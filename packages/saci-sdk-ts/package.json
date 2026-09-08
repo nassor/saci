@@ -1,0 +1,24 @@
+{
+  "name": "@nassor/saci-sdk",
+  "version": "0.1.0",
+  "description": "Processor authoring for SACI WebAssembly pipelines: declare a component, write transforms, export a processor.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "LICENSE", "README.md"],
+  "engines": { "node": ">=24.12" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  }
+}

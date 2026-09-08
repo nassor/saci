@@ -1,0 +1,26 @@
+[package]
+name = "order-processing-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# A sample processor component, not a library a downstream consumer would
+# depend on.
+publish = false
+description = "WASM Component Model port of the scheduler_etl example. Demonstrates field-granular DAG scheduling running inside a WASM processor via saci-processor."
+
+# This is a processor pipeline component, NOT a binary. `cargo build --target wasm32-wasip2`
+# links the cdylib straight into a Component Model component exporting the
+# saci-pipeline world from saci-processor's WIT package.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+saci-processor     = { workspace = true }
+serde          = { workspace = true }
+
+# The bindings generator. Gated on wasm32 because `src/lib.rs` gates the
+# generated module the same way: the host build of this crate is an empty cdylib
+# and has no use for the generator or its proc-macro dependency tree.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { workspace = true }

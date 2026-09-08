@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page.title }} — SACI{% endblock %}
+{% block description %}{{ page.description | default(value=config.description) }}{% endblock %}
+{% block og_title %}{{ page.title }} — SACI{% endblock %}
+{% block og_description %}{{ page.description | default(value=config.description) }}{% endblock %}
+
+{% block content %}
+
+<h1>{{ page.title }}</h1>
+
+{% if page.description %}
+<p class="page-lede">{{ page.description }}</p>
+{% endif %}
+
+{# The fact row is front matter, not prose, so every page under a parent answers
+   the same questions in the same order. #}
+{% if page.extra.facts is defined %}
+<dl class="page-facts">
+    {% for fact in page.extra.facts %}
+    <dt>{{ fact.label }}</dt>
+    <dd>{{ fact.value | safe }}</dd>
+    {% endfor %}
+</dl>
+{% endif %}
+
+{# Markdown element rules are scoped to `.markdown`, so the body needs this
+   wrapper or its tables and lists render unstyled. #}
+<article class="markdown">
+{{ page.content | safe }}
+</article>
+
+{% endblock %}

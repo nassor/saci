@@ -1,0 +1,17 @@
+// Emits `dist/`, the published entry point that `jco componentize` bundles.
+// `allowImportingTsExtensions` is incompatible with emitting, so the build
+// config turns it off and excludes the tests that need it. `src/index.ts`
+// imports the WIT interface by its versioned specifier and `src/wit.d.ts`
+// declares it, which is why the emit stays type-checked without a `paths` entry
+// jco's bundler would also read.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": false,
+    "declaration": true,
+    "outDir": "dist"
+  },
+  "include": ["src/*.ts"]
+}

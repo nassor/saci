@@ -1,0 +1,28 @@
+[package]
+name = "saci-transformer-avro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "The avro byte format for SACI: a Transformer reading and writing Avro object container files and single-object encoded messages."
+
+[dependencies]
+# `io` for `cast_batch`: a decoded Avro record carries the types Avro has, not
+# the ones `schema_fields` declared, so the message surface casts to the
+# declared schema with the ingestion layer's existing helper.
+saci-core        = { workspace = true, features = ["io"] }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+# The codec: OCF on the stream surface, single-object encoding on the message one.
+arrow-avro    = { workspace = true }
+arrow-cast    = { workspace = true }
+arrow-schema  = { workspace = true }
+# `concat_batches` folds a message window wider than one decoder batch into one batch.
+arrow-select  = { workspace = true }
+
+[dev-dependencies]
+tempfile      = { workspace = true }

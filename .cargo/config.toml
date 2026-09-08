@@ -1,0 +1,34 @@
+# `cargo xtask <command>` is the repository's task runner: builds that drive a
+# foreign toolchain, the benchmark harness and the release packing. It is a Rust
+# binary rather than a shell script because cargo is the one prerequisite every
+# one of those tasks already has, on Windows as much as on Linux and macOS.
+[alias]
+xtask = "run --package xtask --"
+
+# Every Rust processor component is built for `wasm32-wasip2`, and the host
+# (wasmtime) enables the SIMD proposal by default, so the vector instructions
+# cost nothing to emit. They pay off in guest-side columnar arithmetic, where
+# LLVM widens an `f64` loop to `f64x2`. Arrow encode and decode spend their time
+# moving bytes rather than computing, so a processor that only round-trips a
+# batch runs the same speed either way. Scoped to this one target: host builds
+# and the `wasm32-unknown-unknown` dashboard bundle are untouched.
+#
+# This is config-file `rustflags`, which an exported `RUSTFLAGS` would replace
+# wholesale rather than extend. Nothing in this repository exports it for a wasm
+# build; `cargo xtask bench` sets it for host benchmark builds only.
+[target.wasm32-wasip2]
+rustflags = ["-C", "target-feature=+simd128"]
+# MSVC's `link.exe` caps the number of modules a `/DEBUG` PDB can carry
+# (LNK1140). Once the all-features dependency graph passed ~200 objects per
+# binary, every dev link of a `saci-service` example and several test binaries
+# started failing; `debug = 0` on dependencies does not help because the limit
+# counts modules, not debuginfo bytes. Drop the PDB for dev/test links on
+# Windows — release builds (debuginfo = 0) never request one. Debuggers lose
+# Windows symbol files; stepping a workspace crate on Windows should use
+# `cargo build` against a Linux or macOS target instead. `/DEBUG:NONE` is a
+# link-arg so it lands after rustc's own `/DEBUG` and wins; `/PDB:NONE` is
+# not used because this toolchain misparses it as a PDB file named `NONE`
+# (LNK1201). MSVC targets only: the GNU toolchain's driver would misread
+# either switch as a file name.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/DEBUG:NONE"]

@@ -1,0 +1,794 @@
+{% extends "base.html" %}
+
+{% block title %}Distributed processing — SACI{% endblock %}
+{% block description %}Distributed processing runs the same Pipeline on several nodes at once: each claims a row range under a lease, checkpoints Arrow IPC bytes through raft, and acks. Leases expire, so processing is at-least-once.{% endblock %}
+{% block og_title %}Distributed processing — SACI{% endblock %}
+{% block og_description %}One pipeline, many nodes, one lease per row range. At-least-once, replicated by raft.{% endblock %}
+
+{% block content %}
+
+<div class="page-kicker">Concept 05</div>
+<h1>Distributed processing</h1>
+
+<p class="page-lede">
+    The same <code>Pipeline</code>, run by several processes at once against different
+    slices of the same data. Coordination is a lease on a row range; durability is Arrow
+    IPC bytes in a raft-replicated redb file.
+</p>
+
+<dl class="page-facts">
+    <dt>In one line</dt>
+    <dd>Many nodes, one pipeline, <strong>at-least-once</strong> per row range</dd>
+    <dt>You need</dt>
+    <dd><code>saci-service</code> with <code>distributed</code>, which needs no external
+        service; add <code>distributed-raft</code> for a cluster</dd>
+    <dt>Read this if</dt>
+    <dd>One process is not enough, and you need work to survive a node dying halfway through a batch</dd>
+</dl>
+
+<h2 id="loop">The claim loop</h2>
+
+<p>
+    <code>DistributedRunner</code> holds three things: a store, a
+    <code>Box&lt;dyn PipelineRuntime&gt;</code> used as a <b>template</b>, and a
+    <code>RunnerConfig</code>. Calling <code>run(world_factory)</code> starts a loop that
+    claims work, runs the template against it, persists the result, and acknowledges. Then
+    it goes back for more, until the store says there is nothing pending.
+</p>
+
+<p>
+    <code>PartitionSource::claim_next_batch</code> hands back a <code>BatchClaim</code>: a
+    <code>batch_id</code>, a half-open <code>Range&lt;u32&gt;</code> of rows, a fresh
+    <code>claim_id</code>, and a lease that expires at a wall-clock millisecond. Hold the
+    lease and the range is yours. Lose it and somebody else gets the same rows.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 250" role="img" aria-labelledby="dst-loop-title dst-loop-desc">
+        <title id="dst-loop-title">One claim from grant to ack, and the same claim after a crash</title>
+        <desc id="dst-loop-desc">
+            The happy path runs left to right: claim a row range, build and run the dataset,
+            write one Arrow IPC checkpoint, then acknowledge the claim so the range is marked
+            completed. Below it the same claim after the holding node dies during the run: no
+            acknowledgement is sent, the lease eventually expires, any surviving runner
+            proposes a sweep that flips the row range back to pending, and another
+            node claims the identical rows under a new claim id. The rows are therefore
+            processed twice, which is what at-least-once means in practice.
+        </desc>
+
+        <text class="t-title" x="0" y="14">One claim, and the same claim after a crash</text>
+
+        <!-- happy path -->
+        <g class="anim anim-1">
+            <rect class="blk blk-ctl" x="0" y="30" width="150" height="88" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="30" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="44" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="45">1 &middot; claim</text>
+            <text class="t-sm" x="12" y="64">claim_next_batch()</text>
+            <text class="t-sm" x="12" y="78">the batch's first</text>
+            <text class="t-sm" x="12" y="92">uncovered rows</text>
+            <text class="t-sm" x="12" y="106">lease: 90 s</text>
+        </g>
+
+        <g class="anim anim-1">
+            <rect class="blk blk-ctl" x="168" y="30" width="150" height="88" rx="8"/>
+            <rect class="hd hd-ctl" x="168" y="30" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="168" y="44" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="180" y="45">2 &middot; run</text>
+            <text class="t-sm t-data" x="180" y="64">world_factory() &rarr;</text>
+            <text class="t-sm t-data" x="180" y="78">your Dataset</text>
+            <text class="t-sm" x="180" y="92">run_on_with_state()</text>
+            <text class="t-sm" x="180" y="106">renews at TTL/3</text>
+        </g>
+
+        <g class="anim anim-2">
+            <rect class="blk blk-ctl" x="336" y="30" width="150" height="88" rx="8"/>
+            <rect class="hd hd-ctl" x="336" y="30" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="336" y="44" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="348" y="45">3 &middot; checkpoint</text>
+            <text class="t-sm" x="348" y="64">save_checkpoint()</text>
+            <text class="t-sm" x="348" y="78">stage_idx = 0</text>
+            <text class="t-sm t-data" x="348" y="92">Arrow IPC bytes</text>
+            <text class="t-sm t-data" x="348" y="106">at most 1 MiB</text>
+        </g>
+
+        <g class="anim anim-2">
+            <rect class="blk blk-ctl" x="504" y="30" width="150" height="88" rx="8"/>
+            <rect class="hd hd-ctl" x="504" y="30" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="504" y="44" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="516" y="45">4 &middot; ack</text>
+            <text class="t-sm" x="516" y="64">ack_claim()</text>
+            <text class="t-sm" x="516" y="78">range Completed</text>
+            <text class="t-sm" x="516" y="92">and never</text>
+            <text class="t-sm" x="516" y="106">re-issued</text>
+        </g>
+
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M150 74 H166" marker-end="url(#dst-l-c)"/>
+            <path class="arw arw-ctl" d="M318 74 H334" marker-end="url(#dst-l-c)"/>
+            <path class="arw arw-ctl" d="M486 74 H502" marker-end="url(#dst-l-c)"/>
+        </g>
+
+        <!-- the fork -->
+        <g class="anim anim-3">
+            <path class="arw arw-ctl" d="M243 118 V132 H75 V146" marker-end="url(#dst-l-c)"/>
+            <text class="t-sm t-ctl" x="100" y="128">the node dies here</text>
+        </g>
+
+        <!-- crash path -->
+        <g class="anim anim-3">
+            <rect class="blk blk-ctl" x="0" y="150" width="150" height="88" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="150" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="164" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="165">node A dies</text>
+            <text class="t-sm" x="12" y="184">no ack, no release</text>
+            <text class="t-sm" x="12" y="198">the claim row stays</text>
+            <text class="t-sm" x="12" y="212">Claimed until its</text>
+            <text class="t-sm" x="12" y="226">lease runs out</text>
+        </g>
+
+        <g class="anim anim-3">
+            <rect class="blk blk-ctl" x="168" y="150" width="150" height="88" rx="8"/>
+            <rect class="hd hd-ctl" x="168" y="150" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="168" y="164" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="180" y="165">lease expires</text>
+            <text class="t-sm" x="180" y="184">any live runner</text>
+            <text class="t-sm" x="180" y="198">calls</text>
+            <text class="t-sm" x="180" y="212">reclaim_expired</text>
+            <text class="t-sm" x="180" y="226">roughly every 30 s</text>
+        </g>
+
+        <g class="anim anim-4">
+            <rect class="blk blk-ctl" x="336" y="150" width="150" height="88" rx="8"/>
+            <rect class="hd hd-ctl" x="336" y="150" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="336" y="164" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="348" y="165">node B claims</text>
+            <text class="t-sm" x="348" y="184">Claimed &rarr; Pending</text>
+            <text class="t-sm" x="348" y="198">same batch, same</text>
+            <text class="t-sm" x="348" y="212">rows, new claim_id</text>
+        </g>
+
+        <g class="anim anim-4">
+            <rect class="blk blk-data" x="504" y="150" width="150" height="88" rx="8"/>
+            <rect class="hd hd-data" x="504" y="150" width="150" height="22" rx="8"/>
+            <rect class="hd hd-data" x="504" y="164" width="150" height="8"/>
+            <text class="t-lbl t-data" x="516" y="165">runs again</text>
+            <text class="t-sm" x="516" y="184">the same rows are</text>
+            <text class="t-sm" x="516" y="198">processed twice</text>
+            <text class="t-sm t-data" x="516" y="212">at-least-once, not</text>
+            <text class="t-sm t-data" x="516" y="226">exactly-once</text>
+        </g>
+
+        <g class="anim anim-4">
+            <path class="arw arw-ctl" d="M150 194 H166" marker-end="url(#dst-l-c)"/>
+            <path class="arw arw-ctl" d="M318 194 H334" marker-end="url(#dst-l-c)"/>
+            <path class="arw arw-data" d="M486 194 H502" marker-end="url(#dst-l-d)"/>
+        </g>
+
+        <defs>
+            <marker id="dst-l-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+            <marker id="dst-l-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-control"><i></i> claims, leases, coordination</span>
+        <span class="k-data"><i></i> rows and Arrow IPC bytes</span>
+    </div>
+    <figcaption class="dgm-cap">
+        A claim covers every row of its batch that no live or completed claim already
+        holds, so a fresh batch goes to one node and several batches spread over several
+        nodes. The gap between <b>step 3 and step 4</b> is where duplicates
+        come from. Work that ran but never acked is handed to somebody else, so every system
+        has to tolerate seeing the same rows twice.
+    </figcaption>
+</div>
+
+<p>
+    Two lease mechanisms keep the window narrow. Before the run,
+    <code>should_renew</code> checks whether less than 30&nbsp;% of the TTL (or ten seconds,
+    whichever is smaller) remains, and renews if so. During the run a renewal task sits
+    beside <code>run_on_with_state</code> in the same <code>tokio::select!</code>, renewing
+    at <code>TTL/3</code>. If a renewal fails the select resolves on the renewal branch, the
+    run is cancelled at its next await point, and the claim is released rather than acked.
+    A runner never keeps working on a lease it has lost.
+</p>
+
+<p>
+    The same is true after the run. If the checkpoint write fails, or the accumulator save
+    fails, or the state blob save fails, the runner calls <code>release_claim</code> and
+    skips the ack. Nothing is acknowledged that could not be made durable.
+</p>
+
+<p>
+    Those two rules add up to at-least-once delivery. A claim, its holder and its
+    expiry are one raft log entry, so every node reads the same claim state.
+    <code>RedbSharedStore</code> grants each claim a 90&nbsp;s lease of its own. A
+    <code>saci-service</code> cluster config overrides that with
+    <code>lease_ttl_ms</code>, which defaults to 30&nbsp;s.
+    A running node proposes an expiry sweep every 30&nbsp;s, which returns an
+    expired range to pending for another node to claim.
+</p>
+
+<p>
+    An ack is issued only after the processor run and the checkpoint write both complete,
+    so a <code>SIGKILL</code> mid-claim loses no data. The lease expires and another node
+    reclaims the range. Processing pauses by up to one lease plus one sweep interval for
+    any range in flight at kill time.
+</p>
+
+<div class="note note-warn">
+    <span class="note-label">The runner does not load your rows</span>
+    <p>
+        <code>world_factory</code> is called once per claim and whatever it returns is what
+        the pipeline sees. The runner <b>never</b> reads the master batch's Arrow IPC back
+        out of the store. Registering the components and filling in the rows for
+        <code>claim.row_range</code> is your closure's job. See
+        <code>examples/distributed_fulfillment/store.rs</code>, which wraps the store to
+        intercept <code>claim_next_batch</code> and stash the IPC where the factory can
+        reach it.
+    </p>
+</div>
+
+<h2 id="modes">Standalone and clustered</h2>
+
+<p>
+    Both modes use the same two traits, the same runner and the same
+    <code>RedbSharedStore</code>. Standalone applies each mutation straight to its local
+    redb file. Clustering proposes the identical mutation through raft, so every node
+    applies it in the same order.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Feature</th><th>What it adds</th></tr></thead>
+    <tbody>
+        <tr>
+            <td><code>distributed</code></td>
+            <td><code>PartitionSource</code>, <code>CheckpointStore</code>,
+                <code>DistributedRunner</code>, <code>CheckpointStrategy</code> and
+                <code>RedbSharedStore::single_node</code>. It carries <code>redb</code>, so
+                one node needs no external service.</td>
+        </tr>
+        <tr>
+            <td><code>distributed-raft</code></td>
+            <td>The SACI raft node, on <code>openraft</code>: <code>ArrowRedbLogStore</code>
+                over <code>raft-log.redb</code>, <code>ArrowRedbStateMachine</code> over
+                <code>cluster-app.redb</code>, <code>ArrowRaftDriver</code>, the TCP peer
+                transport, and <code>RedbSharedStore::multi_node</code>. Implies
+                <code>distributed</code>.</td>
+        </tr>
+        <tr>
+            <td><code>service-cluster</code></td>
+            <td><code>service</code> plus <code>distributed-raft</code>: what the
+                <code>saci-service</code> binary needs to run <code>mode "cluster"</code>
+                from a config file. Add the connectors and the <code>wasm</code> or
+                <code>plugin</code> feature the config names, and nothing else: a cluster
+                node's state is the <code>cluster-app.redb</code> under
+                <code>node.data_dir</code>.</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    A claim is a raft proposal, and the state machine rejects a range that overlaps a
+    claimed or completed one, so the log order arbitrates. Every mutation commits on the
+    leader; reads go to the local replica. The three <code>saci_raft_*</code> gauges report
+    the commit index, the term and the leader id.
+</p>
+
+<p>
+    Standalone persistence is a different file with a different job. A
+    <code>store "redb"</code> block names one local, unreplicated redb file, and
+    <code>RedbStateClient</code> keeps three things in it: the raw config bytes the service
+    was started with, each processor's prior, and each source's cursor. It carries no
+    batches, no claims and no checkpoints, which is why cluster mode has no use for it and
+    refuses the block. Its keys are on
+    <a href="{{ get_url(path='@/service/config/run-modes.md') }}">Run modes and persistence</a>.
+</p>
+
+<h2 id="batches">Publishing work</h2>
+
+<p>
+    A <b>master batch</b> is a registered chunk of Arrow IPC with an id, a component name, a
+    schema version, and a row count. Runners never create batches; they consume them.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>five arguments, in this order</em></div>
+    <pre><code class="language-rust">store
+    .register_master_batch(
+        0,                         // batch_id: u64
+        Order::name().to_string(), // component: String
+        1,                         // schema_id: u32
+        ipc_bytes,                 // Vec&lt;u8&gt;, an Arrow IPC stream
+        900,                       // total_rows: u32
+    )
+    .await?;</code></pre>
+</div>
+
+<p>
+    Registration is what creates the work. <code>register_master_batch</code> proposes one
+    <code>RegisterMasterBatch</code> command, and the state machine writes the record into
+    <code>arrow_master_batches</code> and marks the id in <code>arrow_pending_batches</code>.
+    Row ranges are not pre-cut. A claim carves the first uncovered span off the batch when
+    it is granted. Parallelism is therefore a function of how many batches you register.
+</p>
+
+<p>
+    <code>claim_next_batch</code> walks <code>arrow_pending_batches</code>, then reads that
+    batch's claims out of the <code>arrow_claims_by_batch</code> index in row order and
+    returns the first span no claimed or completed range covers. Two nodes reaching the same
+    span both propose it. The state machine commits one and answers the other with an
+    overlap error, and the loser backs off and rescans, up to eight attempts.
+</p>
+
+<p>
+    One cap applies. <code>MAX_LOG_ENTRY_BYTES</code> is <code>1024 * 1024</code>, because a
+    payload travels inside a raft log entry. <code>register_master_batch</code> rejects an
+    Arrow IPC payload that size or larger. The stage checkpoint, the window accumulator
+    and the processor state blob all read the same number off
+    <code>CheckpointStore::max_checkpoint_bytes</code>.
+</p>
+
+<h2 id="single">Running one node</h2>
+
+<p>
+    One process against one local redb file is a real deployment, and the
+    shortest path to seeing the loop work. It needs no external service, because the store
+    is the file you name.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>features = "distributed"</em></div>
+    <pre><code class="language-rust">use std::path::Path;
+
+use saci_service::SaciResult;
+use saci_service::component::Component;
+use saci_service::dataset::Dataset;
+use saci_service::distributed::RedbSharedStore;
+use saci_service::distributed::runner::{DistributedRunner, RunnerConfig};
+use saci_service::distributed::strategy::CheckpointStrategy;
+use saci_service::pipeline::Pipeline;
+
+#[tokio::main]
+async fn main() -&gt; SaciResult&lt;()&gt; {
+    // One file holds the batches, the claims and the checkpoints. Two
+    // deployments stay apart by naming different files.
+    let store = RedbSharedStore::single_node(Path::new("/var/lib/saci/shared.redb"))?;
+
+    let (ipc_bytes, total_rows) = encode_orders_ipc()?;
+    store
+        .register_master_batch(0, Order::name().to_string(), 1, ipc_bytes, total_rows)
+        .await?;
+
+    // A template. Its own dataset, sources and sinks are never used: each
+    // claim runs against whatever `world_factory` hands back.
+    let template = Pipeline::builder("order-processor")
+        .with::&lt;Order&gt;()
+        .with_system(ValidateOrder)
+        .with_system(PriceOrder)
+        .build();
+
+    let runner = DistributedRunner::new(
+        store,
+        Box::new(template),
+        RunnerConfig {
+            checkpoint_strategy: CheckpointStrategy::EveryStage,
+            schema_id: 1,
+            max_batches: None,
+            ..Default::default()
+        },
+    );
+
+    // Called once per claim. Register the components and load the rows here.
+    let processed = runner.run(hydrate_partition).await?;
+    println!("{processed} batches acked");
+    Ok(())
+}</code></pre>
+</div>
+
+<p>
+    <code>run</code> returns the number of batches it acked. It stops when
+    <code>claim_next_batch</code> returns <code>None</code>, or when
+    <code>max_batches</code> is reached. For a long-lived service use
+    <code>run_with_shutdown</code>, which takes a <code>CancellationToken</code> and exits
+    between batches without holding a lease.
+</p>
+
+<p>
+    Two examples run this loop end to end against a fresh redb file in the temporary
+    directory, so nothing has to be running beside them.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Shell</span><em>runs the same on Linux, macOS and Windows (PowerShell)</em></div>
+    <pre><code class="language-bash">cargo run -p saci-service --example distributed_scheduler --features distributed
+cargo run -p saci-service --example distributed_windowed --features distributed,windows</code></pre>
+</div>
+
+<h2 id="state">Where state lives</h2>
+
+<p>
+    A cluster node's <code>data_dir</code> holds four files and nothing else.
+    <code>raft-log.redb</code> is this node's raft log. <code>cluster-app.redb</code> is the
+    replicated application state. Every node applies the same committed entries in the same
+    order, so every node ends with the same copy. <code>bootstrap.lock</code> and
+    <code>node-id</code> are one line each.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 364" role="img" aria-labelledby="dst-state-title dst-state-desc">
+        <title id="dst-state-title">The four files in a node's data directory, and the state machine they replicate</title>
+        <desc id="dst-state-desc">
+            Each node keeps its own raft log in raft-log.redb, holding its vote and its log
+            entries, and its own copy of the application state in cluster-app.redb. Two more
+            files sit beside them: bootstrap.lock, written when an operator bootstrapped the
+            cluster, and node-id, the identity this directory belongs to. What travels
+            between nodes is raft traffic: votes, heartbeats and log entries, and every entry
+            carries one application command, so the application data rides along with it.
+            Applying those entries leaves every node with the same tables, and five of them
+            carry the work: the registered
+            master batch as Arrow IPC, the batch ids that still have rows to claim, one
+            record per claim carrying its row range, status and lease, checkpoints keyed by
+            claim id and stage index and capped at one mebibyte, and the last heartbeat each
+            instance recorded. A claim is one of those entries, so the log order decides who
+            wins a contested row range.
+        </desc>
+
+        <text class="t-title" x="0" y="14">Four files per node, one replicated state machine</text>
+
+        <!-- node 1 -->
+        <g class="anim anim-1">
+            <rect class="blk blk-ctl" x="0" y="32" width="250" height="104" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="32" width="250" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="46" width="250" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="47">node 1 &middot; leader</text>
+
+            <rect class="row" x="8" y="62" width="234" height="20" rx="3"/>
+            <text class="t-sm" x="16" y="76">raft-log.redb</text>
+            <text class="t-sm t-ctl" x="180" y="76">local</text>
+
+            <rect class="row" x="8" y="86" width="234" height="20" rx="3"/>
+            <text class="t-sm" x="16" y="100">cluster-app.redb</text>
+            <text class="t-sm t-data" x="168" y="100">replicated</text>
+
+            <text class="t-sm" x="16" y="122">bootstrap.lock &middot; node-id</text>
+        </g>
+
+        <!-- node 2 -->
+        <g class="anim anim-2">
+            <rect class="blk blk-ctl" x="404" y="32" width="250" height="104" rx="8"/>
+            <rect class="hd hd-ctl" x="404" y="32" width="250" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="404" y="46" width="250" height="8"/>
+            <text class="t-lbl t-ctl" x="416" y="47">node 2 &middot; follower</text>
+
+            <rect class="row" x="412" y="62" width="234" height="20" rx="3"/>
+            <text class="t-sm" x="420" y="76">raft-log.redb</text>
+            <text class="t-sm t-ctl" x="584" y="76">local</text>
+
+            <rect class="row" x="412" y="86" width="234" height="20" rx="3"/>
+            <text class="t-sm" x="420" y="100">cluster-app.redb</text>
+            <text class="t-sm t-data" x="572" y="100">replicated</text>
+
+            <text class="t-sm" x="420" y="122">same entries, same order</text>
+        </g>
+
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M250 76 H400" marker-end="url(#dst-s-c)"/>
+            <text class="t-sm t-ctl" x="258" y="68">raft traffic</text>
+            <text class="t-sm" x="258" y="96">votes &middot; heartbeats</text>
+            <text class="t-sm" x="258" y="110">log entries</text>
+        </g>
+
+        <g class="anim anim-2">
+            <text class="t-sm t-ctl" x="0" y="154">between nodes: votes, heartbeats and log entries</text>
+            <text class="t-sm t-data" x="0" y="170">inside every entry: one application command</text>
+            <path class="ln" d="M0 182 H654"/>
+        </g>
+
+        <!-- the replicated state machine -->
+        <g class="anim anim-3">
+            <rect class="blk blk-data" x="0" y="192" width="654" height="164" rx="8"/>
+            <rect class="hd hd-data" x="0" y="192" width="654" height="22" rx="8"/>
+            <rect class="hd hd-data" x="0" y="206" width="654" height="8"/>
+            <text class="t-lbl t-data" x="12" y="207">cluster-app.redb &middot; the same tables on every node</text>
+            <text class="t-sm" x="12" y="228">written only by apply &middot; read straight off the local copy</text>
+        </g>
+
+        <g class="anim anim-4">
+            <rect class="row" x="8" y="236" width="638" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="249">arrow_master_batches</text>
+            <text class="t-sm" x="250" y="249">the registered master batch, Arrow IPC</text>
+
+            <rect class="row" x="8" y="258" width="638" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="271">arrow_pending_batches</text>
+            <text class="t-sm" x="250" y="271">batch ids with rows still to claim</text>
+
+            <rect class="row" x="8" y="280" width="638" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="293">arrow_claims</text>
+            <text class="t-sm" x="250" y="293">one claim: its row range, status and lease</text>
+
+            <rect class="row" x="8" y="302" width="638" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="315">arrow_checkpoints</text>
+            <text class="t-sm" x="250" y="315">Arrow IPC bytes, 1 MiB per entry</text>
+
+            <rect class="row" x="8" y="324" width="638" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="337">arrow_instances</text>
+            <text class="t-sm" x="250" y="337">the last heartbeat each instance recorded</text>
+        </g>
+
+        <defs>
+            <marker id="dst-s-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-control"><i></i> the raft log and its traffic</span>
+        <span class="k-data"><i></i> the replicated application state</span>
+    </div>
+    <figcaption class="dgm-cap">
+        The pipeline never queries <code>raft-log.redb</code>. It carries this node's vote
+        and its entries, and the state the pipeline reads is what applying those entries
+        leaves in <code>cluster-app.redb</code>.
+    </figcaption>
+</div>
+
+<p>
+    All three checkpoint kinds share one key space and one API. They are told apart by
+    <code>stage_idx</code>, and the two reserved values sit far above any real stage index,
+    which numbers from zero and stays in the dozens.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Constant</th><th>Value</th><th>Payload</th></tr></thead>
+    <tbody>
+        <tr>
+            <td>none</td>
+            <td><code>0</code></td>
+            <td>The whole partition <code>Dataset</code>, written by the runner after the run.</td>
+        </tr>
+        <tr>
+            <td><code>PROCESSOR_STATE_STAGE_SENTINEL</code></td>
+            <td><code>u32::MAX - 1</code></td>
+            <td>Whatever <code>run_on_with_state</code> returned. Opaque to the host.</td>
+        </tr>
+        <tr>
+            <td><code>ACCUMULATOR_STAGE_SENTINEL</code></td>
+            <td><code>u32::MAX</code></td>
+            <td>The <code>WindowAccumulator</code> component alone, via
+                <code>write_component_ipc</code>.</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="note note-warn">
+    <span class="note-label">The stage checkpoint is write-only, and there is one of it</span>
+    <p>
+        The runner calls <code>run_on_with_state</code> <b>once</b> per claim, since the
+        runtime runs its own stages internally, then writes a single checkpoint at
+        <code>stage_idx = 0</code>. Nothing reads it back, because recovery re-runs the batch from
+        the top rather than resuming mid-pipeline. Two consequences.
+        <code>CheckpointStrategy::EveryNStages(n)</code> only ever fires for
+        <code>n == 1</code>, because the sole call is <code>should_checkpoint(0)</code>. And
+        the checkpoint is an artefact for an operator or an external reader, not a resume
+        point.
+    </p>
+</div>
+
+<h2 id="cluster">Wiring a cluster</h2>
+
+<p>
+    A cluster node runs two things side by side: a raft driver that replicates the
+    application state, and a store that proposes into it.
+    <code>ArrowRaftDriver::start</code> is async, takes the raft log path and the
+    application database path, and returns the handle plus the driver's task. Keep the task
+    alive for the life of the process.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>features = "distributed-raft"</em></div>
+    <pre><code class="language-rust">use std::collections::HashMap;
+use std::sync::Arc;
+
+use saci_service::distributed::RedbSharedStore;
+use saci_service::distributed::consensus::{ArrowRaftDriver, ArrowRaftDriverConfig};
+
+let (handle, _driver_task) = ArrowRaftDriver::start(
+    ArrowRaftDriverConfig {
+        node_id: 1,
+        listen_addr: "0.0.0.0:9001".parse().unwrap(),
+        // "host:port" strings, resolved lazily at connect time, so Docker
+        // service names work. An empty map auto-initialises a single node.
+        peers: HashMap::from([
+            (2, "saci-2:9001".to_string()),
+            (3, "saci-3:9001".to_string()),
+        ]),
+        heartbeat_interval_ms: 300,
+        election_timeout_min_ms: 1_500,
+        election_timeout_max_ms: 3_000,
+    },
+    data_dir.join("raft-log.redb"),      // this node's log
+    data_dir.join("cluster-app.redb"),   // this node's copy of the state
+)
+.await?;
+
+// `start` wires outbound connections only. Without this listener peers cannot
+// deliver votes, heartbeats or log entries, and no leader is ever elected.
+let _tcp_server = handle.spawn_tcp_server("0.0.0.0:9001".parse().unwrap()).await?;
+
+// The store proposes through the driver and reads the same database the state
+// machine writes, so it opens no second file handle.
+let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clone());</code></pre>
+</div>
+
+<p>
+    From here the runner code is byte-for-byte the single-node code: same template, same
+    <code>RunnerConfig</code>, same <code>runner.run(...)</code>. Only the driver is new.
+</p>
+
+<p>
+    Membership is explicit. <code>bootstrap #true</code> on one node calls
+    <code>initialize</code> with the configured <code>peer</code> set and then writes
+    <code>bootstrap.lock</code>. The file records that this cluster was deliberately
+    created, and stops a later start from doing it twice. Every other node starts with
+    <code>bootstrap #false</code> and is caught up by the leader.
+</p>
+
+<p>
+    You do not route work to the leader, but every mutation ends up there.
+    <code>RedbSharedStore</code> proposes each command with <code>Raft::client_write</code>.
+    On a follower that call returns <code>ForwardToLeader</code>, and the store then sends
+    the same command to the leader's configured address over the length-prefixed TCP
+    transport the peers already use. Reads never leave the node, and open the local
+    <code>cluster-app.redb</code> directly. A propose made while no leader is elected comes
+    back as a retryable error, and one that reaches a leader but never commits times out
+    after 30 seconds. The <code>saci-service</code> binary does all
+    of the wiring above from a config file under <code>mode "cluster"</code>, so
+    hand-rolling it is only for embedding the runner in your own process.
+</p>
+
+<h2 id="caps">Payload caps</h2>
+
+<p>
+    Three constants bound what one proposal, one snapshot chunk and one peer frame may
+    carry.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Cap</th><th>Value</th><th>What it bounds</th></tr></thead>
+    <tbody>
+        <tr>
+            <td><code>MAX_LOG_ENTRY_BYTES</code></td>
+            <td>1&nbsp;MiB</td>
+            <td>The Arrow IPC payload of a registered master batch, and, as the
+                <code>CheckpointStore::max_checkpoint_bytes</code> default, of one stage
+                checkpoint. In <code>src/distributed/partition.rs</code>.</td>
+        </tr>
+        <tr>
+            <td><code>SNAPSHOT_CHUNK_BYTES</code></td>
+            <td>4&nbsp;MiB</td>
+            <td>One chunk of a state-machine snapshot. In
+                <code>src/distributed/consensus/transport/mod.rs</code>.</td>
+        </tr>
+        <tr>
+            <td><code>MAX_FRAME_BYTES</code></td>
+            <td>16&nbsp;MiB</td>
+            <td>One length-prefixed TCP frame on the peer transport, which carries raft
+                messages, forwarded proposals and snapshot chunks. Same file.</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    If registration rejects a batch, split the input across several
+    <code>batch_id</code>s rather than raising the constant. A claim covers the pending row
+    range of one batch, so several smaller batches are also what spreads work across nodes.
+</p>
+
+<h2 id="checkpoints">Checkpoint strategies</h2>
+
+<p>
+    Checkpoint strategy is set on <code>DistributedRunner</code>, in code rather than
+    config. The default is <code>EveryStage</code>.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Strategy</th><th>Behaviour</th><th>Use when</th></tr></thead>
+    <tbody>
+        <tr>
+            <td><code>EveryStage</code></td>
+            <td>Checkpoint after every pipeline stage</td>
+            <td>Maximum recovery granularity; highest write amplification</td>
+        </tr>
+        <tr>
+            <td><code>EveryNStages(n)</code></td>
+            <td>Checkpoint every N stages</td>
+            <td>Balance durability and write cost</td>
+        </tr>
+        <tr>
+            <td><code>None</code></td>
+            <td>No checkpointing</td>
+            <td>Idempotent pipelines that can safely re-run from the start</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    For long pipelines with expensive stages, <code>EveryNStages</code> reduces how much
+    each batch writes into the raft log.
+</p>
+
+<h2 id="processor-state">State that outlives a batch</h2>
+
+<p>
+    A native <code>Pipeline</code> keeps everything it knows in the <code>Dataset</code>, so
+    the default <code>run_on_with_state</code> ignores <code>prior</code>, delegates to
+    <code>run_on</code>, and returns <code>Ok(None)</code>. Nothing extra is persisted.
+</p>
+
+<p>
+    A WASM processor cannot do that. Every call gets a fresh wasmtime <code>Store</code>, so
+    processor linear memory does not survive a batch. That is deliberate, because a trapped
+    instance cannot corrupt anything that outlives it. The one channel left is the return value:
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>the host seam, from saci-core</em></div>
+    <pre><code class="language-rust">async fn run_on_with_state(
+    &amp;self,
+    data: &amp;mut Dataset,
+    prior: Option&lt;&amp;[u8]&gt;,
+) -&gt; SaciResult&lt;Option&lt;Vec&lt;u8&gt;&gt;&gt;;</code></pre>
+</div>
+
+<p>
+    <code>WasmPipelineRuntime</code> passes <code>prior</code> straight into the processor's
+    <code>run-batch</code> export and returns the <code>checkpoint</code> field of the
+    result. The runner stores that blob under
+    <code>PROCESSOR_STATE_STAGE_SENTINEL</code> and hands it back as the next call's
+    <code>prior</code>. On the processor side, one macro form opts in:
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>in the processor crate</em></div>
+    <pre><code class="language-rust">// Stateless: `prior` is ignored, `checkpoint` is always None.
+saci_processor::export_pipeline!(build);
+
+// Stateful: systems read and write a `ProcessorState&lt;Counter&gt;` resource, and
+// whatever they leave in it becomes the next batch's `prior`.
+saci_processor::export_pipeline!(build, state = Counter);</code></pre>
+</div>
+
+<p>
+    The pointer to the newest blob is a chain, not a fixed key. The blob is written under the
+    claim that produced it and read back under the id of the claim that wrote the previous
+    one. The state machine resolves a checkpoint's <code>batch_id</code> through the
+    claims table, and rejects a write whose uuid names no claim. Reads survive the ack,
+    so the chain holds for as long as the runner loop does. A runner that restarts hands the
+    runtime <code>None</code>, so the processor starts cold and rebuilds its state.
+</p>
+
+<h2 id="next">Next</h2>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/library/service/_index.md') }}" class="next-card">
+        <span class="next-card-label">Library</span>
+        <h3>Embedding saci-service</h3>
+        <p>Build the same deployment from a <code>ServiceConfig</code> in your own
+            <code>main</code>, with your factories and your runtimes.</p>
+    </a>
+    <a href="{{ get_url(path='@/service/operate/cluster.md') }}" class="next-card">
+        <span class="next-card-label">Service</span>
+        <h3>Running a cluster</h3>
+        <p>The cluster config, bootstrapping three nodes, membership, and what the node
+            keeps on disk.</p>
+    </a>
+</div>
+
+{% endblock %}

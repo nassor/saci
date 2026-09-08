@@ -1,0 +1,526 @@
+name: CI
+
+on:
+  push:
+      branches: [ "main" ]
+  pull_request:
+      branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.95.0  # Rust minimum version
+        components: rustfmt, clippy
+
+    # saci-connector-kafka vendors librdkafka via rdkafka-sys's `cmake-build`
+    # feature, and it compiles in every job that builds a saci-service test or
+    # example target, because saci-service's dev-dependencies include the
+    # connector crates; the distributed_chaos, wasm_processor and polyglot
+    # jobs install this same package. That build is configured with
+    # -DWITH_CURL=0, but the config.h cmake generates for POSIX targets uses
+    # `#cmakedefine01 WITH_OAUTHBEARER_OIDC`, which defines the macro as 0
+    # rather than leaving it undefined, and rdkafka_conf.c gates its
+    # `#include <curl/curl.h>` on `#ifdef WITH_OAUTHBEARER_OIDC`. The header is
+    # therefore compiled even with curl support off, so the --all-features
+    # clippy build needs libcurl's development headers present. Nothing links
+    # against libcurl; only the include has to resolve.
+    - name: Install librdkafka build prerequisites
+      run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v5
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+    # The processor components generate their WIT bindings in-macro, so nothing
+    # has to be produced on disk before `cargo fmt`. The one wasm build this job
+    # still needs is the smoketest artifact, which `tests/wasm_roundtrip.rs`
+    # hard-asserts exists.
+    - name: Install wasm32-wasip2 target
+      run: rustup target add wasm32-wasip2
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest@0.9.143
+
+    - name: Build smoketest WASM component
+      run: cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+
+    - name: Check formatting
+      run: cargo fmt -q --all -- --check
+
+    - name: Run clippy
+      run: cargo clippy -q --all-targets --all-features -- -D warnings
+
+    # The default bundle carries only the connectors that need nothing
+    # installed or already running, so a reduced feature combination is a
+    # normal way to build this binary rather than an edge case. The
+    # --all-features gate above cannot see an item that is dead only when a
+    # feature is off: every `#[cfg]`-sensitive const, function and binding is
+    # reachable there. This step builds the narrowest runnable service and
+    # fails on the warning that build emits.
+    - name: Clippy, reduced build
+      run: cargo clippy -q -p saci-service --no-default-features --features service --all-targets -- -D warnings
+
+    # The same feature set, run rather than linted. It carries neither
+    # processor host and no windowing engine, so it is the only step where
+    # `test_wasm_node_without_the_host_parses_and_names_the_feature`
+    # (`#[cfg(not(feature = "wasm"))]`, and every other test rung in this job
+    # has `wasm`) and
+    # `test_a_missing_host_is_named_before_a_missing_windowing_engine`
+    # (`#[cfg(all(not(feature = "wasm"), not(feature = "windows")))]`) are
+    # compiled at all. The two other refusal tests this build runs,
+    # `test_plugin_node_without_the_host_parses_and_names_the_feature` and
+    # `test_cluster_mode_without_the_raft_stack_names_the_feature`, are not
+    # exclusive to it: neither `plugin` nor `service-cluster` is in the
+    # default bundle, so the default-bundle step below runs both too. This
+    # build is also the only one carrying no transformer and no opt-in
+    # connector, so it is where a missing-format or missing-factory message
+    # is produced by the real call path instead of by a direct call.
+    # `--lib` on purpose: the integration tests under `tests/` need
+    # connectors or a wasm host this feature set deliberately excludes. Do
+    # not fold this into the clippy step above; clippy proves the reduced
+    # build compiles, not that it works.
+    - name: Test, reduced build
+      run: cargo nextest run -p saci-service --no-default-features --features service --lib
+
+    # Both processor hosts with no windowing engine, which is the only
+    # configuration in which a `window` block can be declared on a node this
+    # build can host and still find no engine to serve it. Three refusal tests
+    # are gated on exactly that and run nowhere else in this job:
+    # `service::config::tests::test_window_block_without_the_engine_parses_and_names_the_feature`
+    # and
+    # `service::config::tests::test_plugin_window_block_without_the_engine_names_the_feature`
+    # (`#[cfg(all(not(feature = "windows"), feature = "wasm"))]` and the
+    # `plugin` counterpart), and
+    # `service::builder::tests::test_a_window_block_without_the_engine_is_refused_by_the_builder`,
+    # the embedder-facing half. No neighbouring rung reaches the combination:
+    # `--features service` above carries neither host, so the block has no
+    # node to sit on; the default bundle below and the `--all-features` suite
+    # both carry `windows`, so there is nothing to refuse. Without this step
+    # the three compile in no CI configuration, and a refusal that names the
+    # wrong feature, or stops naming one, goes unnoticed.
+    - name: Test, host pair without the windowing engine
+      run: cargo nextest run -p saci-service --no-default-features --features service,wasm,plugin --lib
+
+    # The default bundle, which is what `cargo install saci-service` produces
+    # and what a contributor running bare `cargo test` gets. It registers 7 of
+    # the 17 connector type names in `BUILTIN_CONNECTOR_FEATURES`, a partial
+    # set neither neighbouring step reaches: the reduced build above registers
+    # none of the 17, the `--all-features` suite below all of them. A premise
+    # that holds at zero connectors and again at seventeen can still be false
+    # in between, and this is the only step in between.
+    # `service::topology::tests::every_allowlist_key_is_a_connector_type_this_crate_ships`
+    # is the allowlist check that meets the partial registry here. The feature
+    # space is partial too: `RUNTIME_SOURCE_HELP`'s `wasm`-without-`plugin`
+    # arm in `service/builder.rs` is compiled by no other test run in this
+    # job, since the reduced build has neither host and `--all-features` has
+    # both.
+    # `--lib` and not every target: this builds no integration binary at all,
+    # and the `--all-features` suite below builds every integration target, so
+    # nothing goes uncovered. Why this is a `--workspace` resolve rather than
+    # `-p saci-service`, with the compile and test-count measurements:
+    # AGENTS.md, Testing.
+    - name: Test, default bundle
+      run: cargo nextest run --workspace --lib
+
+    - name: Build
+      run: cargo build -q
+
+    - name: Check benchmarks
+      run: cargo check -q --benches
+
+    # `--all-features` so the connector-gated example targets are compiled
+    # too: an example naming `required-features = ["connector-nats"]` is
+    # silently skipped by a default-feature check, because every connector
+    # that needs an installed broker, database or object store is opt-in.
+    - name: Check examples
+      run: cargo check -q --examples --all-features
+
+    # Registry pass builds and runs the runnable example configs
+    # (examples.rs); a missing toolchain (Go/dotnet for quickstart, Gradle
+    # for polyglot) is recorded as a failure for that one config and does not
+    # stop the rest, so this runs unconditionally alongside the Rust-only
+    # ones. Config-only pass then parses every examples/configs/*.kdl file
+    # through every built-in connector's factory with `--all-features`,
+    # which is why this job's librdkafka prerequisite above has to run
+    # before this step.
+    - name: Validate example configs
+      run: cargo xtask validate
+
+    # `ci` profile: the full suite, including the Docker-backed
+    # connector/chaos tests the `default` profile skips for everyday local
+    # runs. The one #[ignore]d test (a ~70-100s chaos run) is deliberately
+    # excluded here; it runs alone in the `distributed_chaos` job below. See
+    # .config/nextest.toml for what each profile covers.
+    - name: Run tests
+      run: cargo nextest run --workspace --all-features --profile ci
+
+    - name: Run doctests
+      run: cargo test -q --workspace --all-features --doc
+
+    # Last in this job, and in this job rather than its own: `cargo doc`
+    # needs the same `--all-features` dependency graph every step above has
+    # already built into the cached `target`, so it costs one rustdoc pass per
+    # workspace member here, against a cold cache plus the librdkafka
+    # prerequisite in a job of its own. It runs after the test signal on
+    # purpose: a documentation defect should not delay the report of a broken
+    # test. Scope is the public items of workspace members under
+    # `--all-features`; it does not reach `#[cfg(test)]` modules, which
+    # rustdoc never documents, the non-member `saci-service-ui`, or doctest
+    # execution, which is the step above.
+    - name: Check rustdoc
+      run: RUSTDOCFLAGS="-D warnings" cargo doc -q --workspace --all-features --no-deps
+
+  distributed_chaos:
+    name: Distributed Chaos
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.95.0  # Rust minimum version
+
+    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
+    # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
+    # .agents/skills/saci-connectors/SKILL.md.
+    - name: Install librdkafka build prerequisites
+      run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v5
+      with:
+        path: target
+        key: ${{ runner.os }}-distributed-chaos-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest@0.9.143
+
+    # One of two #[ignore]d tests in crates/: a five-node Raft cluster behind
+    # Toxiproxy, chaos-injecting latency/bandwidth/reset-peer/partition
+    # faults for ~70-100s. Isolated in its own job so its runtime never sits
+    # on the `test` job's critical path. `--test` scopes discovery to this
+    # one binary so `--run-ignored ignored-only` can't pick up the other two
+    # unrelated `#[ignore]`d tests: `saci-service`'s lib unit test
+    # `test_second_init_returns_error` (a global-tracing-subscriber race) and
+    # connector_matrix.rs's full_matrix, run by the `connector_matrix` job
+    # below.
+    - name: Full-stack distributed chaos test
+      run: cargo nextest run -p saci-service --features distributed-raft --test distributed_integration_chaos --run-ignored ignored-only
+
+  # Isolated in its own job because it holds four containers (Kafka, NATS,
+  # PostgreSQL, MinIO/S3) for its entire run and walks the full connector x
+  # sink x transformer x processor-runtime product, so its runtime must not
+  # sit on the `test` job's critical path.
+  connector_matrix:
+    name: Connector Matrix
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.95.0  # Rust minimum version
+
+    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
+    # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
+    # .agents/skills/saci-connectors/SKILL.md.
+    - name: Install librdkafka build prerequisites
+      run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v5
+      with:
+        path: target
+        key: ${{ runner.os }}-connector-matrix-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install wasm32-wasip2 target
+      run: rustup target add wasm32-wasip2
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest@0.9.143
+
+    - name: Build smoketest WASM component
+      run: cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+
+    - name: Build smoketest native plugin
+      run: cargo build -p saci-plugin-smoketest
+
+    - name: Connector/transformer/processor matrix
+      run: cargo nextest run -p saci-service --all-features --profile ci --test connector_matrix --run-ignored ignored-only
+
+  wasm_processor:
+    name: WASM Processor (wasm32-wasip2)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.95.0  # Rust minimum version
+
+    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
+    # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
+    # .agents/skills/saci-connectors/SKILL.md.
+    - name: Install librdkafka build prerequisites
+      run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v5
+      with:
+        path: target
+        key: ${{ runner.os }}-wasm-processor-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install component tooling
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-tools@1.246.2
+
+    # cargo check of saci-core and the saci facade for wasm32-wasip2 with
+    # `--no-default-features --features processor`. The facade half protects the
+    # build instruction `crates/saci/src/lib.rs`'s crate docs and AGENTS.md give
+    # processor authors: `engine` forwards saci-core's `io`, which implies
+    # `runtime` (tokio and rayon), and tokio cannot target wasm32-wasip2, so a
+    # feature edge leaking tokio back into `processor` would make that
+    # instruction false. The task installs the target itself.
+    - name: Check saci-core and the facade for wasm32-wasip2
+      run: cargo xtask check-wasm-processor
+
+    # The arrow-ipc exact pin is load-bearing across the component boundary;
+    # crates/saci-processor/PINS.md forbids relaxing it without this gate.
+    - name: Host-processor arrow-ipc round-trip
+      run: cargo xtask processor-ipc-roundtrip
+
+    # Produced by the round-trip task above.
+    - name: Validate smoketest component
+      run: wasm-tools validate --features component-model target/wasm32-wasip2/release/saci_processor_smoketest.wasm
+
+    - name: Print smoketest component world
+      run: wasm-tools component wit target/wasm32-wasip2/release/saci_processor_smoketest.wasm
+
+    # The processors are built with `-C target-feature=+simd128` from
+    # .cargo/config.toml, and a silently dropped rustflag costs real throughput
+    # in the Arrow encode/decode paths. Three assertions, cheapest first: the
+    # core module carries a target_features section, that section names simd128,
+    # and LLVM actually emitted vector instructions. Only the third one is the
+    # point of the flag; the section is present either way, so it cannot fail
+    # alone. The smoketest yields 12989 matching lines with the flag and 0
+    # without it, so the `-eq 0` threshold has no flake margin to worry about.
+    - name: Assert simd128 in the core module
+      run: |
+        WASM=target/wasm32-wasip2/release/saci_processor_smoketest.wasm
+        wasm-tools objdump "$WASM" | grep -q 'custom "target_features"'
+        grep -qa simd128 "$WASM"
+        vec=$(wasm-tools print "$WASM" \
+          | grep -cE '(^|[^a-z0-9_])(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.' || true)
+        echo "vector instruction lines in the core module: $vec"
+        if [ "$vec" -eq 0 ]; then
+          echo "::error::core module has no v128 instructions: the +simd128 rustflag in .cargo/config.toml did not reach this build. An exported RUSTFLAGS replaces config-file rustflags wholesale rather than extending them."
+          exit 1
+        fi
+
+  polyglot:
+    name: Polyglot Processors
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.95.0  # Rust minimum version
+
+    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
+    # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
+    # .agents/skills/saci-connectors/SKILL.md.
+    - name: Install librdkafka build prerequisites
+      run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v5
+      with:
+        path: target
+        key: ${{ runner.os }}-polyglot-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install wasm32-wasip2 target
+      run: rustup target add wasm32-wasip2
+
+    - name: Install component tooling
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-tools@1.246.2,cargo-nextest@0.9.143
+
+    # Versions are pinned in examples/polyglot/PINS.md; keep the two in sync.
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.25.5'
+
+    # Node 24. The TypeScript stage needs 22.18 for type stripping in
+    # `node --test` and 24.12 for jco's `@napi-rs/lzma`; 24 clears both.
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '24'
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
+    - uses: actions/setup-java@v5
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+
+    - uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: '8.14.4'
+
+    - uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Install processor componentizers
+      run: |
+        go install github.com/bytecodealliance/componentize-go@v0.4.1
+        pip install componentize-py==0.25.0 build
+        npm install -g @bytecodealliance/jco@1.30.0
+        # Kotlin has no released WIT binding generator. JetBrains maintains a
+        # wit-bindgen fork with a Kotlin backend, built from the branch.
+        cargo install wit-bindgen-cli --git https://github.com/Kotlin/wit-bindgen --branch kotlin
+
+    # The five SDK test suites (each now also carrying its codec) need the
+    # generated fixtures, and they are the tests that localise a
+    # flatbuffer-offset bug to one language before the wasm chain turns it into
+    # an opaque byte diff.
+    - name: Generate schema constants and fixtures
+      run: cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit
+
+    # The conformance corpus is committed so a codec's suite runs without a Rust
+    # toolchain. Regenerating it here proves the committed vectors still match
+    # what the generator produces, so the corpus cannot drift from the wire
+    # format it is supposed to pin.
+    - name: Conformance corpus is current
+      run: |
+        cargo run -p saci-service --features conformance --example conformance_vectors -- emit
+        git diff --exit-code -- packages/arrow-ipc-conformance
+
+    - name: Go SDK+codec tests
+      working-directory: packages/saci-sdk-go
+      run: go test ./...
+
+    - name: Python SDK+codec tests
+      working-directory: packages/saci-sdk-py
+      run: PYTHONPATH=src python -m unittest discover -s tests
+
+    - name: TypeScript SDK+codec tests
+      working-directory: packages/saci-sdk-ts
+      run: |
+        npm ci
+        npm run typecheck
+        npm run build
+        npm test
+
+    - name: Kotlin SDK+codec tests
+      working-directory: packages/saci-sdk-kt
+      run: gradle jvmTest
+
+    - name: C# SDK+codec tests
+      working-directory: packages/saci-sdk-cs
+      run: dotnet test tests
+
+    # Keeps the packaging honest between releases: every manifest still agrees
+    # with packages/VERSION and every artifact still builds. Every toolchain it
+    # needs is already installed above.
+    - name: Pack the SDK packages
+      run: cargo xtask pack-sdk
+
+    - name: Build all six components
+      run: cargo xtask polyglot
+
+    - name: Six-language chain regression
+      run: cargo nextest run -p saci-service --features wasm --test polyglot_chain --no-capture
+
+    - name: Run the polyglot driver
+      run: cargo run -p saci-service --features wasm,tracing --example polyglot_orders
+
+    # The Quick Start's C# stage is not built by any other job, so a WIT
+    # world change here would break the tutorial silently. Every toolchain
+    # it needs is already installed above.
+    - name: Build the Quick Start components
+      run: cargo xtask quickstart
+
+  security_audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.95.0  # Rust minimum version
+    
+    - name: Install cargo-audit
+      uses: taiki-e/install-action@cargo-audit
+    
+    - name: Run security audit
+      run: cargo audit

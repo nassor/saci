@@ -1,0 +1,108 @@
+// SACI standalone service configuration driving TCP at both ends.
+//
+// Run:
+//   cargo run --features connector-tcp,wasm --bin saci-service -- validate \
+//     --config examples/configs/tcp.kdl
+//   cargo run --features connector-tcp,wasm --bin saci-service -- serve \
+//     --config examples/configs/tcp.kdl
+//
+// The source listens and the sink dials: `bind` is an address this process
+// accepts producers on, `connect` is a peer this process pushes frames to. Both
+// halves speak the same frame, a u32 big-endian length prefix followed by that
+// many payload bytes, so a sink here feeds a source there.
+//
+// `validate` binds the source's listener, because that is where a busy port
+// surfaces, and the port must be free. It opens no outbound connection: the
+// sink resolves its `connect` address and dials on the first batch, so a
+// collector that is down surfaces during `serve`, not here. There is no
+// reconnect, so a collector that goes away fails the run.
+
+mode "standalone"
+
+node id=1 name="saci-tcp" data_dir="${SACI_DATA_DIR:-/tmp/saci-tcp}"
+
+// The source never reaches EOF: it blocks until the next frame arrives. Only
+// the stream runner can drive that, so config validation rejects `type="tcp"`
+// on a source node in any other run mode. One workflow pass runs per arriving
+// frame. The sink half carries no such rule and runs in every mode.
+run_mode kind="stream"
+
+// Adaptive flow control: every other source (this one included) hands over
+// whatever it produced and the runner slices it at the target, so the
+// admission target still bounds one pass's chunk. max_chunk_bytes is halved
+// from the 8 MiB default because a frame's payload is already small, and an
+// explicit 50 ms target keeps the search honest about live-frame latency
+// rather than the 250 ms stream default.
+flow_control {
+    max_chunk_bytes 4194304
+    target_latency_ms 50
+    adjust_interval_ms 10000
+}
+
+// One workflow declares the whole DAG: the byte format each end speaks, the
+// source, the processor, the sink, and the explicit links between them.
+workflow "ticks" {
+    // The transformer that decodes and encodes each frame's payload.
+    // "arrow-ipc" is one whole RecordBatch per frame; "ndjson" is one JSON
+    // object per frame, decoded against schema_fields below. Both need their
+    // transformer-* feature compiled in, and connector-tcp pulls in
+    // transformer-arrow-ipc.
+    transformer "ipc_fmt" format="arrow-ipc"
+
+    // ---------------------------------------------------------------- source
+
+    // The processor's `describe()` supplies the component list, so `component`
+    // on this source and the sink below must name components it declares.
+    source "ticks_in" type="tcp" component="Tick" transformer="ipc_fmt" {
+        config {
+            // Listen address. Producers connect here and write frames; several
+            // at once is fine, and ordering holds within one connection.
+            bind "${SACI_TCP_BIND:-0.0.0.0:9500}"
+
+            // Decoded batches queued before backpressure reaches the
+            // producers through TCP flow control.
+            buffer 64
+
+            // Per-frame cap, 8 MiB. A producer that announces more has its
+            // connection closed and the listener stays up.
+            max_frame_bytes 8388608
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "price" type="float64" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_ticks" module="pipelines/ticks.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads Tick and writes EnrichedTick. A sink's schema_fields must match
+    // the component's RecordBatch field for field, in order.
+
+    sink "ticks_out" type="tcp" component="EnrichedTick" transformer="ipc_fmt" {
+        config {
+            // Peer to dial. Resolved when the factory is built and connected
+            // on the first batch, and that one connection serves the whole
+            // run.
+            connect "${SACI_TCP_CONNECT:-127.0.0.1:9600}"
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "price" type="float64" nullable=#true
+        }
+    }
+
+    link from="ticks_in" to="process_ticks"
+    link from="process_ticks" to="ticks_out"
+}
+
+// HTTP control plane. /metrics carries the service's own counters.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 15% grade:
+// one workflow.batch span opens per arriving frame, so a live producer at
+// any real rate needs sampling well below full to keep stdout and the
+// inspector buffers readable. error_sample_ratio stays at 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.15 error_sample_ratio=1.0

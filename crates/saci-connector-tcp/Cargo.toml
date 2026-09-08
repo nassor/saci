@@ -1,0 +1,32 @@
+[package]
+name = "saci-connector-tcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Live TCP Source and client-mode Sink for SACI: one length-prefixed frame per RecordBatch, in either direction. A transformer decodes and encodes the payload."
+
+[features]
+tracing = ["dep:tracing", "saci-core/tracing"]
+
+[dependencies]
+saci-core      = { workspace = true, features = ["io"] }
+saci-connector = { workspace = true }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+# `net` and `io-util` are not in the workspace tokio feature set; this crate
+# binds a listener, dials a peer, and moves length-prefixed frames both ways.
+tokio         = { workspace = true, features = ["net", "io-util"] }
+tracing       = { workspace = true, optional = true }
+
+[dev-dependencies]
+# A real payload transformer, built directly by the factory tests.
+saci-transformer-arrow-ipc = { workspace = true }
+
+tokio         = { workspace = true }

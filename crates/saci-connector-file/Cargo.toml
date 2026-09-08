@@ -1,0 +1,33 @@
+[package]
+name = "saci-connector-file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Local-file Source and Sink for SACI. Owns the file handle, the reader thread and the channel; a transformer supplies the byte format."
+
+[dependencies]
+saci-core        = { workspace = true, features = ["io"] }
+saci-connector   = { workspace = true }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+tokio         = { workspace = true }
+
+[dev-dependencies]
+# The formats the round-trip tests and the worked example read and write.
+saci-transformer-csv     = { workspace = true }
+saci-transformer-ndjson  = { workspace = true }
+saci-transformer-parquet = { workspace = true }
+
+tempfile      = { workspace = true }
+tokio         = { workspace = true }
+
+[[example]]
+name = "scheduler_parquet_etl"
+path = "../../examples/connectors/scheduler_parquet_etl.rs"

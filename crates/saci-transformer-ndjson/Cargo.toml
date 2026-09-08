@@ -1,0 +1,21 @@
+[package]
+name = "saci-transformer-ndjson"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "The ndjson byte format for SACI: a Transformer reading and writing newline-delimited JSON, as a stream and as discrete messages."
+
+[dependencies]
+saci-core        = { workspace = true, features = ["runtime"] }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-json    = { workspace = true }
+arrow-schema  = { workspace = true }
+
+[dev-dependencies]
+tempfile      = { workspace = true }

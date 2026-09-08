@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The SACI processor SDK for C#, as a plain net10.0 library.
+       No RuntimeIdentifier and no NuGet dependencies: only the component
+       project that references this one carries wasi-wasm, SelfContained and
+       PublishTrimmed. The Arrow IPC codec ships in this assembly, and nothing
+       here reflects, so PublishTrimmed needs no trimmer root: the source
+       generator in generator/ bakes every field accessor and transform call
+       into the consuming compilation. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Saci.Sdk</RootNamespace>
+    <AssemblyName>Saci.Sdk</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>Saci.Sdk</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Nassor Frazier-Silva</Authors>
+    <Description>Write SACI WebAssembly processors in C#: one row class, one transform method, and the WIT export glue generated at compile time.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/nassor/saci</PackageProjectUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- tests/ is a host-targeted project that references this one, and
+         generator/ targets netstandard2.0 for Roslyn. The default glob would
+         otherwise pull both into the library. -->
+    <Compile Remove="tests/**" />
+    <Compile Remove="generator/**" />
+    <None Include="LICENSE" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The incremental generator, packed into analyzers/dotnet/cs/ so a
+         PackageReference to Saci.Sdk is the only thing a processor project needs.
+         ReferenceOutputAssembly is false because the generator is a build-time
+         tool, not part of the runtime surface.
+
+         Analyzers do not travel across a ProjectReference, so an in-repo
+         consumer that references this csproj by path has to name the generator
+         project itself, the way examples/polyglot/stages/csharp-tier does. -->
+    <ProjectReference Include="generator/Saci.Sdk.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <Target Name="PackGenerator" BeforeTargets="_GetPackageFiles">
+    <ItemGroup>
+      <None Include="generator/bin/$(Configuration)/netstandard2.0/Saci.Sdk.Generators.dll"
+            Pack="true"
+            PackagePath="analyzers/dotnet/cs"
+            Visible="false" />
+    </ItemGroup>
+  </Target>
+
+</Project>

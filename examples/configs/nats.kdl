@@ -1,0 +1,217 @@
+// SACI standalone service configuration driving NATS at both ends.
+//
+// Run:
+//   export NATS_SERVERS='nats://localhost:4222'
+//   cargo run --features connector-nats,wasm --bin saci-service -- validate \
+//     --config examples/configs/nats.kdl
+//   cargo run --features connector-nats,wasm --bin saci-service -- serve \
+//     --config examples/configs/nats.kdl
+//
+// Both ends speak JetStream, so the source has a durable pull consumer and the
+// sink waits for a publish ack. Swap kind="jetstream" for kind="core" to get
+// plain subject pub/sub with no persistence and no acks.
+//
+// `validate` opens no connection: both factories parse and validate their config
+// and build nothing else. The first drain cycle is where an unreachable server,
+// or a missing stream with stream_provision create=#false, surfaces.
+//
+// Streams are created on first use. Set create=#false on either half's
+// stream_provision to require one that already exists instead.
+
+mode "standalone"
+
+node id=1 name="saci-nats" data_dir="${SACI_DATA_DIR:-/tmp/saci-nats}"
+
+// stop_at_end makes the source report EOF once the stream is drained, so the
+// interval runner can drive it without the stream runner. A live consumer
+// (stop_at_end #false) never reaches EOF and instead needs
+// run_mode kind="stream" with exactly one declared source.
+run_mode kind="interval" interval_ms=2000
+
+// Adaptive flow control: batch mode carries no per-item latency contract, so
+// target_latency_ms stays 0 (the interval default). JetStream's own pull
+// consumer already sizes each fetch at batch_size (1000), so a lower ceiling
+// than kafka.kdl's keeps one admitted chunk close to one fetch instead of
+// several, and the 1.75x growth step is gentler than the 2x default.
+flow_control {
+    min_rows 1024
+    max_rows 32768
+    start_rows 4096
+    adjust_interval_ms 12000
+    growth_factor 1.75
+}
+
+// One workflow declares the whole DAG: the byte format each end speaks, the
+// source, the processor, the sink, and the explicit links between them.
+workflow "orders" {
+    // The transformer that decodes/encodes each message. "ndjson" is one JSON
+    // object per message, decoded against schema_fields below; "arrow-ipc" is
+    // one whole RecordBatch per message. Both need their transformer-*
+    // feature compiled in.
+    transformer "ndjson_fmt" format="ndjson"
+
+    // ---------------------------------------------------------------- source
+
+    source "nats_orders" type="NatsSource" component="Order" transformer="ndjson_fmt" {
+        config {
+            batch_size 1000
+            poll_timeout_ms 1000
+            stop_at_end #true
+
+            connection {
+                servers "${NATS_SERVERS:-nats://localhost:4222}"
+                name "saci-orders"
+                connect_timeout_ms 5000
+                ping_interval_ms 60000
+                // 0 is unlimited reconnects; 0 for reconnect_delay_ms keeps the
+                // client's own backoff.
+                max_reconnects 0
+                reconnect_delay_ms 0
+                retry_on_initial_connect #true
+
+                // How the connection authenticates. Omit the node for no
+                // credentials. Each secret has a `_file` twin for a secret mount,
+                // and exactly one of the pair is set: token/token_file,
+                // password/password_file, seed/seed_file.
+                // auth kind="credentials" path="/run/secrets/saci.creds"
+                //   kind is none | token | user_password | nkey | credentials
+
+                // TLS. A `tls://` server URL requires encryption on its own;
+                // require=#true does the same for a `nats://` URL. tls_first
+                // performs the handshake before the INFO exchange and needs
+                // `handshake_first` on the server.
+                // tls require=#true tls_first=#false \
+                //     root_certificates="/etc/ssl/roots.pem" \
+                //     client_certificate="/etc/ssl/saci.pem" \
+                //     client_key="/etc/ssl/saci.key"
+            }
+
+            mode kind="jetstream" {
+                stream "ORDERS"
+                // A durable consumer's progress survives a restart, so SACI
+                // continues where it left off. Drop the key for an ephemeral
+                // consumer.
+                durable_name "saci-orders"
+                // Omit for every subject the stream captures.
+                filter_subjects "orders.new"
+                // Explicit acks, sent at the start of the next drain cycle, which
+                // is what makes delivery at-least-once. double_ack waits for the
+                // server to confirm each one.
+                ack_policy "explicit"
+                double_ack #false
+                ack_wait_ms 30000
+                max_deliver 5
+                // Delivery attempts the source spends on a message the format
+                // cannot decode. On the last one it terminates that message and
+                // reports the stream and sequence, so a poison payload is
+                // neither skipped in silence nor redelivered forever.
+                max_decode_attempts 5
+                max_ack_pending 1000
+                // How long a pull request stays open server-side while the stream
+                // is empty.
+                fetch_expires_ms 5000
+                api_timeout_ms 5000
+
+                // all | last | new | last_per_subject | by_start_sequence | by_start_time
+                deliver_policy kind="all"
+
+                stream_provision {
+                    // Streams are created when they do not exist, like Kafka
+                    // topics. Set create=#false to require one that already
+                    // exists, which turns a stream typo into a startup error
+                    // instead of a new empty stream.
+                    create #true
+                    // The subject list of a stream SACI creates. Omit it and
+                    // filter_subjects above supplies it, because that is exactly
+                    // what this source reads.
+                    subjects "orders.>"
+                    retention "limits"      // limits | interest | workqueue
+                    storage "file"          // file | memory
+                    discard "old"           // old | new
+                    compression "none"      // none | s2
+                    num_replicas 1
+                    // -1 is unlimited on every limit; 0 for max_age_ms is no age
+                    // limit.
+                    max_messages -1
+                    max_bytes -1
+                    max_age_ms 0
+                    duplicate_window_ms 120000
+                }
+            }
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+    //
+    // The processor's `describe()` supplies the component list, so `component`
+    // on the source and sink above and below must name components it declares.
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads Order and writes EnrichedOrder. A sink's schema_fields must match
+    // the component's RecordBatch field for field, in order.
+
+    sink "nats_enriched" type="NatsSink" component="EnrichedOrder" transformer="ndjson_fmt" {
+        config {
+            connection {
+                servers "${NATS_SERVERS:-nats://localhost:4222}"
+                name "saci-enriched"
+            }
+
+            mode kind="jetstream" {
+                stream "ORDERS_ENRICHED"
+                subject "orders.enriched"
+                // The rendered value of this column becomes Nats-Msg-Id, which the
+                // stream's duplicate window deduplicates on. Row-per-message
+                // formats only: arrow-ipc emits one message per batch, so there is
+                // no one row to identify.
+                message_id_field "id"
+                // Refuse a publish that would land in another stream.
+                expected_stream #true
+                // Every publish waits for its stream ack before the drain cycle
+                // continues, so a returned write means the stream holds the rows.
+                // `atomic_batch #true` tightens that to all-or-nothing for the
+                // whole batch, and needs the stream to allow atomic publishes.
+                ack_timeout_ms 30000
+                max_ack_inflight 5000
+                backpressure_on_inflight #true
+
+                // Headers on every message.
+                // headers "X-Producer"="saci"
+
+                // Header name to column name. The rendered cell becomes the value,
+                // and a null cell sends no header. Row-per-message formats only.
+                // header_fields "X-Order-Status"="status"
+
+                // create=#true is the default, and an omitted subjects list is
+                // filled from the sink's own subject, so this node only names what
+                // it changes.
+                stream_provision storage="file" num_replicas=1
+            }
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    link from="nats_orders" to="process_orders"
+    link from="process_orders" to="nats_enriched"
+}
+
+// HTTP control plane. /metrics carries the service's own counters.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 25%
+// grade: one workflow's JetStream consumer and sink redraining every 2 s
+// produce enough per-item spans that full sampling would clutter stdout,
+// but 1 in 4 still shows the shape of a run. error_sample_ratio stays at
+// 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.25 error_sample_ratio=1.0

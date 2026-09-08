@@ -1,0 +1,17 @@
+[package]
+name = "branching-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# A sample processor, not a library a downstream consumer would depend on.
+publish = false
+description = "Routing demo native plugin: decides per batch which branch link its output is delivered to."
+
+# A native plugin is a shared library exporting the saci-plugin-abi C ABI.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+saci-plugin = { workspace = true }
+serde = { workspace = true }

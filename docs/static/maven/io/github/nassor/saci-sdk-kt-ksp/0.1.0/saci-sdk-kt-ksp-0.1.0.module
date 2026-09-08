@@ -1,0 +1,96 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.github.nassor",
+    "module": "saci-sdk-kt-ksp",
+    "version": "0.1.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.14.4"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 21,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.4.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "saci-sdk-kt-ksp-0.1.0.jar",
+          "url": "saci-sdk-kt-ksp-0.1.0.jar",
+          "size": 25324,
+          "sha512": "3e53c0db542d497f6738bf2486ccdc4e0cfc3a18db38bbc320ba6548fa4ec4d18e3a9a91c6b2dbee62fe430ae125b322d1cc1413a2f9e968bd9f7fd3d2af742e",
+          "sha256": "1dfae191c30987c7ccb976e616935e0225b65fc95af2e2575cb060e133bf0ccb",
+          "sha1": "17e3b86f3327864c3dc91d3d188402fb840b801a",
+          "md5": "5cbd8883e30f9771701afa3bcddda312"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 21,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "com.google.devtools.ksp",
+          "module": "symbol-processing-api",
+          "version": {
+            "requires": "2.3.11"
+          }
+        },
+        {
+          "group": "io.github.nassor",
+          "module": "saci-sdk-kt",
+          "version": {
+            "requires": "0.1.0"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.4.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "saci-sdk-kt-ksp-0.1.0.jar",
+          "url": "saci-sdk-kt-ksp-0.1.0.jar",
+          "size": 25324,
+          "sha512": "3e53c0db542d497f6738bf2486ccdc4e0cfc3a18db38bbc320ba6548fa4ec4d18e3a9a91c6b2dbee62fe430ae125b322d1cc1413a2f9e968bd9f7fd3d2af742e",
+          "sha256": "1dfae191c30987c7ccb976e616935e0225b65fc95af2e2575cb060e133bf0ccb",
+          "sha1": "17e3b86f3327864c3dc91d3d188402fb840b801a",
+          "md5": "5cbd8883e30f9771701afa3bcddda312"
+        }
+      ]
+    }
+  ]
+}

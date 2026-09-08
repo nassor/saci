@@ -1,0 +1,57 @@
+[package]
+name = "saci-connector-kafka"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Kafka Source and Sink for SACI, with the factories that build them from service configuration."
+
+[dependencies]
+saci-core      = { workspace = true, features = ["io"] }
+saci-connector = { workspace = true }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+# `display::ArrayFormatter` renders one cell as the message key. The payload
+# codecs themselves live in the transformer crates, so no arrow codec crate is
+# a dependency here.
+arrow-cast    = { workspace = true }
+async-trait   = { workspace = true }
+# `join_all` awaits every in-flight `producer.send` future concurrently in
+# `KafkaSink::write_batch` rather than round-tripping one message at a time.
+# Already a transitive dependency of `rdkafka` itself, so this adds no new
+# crate to the dependency graph.
+futures-util  = { workspace = true }
+serde         = { workspace = true }
+tokio         = { workspace = true }
+
+# librdkafka bindings. The connector's whole configurability story is
+# `ClientConfig::set`, which reaches every librdkafka property, and
+# `AdminClient::create_topics`, which no pure-Rust client offers. `cmake-build`
+# is the only librdkafka build path that works on Windows, so it is not
+# optional. TLS and SASL are deliberately not enabled: CI builds
+# `--all-features`, and vendoring OpenSSL or krb5 there costs more than the
+# plaintext-only default is worth.
+rdkafka       = { version = "0.39", features = ["cmake-build"] }
+
+[dev-dependencies]
+# The payload formats the round-trip tests exercise, constructed directly.
+saci-transformer-arrow-ipc = { workspace = true }
+saci-transformer-ndjson = { workspace = true }
+
+# The Kafka broker the integration tests drive. The core crate rather than
+# `testcontainers-modules`, matching saci-connector-postgresql: the modules crate
+# pins testcontainers ^0.27 against the workspace's 0.28, and a single-node
+# KRaft broker needs a custom env block either way.
+testcontainers = "0.28"
+anyhow         = { workspace = true }
+tokio          = { workspace = true, features = ["rt-multi-thread"] }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+# `key_field_sets_the_message_key` parses each message's JSON payload to
+# cross-check its `id` field against the raw-consumed message key.
+serde_json     = { workspace = true }

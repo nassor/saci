@@ -1,0 +1,141 @@
+// SACI standalone service configuration driving S3 at both ends.
+//
+// Run:
+//   export SACI_S3_BUCKET='saci-orders'
+//   export SACI_S3_ENDPOINT='http://127.0.0.1:9000'
+//   export SACI_S3_ACCESS_KEY='rustfsadmin'
+//   export SACI_S3_SECRET_KEY='rustfsadmin'
+//   cargo run --features connector-s3,transformer-csv,wasm --bin saci-service -- validate \
+//     --config examples/configs/s3.kdl
+//   cargo run --features connector-s3,transformer-csv,wasm --bin saci-service -- serve \
+//     --config examples/configs/s3.kdl
+//
+// Both ends speak the same csv format through one declared transformer. The
+// source lists `incoming/orders` once and drains every object in key order;
+// the sink accumulates rows in memory and uploads them as one timestamped
+// object when a flush threshold fires (here: every 50 000 rows, 128 MiB of
+// encoded bytes, or 60 s since the object opened — whichever comes first).
+// Set all three flush knobs to 0 for exactly one object, at finish.
+//
+// The bucket must already exist: object_store has no bucket-creation API.
+//
+// `validate` opens no connection: neither factory parses beyond its own config
+// and builds nothing else. The first drain cycle is where an unreachable
+// endpoint, a missing bucket, or bad credentials surface.
+
+mode "standalone"
+
+node id=1 name="saci-s3" data_dir="${SACI_DATA_DIR:-/tmp/saci-s3}"
+
+// One pass through the workflow: the source reaches EOF when its listing is
+// exhausted, so the one_shot runner is the natural fit. A stream-mode run
+// would re-list nothing and simply end, so prefer one_shot. one_shot builds
+// no flow-control controller for any source, so a `flow_control` block here
+// would be accepted but inert; kafka.kdl and nats.kdl (interval mode) or
+// redb.kdl (stream mode) are where that block does something.
+run_mode kind="one_shot"
+
+// One workflow declares the whole DAG: the byte format each end speaks, the
+// source, the processor, the sink, and the explicit links between them.
+workflow "orders" {
+    // The transformer that decodes/encodes each object. "csv" is one row per
+    // line, decoded against schema_fields below; "ndjson" and "parquet" work
+    // the same way (parquet carries its own schema, so a source over parquet
+    // should set schema_from "object" and may omit schema_fields).
+    transformer "orders_csv" name="Orders CSV" format="csv" {
+        options has_headers=#false
+    }
+
+    // ---------------------------------------------------------------- source
+
+    source "orders_in" type="S3Source" component="Order" transformer="orders_csv" {
+        config {
+            // The path prefix listed. This is a byte prefix handed to the
+            // service's list API: a trailing slash keeps it inside one
+            // directory.
+            prefix "incoming/orders"
+
+            connection {
+                bucket "${SACI_S3_BUCKET:-saci-orders}"
+                endpoint "${SACI_S3_ENDPOINT:-http://127.0.0.1:9000}"
+                region "${SACI_S3_REGION:-us-east-1}"
+                access_key_id "${SACI_S3_ACCESS_KEY:-rustfsadmin}"
+                secret_access_key "${SACI_S3_SECRET_KEY:-rustfsadmin}"
+                // Plain HTTP is required for a local S3-compatible server;
+                // omit for AWS, whose endpoint is derived from region.
+                allow_http #true
+            }
+
+            // The twelve-field Order the polyglot stages declare, so this
+            // config pairs with `cargo xtask polyglot`'s processors. The
+            // schema must match the processor's declared component field for
+            // field, in order.
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "currency" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+            schema_fields "valid" type="boolean" nullable=#false
+            schema_fields "usd_amount" type="float64" nullable=#false
+            schema_fields "usd_amount_display" type="utf8" nullable=#false
+            schema_fields "risk_score" type="float64" nullable=#false
+            schema_fields "flagged" type="boolean" nullable=#false
+            schema_fields "fee" type="float64" nullable=#false
+            schema_fields "review_tier" type="int64" nullable=#false
+            schema_fields "settlement" type="utf8" nullable=#false
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+    //
+    // The processor's `describe()` supplies the component list, so `component`
+    // on the source and sink above and below must name components it declares.
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // ------------------------------------------------------------------ sink
+
+    sink "orders_out" type="S3Sink" component="Order" transformer="orders_csv" {
+        config {
+            prefix "processed/orders"
+            // Appended to the generated key. Nothing is inferred from the
+            // format, so omit it if the format needs no extension.
+            suffix ".csv"
+            // 0 disables a threshold. Whichever of the three fires first
+            // closes the open object and uploads it.
+            flush max_rows=50000 max_bytes=134217728 max_age_ms=60000
+
+            connection {
+                bucket "${SACI_S3_BUCKET:-saci-orders}"
+                endpoint "${SACI_S3_ENDPOINT:-http://127.0.0.1:9000}"
+                region "${SACI_S3_REGION:-us-east-1}"
+                access_key_id "${SACI_S3_ACCESS_KEY:-rustfsadmin}"
+                secret_access_key "${SACI_S3_SECRET_KEY:-rustfsadmin}"
+                allow_http #true
+            }
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "currency" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+            schema_fields "valid" type="boolean" nullable=#false
+            schema_fields "usd_amount" type="float64" nullable=#false
+            schema_fields "usd_amount_display" type="utf8" nullable=#false
+            schema_fields "risk_score" type="float64" nullable=#false
+            schema_fields "flagged" type="boolean" nullable=#false
+            schema_fields "fee" type="float64" nullable=#false
+            schema_fields "review_tier" type="int64" nullable=#false
+            schema_fields "settlement" type="utf8" nullable=#false
+        }
+    }
+
+    link from="orders_in" to="process_orders"
+    link from="process_orders" to="orders_out"
+}
+
+// HTTP control plane. /metrics carries the service's own counters.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 75% grade:
+// one bounded pass through a listing, then the process exits, so there is
+// little reason to sample the run's own spans down further.
+observability log_format="pretty" log_level="info" sample_ratio=0.75 error_sample_ratio=1.0

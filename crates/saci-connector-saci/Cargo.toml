@@ -1,0 +1,51 @@
+[package]
+name = "saci-connector-saci"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Service-to-service Source and Sink for SACI: a sink in one service pushes RecordBatches to a source in another, naming the service, workflow and node they came from."
+
+[features]
+tracing = ["dep:tracing", "saci-core/tracing"]
+# Carries the sender's span as a W3C traceparent and adopts it on receipt, so a
+# received batch's span joins the sender's trace under OTLP export.
+trace-context = ["tracing", "dep:opentelemetry", "dep:tracing-opentelemetry"]
+# Emits into the process-global OpenTelemetry meter the saci-service binary
+# installs. Off by default because a library consumer may have no provider.
+metrics = ["dep:opentelemetry"]
+
+[dependencies]
+saci-core      = { workspace = true, features = ["io"] }
+saci-connector = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-buffer  = { workspace = true }
+arrow-ipc     = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+# `net` and `io-util` are not in the workspace tokio feature set; this crate
+# binds a listener, dials a peer, and moves framed batches both ways. `time`
+# and `macros` come from the workspace set: one bounds the handshake reply, the
+# other carries the `select!` that ends a session with its source.
+tokio         = { workspace = true, features = ["net", "io-util"] }
+tracing       = { workspace = true, optional = true }
+# The same local pins saci-service and saci-connector-postgresql carry: 0.33 is
+# the tracing-opentelemetry release that depends on the opentelemetry 0.32 line.
+opentelemetry         = { version = "0.32", optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# A real meter provider, so the round-trip test reads the series it emits back
+# out of a Prometheus registry instead of asserting on its own call sites. Its
+# `trace` feature carries the tracer provider the trace-context test installs.
+opentelemetry_sdk = { version = "0.32", features = ["metrics", "trace"] }
+opentelemetry-prometheus = { version = "0.32" }
+prometheus = { version = "0.14", default-features = false }
+# The same local pin saci-service carries. `registry` is the layered
+# subscriber the trace-context test installs for its own duration.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

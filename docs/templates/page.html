@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page.title }} — SACI{% endblock %}
+{% block description %}{{ page.description | default(value=config.description) }}{% endblock %}
+{% block og_title %}{{ page.title }} — SACI{% endblock %}
+{% block og_description %}{{ page.description | default(value=config.description) }}{% endblock %}
+
+{% block content %}
+<article class="markdown">
+{{ page.content | safe }}
+</article>
+{% endblock %}

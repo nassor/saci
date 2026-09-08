@@ -1,0 +1,47 @@
+[package]
+name = "saci-connector-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "HTTP and HTTPS Source and Sink for SACI. The source is one GET spooled through a transformer; the sink sends one self-contained document per RecordBatch."
+
+[dependencies]
+saci-core        = { workspace = true, features = ["io"] }
+saci-connector   = { workspace = true }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+tokio         = { workspace = true }
+# A runtime dependency, not a test one: the stream read surface takes a
+# `std::fs::File` because parquet reads its footer before any row group, so the
+# response body is spooled to an unnamed temp file the OS reclaims on close.
+tempfile      = { workspace = true }
+# 0.13.4, the version saci-service already pins, so the two share one tree.
+#
+# `rustls-no-provider` is the only TLS feature in that release which does not
+# pull `aws-lc-rs`: the `rustls` feature implies `__rustls-aws-lc-rs`, and 0.13
+# has no `rustls-tls-ring` or `webpki-roots` feature at all. Roots therefore
+# come from `rustls-platform-verifier`, the OS trust store, not from a bundled
+# webpki set. The workspace standardises on `ring` (saci-connector-postgresql
+# links it, saci-service pairs these same two dependencies with the same
+# features), so the provider is installed before any client is built. Nothing
+# here needs `json`, compression or `blocking`.
+reqwest       = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
+rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+# The format the round-trip and factory tests read and write. csv is the
+# stream-surface format that also requires a declared schema, so it exercises
+# both the source's `schema_fields` path and the sink's.
+saci-transformer-csv = { workspace = true }
+# The self-describing counterpart: it refuses a declared schema, so it is what
+# `schema_from "body"` exists for.
+saci-transformer-parquet = { workspace = true }
+
+tokio         = { workspace = true }

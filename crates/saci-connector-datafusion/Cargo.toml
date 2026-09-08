@@ -1,0 +1,35 @@
+[package]
+name = "saci-connector-datafusion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "DataFusion SQL Source for SACI: streams the result of a query against a live SessionContext into a Dataset."
+
+[dependencies]
+saci-core     = { workspace = true, features = ["io"] }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+futures       = { workspace = true }
+tokio         = { workspace = true }
+datafusion    = { version = "55", default-features = false, features = ["sql", "parquet"] }
+
+[dev-dependencies]
+arrow-buffer  = { workspace = true }
+criterion     = { workspace = true }
+mimalloc      = "0.1.52"
+num_cpus      = { workspace = true }
+serde         = { workspace = true }
+
+[[example]]
+name = "datafusion_interop"
+path = "../../examples/connectors/datafusion_interop.rs"
+
+[[bench]]
+name = "vs_datafusion_q6"
+harness = false

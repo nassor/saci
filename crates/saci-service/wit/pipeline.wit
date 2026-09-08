@@ -1,0 +1,124 @@
+package saci:pipeline@0.3.0;
+
+// No `required-host-io-version` field on pipeline-descriptor: the WIT package
+// version (`@0.3.0`) already signals host-io compatibility.
+
+/// Types shared by the pipeline interface.
+interface types {
+    /// Arrow IPC stream bytes (schema + batches). Host serializes a Dataset
+    /// on input; processor re-serializes the (possibly mutated) Dataset on output.
+    type ipc-bytes = list<u8>;
+
+    /// Opaque processor-owned checkpoint blob. Host persists verbatim via
+    /// saci-core CheckpointStore; processor owns the layout.
+    type checkpoint = list<u8>;
+
+    /// One component declared by the processor pipeline. `arrow-schema-ipc` is its
+    /// Arrow IPC schema message. Host validates source and sink component
+    /// targets against this list at load time.
+    record component-descriptor {
+        name: string,
+        arrow-schema-ipc: list<u8>,
+    }
+
+    /// Stable identity of the pipeline. Host gates config and checkpoint
+    /// compatibility on this. `schema-fingerprint` is computed from all
+    /// component schemas concatenated (see saci-core SchemaRegistry).
+    record pipeline-descriptor {
+        name: string,
+        version: string,
+        components: list<component-descriptor>,
+        stateful: bool,
+        schema-fingerprint: string,
+    }
+
+    /// Lightweight metrics the processor reports after each batch. The host
+    /// records them as the `saci_processor_batch_duration_seconds`,
+    /// `saci_processor_rows_in_total`, `saci_processor_rows_out_total`,
+    /// `saci_processor_systems_run_total` and `saci_processor_retries_total`
+    /// series.
+    record run-metrics {
+        wall-ns: u64,
+        rows-in: u64,
+        rows-out: u64,
+        systems-run: u32,
+        retries: u32,
+    }
+
+    record run-result {
+        output: ipc-bytes,
+        checkpoint: option<checkpoint>,
+        metrics: run-metrics,
+        /// Branch names this batch's output is delivered to. `none` preserves
+        /// the legacy behaviour: the host multicasts the output to every
+        /// downstream link. `some([])` routes the output nowhere.
+        routes: option<list<string>>,
+    }
+
+    /// Structured errors so the host can distinguish "release claim and retry"
+    /// from "ack claim and surface to operator". Variant names match the
+    /// DistributedRunner vocabulary: `retryable` maps to `release_claim`,
+    /// `permanent` to `ack_claim`.
+    variant run-error {
+        /// Transient failure worth retrying. Host releases the claim and
+        /// retries next tick.
+        retryable(string),
+        /// Permanent failure: bad input shape, processor logic bug, unknown error.
+        /// Host acks the claim, logs, and surfaces it to /status.
+        permanent(string),
+        /// Reserved for a future startup-time schema check. `run-batch` MUST
+        /// NOT emit this; a mid-batch schema error folds into `permanent`.
+        schema-mismatch(string),
+    }
+}
+
+/// Host capabilities the processor may call during run-batch: logging, metric
+/// counters, static config read. No filesystem, no network, no clock.
+interface host-io {
+    enum log-level { trace, debug, info, warn, error }
+
+    /// Structured log line bridged to tracing on the host.
+    log: func(level: log-level, target: string, message: string);
+
+    /// Increment or observe a named metric. The host records it as the
+    /// `saci_processor_metric` histogram, labelled `metric="<name>"`.
+    /// Value is f64 to cover counters, gauges, and histograms.
+    metric: func(name: string, value: f64);
+
+    /// Pull a string-typed config value the host injected via
+    /// the `config` node inside the service config's `wasm` node. Returns none if absent.
+    /// Processor is expected to parse numerics itself.
+    get-config: func(key: string) -> option<string>;
+}
+
+/// The sole processor export. All functions are sync from the WIT perspective;
+/// the host wraps each call in spawn_blocking + epoch interruption.
+interface pipeline {
+    use types.{pipeline-descriptor, ipc-bytes, checkpoint, run-result, run-error};
+
+    /// Called once at load time. Host validates the descriptor against
+    /// ServiceConfig (declared components cover sources/sinks, schema
+    /// fingerprint matches any persisted checkpoint).
+    describe: func() -> pipeline-descriptor;
+
+    /// The hot path. Host marshals the partition batch to Arrow IPC and hands
+    /// it in with the processor's state blob from the previous batch. The processor
+    /// runs its Pipeline::run_on DAG against a fresh Dataset and returns IPC
+    /// bytes, the updated state blob, and metrics.
+    ///
+    /// `prior` is `none` on the first batch after a cold start. Whatever the
+    /// processor returns in `run-result.checkpoint` is persisted verbatim by the
+    /// host and handed back as the next call's `prior`; a stateless processor
+    /// returns `none`. This is the only channel for processor state: the host
+    /// creates a fresh wasmtime Store per call, so processor linear memory never
+    /// survives a batch boundary.
+    ///
+    /// Invariant: run-batch MUST NOT return run-error::schema-mismatch. A
+    /// mismatch surfacing mid-batch is a processor bug and folds into `permanent`.
+    run-batch: func(input: ipc-bytes, prior: option<checkpoint>) -> result<run-result, run-error>;
+}
+
+world saci-pipeline {
+    import host-io;
+    export pipeline;
+}

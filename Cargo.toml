@@ -1,0 +1,232 @@
+[workspace]
+members = [
+    "crates/saci-core",
+    "crates/saci-config",
+    "crates/saci-connector",
+    "crates/saci-connector-channel",
+    "crates/saci-connector-datafusion",
+    "crates/saci-connector-file",
+    "crates/saci-connector-http",
+    "crates/saci-connector-kafka",
+    "crates/saci-connector-nats",
+    "crates/saci-connector-postgresql",
+    "crates/saci-connector-turso",
+    "crates/saci-connector-redb",
+    "crates/saci-connector-s3",
+    "crates/saci-connector-tcp",
+    "crates/saci-connector-saci",
+    "crates/saci-transformer",
+    "crates/saci-transformer-arrow-ipc",
+    "crates/saci-transformer-avro",
+    "crates/saci-transformer-csv",
+    "crates/saci-transformer-ndjson",
+    "crates/saci-transformer-parquet",
+    "crates/saci-macros",
+    "crates/saci-processor",
+    "crates/saci-processor-smoketest",
+    "crates/saci-plugin",
+    "crates/saci-plugin-abi",
+    "crates/saci-plugin-smoketest",
+    "crates/saci-inspector-wire",
+    "crates/saci-service",
+    "crates/saci",
+    "examples/wasm/order_processing",
+    "examples/polyglot/stages/rust-settle",
+    "examples/branching/wasm",
+    "examples/branching/plugin",
+    "examples/windowing/tumbling/wasm",
+    "examples/windowing/tumbling/plugin",
+    "examples/windowing/sliding/wasm",
+    "examples/windowing/session/wasm",
+    "examples/multi_workflow/wasm",
+    "examples/integrity/wasm/classify",
+    "examples/integrity/wasm/aggregate",
+    "examples/integrity/wasm/audit",
+    # The task runner: `cargo xtask <command>`. A member so it shares the lock
+    # file and the target directory, and so `cargo clippy --all-targets` and
+    # `cargo fmt --all` cover it.
+    "xtask",
+]
+# Not a member: `saci-service-ui` only compiles for wasm32-unknown-unknown, so a
+# workspace-wide host build would fail on it. It carries its own lock file and
+# `cargo xtask ui` runs its fmt and clippy gates.
+exclude = ["crates/saci-service-ui"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+rust-version = "1.95.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+# Flipped from the historical `false`: every crate below is meant to publish
+# to crates.io. The handful that are CI fixtures or samples, not libraries an
+# external consumer would add as a dependency, override this back to `false`
+# in their own manifest: saci-processor-smoketest, saci-plugin-smoketest,
+# xtask, and the thirteen example-workspace crates under examples/.
+publish = true
+repository = "https://github.com/nassor/saci"
+homepage = "https://nassor.github.io/saci/"
+authors = ["Nassor Frazier-Silva <nassor@gmail.com>"]
+
+[workspace.dependencies]
+# The workspace's own crates. Every internal edge is declared once here and
+# taken as `{ workspace = true }` in the member, so the version requirement
+# between two SACI crates lives next to `[workspace.package] version` above
+# instead of in each of the thirty-odd manifests that names a sibling. The
+# requirement cannot simply be dropped: `cargo publish` rejects a path
+# dependency that carries no version.
+#
+# `saci-core` is the one entry declared `default-features = false`. Its
+# default is `runtime` (tokio and rayon), which cannot target
+# wasm32-wasip2, so the two authoring SDKs must not receive it; cargo
+# ignores a member's own `default-features = false` when the workspace
+# dependency does not set one, which would leave that exclusion silently
+# undone. The baseline is therefore the narrower of the two, and a member
+# that wants the host runtime asks for it by name: `features = ["runtime"]`,
+# or `features = ["io"]`, which implies it.
+saci-core                  = { path = "crates/saci-core", version = "0.1.0", default-features = false }
+saci-config                = { path = "crates/saci-config", version = "0.1.0" }
+saci-connector             = { path = "crates/saci-connector", version = "0.1.0" }
+saci-connector-channel     = { path = "crates/saci-connector-channel", version = "0.1.0" }
+saci-connector-datafusion  = { path = "crates/saci-connector-datafusion", version = "0.1.0" }
+saci-connector-file        = { path = "crates/saci-connector-file", version = "0.1.0" }
+saci-connector-http        = { path = "crates/saci-connector-http", version = "0.1.0" }
+saci-connector-kafka       = { path = "crates/saci-connector-kafka", version = "0.1.0" }
+saci-connector-nats        = { path = "crates/saci-connector-nats", version = "0.1.0" }
+saci-connector-postgresql  = { path = "crates/saci-connector-postgresql", version = "0.1.0" }
+saci-connector-turso       = { path = "crates/saci-connector-turso", version = "0.1.0" }
+saci-connector-redb        = { path = "crates/saci-connector-redb", version = "0.1.0" }
+saci-connector-s3          = { path = "crates/saci-connector-s3", version = "0.1.0" }
+saci-connector-tcp         = { path = "crates/saci-connector-tcp", version = "0.1.0" }
+saci-connector-saci        = { path = "crates/saci-connector-saci", version = "0.1.0" }
+saci-transformer           = { path = "crates/saci-transformer", version = "0.1.0" }
+saci-transformer-arrow-ipc = { path = "crates/saci-transformer-arrow-ipc", version = "0.1.0" }
+saci-transformer-avro      = { path = "crates/saci-transformer-avro", version = "0.1.0" }
+saci-transformer-csv       = { path = "crates/saci-transformer-csv", version = "0.1.0" }
+saci-transformer-ndjson    = { path = "crates/saci-transformer-ndjson", version = "0.1.0" }
+saci-transformer-parquet   = { path = "crates/saci-transformer-parquet", version = "0.1.0" }
+saci-macros                = { path = "crates/saci-macros", version = "0.1.0" }
+saci-processor             = { path = "crates/saci-processor", version = "0.1.0" }
+saci-plugin                = { path = "crates/saci-plugin", version = "0.1.0" }
+saci-plugin-abi            = { path = "crates/saci-plugin-abi", version = "0.1.0" }
+saci-inspector-wire        = { path = "crates/saci-inspector-wire", version = "0.1.0" }
+
+# Arrow core sub-crates, exact-pinned at workspace level. `arrow-ipc` defines the
+# on-disk checkpoint format, so bump it only after validating round-trip reads
+# against an existing checkpoint store. arrow-buffer, arrow-arith and arrow-ord
+# couple tightly to arrow's memory layout, so they are pinned too.
+arrow-array   = { version = "59.3.0" }
+arrow-schema  = { version = "59.3.0" }
+arrow-buffer  = { version = "=59.3.0" }
+arrow-select  = { version = "59.3.0" }
+arrow-cast    = { version = "59.3.0" }
+arrow-arith   = { version = "=59.3.0" }
+arrow-ord     = { version = "=59.3.0" }
+arrow-ipc     = { version = "=59.3.0" }
+arrow-json    = { version = "59.3.0" }
+arrow-csv     = { version = "59.3.0" }
+# The Avro codec. Caret-ranged like the other format-specific arrow sub-crates:
+# it is neither the checkpoint wire format nor coupled to arrow's memory layout.
+# bzip2 and xz stay off: they link C libraries nothing else in the graph needs,
+# and arrow-avro rejects an OCF in either codec by naming the missing feature.
+arrow-avro    = { version = "59.3.0", default-features = false, features = ["deflate", "snappy", "zstd"] }
+parquet       = { version = "=59.3.0", default-features = false, features = ["arrow", "snap"] }
+# `parquet`'s `ChunkReader` is implemented for `File` and for `bytes::Bytes`
+# only, so a Parquet file that lives in a message payload rather than on disk
+# is read through `Bytes`.
+bytes         = { version = "1.12.1" }
+serde_arrow   = { version = "0.15.0", features = ["arrow-59"] }
+
+# Common runtime deps
+async-trait   = { version = "0.1.92" }
+tokio         = { version = "1.53.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
+tokio-util    = { version = "0.7.19", features = ["rt"] }
+futures       = { version = "0.3.34" }
+futures-util  = { version = "0.3.34" }
+serde         = { version = "1.0.229", features = ["derive"] }
+serde_json    = { version = "1.0.151" }
+serde_bytes   = { version = "0.11.19" }
+# The service configuration language. KDL text is parsed here and mapped into
+# the self-describing `ConfigValue` tree the factory signatures carry. `span`
+# positions every diagnostic as `line:column`; the default `serde` feature is
+# off because it is the crate's experimental KDL-to-serde mapping, which
+# `saci-config` deliberately does not use.
+kdl           = { version = "6.7", default-features = false, features = ["span"] }
+tracing       = { version = "0.1.44" }
+rayon         = { version = "1.12.0" }
+num_cpus      = { version = "1.17.0" }
+fnv           = { version = "1.0.7" }
+rand          = { version = "0.10.2" }
+uuid          = { version = "1.26.1", features = ["v7", "serde"] }
+# Loads a repo-root `.env` so cloud-service credentials (Turso and any later
+# one) resolve without a manual export. Never overrides an existing variable.
+dotenvy       = { version = "0.15" }
+
+# The Turso (SQLite-compatible, in-process) engine the `turso` connector
+# embeds. `default-features = false` drops the crate's default `mimalloc`
+# feature, which installs a `#[global_allocator]` and would collide with the
+# allocator every host binary already sets; `fts` is unneeded. `sync` adds the
+# HTTP/TLS path for a synced remote replica (Turso Cloud / sqld).
+turso         = { version = "=0.7.2", default-features = false, features = ["sync"] }
+
+# The embedded key/value store. saci-service's `distributed` feature keeps its
+# local state file and its raft log in one, and saci-connector-redb uses one as
+# a transport, so a single version covers every user.
+redb          = { version = "4.2.0" }
+
+# WASM component model host
+wasmtime      = { version = "48.0.2", features = ["component-model"] }
+wasmtime-wasi = { version = "48.0.2" }
+sha3          = { version = "0.12.0" }
+
+# WASM component model guest. Every Rust processor component invokes
+# `wit_bindgen::generate!` against `crates/saci-processor/wit`, so the generator
+# and its runtime support are one dependency pinned in one place. The five
+# processor crates take it as a `cfg(target_arch = "wasm32")` dependency: the
+# generated module is gated on wasm32, so a host build needs neither the crate
+# nor its proc-macro tree.
+wit-bindgen   = { version = "0.62.0" }
+
+# Native plugin host. `libloading` is the dlopen/LoadLibrary wrapper the plugin
+# runtime loads a shared library with. `base64` decodes the schema bytes a
+# plugin's `describe` manifest carries; the encoding matches the generated
+# constants the polyglot processors already embed, and an audited decoder beats
+# hand-rolling alphabet and padding validation over plugin-supplied input.
+libloading    = { version = "0.9.0" }
+base64        = { version = "0.23.1" }
+
+# Dev / bench deps shared across crates
+criterion     = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
+postcard      = { version = "1.1.3", default-features = false, features = ["alloc"] }
+tempfile      = { version = "3.27.0" }
+anyhow        = { version = "1.0.104" }
+libc          = { version = "0.2.189" }
+
+# Link-time optimisation. `codegen-units=1` (supplied by `cargo xtask bench` via
+# RUSTFLAGS) optimises each crate whole but stops at every crate boundary:
+# without LTO cargo passes `-C embed-bitcode=no`, so the arrow rlibs carry no
+# bitcode and any accessor that is neither generic nor `#[inline]` stays an
+# out-of-line call. `arrow_array::BooleanArray::value` is one such accessor, a
+# concrete type with a bounds `assert!` and no inline hint, so a per-row mask
+# read in an aggregate costs a call per row.
+#
+# `thin`, not `fat`: fat buys nothing on these workloads, reshuffles unrelated
+# code enough to make later A/B comparisons drift, and costs 2.3x thin's
+# incremental rebuild.
+#
+# Profiles are read only from the workspace root; a `[profile]` in a member
+# manifest is ignored. `[profile.bench]` governs the whole bench unit graph,
+# dependencies included, so `bench` is what the benchmark numbers come from and
+# `release` is here so shipped binaries get the same optimisation.
+[profile.release]
+lto = "thin"
+
+[profile.bench]
+lto = "thin"
+# Dependencies carry no symbols worth debugging from this repo, so build them
+# without debuginfo: less codegen work per dep crate and smaller artifacts.
+# The workspace's own crates keep their full debug data. (The MSVC PDB module
+# cap, LNK1140, is handled in `.cargo/config.toml` with `/PDB:NONE`.)
+[profile.dev.package."*"]
+debug = 0
+

@@ -1,0 +1,14 @@
+# Copied in by `cargo xtask plugins` from examples/polyglot/generated/, which
+# the emit command regenerates from the canonical Rust Order definition. Only the
+# package clause is rewritten on the way in, because a c-shared plugin is
+# package main.
+/schema_gen.go
+
+# Build output. `go build -buildmode=c-shared` writes the library and a C header
+# named after it; the name follows DLL_PREFIX and DLL_SUFFIX so the host test
+# suite can build the path the same way it builds the Rust fixture's.
+/libsettle_go.so
+/libsettle_go.dylib
+/settle_go.dll
+/libsettle_go.h
+/settle_go.h

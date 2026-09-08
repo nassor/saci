@@ -1,0 +1,299 @@
+base_url = "https://nassor.github.io/saci"
+title = "SACI Documentation"
+description = "Distributed Batch Processing for Rust, on Apache Arrow."
+default_language = "en"
+compile_sass = false
+build_search_index = false
+generate_feeds = false
+
+# Output to docs/public so GitHub Pages workflow can upload it.
+output_dir = "public"
+
+# Pretty URLs (default true): /world.md → /world/
+[markdown]
+render_emoji = false
+
+# Class mode keeps the inline `style` attribute off `<pre>`, so the site's own
+# light/dark rules and the `data-theme` toggle still paint the code frame.
+# Zola writes a `giallo.css` for the theme below; no page links it, because the
+# Prism `.token.*` rules in `styles.css` colour the tokens. The section exists
+# so a fence annotation such as ```rust,name=The build script reaches the page
+# as `data-name`, which `script.js` renders as the frame caption.
+[markdown.highlighting]
+theme = "ayu-dark"
+style = "class"
+
+[extra]
+github_repo = "https://github.com/nassor/saci"
+crates_io = "https://crates.io/crates/saci"
+docs_rs = "https://docs.rs/saci"
+
+# The two documentation areas, declared once. `base.html` renders the area
+# switch, the sidebar, the breadcrumb and the previous/next pager from this
+# list, so all four agree. The pager never crosses an area boundary.
+# A group collapses in the sidebar, so a hub item keeps its children here
+# rather than hiding them behind the hub page alone.
+[[extra.areas]]
+id = "service"
+label = "Service"
+path = "@/service/_index.md"
+
+[[extra.areas.nav]]
+label = "Getting started"
+[[extra.areas.nav.items]]
+title = "What the service does"
+path = "@/service/_index.md"
+[[extra.areas.nav.items]]
+title = "Install saci-service"
+path = "@/service/install.md"
+[[extra.areas.nav.items]]
+title = "Your first pipeline"
+path = "@/service/first-pipeline.md"
+
+[[extra.areas.nav]]
+label = "Writing the config"
+[[extra.areas.nav.items]]
+title = "The config file"
+path = "@/service/config/_index.md"
+[[extra.areas.nav.items]]
+title = "Workflows and links"
+path = "@/service/config/workflows.md"
+[[extra.areas.nav.items]]
+title = "Run modes and persistence"
+path = "@/service/config/run-modes.md"
+
+[[extra.areas.nav]]
+label = "Sources, sinks and formats"
+[[extra.areas.nav.items]]
+title = "Sources and sinks"
+path = "@/service/connectors/_index.md"
+[[extra.areas.nav.items.children]]
+title = "File"
+path = "@/service/connectors/file.md"
+[[extra.areas.nav.items.children]]
+title = "HTTP"
+path = "@/service/connectors/http.md"
+[[extra.areas.nav.items.children]]
+title = "Kafka"
+path = "@/service/connectors/kafka.md"
+[[extra.areas.nav.items.children]]
+title = "NATS"
+path = "@/service/connectors/nats.md"
+[[extra.areas.nav.items.children]]
+title = "PostgreSQL"
+path = "@/service/connectors/postgresql.md"
+[[extra.areas.nav.items.children]]
+title = "Turso"
+path = "@/service/connectors/turso.md"
+[[extra.areas.nav.items.children]]
+title = "redb"
+path = "@/service/connectors/redb.md"
+[[extra.areas.nav.items.children]]
+title = "S3"
+path = "@/service/connectors/s3.md"
+[[extra.areas.nav.items.children]]
+title = "TCP"
+path = "@/service/connectors/tcp.md"
+[[extra.areas.nav.items.children]]
+title = "SACI"
+path = "@/service/connectors/saci.md"
+[[extra.areas.nav.items.children]]
+title = "Channel"
+path = "@/service/connectors/channel.md"
+[[extra.areas.nav.items]]
+title = "Formats"
+path = "@/service/formats/_index.md"
+[[extra.areas.nav.items.children]]
+title = "csv"
+path = "@/service/formats/csv.md"
+[[extra.areas.nav.items.children]]
+title = "ndjson"
+path = "@/service/formats/ndjson.md"
+[[extra.areas.nav.items.children]]
+title = "parquet"
+path = "@/service/formats/parquet.md"
+[[extra.areas.nav.items.children]]
+title = "avro"
+path = "@/service/formats/avro.md"
+[[extra.areas.nav.items.children]]
+title = "arrow-ipc"
+path = "@/service/formats/arrow-ipc.md"
+
+[[extra.areas.nav]]
+label = "Processors"
+[[extra.areas.nav.items]]
+title = "Processors in a workflow"
+path = "@/service/processors/_index.md"
+[[extra.areas.nav.items]]
+title = "Branching"
+path = "@/service/processors/branching.md"
+[[extra.areas.nav.items]]
+title = "Windowing"
+path = "@/service/processors/windowing/_index.md"
+[[extra.areas.nav.items.children]]
+title = "Tumbling"
+path = "@/service/processors/windowing/tumbling.md"
+[[extra.areas.nav.items.children]]
+title = "Sliding"
+path = "@/service/processors/windowing/sliding.md"
+[[extra.areas.nav.items.children]]
+title = "Session"
+path = "@/service/processors/windowing/session.md"
+[[extra.areas.nav.items]]
+title = "Several workflows"
+path = "@/service/processors/multiple-workflows.md"
+[[extra.areas.nav.items]]
+title = "Build your own"
+path = "@/service/processors/build/_index.md"
+[[extra.areas.nav.items.children]]
+title = "Rust"
+path = "@/service/processors/build/rust.md"
+[[extra.areas.nav.items.children]]
+title = "Go"
+path = "@/service/processors/build/go.md"
+[[extra.areas.nav.items.children]]
+title = "Python"
+path = "@/service/processors/build/python.md"
+[[extra.areas.nav.items.children]]
+title = "TypeScript"
+path = "@/service/processors/build/typescript.md"
+[[extra.areas.nav.items.children]]
+title = "Kotlin"
+path = "@/service/processors/build/kotlin.md"
+[[extra.areas.nav.items.children]]
+title = "C#"
+path = "@/service/processors/build/csharp.md"
+[[extra.areas.nav.items.children]]
+title = "Any other language"
+path = "@/service/processors/build/wit-contract.md"
+
+[[extra.areas.nav]]
+label = "Plugins"
+[[extra.areas.nav.items]]
+title = "Plugins in a workflow"
+path = "@/service/plugins/_index.md"
+[[extra.areas.nav.items]]
+title = "Build your own"
+path = "@/service/plugins/rust.md"
+[[extra.areas.nav.items.children]]
+title = "Rust"
+path = "@/service/plugins/rust.md"
+[[extra.areas.nav.items.children]]
+title = "Go"
+path = "@/service/plugins/go.md"
+[[extra.areas.nav.items.children]]
+title = "Other languages"
+path = "@/service/plugins/other-languages.md"
+
+[[extra.areas.nav]]
+label = "Operating"
+[[extra.areas.nav.items]]
+title = "The command line"
+path = "@/service/operate/_index.md"
+[[extra.areas.nav.items]]
+title = "Logs, metrics and traces"
+path = "@/service/operate/observability.md"
+[[extra.areas.nav.items]]
+title = "The live dashboard"
+path = "@/service/operate/dashboard.md"
+[[extra.areas.nav.items]]
+title = "Flow control"
+path = "@/service/operate/flow-control.md"
+[[extra.areas.nav.items]]
+title = "Self-healing"
+path = "@/service/operate/self-healing.md"
+[[extra.areas.nav.items]]
+title = "Dead letter queue"
+path = "@/service/operate/dead-letter-queue.md"
+[[extra.areas.nav.items]]
+title = "Workflow lifecycle"
+path = "@/service/operate/workflows.md"
+[[extra.areas.nav.items]]
+title = "Running a cluster"
+path = "@/service/operate/cluster.md"
+[[extra.areas.nav.items]]
+title = "Troubleshooting"
+path = "@/service/operate/troubleshooting.md"
+
+[[extra.areas]]
+id = "library"
+label = "As a Library"
+path = "@/library/_index.md"
+
+[[extra.areas.nav]]
+label = "Getting started"
+[[extra.areas.nav.items]]
+title = "Embedding SACI"
+path = "@/library/_index.md"
+[[extra.areas.nav.items]]
+title = "Build your first pipeline"
+path = "@/library/first-pipeline.md"
+
+[[extra.areas.nav]]
+label = "Core concepts"
+[[extra.areas.nav.items]]
+title = "Dataset & Components"
+path = "@/library/dataset.md"
+[[extra.areas.nav.items]]
+title = "Systems"
+path = "@/library/systems.md"
+[[extra.areas.nav.items]]
+title = "Pipeline"
+path = "@/library/pipeline.md"
+[[extra.areas.nav.items]]
+title = "Scheduler"
+path = "@/library/scheduler.md"
+[[extra.areas.nav.items]]
+title = "Sources & Sinks"
+path = "@/library/io.md"
+[[extra.areas.nav.items]]
+title = "Windowed aggregation"
+path = "@/library/windowing.md"
+[[extra.areas.nav.items]]
+title = "Distributed processing"
+path = "@/library/distributed.md"
+
+[[extra.areas.nav]]
+label = "Extending the service"
+[[extra.areas.nav.items]]
+title = "Embedding saci-service"
+path = "@/library/service/_index.md"
+[[extra.areas.nav.items]]
+title = "Writing a connector"
+path = "@/library/service/connectors.md"
+[[extra.areas.nav.items]]
+title = "Writing a transformer"
+path = "@/library/service/transformers.md"
+[[extra.areas.nav.items]]
+title = "SQL results as a source"
+path = "@/library/service/datafusion.md"
+[[extra.areas.nav.items]]
+title = "What the loader validates"
+path = "@/library/service/loading.md"
+
+[[extra.areas.nav]]
+label = "Under the hood"
+[[extra.areas.nav.items]]
+title = "How flow control decides"
+path = "@/library/flow-control.md"
+[[extra.areas.nav.items]]
+title = "Tracing & metrics"
+path = "@/library/tracing.md"
+[[extra.areas.nav.items]]
+title = "How the host runs a processor"
+path = "@/library/processor-host.md"
+
+[[extra.areas.nav]]
+label = "Reference"
+[[extra.areas.nav.items]]
+title = "Crates and features"
+path = "@/library/reference/crates.md"
+[[extra.areas.nav.items]]
+title = "Host to processor wire format"
+path = "@/library/reference/wire-format.md"
+[[extra.areas.nav.items]]
+title = "The SDK packages"
+path = "@/library/reference/sdk-packages.md"
+[[extra.areas.nav.items]]
+title = "Benchmarks"
+path = "@/library/reference/benchmarks.md"

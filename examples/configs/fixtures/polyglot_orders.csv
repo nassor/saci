@@ -1,0 +1,7 @@
+id,region,currency,amount,valid,usd_amount,usd_amount_display,risk_score,flagged,fee,review_tier,settlement
+1,emea,EUR,100.0,true,0.0,110.00 USD,0.0,false,0.0,0,PENDING
+2,emea,GBP,-5.0,false,0.0,-,0.0,false,0.0,0,PENDING
+3,apac,JPY,1000000.0,true,0.0,6800.00 USD,0.0,false,0.0,0,PENDING
+4,amer,USD,60000.0,true,0.0,60000.00 USD,0.0,false,0.0,0,PENDING
+5,emea,EUR,0.0,false,0.0,-,0.0,false,0.0,0,PENDING
+6,apac,USD,20000.0,true,0.0,20000.00 USD,0.0,false,0.0,0,PENDING

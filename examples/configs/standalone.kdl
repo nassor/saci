@@ -1,0 +1,90 @@
+// SACI standalone service configuration, built-in factories only.
+//
+// Run:
+//   cargo run --features connector-file,transformer-csv,wasm --bin saci-service -- validate \
+//     --config examples/configs/standalone.kdl
+//   cargo run --features connector-file,transformer-csv,wasm --bin saci-service -- serve \
+//     --config examples/configs/standalone.kdl
+//
+// The pipeline reads examples/configs/fixtures/orders.csv, runs a WASM processor
+// component, and writes /tmp/saci-standalone-orders-out.csv. If you change that
+// path, create the parent directory first.
+//
+// Components and systems have no configuration representation: the processor
+// declares them through `describe()`. See crates/saci-service/src/service/registry.rs.
+
+// Single process, no distributed coordination.
+mode "standalone"
+
+node id=1 name="saci-standalone" data_dir="${SACI_DATA_DIR:-/tmp/saci-standalone}"
+
+// Paces repeated iterations: one_shot, continuous, or interval every N ms.
+// Defaults to continuous. one_shot builds no flow-control controller for any
+// source, so this tutorial declares no `flow_control` block; see
+// examples/configs/kafka.kdl or postgresql.kdl for one under `interval`.
+run_mode kind="one_shot"
+
+// One workflow declares the whole DAG: the byte format both ends speak, the
+// source, the processor, the sink, and the explicit links between them.
+//
+// The processor's `describe()` response supplies the component list, so the
+// `component` properties below must name components it declares. Build the
+// module with `cargo build --release --target wasm32-wasip2`.
+workflow "orders" {
+    // Both FileSource and FileSink move CSV bytes, so one declared transformer
+    // serves them both. csv requires schema_fields and reads has_headers off
+    // its own options, where it defaults to true.
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // Sources feed rows into component columns before the pipeline runs.
+    // FileSource requires path and schema_fields.
+    source "csv_orders" type="FileSource" component="orders" transformer="csv_fmt" {
+        // Every source retries a failed read with exponential backoff before
+        // the error reaches the runner. The default is 4 attempts, a 100 ms
+        // base, 2.0x growth, a 30 s cap and 0.1 jitter; an explicit `retry`
+        // child overrides it for this node. Here the file reader gets more
+        // attempts with a gentler start.
+        retry max_attempts=6 base_delay_ms=200 multiplier=2.0 max_delay_ms=10000 jitter=0.1
+
+        config {
+            path "examples/configs/fixtures/orders.csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#true
+            schema_fields "status" type="Utf8" nullable=#true
+        }
+    }
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // Sinks drain rows from component columns after the pipeline finishes.
+    // FileSink requires path and schema_fields.
+    //
+    // FileSink appends by default, so a rerun would grow the file and csv
+    // with has_headers would put a second header line in the middle of it.
+    // `truncate #true` keeps this example's replace-each-run output. The
+    // parent directory still has to exist: the file is created as soon as the
+    // factory is built, `validate` included.
+    sink "csv_out" type="FileSink" component="orders" transformer="csv_fmt" {
+        config {
+            path "/tmp/saci-standalone-orders-out.csv"
+            truncate #true
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#true
+            schema_fields "status" type="Utf8" nullable=#true
+        }
+    }
+
+    link from="csv_orders" to="process_orders"
+    link from="process_orders" to="csv_out"
+}
+
+// HTTP control plane: /health and /metrics. Port 0 takes an ephemeral port.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at full
+// grade: a three-row fixture and one pass produce too little span volume
+// for sampling to matter, and full visibility is what a first run should
+// show.
+observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0

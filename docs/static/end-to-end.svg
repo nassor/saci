@@ -1,0 +1,223 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" role="img" aria-labelledby="e2e-title e2e-desc">
+  <title id="e2e-title">SACI end to end: write, build, run, scale</title>
+  <desc id="e2e-desc">
+    You write Component, System, and Pipeline structs. A wasm32-wasip2 cargo build turns the
+    pipeline into pipeline.wasm, a wasm32-wasip2 component. saci-service loads the component
+    named in saci.kdl and drives Arrow IPC batches from sources through the host to
+    sinks. Optionally the host coordinates a Raft cluster with row-range leases and
+    checkpoints.
+  </desc>
+
+  <style>
+    text { font-family: 'Fira Code', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace; }
+
+    /* Catppuccin Latte, with Mocha below for a dark viewer. Site CSS does not
+       reach a standalone figure, so both flavours live here. An accent tints
+       an area; the darker ink tone draws lines and sets letters, which is
+       what Latte needs to hold 4.5:1 and 3:1. */
+    .canvas { fill: #eff1f5; stroke: #7c7f93; }
+    .panel  { fill: #e6e9ef; stroke: #acb0be; }
+
+    .blk   { fill: #eff1f5; stroke-width: 1; }
+    .blk-d { stroke: rgb(171 63 0 / 0.7); }
+    .blk-c { stroke: rgb(0 109 115 / 0.7); }
+    .blk-b { stroke: rgb(128 46 229 / 0.7); }
+
+    .hd-d { fill: #f2d2c2; }
+    .hd-c { fill: #bfdce1; }
+    .hd-b { fill: #d8c9f4; }
+
+    /* The badges sit on the panel, not on the canvas, so the wash under the
+       step number is thinner than the one the site uses on the page. */
+    .badge   { stroke-width: 1; }
+    .badge-d { fill: rgb(254 100 11 / 0.12);  stroke: rgb(171 63 0 / 0.8); }
+    .badge-c { fill: rgb(23 146 153 / 0.12);  stroke: rgb(0 109 115 / 0.8); }
+    .badge-b { fill: rgb(136 57 239 / 0.12);  stroke: rgb(128 46 229 / 0.8); }
+
+    .t-ttl  { font-size: 13px;   font-weight: 600; fill: #4c4f69; }
+    .t-sub  { font-size: 11px;   fill: #5c5f77; }
+    .t-lab  { font-size: 11px;   fill: #5c5f77; }
+    .t-step { font-size: 12px;   font-weight: 700; letter-spacing: 1px; }
+    .t-num  { font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+    .t-mid  { text-anchor: middle; }
+
+    .f-n { fill: #5c5f77; }
+    .f-d { fill: #ab3f00; }
+    .f-c { fill: #006d73; }
+    .f-b { fill: #802ee5; }
+
+    .arw  { stroke-width: 1.5; fill: none; }
+    .s-n  { stroke: #5c5f77; }
+    .s-d  { stroke: #ab3f00; }
+    .s-c  { stroke: #006d73; }
+    .s-b  { stroke: #802ee5; }
+    .dash { stroke-dasharray: 5 4; }
+
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #1e1e2e; stroke: #6c7086; }
+      .panel  { fill: #181825; stroke: #45475a; }
+
+      .blk   { fill: #313244; }
+      .blk-d { stroke: rgb(250 179 135 / 0.7); }
+      .blk-c { stroke: rgb(148 226 213 / 0.7); }
+      .blk-b { stroke: rgb(203 166 247 / 0.7); }
+
+      .hd-d { fill: #5d4e53; }
+      .hd-c { fill: #475964; }
+      .hd-b { fill: #534c6b; }
+
+      .badge-d { fill: rgb(250 179 135 / 0.18);  stroke: rgb(250 179 135 / 0.8); }
+      .badge-c { fill: rgb(148 226 213 / 0.18); stroke: rgb(148 226 213 / 0.8); }
+      .badge-b { fill: rgb(203 166 247 / 0.18); stroke: rgb(203 166 247 / 0.8); }
+
+      .t-ttl { fill: #cdd6f4; }
+      .t-sub { fill: #a6adc8; }
+      .t-lab { fill: #a6adc8; }
+
+      .f-n { fill: #a6adc8; }
+      .f-d { fill: #fab387; }
+      .f-c { fill: #94e2d5; }
+      .f-b { fill: #cba6f7; }
+
+      .s-n { stroke: #a6adc8; }
+      .s-d { stroke: #fab387; }
+      .s-c { stroke: #94e2d5; }
+      .s-b { stroke: #cba6f7; }
+    }
+  </style>
+
+  <rect class="canvas" x="0.5" y="0.5" width="879" height="559" rx="14"/>
+
+  <!-- ============ 1 · YOU WRITE ============ -->
+  <rect class="panel" x="28" y="28" width="436" height="212" rx="12"/>
+  <circle class="badge badge-d" cx="64" cy="58" r="11"/>
+  <text class="t-num f-d" x="64" y="62">1</text>
+  <text class="t-step f-d" x="84" y="62">YOU WRITE</text>
+
+  <g>
+    <rect class="blk blk-d" x="48" y="78" width="188" height="64" rx="8"/>
+    <rect class="hd-d" x="48" y="78" width="188" height="22" rx="8"/>
+    <rect class="hd-d" x="48" y="92" width="188" height="8"/>
+    <text class="t-ttl" x="60" y="94">Component</text>
+    <text class="t-sub" x="60" y="118">a struct, stored as</text>
+    <text class="t-sub" x="60" y="134">Arrow columns</text>
+  </g>
+
+  <g>
+    <rect class="blk blk-d" x="48" y="158" width="188" height="64" rx="8"/>
+    <rect class="hd-d" x="48" y="158" width="188" height="22" rx="8"/>
+    <rect class="hd-d" x="48" y="172" width="188" height="8"/>
+    <text class="t-ttl" x="60" y="174">System</text>
+    <text class="t-sub" x="60" y="198">a transform + its</text>
+    <text class="t-sub" x="60" y="214">field declarations</text>
+  </g>
+
+  <path class="arw s-n" d="M236 110 H252 V136 H262" marker-end="url(#m-n)"/>
+  <path class="arw s-n" d="M236 190 H252 V164 H262" marker-end="url(#m-n)"/>
+
+  <g>
+    <rect class="blk blk-d" x="268" y="118" width="176" height="64" rx="8"/>
+    <rect class="hd-d" x="268" y="118" width="176" height="22" rx="8"/>
+    <rect class="hd-d" x="268" y="132" width="176" height="8"/>
+    <text class="t-ttl" x="280" y="134">Pipeline</text>
+    <text class="t-sub" x="280" y="160">components + systems</text>
+  </g>
+
+  <!-- build edge -->
+  <path class="arw s-d" d="M444 150 H634" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid" x="540" y="138">cargo build (wasip2)</text>
+
+  <!-- ============ 2 · YOU BUILD ============ -->
+  <rect class="panel" x="620" y="28" width="232" height="212" rx="12"/>
+  <circle class="badge badge-b" cx="656" cy="58" r="11"/>
+  <text class="t-num f-b" x="656" y="62">2</text>
+  <text class="t-step f-b" x="676" y="62">YOU BUILD</text>
+
+  <text class="t-lab" x="644" y="92">built from any language</text>
+  <text class="t-lab" x="644" y="108">that targets WASI 0.2</text>
+
+  <g>
+    <rect class="blk blk-b" x="644" y="118" width="184" height="64" rx="8"/>
+    <rect class="hd-b" x="644" y="118" width="184" height="22" rx="8"/>
+    <rect class="hd-b" x="644" y="132" width="184" height="8"/>
+    <text class="t-ttl" x="656" y="134">pipeline.wasm</text>
+    <text class="t-sub" x="656" y="160">wasm32-wasip2 component</text>
+  </g>
+
+  <!-- boundary crossing: wasm → host -->
+  <path class="arw s-b dash" d="M736 182 V266 H326 V378" marker-end="url(#m-b)"/>
+  <text class="t-lab t-mid f-b" x="531" y="258">named in saci.kdl</text>
+
+  <!-- ============ 3 · SACI-SERVICE RUNS ============ -->
+  <rect class="panel" x="28" y="300" width="596" height="232" rx="12"/>
+  <circle class="badge badge-c" cx="64" cy="330" r="11"/>
+  <text class="t-num f-c" x="64" y="334">3</text>
+  <text class="t-step f-c" x="84" y="334">SACI-SERVICE RUNS</text>
+
+  <g>
+    <rect class="blk blk-c" x="52" y="396" width="120" height="64" rx="8"/>
+    <rect class="hd-c" x="52" y="396" width="120" height="22" rx="8"/>
+    <rect class="hd-c" x="52" y="410" width="120" height="8"/>
+    <text class="t-ttl" x="64" y="412">Sources</text>
+    <text class="t-sub" x="64" y="436">CSV · JSON</text>
+    <text class="t-sub" x="64" y="452">Parquet</text>
+  </g>
+
+  <path class="arw s-d" d="M172 428 H233" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid f-d" x="206" y="416">Arrow IPC</text>
+
+  <g>
+    <rect class="blk blk-c" x="241" y="388" width="170" height="80" rx="8"/>
+    <rect class="hd-c" x="241" y="388" width="170" height="22" rx="8"/>
+    <rect class="hd-c" x="241" y="402" width="170" height="8"/>
+    <text class="t-ttl" x="253" y="404">Host</text>
+    <text class="t-sub" x="253" y="430">loads · validates</text>
+    <text class="t-sub" x="253" y="446">drives</text>
+  </g>
+
+  <path class="arw s-d" d="M411 428 H472" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid f-d" x="446" y="416">Arrow IPC</text>
+
+  <g>
+    <rect class="blk blk-c" x="480" y="396" width="120" height="64" rx="8"/>
+    <rect class="hd-c" x="480" y="396" width="120" height="22" rx="8"/>
+    <rect class="hd-c" x="480" y="410" width="120" height="8"/>
+    <text class="t-ttl" x="492" y="412">Sinks</text>
+    <text class="t-sub" x="492" y="436">CSV · JSON</text>
+    <text class="t-sub" x="492" y="452">Parquet</text>
+  </g>
+
+  <!-- optional: host → raft -->
+  <path class="arw s-c dash" d="M326 468 V500 H762 V478" marker-end="url(#m-c)"/>
+  <text class="t-lab t-mid f-c" x="544" y="492">optionally</text>
+
+  <!-- ============ 4 · AT SCALE ============ -->
+  <rect class="panel dash" x="672" y="300" width="180" height="232" rx="12"/>
+  <circle class="badge badge-c" cx="708" cy="330" r="11"/>
+  <text class="t-num f-c" x="708" y="334">4</text>
+  <text class="t-step f-c" x="728" y="334">AT SCALE</text>
+
+  <g>
+    <rect class="blk blk-c" x="690" y="388" width="144" height="80" rx="8"/>
+    <rect class="hd-c" x="690" y="388" width="144" height="22" rx="8"/>
+    <rect class="hd-c" x="690" y="402" width="144" height="8"/>
+    <text class="t-ttl" x="702" y="404">Raft cluster</text>
+    <text class="t-sub" x="702" y="430">row-range leases</text>
+    <text class="t-sub" x="702" y="446">checkpoints</text>
+  </g>
+
+  <defs>
+    <marker id="m-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-n"/>
+    </marker>
+    <marker id="m-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-d"/>
+    </marker>
+    <marker id="m-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-b"/>
+    </marker>
+    <marker id="m-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-c"/>
+    </marker>
+  </defs>
+</svg>

@@ -1,0 +1,23 @@
+/target
+/tmp
+/docs/public
+**/.DS_Store
+
+# The dashboard crate is outside the workspace, so it has its own target dir,
+# and `cargo xtask ui` caches the Tailwind standalone binary next to it. The
+# bundle itself is committed under /crates/saci-service/assets/ui/, which is
+# what saci-service embeds.
+/crates/saci-service-ui/target
+/crates/saci-service-ui/.tools
+
+# Avoid IDE files
+.idea/
+.vscode/
+
+# Local Benchmarks
+performance-improvement.md
+.agents/skills/rust-*
+**/__pycache__/
+
+# Local secrets (cloud-service credentials; never commit)
+.env

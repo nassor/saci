@@ -1,0 +1,118 @@
+// SACI standalone service configuration driving HTTP at both ends.
+//
+// Run:
+//   cargo run --features connector-http,transformer-csv,wasm --bin saci-service -- validate \
+//     --config examples/configs/http.kdl
+//   cargo run --features connector-http,transformer-csv,wasm --bin saci-service -- serve \
+//     --config examples/configs/http.kdl
+//
+// The source is one GET and the sink is one request per batch. Each request
+// body is a whole document in the format the transformer names: this config
+// says csv, so the source reads one csv file off the wire and every POST the
+// sink sends carries its own header row plus that batch's rows. A footer
+// format (parquet, avro) works the same way, one self-contained container per
+// request.
+//
+// `validate` touches no network. Both halves are built without a request, so a
+// url that is down, a name that does not resolve, and a certificate the trust
+// store rejects all surface during `serve`, on the first batch. There is no
+// retry: a request the endpoint refuses fails the run.
+//
+// https works with no extra keys. rustls verifies the peer against the
+// platform trust store, and there is no way to turn that off.
+
+mode "standalone"
+
+node id=1 name="saci-http" data_dir="${SACI_DATA_DIR:-/tmp/saci-http}"
+
+// The source reaches EOF once its one GET is drained, so every run mode can
+// drive it. `one_shot` reads the resource once and exits; `interval` re-reads
+// it on every tick, which is the polling shape for a resource that changes.
+// one_shot builds no flow-control controller for any source, so this config
+// declares no `flow_control` block; see kafka.kdl or nats.kdl for one that
+// does something under `interval`.
+run_mode kind="one_shot"
+
+// One workflow declares the whole DAG: the byte format each end speaks, the
+// source, the processor, the sink, and the explicit links between them.
+workflow "orders" {
+    // The transformer that decodes the response body and encodes each request
+    // body. "csv" needs transformer-csv compiled in; connector-http implies no
+    // transformer feature, so this config picks.
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // ---------------------------------------------------------------- source
+
+    // The processor's `describe()` supplies the component list, so `component`
+    // on this source and the sink below must name components it declares.
+    source "orders_in" type="HttpSource" component="Order" transformer="csv_fmt" {
+        config {
+            // The resource to GET, once, on the first batch. For example
+            // "https://data.internal/exports/orders.csv".
+            url "${SACI_HTTP_SOURCE_URL:-http://127.0.0.1:8081/orders.csv}"
+
+            // Whole-request budget in milliseconds, connect through body.
+            timeout_ms 30000
+
+            // Request headers, one entry per line. A bearer token belongs in
+            // an env var, not in the file. Substitution runs over the whole
+            // file before the parser, comments included, so a placeholder
+            // always carries a default.
+            headers {
+                accept "text/csv"
+                // authorization "Bearer ${SACI_HTTP_TOKEN:-unset}"
+            }
+
+            // csv carries no schema, so the declared one is handed to it. A
+            // format that carries its own (parquet, avro) refuses this key, so
+            // a source over one adds schema_from "body": the fields below stay
+            // behind for the workflow graph check and are compared against the
+            // schema the body turned out to carry.
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads Order and writes EnrichedOrder. A sink's schema_fields must match
+    // the component's RecordBatch field for field, in order.
+
+    sink "orders_out" type="HttpSink" component="EnrichedOrder" transformer="csv_fmt" {
+        config {
+            // Endpoint every batch is sent to. For example
+            // "https://ingest.internal/v1/orders".
+            url "${SACI_HTTP_SINK_URL:-http://127.0.0.1:8082/ingest}"
+
+            // Any HTTP method the endpoint expects. POST is the default.
+            method "POST"
+
+            timeout_ms 30000
+
+            headers {
+                "content-type" "text/csv"
+            }
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    link from="orders_in" to="process_orders"
+    link from="process_orders" to="orders_out"
+}
+
+// HTTP control plane. /metrics carries the service's own counters.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at full grade:
+// one request in, one request out, per run, so there is nothing to gain from
+// sampling it down.
+observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0

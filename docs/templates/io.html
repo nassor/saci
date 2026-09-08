@@ -1,0 +1,899 @@
+{% extends "base.html" %}
+
+{% block title %}Sources &amp; Sinks — SACI{% endblock %}
+{% block description %}Two traits move Arrow rows in and out of a Dataset: Source pulls RecordBatches until EOF, Sink takes one write per cycle. Local files in csv, ndjson, parquet or avro, in-memory channels, and DataFusion SQL.{% endblock %}
+{% block og_title %}Sources &amp; Sinks — SACI{% endblock %}
+{% block og_description %}Pull batches in with Source, push one batch out with Sink, and cast between the file's schema and the component's.{% endblock %}
+
+{% block content %}
+
+<div class="page-kicker">Moving data</div>
+<h1>Sources &amp; Sinks</h1>
+
+<p class="page-lede">
+    A <code>Source</code> is pulled for Arrow batches until it says it has none left.
+    A <code>Sink</code> takes one write per drain cycle, and closing it is the caller's job.
+</p>
+
+<dl class="page-facts">
+    <dt>In one line</dt>
+    <dd>How rows <strong>get into</strong> a Dataset and <strong>back out</strong> again</dd>
+    <dt>You need</dt>
+    <dd>The <code>saci-core/io</code> feature for the traits, plus a connector crate for the transport and a transformer crate for the format</dd>
+    <dt>Read this if</dt>
+    <dd>Your Parquet file has an <code>Int32</code> column where the component declares <code>Int64</code>, or your second run says <em>write_batch called after finish</em></dd>
+</dl>
+
+<h2 id="cycle">The shape of a drain cycle</h2>
+
+<p>
+    Ingestion is <b>pull</b>: something calls <code>next_batch()</code> in a loop and appends
+    each batch. Egress is <b>push</b>, where something hands the sink a batch and then
+    finalises it. One constraint sits between them. A <code>Dataset</code> accepts a batch
+    only when its schema matches the registered one <em>exactly</em>, so a cast usually has
+    to happen first.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 392" role="img" aria-labelledby="io-a-title io-a-desc">
+        <title id="io-a-title">A batch travelling from a Parquet file into a Dataset and out to a sink</title>
+        <desc id="io-a-desc">
+            FileSource reads a parquet file through its transformer and yields batches
+            whose columns are Int32 and Float32. A CastingSource converts each batch to the
+            Int64 and Float64 types the component declares, then append_record_batch
+            compares the batch schema against the SchemaRegistry entry and either accepts
+            the batch whole or returns an error. On the way out, drain_dataset makes a
+            single write_batch call with the whole merged component, and finish writes the
+            Parquet footer.
+        </desc>
+
+        <text class="t-title" x="0" y="14">One drain cycle</text>
+        <text class="t-sm" x="0" y="30">component Trade = { id : Int64, price : Float64 }</text>
+
+        <!-- the file's own schema -->
+        <g class="anim anim-1">
+            <rect class="blk blk-data" x="0" y="44" width="176" height="96" rx="8"/>
+            <rect class="hd hd-data" x="0" y="44" width="176" height="22" rx="8"/>
+            <rect class="hd hd-data" x="0" y="58" width="176" height="8"/>
+            <text class="t-lbl t-data" x="12" y="59">FileSource</text>
+
+            <rect class="row" x="8" y="72" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="85">id      : Int32</text>
+            <rect class="row" x="8" y="94" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="107">price   : Float32</text>
+
+            <path class="ln" d="M8 120 H168"/>
+            <text class="t-sm" x="16" y="134">schema from file metadata</text>
+
+            <path class="arw arw-data" d="M88 140 V166" marker-end="url(#io-d)"/>
+            <text class="t-sm" x="96" y="158">next_batch</text>
+        </g>
+
+        <!-- the cast: a Source that wraps a Source -->
+        <g class="anim anim-2">
+            <rect class="blk blk-data" x="0" y="172" width="176" height="100" rx="8"/>
+            <rect class="hd hd-data" x="0" y="172" width="176" height="22" rx="8"/>
+            <rect class="hd hd-data" x="0" y="186" width="176" height="8"/>
+            <text class="t-lbl t-data" x="12" y="187">CastingSource</text>
+
+            <rect class="row-w" x="8" y="200" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="213">id      : Int64</text>
+            <rect class="row-w" x="8" y="222" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="235">price   : Float64</text>
+
+            <path class="ln" d="M8 248 H168"/>
+            <text class="t-sm" x="16" y="262">cast_with_options</text>
+
+            <path class="arw arw-data" d="M176 222 H248" marker-end="url(#io-d)"/>
+            <text class="t-sm" x="182" y="214">append</text>
+            <text class="t-sm t-ctl" x="182" y="240">or reject</text>
+        </g>
+
+        <!-- the dataset -->
+        <g class="anim anim-3">
+            <rect class="blk blk-data" x="256" y="44" width="192" height="228" rx="8"/>
+            <rect class="hd hd-data" x="256" y="44" width="192" height="22" rx="8"/>
+            <rect class="hd hd-data" x="256" y="58" width="192" height="8"/>
+            <text class="t-lbl t-data" x="268" y="59">Dataset</text>
+
+            <rect class="row" x="264" y="72" width="176" height="18" rx="3"/>
+            <text class="t-sm" x="272" y="85">id      : Int64</text>
+            <rect class="row" x="264" y="94" width="176" height="18" rx="3"/>
+            <text class="t-sm" x="272" y="107">price   : Float64</text>
+
+            <path class="ln" d="M264 120 H440"/>
+            <text class="t-sm" x="272" y="136">1         99.50</text>
+            <text class="t-sm" x="272" y="150">2        240.00</text>
+            <text class="t-sm" x="272" y="164">3         14.99</text>
+            <text class="t-sm t-data" x="272" y="186">row_count = 3</text>
+
+            <path class="ln" d="M264 200 H440"/>
+            <text class="t-sm" x="272" y="216">three appended chunks,</text>
+            <text class="t-sm" x="272" y="230">merged on first read</text>
+            <text class="t-sm" x="272" y="252">systems see columns</text>
+            <text class="t-sm" x="272" y="266">here, never rows</text>
+
+            <path class="arw arw-data" d="M448 150 H530" marker-end="url(#io-d)"/>
+            <text class="t-sm" x="454" y="142">drain_dataset</text>
+            <text class="t-sm" x="454" y="168">1 write_batch</text>
+        </g>
+
+        <!-- the sink -->
+        <g class="anim anim-3">
+            <rect class="blk blk-data" x="538" y="44" width="116" height="228" rx="8"/>
+            <rect class="hd hd-data" x="538" y="44" width="116" height="22" rx="8"/>
+            <rect class="hd hd-data" x="538" y="58" width="116" height="8"/>
+            <text class="t-lbl t-data" x="548" y="59">FileSink</text>
+
+            <rect class="row" x="546" y="72" width="100" height="18" rx="3"/>
+            <text class="t-sm" x="554" y="85">id : Int64</text>
+            <rect class="row" x="546" y="94" width="100" height="18" rx="3"/>
+            <text class="t-sm" x="554" y="107">price : F64</text>
+
+            <path class="ln" d="M546 120 H646"/>
+            <text class="t-sm" x="554" y="136">one batch,</text>
+            <text class="t-sm" x="554" y="150">whole column</text>
+            <text class="t-sm t-ctl" x="554" y="172">finish()</text>
+            <text class="t-sm" x="554" y="186">writes the</text>
+            <text class="t-sm" x="554" y="200">Parquet footer</text>
+            <text class="t-sm" x="554" y="222">dead rows are</text>
+            <text class="t-sm" x="554" y="236">written too</text>
+        </g>
+
+        <!-- the registry is what both the cast and the append consult -->
+        <g class="anim anim-4">
+            <rect class="blk blk-ctl" x="256" y="300" width="192" height="80" rx="8"/>
+            <rect class="hd hd-ctl" x="256" y="300" width="192" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="256" y="312" width="192" height="8"/>
+            <text class="t-lbl t-ctl" x="268" y="314">SchemaRegistry</text>
+            <text class="t-sm" x="268" y="336">Trade   v1</text>
+            <text class="t-sm" x="268" y="350">id      Int64</text>
+            <text class="t-sm" x="268" y="364">price   Float64</text>
+
+            <path class="arw arw-ctl" d="M352 300 V278" marker-end="url(#io-c)"/>
+            <text class="t-sm t-ctl" x="364" y="292">checked on append</text>
+
+            <path class="arw arw-ctl" d="M256 330 H170 V274" marker-end="url(#io-c)"/>
+            <text class="t-sm t-ctl" x="178" y="322">cast target</text>
+
+            <text class="t-sm" x="470" y="322">fields() compared</text>
+            <text class="t-sm" x="470" y="336">exactly: name, type,</text>
+            <text class="t-sm" x="470" y="350">nullability, order</text>
+            <text class="t-sm t-data" x="470" y="372">no match: SaciError</text>
+        </g>
+
+        <defs>
+            <marker id="io-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
+            </marker>
+            <marker id="io-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> rows, batches, columns</span>
+        <span class="k-control"><i></i> the registered schema</span>
+    </div>
+    <figcaption class="dgm-cap">
+        The cast happens <b>before</b> the Dataset ever sees the batch. There is no in-place
+        retype of a registered column, so <code>append_record_batch</code> takes the batch
+        whole or refuses it whole.
+    </figcaption>
+</div>
+
+<h2 id="traits">The two traits</h2>
+
+<p>
+    Both live in <code>saci-core</code> behind its <code>io</code> feature. Every
+    implementation lives in a connector crate that depends on them.
+    Each is a schema, a step, and a way to signal <em>done</em>.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>crates/saci-core/src/io/source.rs</em></div>
+    <pre><code class="language-rust">#[async_trait]
+pub trait Source: Send + Sync {
+    /// Fixed per source instance. Must not change between calls.
+    fn schema(&amp;self) -&gt; Arc&lt;Schema&gt;;
+
+    /// Pull the next batch, or `None` at EOF.
+    async fn next_batch(&amp;mut self) -&gt; Result&lt;Option&lt;RecordBatch&gt;, SaciError&gt;;
+
+    /// Progress reporting only. Callers must not rely on accuracy.
+    fn estimated_rows(&amp;self) -&gt; Option&lt;usize&gt; { None }
+
+    /// Advisory hint: how many rows the caller wants next. May be ignored.
+    fn request_batch_rows(&amp;mut self, _rows: usize) {}
+}</code></pre>
+</div>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>crates/saci-core/src/io/sink.rs</em></div>
+    <pre><code class="language-rust">#[async_trait]
+pub trait Sink: Send {
+    /// May be called multiple times.
+    async fn write_batch(&amp;mut self, batch: &amp;RecordBatch) -&gt; Result&lt;(), SaciError&gt;;
+
+    /// Flush and finalise. Exactly once, after the last batch.
+    async fn finish(&amp;mut self) -&gt; Result&lt;(), SaciError&gt;;
+
+    /// Batches must conform to this schema.
+    fn schema(&amp;self) -&gt; Arc&lt;Schema&gt;;
+
+    /// Backpressure probe. `None` if unsupported.
+    fn pending_rows(&amp;self) -&gt; Option&lt;usize&gt; { None }
+}</code></pre>
+</div>
+
+<p>
+    The bounds differ deliberately. <code>Source</code> is <code>Send + Sync</code>;
+    <code>Sink</code> is only <code>Send</code>, because exclusive <code>&amp;mut self</code>
+    access already provides the synchronisation a writer needs. Concurrent writes to one sink
+    are not a supported shape.
+</p>
+
+<p>
+    <code>pending_rows</code> has two consumers. Inside <code>saci-service</code>, the
+    <a href="{{ get_url(path='@/service/operate/flow-control.md') }}">flow controller</a> reads it
+    directly off the runner's sink list on every pass, to back off when a sink's backlog
+    grows. In a hand-built <code>Scheduler</code>,
+    <code>Pipeline::sink_pending_rows(component)</code> surfaces it for a
+    <code>BackpressureSpec::Predicate</code> closure to consult, though nothing in this
+    repository calls it. Four built-in sinks implement it:
+    <code>ChannelSink</code> (the row backlog of every batch still queued),
+    <code>PostgresSink</code> (rows buffered but not yet copied),
+    <code>TursoSink</code> (rows buffered but not yet flushed) and <code>S3Sink</code>
+    (rows in the open object). A file sink has no meaningful queue depth.
+</p>
+
+<p>
+    <code>request_batch_rows</code> is the read-side counterpart, advisory in the other
+    direction. A host tells the source what size it wants next, and a source may return
+    fewer rows, more rows, or ignore the call entirely and stay correct, because the
+    caller reshapes whatever comes back. Implementing it buys efficiency, never
+    correctness. <code>KafkaSource</code>, <code>NatsSource</code>
+    and <code>PostgresSource</code> act on it to size their own fetch. <code>FileSource</code>,
+    <code>HttpSource</code>, <code>S3Source</code>, <code>TcpIngestSource</code>,
+    <code>SaciSource</code>,
+    <code>TursoSource</code>, <code>ChannelSource</code> and <code>DataFusionSource</code> keep
+    the trait's no-op
+    default and are still governed by whatever calls it.
+</p>
+
+<p>Implementing a source is one method plus a schema:</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>yield fixed-size chunks, then None</em></div>
+    <pre><code class="language-rust">use std::sync::Arc;
+use arrow_array::{Array, Float64Array, RecordBatch};
+use arrow_schema::Schema;
+use async_trait::async_trait;
+use saci_core::SaciError;
+use saci_core::io::Source;
+
+struct RampSource {
+    schema: Arc&lt;Schema&gt;,
+    remaining: usize,
+    chunk: usize,
+}
+
+#[async_trait]
+impl Source for RampSource {
+    fn schema(&amp;self) -&gt; Arc&lt;Schema&gt; {
+        self.schema.clone()
+    }
+
+    async fn next_batch(&amp;mut self) -&gt; Result&lt;Option&lt;RecordBatch&gt;, SaciError&gt; {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let n = self.chunk.min(self.remaining);
+        self.remaining -= n;
+
+        let col: Arc&lt;dyn Array&gt; =
+            Arc::new(Float64Array::from_iter_values((0..n).map(|i| i as f64)));
+        RecordBatch::try_new(self.schema.clone(), vec![col])
+            .map(Some)
+            .map_err(|e| SaciError::generic(format!("RampSource: {e}")))
+    }
+
+    fn estimated_rows(&amp;self) -&gt; Option&lt;usize&gt; {
+        Some(self.remaining)
+    }
+}</code></pre>
+</div>
+
+<p>
+    Emit the transport's natural unit rather than buffering up one giant batch when a source
+    is driven directly against <code>saci-core</code>, with no host in the loop. The trait
+    docs name no size: whatever a source produces is correct, because the
+    caller reshapes it. Under <code>saci-service</code>, a source's own size matters less, because the
+    standalone and stream runners size chunks themselves, admitting only what their
+    <a href="{{ get_url(path='@/service/operate/flow-control.md') }}">adaptive flow controller</a>
+    currently targets and reshaping the rest with a zero-copy <code>RecordBatch::slice</code>.
+    <code>FileSource</code> reads on a dedicated OS thread and hands
+    batches over a <code>tokio::sync::mpsc</code> channel with capacity 4, so
+    <code>next_batch</code> awaits instead of blocking the executor and the file is never
+    fully materialised.
+</p>
+
+<h2 id="batching">The batching contract</h2>
+
+<p>
+    Two free functions do the driving. Note the argument order is <b>not</b> symmetric: the
+    source comes first, the sink comes last.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>both return the row count they moved</em></div>
+    <pre><code class="language-rust">pub async fn drain_into_dataset&lt;S: Source + ?Sized&gt;(
+    source: &amp;mut S,
+    dataset: &amp;mut Dataset,
+    component_name: &amp;'static str,
+) -&gt; Result&lt;usize, SaciError&gt;;
+
+pub async fn drain_dataset&lt;K: Sink + ?Sized&gt;(
+    dataset: &amp;Dataset,
+    component_name: &amp;'static str,
+    sink: &amp;mut K,
+) -&gt; Result&lt;usize, SaciError&gt;;</code></pre>
+</div>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 344" role="img" aria-labelledby="io-b-title io-b-desc">
+        <title id="io-b-title">Call counts across one drain cycle, and who calls finish</title>
+        <desc id="io-b-desc">
+            drain_into_dataset calls next_batch four times to receive three batches and an
+            EOF, appending each batch separately, so the component holds three chunks.
+            drain_dataset then makes exactly one write_batch call with the merged batch and
+            never calls finish. Pipeline::run_with_io calls finish after every cycle, while
+            the standalone service runner calls it only on a one-shot exit or on
+            cancellation.
+        </desc>
+
+        <text class="t-title" x="0" y="14">Counting one cycle</text>
+        <text class="t-sm" x="0" y="30">a source is pulled until it says None; a sink is written once</text>
+
+        <!-- pull side -->
+        <g class="anim anim-1">
+            <text class="t-sm t-data" x="0" y="52">Source</text>
+            <rect class="blk blk-data" x="0" y="60" width="42" height="20" rx="3"/>
+            <text class="t-sm t-mid" x="21" y="74">b0</text>
+            <rect class="blk blk-data" x="47" y="60" width="42" height="20" rx="3"/>
+            <text class="t-sm t-mid" x="68" y="74">b1</text>
+            <rect class="blk blk-data" x="94" y="60" width="42" height="20" rx="3"/>
+            <text class="t-sm t-mid" x="115" y="74">b2</text>
+            <rect class="blk" x="141" y="60" width="42" height="20" rx="3"/>
+            <text class="t-sm t-mid" x="162" y="74">None</text>
+
+            <text class="t-sm" x="0" y="98">4 calls to next_batch</text>
+            <text class="t-sm" x="0" y="112">3 appends, then EOF</text>
+            <text class="t-sm" x="0" y="134">returns rows appended</text>
+
+            <path class="arw arw-data" d="M190 70 H244" marker-end="url(#io-bd)"/>
+            <text class="t-sm" x="196" y="62">append</text>
+        </g>
+
+        <!-- the dataset in the middle -->
+        <g class="anim anim-2">
+            <rect class="blk blk-data" x="252" y="44" width="150" height="104" rx="8"/>
+            <rect class="hd hd-data" x="252" y="44" width="150" height="22" rx="8"/>
+            <rect class="hd hd-data" x="252" y="58" width="150" height="8"/>
+            <text class="t-lbl t-data" x="264" y="59">Dataset</text>
+
+            <rect class="row" x="260" y="72" width="134" height="18" rx="3"/>
+            <text class="t-sm" x="268" y="85">Trade  3 chunks</text>
+            <text class="t-sm" x="268" y="108">row_count = 3</text>
+            <text class="t-sm" x="268" y="126">batch_for merges</text>
+            <text class="t-sm" x="268" y="140">them into one</text>
+
+            <path class="arw arw-data" d="M402 96 H456" marker-end="url(#io-bd)"/>
+            <text class="t-sm" x="408" y="88">1 write</text>
+        </g>
+
+        <!-- push side -->
+        <g class="anim anim-2">
+            <rect class="blk blk-data" x="464" y="44" width="190" height="104" rx="8"/>
+            <rect class="hd hd-data" x="464" y="44" width="190" height="22" rx="8"/>
+            <rect class="hd hd-data" x="464" y="58" width="190" height="8"/>
+            <text class="t-lbl t-data" x="476" y="59">Sink</text>
+
+            <rect class="row-w" x="472" y="72" width="174" height="18" rx="3"/>
+            <text class="t-sm" x="480" y="85">write_batch(&amp;batch)</text>
+            <text class="t-sm" x="480" y="108">zero rows: no call</text>
+            <text class="t-sm t-ctl" x="480" y="126">finish() is not called</text>
+            <text class="t-sm t-ctl" x="480" y="140">by drain_dataset</text>
+        </g>
+
+        <!-- who owns the close -->
+        <g class="anim anim-3">
+            <path class="ln" d="M0 164 H654"/>
+            <text class="t-sm t-ctl" x="0" y="182">who calls finish()</text>
+
+            <rect class="blk blk-ctl" x="0" y="192" width="318" height="92" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="192" width="318" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="204" width="318" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="206">Pipeline::run_with_io</text>
+            <text class="t-sm" x="12" y="228">after every call, so a file sink is</text>
+            <text class="t-sm" x="12" y="242">one shot: run it twice and</text>
+            <text class="t-sm" x="12" y="256">FileSink reports write_batch</text>
+            <text class="t-sm" x="12" y="270">called after finish</text>
+
+            <rect class="blk blk-ctl" x="336" y="192" width="318" height="92" rx="8"/>
+            <rect class="hd hd-ctl" x="336" y="192" width="318" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="336" y="204" width="318" height="8"/>
+            <text class="t-lbl t-ctl" x="348" y="206">run_standalone</text>
+            <text class="t-sm" x="348" y="228">only on the OneShot exit or on</text>
+            <text class="t-sm" x="348" y="242">cancellation. Continuous and</text>
+            <text class="t-sm" x="348" y="256">Interval keep the sink open and</text>
+            <text class="t-sm" x="348" y="270">clear() the Dataset each loop</text>
+        </g>
+
+        <!-- the failure case -->
+        <g class="anim anim-4">
+            <path class="ln" d="M0 300 H654"/>
+            <text class="t-sm" x="0" y="318">A source error mid-drain propagates out of drain_into_dataset, but the batches already appended stay.</text>
+            <text class="t-sm t-data" x="0" y="332">row_count has already moved, so that component now leads every other one. Restart the cycle, do not resume it.</text>
+        </g>
+
+        <defs>
+            <marker id="io-bd" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> rows and batches</span>
+        <span class="k-control"><i></i> who owns the loop</span>
+    </div>
+    <figcaption class="dgm-cap">
+        The counts are asymmetric by design: N pulls in, one push out. Nothing inside
+        <code>drain_dataset</code> closes the sink, so whoever owns the loop owns
+        <code>finish()</code>. Call it once too early and the next write fails; never call it
+        and a Parquet file has no footer at all.
+    </figcaption>
+</div>
+
+<p>
+    Three details matter. <code>drain_dataset</code> pulls the component's whole
+    <code>RecordBatch</code> and issues a <b>single</b> <code>write_batch</code>, so a sink
+    never sees the chunk boundaries the source produced. It returns <code>Ok(0)</code>
+    without calling the sink at all when the component has no rows. And that batch is the
+    <em>raw</em> one, so soft-deleted rows are still in it. Call <code>compact()</code>
+    before draining to keep them out of the output file.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>driving both ends by hand</em></div>
+    <pre><code class="language-rust">use std::path::Path;
+use std::sync::Arc;
+use saci_connector_file::{FileSink, FileSource};
+use saci_core::Component;
+use saci_core::dataset::Dataset;
+use saci_core::io::{Sink, drain_dataset, drain_into_dataset};
+use saci_transformer_parquet::ParquetTransformer;
+
+let mut data = Dataset::new();
+data.register_component::&lt;Trade&gt;()?;
+
+let parquet  = Arc::new(ParquetTransformer::new());
+let mut src  = FileSource::open_async(Path::new("in.parquet"), parquet.clone(), None).await?;
+let mut sink = FileSink::create_truncating(Path::new("out.parquet"), parquet, Trade::schema())?;
+
+let rows_in = drain_into_dataset(&amp;mut src, &amp;mut data, "Trade").await?;
+// ... run systems over `data` ...
+let rows_out = drain_dataset(&amp;data, "Trade", &amp;mut sink).await?;
+sink.finish().await?;</code></pre>
+</div>
+
+<p>
+    Or attach them to the pipeline and let it sequence the three phases for you:
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>drain sources, run systems, drain sinks, finish</em></div>
+    <pre><code class="language-rust">let mut pipeline = Pipeline::builder("etl")
+    .with::&lt;Trade&gt;()
+    .with_source("Trade", src)
+    .with_sink("Trade", sink)
+    .with_parallel_system(ScaleSystem)
+    .build();
+
+pipeline.run_with_io().await?;</code></pre>
+</div>
+
+<div class="note note-warn">
+    <span class="note-label">Sharp edge</span>
+    <p>
+        <code>run_with_io</code> calls <code>finish()</code> on every registered sink at the
+        end of <b>every</b> call. With a <code>FileSink</code> that makes it a one-shot
+        API: the second call fails with <em>FileSink: write_batch called after finish</em>. For a
+        long-running loop, drive the drains yourself. That is what
+        <code>run_standalone</code> does, deferring <code>finish()</code> to the final
+        iteration.
+    </p>
+</div>
+
+<p>
+    Sources are also drained <b>one component at a time</b>, each with its own row count. Two
+    sources feeding two components with different numbers of rows will leave the Dataset
+    inconsistent, because <code>append_record_batch</code> extends the shared
+    <code>row_count</code> as it goes. Give every component the same number of rows per cycle,
+    or drain only one.
+</p>
+
+<h2 id="cast">Casting into the component schema</h2>
+
+<p>
+    A component's schema is registered once and enforced on every append. The batch's
+    <code>schema().fields()</code> must equal the registered <code>fields()</code>, compared
+    by name, data type, nullability and order. There is no in-place retype of a registered
+    column, so a cast is a <b>pre-ingestion</b> step. <code>cast_batch</code> is the pure
+    function; <code>CastingSource</code> is that function wrapped as a <code>Source</code>.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>CastOptions comes from the arrow-cast crate</em></div>
+    <pre><code class="language-rust">use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use arrow_cast::CastOptions;
+use arrow_schema::DataType;
+use saci_connector_file::FileSource;
+use saci_core::io::{CastingSource, build_target_schema};
+use saci_transformer_csv::CsvTransformer;
+
+// The file says Int32 / Float32; the component declares Int64 / Float64.
+let csv  = Arc::new(CsvTransformer::new(true));   // true: the file has a header row
+let file = FileSource::open(Path::new("trades.csv"), csv, Some(file_schema.clone()))?;
+
+let mut overrides = HashMap::new();
+overrides.insert("id",    DataType::Int64);
+overrides.insert("price", DataType::Float64);
+let target = build_target_schema(&amp;file_schema, &amp;overrides);
+
+let src = CastingSource::new(file, target, CastOptions::default());</code></pre>
+</div>
+
+<p>The rules <code>cast_batch</code> follows, in the order it applies them:</p>
+
+<ul>
+    <li>It walks the <b>target's</b> fields and looks each one up in the batch <b>by name</b>,
+        so column order in the incoming batch does not matter.</li>
+    <li>A column in the batch that the target does not name is <b>dropped</b>.</li>
+    <li>A column the target names that the batch does not have is an <b>error</b>:
+        <code>cast_batch: source batch missing column '&lt;name&gt;'</code>. A cast cannot
+        invent data.</li>
+    <li>A column whose type already matches is cloned, not converted. Arrow arrays are
+        reference-counted, so a matching cast costs nothing.</li>
+    <li>The result is rebuilt against the target schema exactly, which is why nullability
+        comes from the target and the output is append-ready by construction.</li>
+</ul>
+
+<p>
+    <code>CastOptions::default()</code> is <code>safe: true</code>: a value that cannot be
+    represented in the target type becomes <code>null</code> rather than an error. Set
+    <code>safe: false</code> to get the error instead. The two settings interact. If safe
+    mode produces a null for a field the target declares non-nullable, the rebuild fails with
+    <code>cast_batch: RecordBatch rebuild error</code>.
+</p>
+
+<p>
+    <code>build_target_schema(source, overrides)</code> covers the common case: clone a
+    source schema and replace the data type of a named subset of fields, keeping every
+    field's nullability as it was.
+</p>
+
+<div class="note">
+    <span class="note-label">Constraint</span>
+    <p>
+        A cast adapts <b>types</b>, never <b>shape</b>. If the component declares a column the
+        file does not contain, no <code>CastingSource</code> configuration will help. Write a
+        small wrapping <code>Source</code> that builds the missing array and re-assembles the
+        batch. <code>examples/connectors/scheduler_parquet_etl.rs</code> does exactly
+        that to pad a zero-filled output column.
+    </p>
+</div>
+
+<h2 id="builtins">What ships in the box</h2>
+
+<p>
+    The traits, the two drain functions and the cast helpers live in
+    <code>saci-core</code>. The factory contract lives in <code>saci-connector</code>. A
+    connector crate carries bytes over one transport and a transformer crate turns bytes into
+    batches, so a build pulls in <code>parquet</code>, <code>arrow-csv</code> or
+    <code>tokio-postgres</code> only when it reads or writes that format.
+</p>
+
+<table class="rule-table">
+    <thead>
+        <tr><th>What</th><th>Source</th><th>Sink</th><th>Crate</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>Traits &amp; drains</strong></td>
+            <td colspan="2"><code>Source</code>, <code>Sink</code>, <code>drain_into_dataset</code>, <code>drain_dataset</code></td>
+            <td><code>saci-core</code></td>
+        </tr>
+        <tr>
+            <td><strong>Cast helpers</strong></td>
+            <td colspan="2"><code>cast_batch</code>, <code>CastingSource</code>, <code>build_target_schema</code></td>
+            <td><code>saci-core</code></td>
+        </tr>
+        <tr>
+            <td><strong>Factory contract</strong></td>
+            <td colspan="2"><code>SourceFactory</code>, <code>SinkFactory</code>, <code>ConnectorContext</code>, <code>parse_schema_fields</code></td>
+            <td><code>saci-connector</code></td>
+        </tr>
+        <tr>
+            <td><strong>Transformer contract</strong></td>
+            <td colspan="2"><code>Transformer</code>, <code>BatchReader</code>, <code>BatchWriter</code>, <code>MessageDecoder</code></td>
+            <td><code>saci-transformer</code></td>
+        </tr>
+        <tr>
+            <td><strong>Channel</strong></td>
+            <td><code>ChannelSource</code></td>
+            <td><code>ChannelSink</code></td>
+            <td><code>saci-connector-channel</code></td>
+        </tr>
+        <tr>
+            <td><strong>File</strong></td>
+            <td><code>FileSource</code></td>
+            <td><code>FileSink</code></td>
+            <td><code>saci-connector-file</code></td>
+        </tr>
+        <tr>
+            <td><strong>redb</strong></td>
+            <td><code>RedbSource</code></td>
+            <td><code>RedbSink</code></td>
+            <td><code>saci-connector-redb</code></td>
+        </tr>
+        <tr>
+            <td><strong>PostgreSQL</strong></td>
+            <td><code>PostgresSource</code></td>
+            <td><code>PostgresSink</code></td>
+            <td><code>saci-connector-postgresql</code></td>
+        </tr>
+        <tr>
+            <td><strong>Turso</strong></td>
+            <td><code>TursoSource</code></td>
+            <td><code>TursoSink</code></td>
+            <td><code>saci-connector-turso</code></td>
+        </tr>
+        <tr>
+            <td><strong>Kafka</strong></td>
+            <td><code>KafkaSource</code></td>
+            <td><code>KafkaSink</code></td>
+            <td><code>saci-connector-kafka</code></td>
+        </tr>
+        <tr>
+            <td><strong>NATS</strong></td>
+            <td><code>NatsSource</code></td>
+            <td><code>NatsSink</code></td>
+            <td><code>saci-connector-nats</code></td>
+        </tr>
+        <tr>
+            <td><strong>TCP</strong></td>
+            <td><code>TcpIngestSource</code></td>
+            <td><code>TcpSink</code></td>
+            <td><code>saci-connector-tcp</code></td>
+        </tr>
+        <tr>
+            <td><strong>SACI</strong></td>
+            <td><code>SaciSource</code></td>
+            <td><code>SaciSink</code></td>
+            <td><code>saci-connector-saci</code></td>
+        </tr>
+        <tr>
+            <td><strong>HTTP</strong></td>
+            <td><code>HttpSource</code></td>
+            <td><code>HttpSink</code></td>
+            <td><code>saci-connector-http</code></td>
+        </tr>
+        <tr>
+            <td><strong>S3</strong></td>
+            <td><code>S3Source</code></td>
+            <td><code>S3Sink</code></td>
+            <td><code>saci-connector-s3</code></td>
+        </tr>
+        <tr>
+            <td><strong>DataFusion SQL</strong></td>
+            <td><code>DataFusionSource</code></td>
+            <td>none</td>
+            <td><code>saci-connector-datafusion</code></td>
+        </tr>
+        <tr>
+            <td><strong>Config registration</strong></td>
+            <td colspan="2"><code>Registry</code>, <code>register_builtin_factories</code></td>
+            <td><code>saci-service</code></td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    A <code>format</code> key names the transformer that turns a connector's bytes into
+    batches, and one crate implements each name. The
+    <a href="{{ get_url(path='@/service/formats/_index.md') }}">transformers</a> page has the schema
+    rules and the options each one takes.
+</p>
+
+<table class="rule-table">
+    <thead>
+        <tr><th><code>format</code></th><th>Transformer</th><th>Crate</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>csv</code></td>
+            <td><code>CsvTransformer</code></td>
+            <td><code>saci-transformer-csv</code></td>
+        </tr>
+        <tr>
+            <td><code>ndjson</code></td>
+            <td><code>NdjsonTransformer</code></td>
+            <td><code>saci-transformer-ndjson</code></td>
+        </tr>
+        <tr>
+            <td><code>parquet</code></td>
+            <td><code>ParquetTransformer</code></td>
+            <td><code>saci-transformer-parquet</code></td>
+        </tr>
+        <tr>
+            <td><code>avro</code></td>
+            <td><code>AvroTransformer</code></td>
+            <td><code>saci-transformer-avro</code></td>
+        </tr>
+        <tr>
+            <td><code>arrow-ipc</code></td>
+            <td><code>ArrowIpcTransformer</code></td>
+            <td><code>saci-transformer-arrow-ipc</code></td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    Every format reads and writes a file stream, and every format also carries discrete
+    messages, so any of the five works on a TCP, Kafka or NATS node.
+    <code>Transformer::message_shape</code> is what says how a batch splits into them:
+    <code>csv</code>, <code>ndjson</code> and <code>avro</code> answer
+    <code>PerRow</code>, one message per row, and <code>arrow-ipc</code> and
+    <code>parquet</code> answer <code>PerBatch</code>, one message per batch. A message
+    connector refuses its config at build time against a format that answers neither.
+</p>
+
+<p>
+    No connector resolves a format implicitly. A node that moves bytes names a declared
+    <code>transformer</code> node by id, and that node's own <code>format</code> key is
+    what the registry resolves. Which crates a build carries is one
+    <code>saci-service</code> feature per crate, listed on
+    <a href="{{ get_url(path='@/library/reference/crates.md') }}">Crates and features</a>.
+</p>
+
+<p>
+    <code>DataFusionSource</code> has no factory, because it needs a live
+    <code>SessionContext</code>, which a config file cannot express. Build it in Rust.
+</p>
+
+<p>Every constructor, since they are not uniform:</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>signatures, not calls</em></div>
+    <pre><code class="language-rust">// saci-connector-file. open_async moves the open and the metadata read off the executor.
+// create appends to an existing file, create_truncating replaces it.
+FileSource::open           (&amp;Path, Arc&lt;dyn Transformer&gt;, Option&lt;Arc&lt;Schema&gt;&gt;) -&gt; Result&lt;Self&gt;
+FileSource::open_async     (&amp;Path, Arc&lt;dyn Transformer&gt;, Option&lt;Arc&lt;Schema&gt;&gt;) -&gt; Result&lt;Self&gt;
+FileSink::create           (&amp;Path, Arc&lt;dyn Transformer&gt;, Arc&lt;Schema&gt;)         -&gt; Result&lt;Self&gt;
+FileSink::create_truncating(&amp;Path, Arc&lt;dyn Transformer&gt;, Arc&lt;Schema&gt;)         -&gt; Result&lt;Self&gt;
+
+// saci-connector-http. Neither makes a request: the source GETs and the sink
+// sends on the first batch, so validate needs no reachable endpoint.
+HttpSource::new(&amp;str, Option&lt;Arc&lt;Schema&gt;&gt;, SchemaFrom, Arc&lt;dyn Transformer&gt;, Vec&lt;(String, String)&gt;, Duration) -&gt; Result&lt;Self&gt;
+HttpSink::new  (&amp;str, Arc&lt;Schema&gt;, Arc&lt;dyn Transformer&gt;, method: &amp;str, Vec&lt;(String, String)&gt;, Duration) -&gt; Result&lt;Self&gt;
+
+// The transformer each of those takes, one crate per format.
+CsvTransformer::new(has_headers: bool)   -&gt; Self   // csv
+NdjsonTransformer::new(infer_max: usize) -&gt; Self   // ndjson
+ParquetTransformer::new()                -&gt; Self   // parquet, Snappy
+ArrowIpcTransformer::new()               -&gt; Self   // arrow-ipc
+AvroTransformer::new(compression: Option&lt;CompressionCodec&gt;, schema_id: Option&lt;u32&gt;) // avro
+
+// saci-connector-channel. Returns the paired endpoint alongside the source or sink.
+ChannelSource::new(Arc&lt;Schema&gt;, buffer: usize) -&gt; (mpsc::Sender&lt;RecordBatch&gt;, Self)
+ChannelSink::new  (Arc&lt;Schema&gt;, buffer: usize) -&gt; (Self, mpsc::Receiver&lt;RecordBatch&gt;)</code></pre>
+</div>
+
+<p>
+    Only <code>ndjson</code> infers a schema, and only when <code>schema_fields</code> is
+    absent: <code>csv</code> requires one, and <code>parquet</code>, <code>avro</code> and
+    <code>arrow-ipc</code> reject one on a read, since the stream carries its own.
+    <code>FileSource</code> and <code>HttpSource</code> report
+    <code>estimated_rows</code> under <code>parquet</code> alone, summed from row-group
+    metadata with no data read. <code>NatsSource</code> reports JetStream's own pending-message
+    count in <code>jetstream</code> mode, and <code>DataFusionSource</code> reports whatever
+    <code>with_estimated_rows</code> sets. <code>CastingSource</code> forwards whatever it
+    wraps; every other source returns <code>None</code>.
+</p>
+
+<p>
+    <code>finish()</code> means different things per sink, and that matters when you decide
+    where to call it. <code>FileSink</code> hands it to the transformer:
+    <code>parquet</code> writes the footer and closes the writer, <code>arrow-ipc</code>
+    writes the end-of-stream marker, and <code>csv</code>,
+    <code>ndjson</code> and <code>avro</code> flush their buffered writer. After any of them
+    a further <code>write_batch</code> is an error, and a second <code>finish</code> is a
+    no-op. <code>ChannelSink</code> has nothing to flush.
+</p>
+
+<h2 id="channel">The in-memory channel</h2>
+
+<p>
+    <code>ChannelSource</code> and <code>ChannelSink</code> are a <code>tokio</code> mpsc
+    pair dressed as IO. They exist for two jobs: testing a pipeline without touching the
+    filesystem, and bridging a pipeline to another async task in the same process.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>the sender and receiver are yours to hold</em></div>
+    <pre><code class="language-rust">use saci_connector_channel::{ChannelSink, ChannelSource};
+use saci_core::io::Source;
+
+let (tx, mut src)   = ChannelSource::new(schema.clone(), 8);
+let (mut sink, mut rx) = ChannelSink::new(schema.clone(), 8);
+
+tx.send(batch).await.unwrap();
+drop(tx);                                  // EOF: next_batch now returns Ok(None)
+
+assert!(src.next_batch().await?.is_some());
+assert!(src.next_batch().await?.is_none());</code></pre>
+</div>
+
+<p>
+    EOF is <b>the sender being dropped</b>, not a sentinel value, so a source you never drop
+    the sender for will wait forever. <code>ChannelSource</code> validates each received
+    batch against its declared schema and returns an error on mismatch, which makes it a
+    useful place to catch a producer drifting from the component definition.
+    <code>ChannelSink</code> clones each batch into the channel and reports
+    <code>pending_rows</code> as the row backlog. That is the sum of the row counts of every
+    batch still queued and not yet received, so the number reflects rows regardless of how
+    large or small the batches are.
+</p>
+
+<p>
+    One caveat if you reach these through the config file. <code>ChannelSourceFactory</code> and
+    <code>ChannelSinkFactory</code> resolve the halves through the host's channel registry, so
+    neither hands the other endpoint back to you. The source takes the receiver, its paired
+    sink the sender, and the source's EOF is that sink being dropped. A half whose counterpart
+    never builds waits on a channel nothing will fill, which is why
+    <code>ServiceConfig::validate</code> requires every channel <code>name</code> to pair
+    exactly one <code>ChannelSink</code> with one <code>ChannelSource</code>. For real use,
+    construct the channel yourself and pass the endpoint in programmatically.
+</p>
+
+<h2 id="datafusion">SQL results as a Source</h2>
+
+<p>
+    <code>saci-connector-datafusion</code> adds one adapter, in one direction: a DataFusion
+    query becomes a SACI <code>Source</code>, streaming lazily so a filter or aggregation
+    runs in DataFusion and only the result crosses into the Dataset. The constructors, the
+    drain into a <code>Dataset</code>, and why it has no factory are on
+    <a href="{{ get_url(path='@/library/service/datafusion.md') }}">SQL results as a source</a>.
+</p>
+
+<h2 id="next">Next</h2>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/service/connectors/_index.md') }}" class="next-card">
+        <span class="next-card-label">Moving data</span>
+        <h3>Connectors</h3>
+        <p>One page per connector: the crate to depend on, the constructor to call, and the config keys its node accepts.</p>
+    </a>
+    <a href="{{ get_url(path='@/service/_index.md') }}" class="next-card">
+        <span class="next-card-label">Service</span>
+        <h3>Service</h3>
+        <p>The binary that owns the drain loop, reads the config above, and decides when finish() gets called.</p>
+    </a>
+</div>
+
+{% endblock %}

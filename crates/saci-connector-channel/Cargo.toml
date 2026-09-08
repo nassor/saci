@@ -1,0 +1,23 @@
+[package]
+name = "saci-connector-channel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "In-memory mpsc Source and Sink for SACI, with the factories that build them from service configuration."
+
+[dependencies]
+saci-core      = { workspace = true, features = ["io"] }
+saci-connector = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+tokio         = { workspace = true }
+
+[dev-dependencies]
+arrow-array   = { workspace = true }
+tokio         = { workspace = true }

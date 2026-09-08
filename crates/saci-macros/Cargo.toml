@@ -1,0 +1,38 @@
+[package]
+name = "saci-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Derive and attribute macros for the SACI processor SDK: #[derive(Component)], #[transform], #[fold] and #[processor]."
+
+# A host proc-macro crate. It never compiles for wasm32-wasip2: cargo builds it
+# for the host even when the crate that invokes the macros is a wasm target, so
+# the wasm-side pins (arrow-ipc, wit-bindgen) are irrelevant here.
+[lib]
+proc-macro = true
+
+[dependencies]
+# syn's `full` feature is required: the attribute macros parse `ItemFn`, which
+# lives behind it. `extra-traits` is not needed; nothing here compares or
+# hashes syntax nodes.
+syn = { version = "3.0.4", features = ["full"] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"
+
+# A dev-dependency cycle back onto the SDK the macros target. Cargo permits
+# cycles through dev-dependencies, and it is the only way to compile-and-run
+# the expansions in this crate's own test suite: the generated code names
+# `::saci_processor` paths, so a test that exercises it needs that crate in
+# scope.
+[dev-dependencies]
+saci-processor = { workspace = true }
+serde = { workspace = true }
+
+# A current-thread runtime with a timer, for the two tests that drive a failing
+# system: `saci_core::retry` waits on `tokio::time::sleep` in every host build,
+# and `pollster` has no reactor to run it on.
+tokio = { workspace = true }

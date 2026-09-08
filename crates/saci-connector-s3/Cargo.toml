@@ -1,0 +1,56 @@
+[package]
+name = "saci-connector-s3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "S3 Source and Sink for SACI against any S3-compatible endpoint. Owns the object client, the row/byte/age flush thresholds and the timestamped key layout; a transformer supplies the byte format."
+
+[features]
+# Off by default like saci-connector-tcp's: a library consumer may have no
+# subscriber. `connector-s3` in saci-service turns it on.
+tracing = ["dep:tracing", "saci-core/tracing"]
+
+[dependencies]
+saci-core        = { workspace = true, features = ["io"] }
+saci-connector   = { workspace = true }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+futures-util  = { workspace = true }
+serde         = { workspace = true }
+# `fs` + `io-util` are not in the workspace tokio feature set; the source spools
+# a downloaded object to disk because `Transformer::open_reader` takes a
+# concrete `std::fs::File`. `time` and `rt-multi-thread` are already in the
+# workspace set and carry the sink's `flush.max_age_ms` ticker task.
+tokio         = { workspace = true, features = ["fs", "io-util"] }
+tempfile      = { workspace = true }
+tracing       = { workspace = true, optional = true }
+
+# The S3 client. `object_store` rather than `aws-sdk-s3`: it is the Arrow
+# project's own crate, 0.13.2 is already in the lock file through
+# saci-connector-datafusion's `datafusion`, and its `aws` feature resolves TLS
+# through reqwest + rustls + `ring`, the one crypto backend this workspace
+# already links (see saci-connector-postgresql's `tls` feature). `aws-sdk-s3`
+# would pull a second one, `aws-lc-rs`, whose `aws-lc-sys` build needs NASM on
+# windows-x86_64. `default-features = false` drops the unused
+# `LocalFileSystem` backend and its walkdir dependency.
+object_store  = { version = "0.13.2", default-features = false, features = ["aws"] }
+# Wall-clock formatting for the object key's timestamp prefix. Already in the
+# lock file with `clock` and `serde` on, through arrow and object_store.
+chrono        = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+saci-transformer-csv     = { workspace = true }
+saci-transformer-ndjson  = { workspace = true }
+saci-transformer-parquet = { workspace = true }
+# Pinned here rather than in `[workspace.dependencies]`, matching
+# saci-connector-kafka, -nats and -postgresql.
+testcontainers = "0.28"
+anyhow         = { workspace = true }
+tokio          = { workspace = true, features = ["rt-multi-thread"] }

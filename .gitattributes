@@ -1,0 +1,21 @@
+# LF everywhere. `text=auto` normalizes any file git detects as text to LF in
+# the object store, and `eol=lf` checks it out as LF on every platform, so a
+# clone on Windows carries the same bytes as one on Linux regardless of a
+# developer's `core.autocrlf`.
+* text=auto eol=lf
+
+# Content detection keys on a NUL byte in the first 8 KiB, which every file
+# below happens to carry today. Declared anyway: a conformance vector or a
+# generated bundle that is accidentally NUL-free must still never be
+# line-ending converted, and for `.saci` that would rewrite the wire format
+# the corpus exists to pin.
+*.saci binary
+*.wasm binary
+*.png binary
+*.jar binary
+*.klib binary
+
+# The Pages-served Maven repository is byte-exact: every artifact carries
+# committed .md5/.sha1/.sha256/.sha512 files beside it, so an end-of-line
+# conversion on checkout would invalidate the checksum Gradle verifies.
+docs/static/maven/** -text

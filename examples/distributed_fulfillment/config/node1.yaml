@@ -1,0 +1,11 @@
+# Node 1 — bootstrap node + generator
+node_id: 1
+listen: "0.0.0.0:9001"
+bootstrap: true
+data_dir: /data/node1
+output_dir: /data/output/node1
+peers:
+  - "node2:9002"
+  - "node3:9003"
+log_json: true
+generator_interval_secs: 10

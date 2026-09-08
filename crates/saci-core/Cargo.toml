@@ -1,0 +1,84 @@
+[package]
+name = "saci-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Core columnar processing types for SACI: Dataset, Pipeline, System, Scheduler."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = ["runtime"]
+# Full async runtime: tokio + rayon parallelism. Enabled by default; disable for wasm processor builds.
+runtime = ["dep:tokio", "dep:rayon", "dep:num_cpus"]
+# Processor feature: wasm32-wasip2 target; sequential-only execution, pollster sync executor.
+processor = ["dep:pollster"]
+tracing = ["dep:tracing"]
+windows = []
+io = ["runtime"]
+distributed = ["runtime"]
+
+[dependencies]
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+arrow-buffer  = { workspace = true }
+arrow-select  = { workspace = true }
+arrow-cast    = { workspace = true }
+arrow-arith   = { workspace = true }
+arrow-ord     = { workspace = true }
+arrow-ipc     = { workspace = true }
+serde_arrow   = { workspace = true }
+async-trait   = { workspace = true }
+tokio         = { workspace = true, optional = true }
+futures       = { workspace = true }
+serde         = { workspace = true }
+tracing       = { workspace = true, optional = true }
+rayon         = { workspace = true, optional = true }
+num_cpus      = { workspace = true, optional = true }
+pollster      = { version = "1.0.1", optional = true }
+fnv           = { workspace = true }
+rand          = { workspace = true }
+
+[dev-dependencies]
+criterion    = { workspace = true }
+postcard     = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tokio        = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc    = { workspace = true }
+tempfile     = { workspace = true }
+sha3         = { workspace = true }
+mimalloc = "0.1.52"
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[[bench]]
+name = "batch_vs_stream"
+harness = false
+required-features = ["io"]
+
+[[bench]]
+name = "parallelism"
+harness = false
+
+[[bench]]
+name = "parallelism_compute"
+harness = false
+
+[[bench]]
+name = "tpch_q1"
+harness = false
+
+[[bench]]
+name = "tpch_q6"
+harness = false
+
+[[bench]]
+name = "ipc_checkpoint"
+harness = false

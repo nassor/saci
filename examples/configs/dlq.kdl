@@ -1,0 +1,104 @@
+// SACI standalone service configuration with a dead letter queue.
+//
+// Run:
+//   cargo run -p saci-service -- validate --config examples/configs/dlq.kdl
+//   cargo run -p saci-service -- serve --config examples/configs/dlq.kdl
+//
+// Both commands work with the default feature bundle: connector-file,
+// connector-http and connector-redb are all in it.
+//
+// The workflow reads examples/configs/fixtures/orders.csv and POSTs the rows
+// as ndjson to an endpoint that is not running. That POST fails, and because
+// the workflow declares a `dlq` block the refused batch is stored instead of
+// dropped:
+//
+//   curl http://127.0.0.1:8080/api/workflows/orders/dlq
+//
+// reports one letter of five rows, grouped by (sink, reason), and so does
+// the dashboard's Dead letters tab at
+// http://127.0.0.1:8080/ui#dead-letters. A `FileSource` reaches EOF once, so
+// the file produces exactly that one letter however long the service runs;
+// the automatic replay re-attempts it on a widening backoff, and every
+// attempt bumps its `replays` count.
+//
+// Then start the collector, in a second terminal:
+//
+//   python3 examples/configs/fixtures/dlq_collector.py
+//
+// Within one backoff step the automatic replay delivers the stored batch to
+// the now-live endpoint, the collector prints the POST, and the summary drops
+// to zero letters. `POST /api/workflows/orders/restart` re-reads the file, so
+// stopping the collector and restarting the workflow produces another letter.
+//
+// To replay by hand instead, or to discard what is waiting:
+//
+//   curl -X POST http://127.0.0.1:8080/api/workflows/orders/dlq/replay
+//   curl -X POST http://127.0.0.1:8080/api/workflows/orders/dlq/purge
+
+mode "standalone"
+
+node id=1 name="saci-dlq" data_dir="${SACI_DATA_DIR:-/tmp/saci-dlq}"
+
+// One pass a second. A source that keeps producing would put a letter in the
+// store on every failing pass; this one reaches EOF after the first.
+run_mode kind="interval" interval_ms=1000
+
+workflow "orders" {
+    // The dead letter queue. `redb` is the default store, so `dlq` alone
+    // would do; the block is spelled out here to show where the file goes.
+    // Every key outside `replay`, `source` and `sink` belongs to the store's
+    // connector and is shared by both halves.
+    //
+    // `replay "before_sources"` (the default) runs the replay at the head of
+    // a pass, so a stored batch reaches the sink ahead of anything new.
+    dlq "redb" {
+        directory "${SACI_DLQ_DIR:-/tmp/saci-dlq/dlq}"
+    }
+
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    transformer "ndjson_fmt" format="ndjson"
+
+    source "csv_orders" type="FileSource" component="orders" transformer="csv_fmt" {
+        config {
+            path "examples/configs/fixtures/orders.csv"
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "amount" type="float64" nullable=#true
+            schema_fields "status" type="utf8" nullable=#true
+        }
+    }
+
+    // `retry { max_attempts 1 }` disables retrying, so a refused POST reaches
+    // the dead letter queue on the first attempt instead of after four. With
+    // the default policy the letter's `reason` would be the same, because a
+    // `RetryExhausted` error is unwrapped to the failure underneath it.
+    sink "orders_out" type="HttpSink" component="orders" transformer="ndjson_fmt" {
+        retry { max_attempts 1 }
+        config {
+            url "${SACI_DLQ_SINK_URL:-http://127.0.0.1:18099/orders}"
+            method "POST"
+            timeout_ms 5000
+            headers {
+                "content-type" "application/x-ndjson"
+            }
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "amount" type="float64" nullable=#true
+            schema_fields "status" type="utf8" nullable=#true
+        }
+    }
+
+    link from="csv_orders" to="orders_out"
+}
+
+// A fixed port, not 0: the curl lines above and the dashboard URL name it.
+http bind="127.0.0.1:8080" disabled=#false
+
+// `log_level="info"` is what puts the `dead letter recorded` and `dead letter
+// replay finished` lines on stdout beside the runner's own. Both ride the
+// `saci::dlq` target, which an always-on filter directive enables at warn, so
+// they appear at every level including `off`.
+observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0 {
+    inspector enabled=#true ui=#true
+}

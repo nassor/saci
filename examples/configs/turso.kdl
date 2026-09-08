@@ -1,0 +1,114 @@
+// SACI standalone service configuration driving Turso at both ends.
+//
+// Run from the repository root, so the binary loads the gitignored `.env`:
+//
+//   cargo run -p saci-service --features connector-turso,wasm --bin saci-service -- \
+//     validate --connectors-only --config examples/configs/turso.kdl
+//   cargo run -p saci-service --features connector-turso,wasm --bin saci-service -- \
+//     serve --config examples/configs/turso.kdl
+//
+// The source polls the embedded database for new rows and the sink upserts the
+// pipeline's output into a second table. `validate` opens no database: both
+// factories parse and validate their config and stop there. The first drain
+// cycle is where a missing table or file surfaces.
+
+mode "standalone"
+
+node id=1 name="saci-turso" data_dir="${SACI_DATA_DIR:-/tmp/saci-turso}"
+
+// Re-drain every 2 s. The polling source returns EOF once it is caught up, so
+// the interval runner drives it without the stream runner.
+run_mode kind="interval" interval_ms=2000
+
+workflow "orders" {
+    // ---------------------------------------------------------------- source
+
+    source "turso_orders" type="TursoSource" component="OrderChange" {
+        config {
+            name "turso_orders"
+            // Rows per emitted RecordBatch.
+            batch_rows 4096
+
+            // One embedded database file, no network. To keep an embedded
+            // replica in sync with Turso Cloud or a self-hosted sqld instead,
+            // add a remote block and let the service substitute the secrets:
+            //
+            //   connection path="replica.db" {
+            //       remote url="${SACI_TURSO_URL}" token="${SACI_TURSO_TOKEN}"
+            //   }
+            // Page-level encryption at rest, embedded only (a synced replica
+            // takes no local encryption):
+            //
+            //   connection path="sealed.db" {
+            //       encryption cipher="aegis256" hexkey="${SACI_TURSO_KEY}"
+            //   }
+            //
+            connection path="turso-example.db"
+
+            // Read strategy, chosen by `kind`:
+            //   polling  incremental, ordered by a cursor column
+            //   dump     the whole table every cycle
+            //   cdc      the change table a capture-enabled writer fills
+            //
+            // For `cdc`, replace the mode below with the following and declare
+            // a `__op` field (plus any of `__change_id`, `__change_time`,
+            // `__table`, `__rowid`) alongside the decoded columns:
+            //
+            //   mode kind="cdc" table="orders" cdc_table="turso_cdc"
+            //
+            mode kind="polling" table="orders" cursor_column="id"
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            // SQLite is dynamically typed; a value that does not fit the
+            // declared type is a loud error rather than a silent coercion.
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // ------------------------------------------------------------------ sink
+
+    sink "turso_enriched" type="TursoSink" component="EnrichedOrder" {
+        config {
+            name "turso_enriched"
+            table "enriched_orders"
+            // append, upsert or ignore_conflicts. upsert makes a replayed
+            // drain cycle idempotent, which is what makes the at-least-once
+            // source safe end to end. The conflict_columns must carry a
+            // PRIMARY KEY or UNIQUE constraint on the target table.
+            write_mode "upsert"
+            conflict_columns "id"
+            // Record this sink's own writes in the change table, so a `cdc`
+            // source (in this service or another) can read them:
+            //
+            //   capture mode="full"
+            //
+            // Concurrent writers under MVCC. The engine makes MVCC and change
+            // capture mutually exclusive, so this cannot combine with `capture`:
+            //
+            //   transaction "concurrent"
+            //   conflict_retries 16
+            //
+            connection path="turso-example.db"
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    link from="turso_orders" to="process_orders"
+    link from="process_orders" to="turso_enriched"
+}
+
+// HTTP control plane. /metrics carries the connector's counters:
+// saci_turso_source_rows_total, saci_turso_source_batches_total,
+// saci_turso_source_changes_total, saci_turso_sink_rows_written_total and
+// saci_turso_sink_flushes_total.
+http bind="127.0.0.1:0" disabled=#false
+
+observability log_format="pretty" log_level="info" sample_ratio=0.3 error_sample_ratio=1.0

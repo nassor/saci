@@ -1,0 +1,4 @@
+# Build outputs: the component itself, jco's generated typings, and npm's tree.
+/score-ts.wasm
+/types/
+/node_modules/

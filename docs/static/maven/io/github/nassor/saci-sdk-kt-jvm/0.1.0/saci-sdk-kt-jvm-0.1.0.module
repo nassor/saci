@@ -1,0 +1,102 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "url": "../../saci-sdk-kt/0.1.0/saci-sdk-kt-0.1.0.module",
+    "group": "io.github.nassor",
+    "module": "saci-sdk-kt",
+    "version": "0.1.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.14.4"
+    }
+  },
+  "variants": [
+    {
+      "name": "jvmApiElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.4.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "saci-sdk-kt-jvm-0.1.0.jar",
+          "url": "saci-sdk-kt-jvm-0.1.0.jar",
+          "size": 76361,
+          "sha512": "c8b956add14782600428b5c46b02b3d1e35e66bba183828ab7fe8be56c5593705b7ea9b8f3d4c46357a5564137750acae0305507c4ff65b3d224c34868908ef1",
+          "sha256": "4f49387131f397984f419413d362cf8e9d9f718efd5d5386cec0a566e274243f",
+          "sha1": "e2d7b4ac10b664c1e8a38ceec5ef39f81f508535",
+          "md5": "56474544a36c6e01fe2499701af92ffb"
+        }
+      ]
+    },
+    {
+      "name": "jvmRuntimeElements-published",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "2.4.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "saci-sdk-kt-jvm-0.1.0.jar",
+          "url": "saci-sdk-kt-jvm-0.1.0.jar",
+          "size": 76361,
+          "sha512": "c8b956add14782600428b5c46b02b3d1e35e66bba183828ab7fe8be56c5593705b7ea9b8f3d4c46357a5564137750acae0305507c4ff65b3d224c34868908ef1",
+          "sha256": "4f49387131f397984f419413d362cf8e9d9f718efd5d5386cec0a566e274243f",
+          "sha1": "e2d7b4ac10b664c1e8a38ceec5ef39f81f508535",
+          "md5": "56474544a36c6e01fe2499701af92ffb"
+        }
+      ]
+    },
+    {
+      "name": "jvmSourcesElements-published",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "files": [
+        {
+          "name": "saci-sdk-kt-jvm-0.1.0-sources.jar",
+          "url": "saci-sdk-kt-jvm-0.1.0-sources.jar",
+          "size": 25966,
+          "sha512": "ff975cbdc1f46e79b8dff93bf5ffe2189f7b99b91f9518ef327f655062a4f6b5ad7597139d7d7734df18a92f28b58f45ba1c9b7bd2b846823ff33e5bab87c516",
+          "sha256": "851e639a85b1db621c99845d83a76ff570d2377ebbe04376b2b28bd5feb24963",
+          "sha1": "038047f76863963a2313aa9fcf515efb4fcb50a4",
+          "md5": "f8a52b888453ebcc03ebfb0f34bdf028"
+        }
+      ]
+    }
+  ]
+}

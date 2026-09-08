@@ -1,0 +1,78 @@
+// SACI standalone service configuration backed by a local redb store.
+//
+// Run:
+//   cargo run --features connector-file,transformer-csv --bin saci-service -- validate \
+//     --config examples/configs/redb.kdl
+//   cargo run --features connector-file,transformer-csv --bin saci-service -- serve \
+//     --config examples/configs/redb.kdl
+//
+// With the `store` block present, `serve` persists the raw config file to the
+// redb file before the pipeline builds, stream-mode source cursors and
+// processor priors are written back as items flow, and a restarted service
+// resumes from its last save point. The file is local and unreplicated:
+// cluster state lives in `node.data_dir` instead and takes no `store` block.
+//
+// The pipeline reads examples/configs/fixtures/orders.csv and writes
+// /tmp/saci-redb-orders-out.csv. If you change that path, create the parent
+// directory first.
+
+mode "standalone"
+
+node id=1 name="saci-redb" data_dir="${SACI_DATA_DIR:-/tmp/saci-redb}"
+
+// Local embedded store. `path` is created on first use; its parent directory
+// is created with it. Interval/one-shot processor state carry is opt-in via
+// `batch_resume #true`.
+store "redb" {
+    path "${SACI_STATE_DB:-/tmp/saci-state.redb}"
+}
+
+// Stream mode: one workflow pass per arriving batch, no pacing timer.
+run_mode kind="stream"
+
+// Adaptive flow control: the bundled fixture is a handful of rows, so the
+// row bounds are scaled well below the hard defaults (1024/65536/4096) to
+// keep the search meaningful at that size; a real deployment reading a
+// larger file would drop this block and take the defaults.
+flow_control {
+    min_rows 256
+    max_rows 4096
+    start_rows 1024
+    adjust_interval_ms 5000
+}
+
+workflow "orders" {
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // Stream-mode sources are live (never reach EOF by themselves); this
+    // one-shot file source simply terminates after the file is drained.
+    source "csv_orders" type="FileSource" component="orders" transformer="csv_fmt" {
+        config {
+            path "examples/configs/fixtures/orders.csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#true
+            schema_fields "status" type="Utf8" nullable=#true
+        }
+    }
+
+    sink "csv_out" type="FileSink" component="orders" transformer="csv_fmt" {
+        config {
+            path "/tmp/saci-redb-orders-out.csv"
+            truncate #true
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#true
+            schema_fields "status" type="Utf8" nullable=#true
+        }
+    }
+
+    link from="csv_orders" to="csv_out"
+}
+
+http bind="127.0.0.1:0" disabled=#false
+
+// Kept at a 40% grade: a local, checkpointed, single-source demo produces
+// little per-item span volume, so there is less to gain from sampling it
+// down further. error_sample_ratio stays at 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.4 error_sample_ratio=1.0

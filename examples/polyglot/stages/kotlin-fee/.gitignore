@@ -1,0 +1,10 @@
+# Gradle and Kotlin build state.
+build/
+.gradle/
+.kotlin/
+
+# Written by `wit-bindgen kotlin`.
+src/wasmWasiMain/kotlin/bindings/
+
+# Component collected into examples/polyglot/build/.
+fee-kt.wasm

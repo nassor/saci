@@ -1,0 +1,19 @@
+[package]
+name = "saci-connector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Factory contract every SACI connector implements: SourceFactory, SinkFactory, the ConnectorContext that resolves byte formats, and the shared schema_fields parser."
+
+[dependencies]
+saci-core        = { workspace = true, features = ["io"] }
+saci-transformer = { workspace = true }
+
+arrow-schema  = { workspace = true }
+# `ConfigValue` is part of the factory signature, so every connector and the
+# host that loads it must agree on one version of this crate.
+saci-config   = { workspace = true }

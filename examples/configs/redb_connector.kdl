@@ -1,0 +1,84 @@
+// SACI standalone service configuration writing rows into a redb file.
+//
+// Run:
+//   cargo run --features connector-file,connector-redb,transformer-csv --bin saci-service -- validate \
+//     --config examples/configs/redb_connector.kdl
+//   cargo run --features connector-file,connector-redb,transformer-csv --bin saci-service -- serve \
+//     --config examples/configs/redb_connector.kdl
+//
+// Both features are in the default bundle, so `cargo run --bin saci-service`
+// with no `--features` flag works too.
+//
+// The pipeline reads examples/configs/fixtures/orders.csv and stores every
+// batch as one csv document in /tmp/saci-redb-connector/orders.redb. The
+// directory is created if it is absent.
+//
+// Not to be confused with examples/configs/redb.kdl, which uses redb as the
+// service's own state store rather than as a connector.
+//
+// Reading the file back needs a separate run: redb locks the file exclusively
+// while RedbSink holds it, from the build until finish. A config that reads it
+// declares the matching half:
+//
+//   source "orders_in" type="RedbSource" component="orders" transformer="csv_fmt" {
+//       config {
+//           directory "${SACI_REDB_DIR:-/tmp/saci-redb-connector}"
+//           file "orders.redb"
+//           key_prefix "orders/"
+//           key_suffix ".csv"
+//           schema_fields "id" type="Int64" nullable=#false
+//           schema_fields "amount" type="Float64" nullable=#true
+//           schema_fields "status" type="Utf8" nullable=#true
+//       }
+//   }
+
+mode "standalone"
+
+node id=1 name="saci-redb-connector" data_dir="${SACI_DATA_DIR:-/tmp/saci-redb-connector-node}"
+
+run_mode kind="one_shot"
+
+workflow "orders" {
+    // One declared transformer serves both ends: FileSource reads csv bytes
+    // and RedbSink stores csv documents.
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    source "csv_orders" type="FileSource" component="orders" transformer="csv_fmt" {
+        config {
+            path "examples/configs/fixtures/orders.csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#true
+            schema_fields "status" type="Utf8" nullable=#true
+        }
+    }
+
+    // One entry per non-empty batch, keyed
+    // `{key_prefix}{seq:020}{key_suffix}`, so the table's key order is the
+    // order the batches arrived in. A reopened sink reads the highest key
+    // back and continues the sequence, so a rerun adds entries instead of
+    // replacing them.
+    //
+    // `compact`, `durability "immediate"`, `two_phase_commit` and
+    // `quick_repair` are all on by default; the defaults are what this
+    // example wants, so it names none of them.
+    sink "orders_out" type="RedbSink" component="orders" transformer="csv_fmt" {
+        config {
+            directory "${SACI_REDB_DIR:-/tmp/saci-redb-connector}"
+            file "orders.redb"
+            table "records"
+            key_prefix "orders/"
+            key_suffix ".csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#true
+            schema_fields "status" type="Utf8" nullable=#true
+        }
+    }
+
+    link from="csv_orders" to="orders_out"
+}
+
+http bind="127.0.0.1:0" disabled=#false
+
+observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0

@@ -1,0 +1,5 @@
+# The repository is LF everywhere (see .gitattributes). rustfmt's default
+# `newline_style = "Auto"` writes whatever the file it rewrites already used, so
+# on Windows a file that ever picks up CRLF keeps it; "Unix" makes every
+# `cargo fmt` write LF regardless of platform or prior content.
+newline_style = "Unix"

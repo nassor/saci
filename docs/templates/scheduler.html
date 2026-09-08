@@ -1,0 +1,611 @@
+{% extends "base.html" %}
+
+{% block title %}Scheduler — SACI{% endblock %}
+{% block description %}A Scheduler drives several independent Pipelines from one process. It resolves dependency edges into ordered stages, orders each stage by priority, skips a pipeline when its data dependency produced nothing, and pauses one under backpressure.{% endblock %}
+{% block og_title %}Scheduler — SACI{% endblock %}
+{% block og_description %}Many pipelines, one process, one dependency-ordered pass per tick.{% endblock %}
+
+{% block content %}
+
+<div class="page-kicker">Concept 04</div>
+<h1>Scheduler</h1>
+
+<p class="page-lede">
+    A <code>Pipeline</code> is one workload. A <code>Scheduler</code> is several of them in
+    one process, driven once per tick in the order their dependency edges allow.
+</p>
+
+<dl class="page-facts">
+    <dt>In one line</dt>
+    <dd>Many pipelines, <strong>one dependency-ordered pass</strong> per tick</dd>
+    <dt>You need</dt>
+    <dd>Nothing beyond <code>saci-core</code>. The <code>io</code> feature only changes what a tick does and unlocks the sink-depth probe</dd>
+    <dt>Read this if</dt>
+    <dd>You have two or more workloads sharing a process, and one of them must wait for another or be skipped because of it</dd>
+</dl>
+
+<h2 id="shape">What a Scheduler owns</h2>
+
+<p>
+    Three fields: a <code>Vec&lt;Pipeline&gt;</code>, a matching
+    <code>Vec&lt;PipelineConfig&gt;</code>, and a cached stage plan. <code>tick()</code>
+    drives it, and three methods read it back: <code>pipelines()</code>,
+    <code>get(name)</code>, <code>get_mut(name)</code>.
+</p>
+
+<p>
+    It owns <b>no shared dataset</b>. Every <code>Pipeline</code> carries its own
+    <code>Dataset</code>, so two pipelines registered with the same scheduler cannot read
+    each other's columns, and a dependency edge between them <b>moves no rows</b>. An edge
+    decides who runs first, and whether the later one runs at all. Nothing else.
+</p>
+
+<h2 id="adding">Adding pipelines</h2>
+
+<p>
+    <code>add_pipeline</code> takes a pipeline and gives it a default
+    <code>PipelineConfig</code>: no dependencies, priority 0, no backpressure.
+    <code>add_pipeline_with_config</code> takes the config explicitly. Both return
+    <code>&amp;mut Self</code>, so calls chain.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>two ways in, one prelude import</em></div>
+    <pre><code class="language-rust">use saci_core::prelude::*;
+
+let mut sched = Scheduler::new();
+
+// Default config: no edges, priority 0, no backpressure.
+sched.add_pipeline(
+    Pipeline::builder("ingest")
+        .with::&lt;Transaction&gt;()
+        .with_system(IngestSystem)
+        .build(),
+);
+
+// Explicit config: one edge, one priority.
+sched.add_pipeline_with_config(
+    Pipeline::builder("enrich")
+        .with::&lt;Transaction&gt;()
+        .with_system(EnrichSystem)
+        .build(),
+    PipelineConfig::new()
+        .after("ingest", DependencyKind::Data)
+        .priority(-1),
+);</code></pre>
+</div>
+
+<p>
+    <code>PipelineConfig</code> has exactly three fields, one builder method each:
+    <code>dependencies</code>, <code>priority</code> (an <code>i32</code>, lower runs
+    first, default 0), and <code>backpressure</code> (an <code>Option</code>).
+    <code>.after()</code> <em>pushes</em> an edge, so call it once per predecessor.
+    <code>Scheduler</code>, <code>PipelineConfig</code>, <code>DependencyKind</code> and
+    <code>BackpressureSpec</code> are all in <code>saci_core::prelude</code>.
+</p>
+
+<div class="note note-warn">
+    <span class="note-label">The plan is built once, and cached</span>
+    <p>
+        The stage plan lives in a <code>OnceLock</code> filled by the first
+        <code>tick()</code>. <code>add_pipeline</code> does not clear it, unlike
+        <code>Pipeline::add_system</code>, which does invalidate its own pipeline's stage
+        cache. Register every pipeline <b>before</b> the first tick. One added afterwards
+        belongs to no stage and will never run, with no error. A bad graph is cached the
+        same way, so a cycle or an unknown dependency name returns the identical error from
+        every later tick.
+    </p>
+</div>
+
+<h2 id="tick">What one tick does</h2>
+
+<p>
+    A tick is one pass over the whole graph. Four steps:
+</p>
+
+<ol>
+    <li>
+        <b>Build the plan, if it is not built yet.</b> <code>build_stages</code> peels the
+        dependency graph with Kahn's algorithm. Every pipeline with no unmet dependency
+        forms stage 1, removing them exposes stage 2, and so on. Each entry in
+        <code>dependencies</code> becomes one edge, and <em>the kind is ignored here</em>, so
+        <code>Order</code> and <code>Data</code> build the same graph. A name that
+        matches no pipeline fails with a message quoting both pipelines, and a cycle fails
+        with <code>"pipeline dependency graph contains a cycle"</code>. Either way
+        <code>tick</code> hands it back as a <code>SaciError::Scheduler</code>.
+    </li>
+    <li>
+        <b>Sort each stage by priority.</b> A stable sort, so pipelines with equal priority
+        keep registration order.
+    </li>
+    <li>
+        <b>For each member, in that order:</b> test its <code>Data</code> edges, then its
+        backpressure predicate, then run it. The run is <code>run_with_io()</code> when the
+        <code>io</code> feature is on, which drains sources in, runs systems, and drains
+        sinks out. Otherwise it is plain <code>run()</code>.
+    </li>
+    <li>
+        <b>Record whether it produced zero rows,</b> for the <code>Data</code> edges
+        downstream of it.
+    </li>
+</ol>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 308" role="img" aria-labelledby="sch-tick-title sch-tick-desc">
+        <title id="sch-tick-title">One tick resolved into dependency stages</title>
+        <desc id="sch-tick-desc">
+            Four pipelines are peeled into three stages. Ingest and metrics have no
+            dependencies so they share stage 1, where priority decides which of them runs
+            first even though metrics was registered earlier. Enrich has one incoming Data
+            edge from ingest so it lands in stage 2, and report has an Order edge from
+            enrich so it lands in stage 3. Each pipeline block contains its own Dataset,
+            and the edges between them carry ordering only, never rows.
+        </desc>
+
+        <text class="t-title" x="0" y="14">One tick, four pipelines</text>
+        <text class="t-sm" x="0" y="30">build_stages() peels the graph into stages; tick() walks them in order</text>
+
+        <!-- stage 1: two pipelines with no incoming edge -->
+        <g class="anim anim-1">
+            <text class="t-sm t-ctl" x="0" y="52">STAGE 1</text>
+
+            <rect class="blk blk-ctl" x="0" y="60" width="196" height="82" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="60" width="196" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="74" width="196" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="75">ingest</text>
+            <rect class="row-w" x="8" y="88" width="180" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="101">its own Dataset</text>
+            <text class="t-sm" x="12" y="119">priority -1, added second</text>
+            <text class="t-sm t-ctl" x="12" y="133">&rarr; still runs first</text>
+
+            <rect class="blk blk-ctl" x="0" y="154" width="196" height="68" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="154" width="196" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="168" width="196" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="169">metrics</text>
+            <rect class="row-w" x="8" y="182" width="180" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="195">its own Dataset</text>
+            <text class="t-sm" x="12" y="213">priority 0, added first</text>
+        </g>
+
+        <!-- stage 2: one incoming Data edge -->
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M196 71 H228" marker-end="url(#sch-c)"/>
+            <text class="t-sm t-ctl" x="198" y="88">Data</text>
+
+            <text class="t-sm t-ctl" x="232" y="52">STAGE 2</text>
+            <rect class="blk blk-ctl" x="232" y="60" width="196" height="68" rx="8"/>
+            <rect class="hd hd-ctl" x="232" y="60" width="196" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="232" y="74" width="196" height="8"/>
+            <text class="t-lbl t-ctl" x="244" y="75">enrich</text>
+            <rect class="row-w" x="240" y="88" width="180" height="18" rx="3"/>
+            <text class="t-sm" x="248" y="101">its own Dataset</text>
+            <text class="t-sm" x="244" y="119">skips if ingest nets 0</text>
+
+            <text class="t-sm" x="232" y="150">one incoming edge, so</text>
+            <text class="t-sm" x="232" y="164">it cannot join stage 1</text>
+        </g>
+
+        <!-- stage 3: an Order edge -->
+        <g class="anim anim-3">
+            <path class="arw arw-ctl" d="M428 71 H460" marker-end="url(#sch-c)"/>
+            <text class="t-sm t-ctl" x="430" y="88">Order</text>
+
+            <text class="t-sm t-ctl" x="464" y="52">STAGE 3</text>
+            <rect class="blk blk-ctl" x="464" y="60" width="190" height="68" rx="8"/>
+            <rect class="hd hd-ctl" x="464" y="60" width="190" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="464" y="74" width="190" height="8"/>
+            <text class="t-lbl t-ctl" x="476" y="75">report</text>
+            <rect class="row-w" x="472" y="88" width="174" height="18" rx="3"/>
+            <text class="t-sm" x="480" y="101">its own Dataset</text>
+            <text class="t-sm" x="476" y="119">Order &rarr; always runs</text>
+
+            <text class="t-sm" x="464" y="150">waits for every member</text>
+            <text class="t-sm" x="464" y="164">of stage 2</text>
+        </g>
+
+        <g class="anim anim-4">
+            <text class="t-sm" x="0" y="242">ingest and metrics share stage 1: no edge between them, and no shared Dataset either.</text>
+
+            <path class="ln" d="M0 260 H654"/>
+            <text class="t-sm" x="0" y="280">One tick awaits them one at a time: <tspan class="t-ctl">ingest, metrics, enrich, report</tspan>.</text>
+            <text class="t-sm" x="0" y="296">Parallelism lives one level down : inside a pipeline, across its ParallelSystems.</text>
+        </g>
+
+        <defs>
+            <marker id="sch-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-control"><i></i> stages, edges, priority: the plan</span>
+        <span class="k-data"><i></i> each pipeline's own Dataset</span>
+    </div>
+    <figcaption class="dgm-cap">
+        Sharing a stage means <b>nothing orders them but priority</b>. They still do not
+        overlap in time, because a tick awaits one pipeline before starting the next.
+    </figcaption>
+</div>
+
+<p>
+    <code>tick</code> awaits each pipeline before starting the next. Its own doc line reads
+    <em>"run all pipelines sequentially according to the DAG stage plan"</em>. Across
+    pipelines, the stage plan buys ordering and the skip semantics below, nothing more.
+</p>
+
+<p>
+    Concurrency in SACI lives one level down, and even there it is conditional. A stage
+    inside a pipeline means only that <b>nothing orders those systems relative to each
+    other</b>, which is what licenses running them together. They run together, on
+    the tokio + rayon executor, only when <b>every</b> member of that stage implements
+    <code>ParallelSystem</code>, there is more than one of them, and the dataset holds at
+    least 100_000 rows. A stage holding even one plain <code>System</code>, or a smaller
+    dataset, runs its members one at a time, exactly as the scheduler runs a stage of
+    pipelines.
+</p>
+
+<p>
+    Each pipeline owns its dataset, so two stage-mates share no state to race over. The
+    sequencing is a scheduling choice, and correctness does not rest on it. You drive the
+    cadence yourself.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>one tick is one pass; the loop is yours</em></div>
+    <pre><code class="language-rust">loop {
+    sched.tick().await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+}</code></pre>
+</div>
+
+<h2 id="edges">Order edges and Data edges</h2>
+
+<p>
+    Both kinds place the dependent after its predecessor, because
+    <code>build_stages</code> ignores the kind. The difference is entirely at run time,
+    and only <code>Data</code> can cancel a run:
+</p>
+
+<ul>
+    <li>
+        <code>DependencyKind::Order</code>: run after the named pipeline, whatever it
+        produced.
+    </li>
+    <li>
+        <code>DependencyKind::Data</code>: run after the named pipeline
+        <b>and skip this tick</b> if that pipeline produced nothing.
+    </li>
+</ul>
+
+<p>
+    "Produced nothing" is a specific condition. A pipeline is flagged as having produced
+    nothing when either:
+</p>
+
+<ul>
+    <li>it ran and its <code>last_stats().rows_produced</code> was <b>exactly 0</b>; or</li>
+    <li>it was itself skipped, by one of its own <code>Data</code> edges, or by backpressure.</li>
+</ul>
+
+<p>
+    The second case is what makes chains behave sensibly. A skip propagates down
+    consecutive <code>Data</code> edges, so an idle source does not wake the three stages
+    behind it. An <code>Order</code> edge stops the propagation, because it never consults
+    the flag at all.
+</p>
+
+<div class="note">
+    <span class="note-label">rows_produced is a net delta</span>
+    <p>
+        It is computed as live rows after the run minus live rows before, as an
+        <code>isize</code>. A pipeline that appends 40 rows and soft-deletes 40 nets zero
+        and reads as "produced nothing". A pipeline whose systems only <em>rewrite</em>
+        existing columns always nets zero, so its <code>Data</code> dependents never run.
+        Give those an <code>Order</code> edge instead. Net deletion is not zero, so
+        a shrinking pipeline still wakes its dependents.
+    </p>
+</div>
+
+<p>
+    Pipeline names are the only identifier an edge has, and nothing checks that they are
+    unique. Register two pipelines under one name and the two halves of the machinery
+    disagree. Edge building resolves the name through a <code>HashMap</code>, which keeps
+    the <em>last</em> registration, while the skip check scans for the <em>first</em>. Keep
+    names unique.
+</p>
+
+<h2 id="skips">Skips and backpressure</h2>
+
+<p>
+    <code>BackpressureSpec</code> has one variant:
+    <code>Predicate(Box&lt;dyn Fn(&amp;Pipeline) -&gt; bool + Send + Sync&gt;)</code>. The
+    closure receives <b>the pipeline it gates</b>. Returning <code>true</code> skips that
+    pipeline for the current tick and flags it, so <code>Data</code> dependents skip too.
+    The two checks are ordered. The <code>Data</code> edges are tested first, and
+    a pipeline already skipped is never asked about backpressure.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 322" role="img" aria-labelledby="sch-skip-title sch-skip-desc">
+        <title id="sch-skip-title">The three decisions a tick makes per pipeline</title>
+        <desc id="sch-skip-desc">
+            For each pipeline in a stage the tick asks three questions in order: is any Data
+            predecessor flagged, does the backpressure predicate return true, and only then
+            does it run the pipeline and measure the net row change. All three outcomes write
+            the same shared table of one boolean per pipeline, which is what a downstream
+            pipeline with a Data edge consults. The table is cleared at the start of every
+            tick.
+        </desc>
+
+        <text class="t-title" x="0" y="14">Skip, pause, or run</text>
+        <text class="t-sm" x="0" y="30">asked in this order, for every member of the stage</text>
+
+        <!-- the three gates -->
+        <g class="anim anim-1">
+            <text class="t-sm t-ctl" x="0" y="52">FOR ONE PIPELINE</text>
+
+            <rect class="blk blk-ctl" x="0" y="60" width="196" height="48" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="60" width="196" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="74" width="196" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="75">1. Data dependency</text>
+            <text class="t-sm" x="12" y="99">a Data predecessor flagged?</text>
+
+            <path class="arw arw-ctl" d="M98 108 V126" marker-end="url(#sch-c2)"/>
+            <text class="t-sm" x="104" y="122">no</text>
+
+            <rect class="blk blk-ctl" x="0" y="126" width="196" height="62" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="126" width="196" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="140" width="196" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="141">2. Backpressure</text>
+            <text class="t-sm" x="12" y="164">Predicate(&amp;pipeline) true?</text>
+            <text class="t-sm" x="12" y="180">may probe sink_pending_rows</text>
+
+            <path class="arw arw-ctl" d="M98 188 V206" marker-end="url(#sch-c2)"/>
+            <text class="t-sm" x="104" y="202">no</text>
+
+            <rect class="blk blk-data" x="0" y="206" width="196" height="82" rx="8"/>
+            <rect class="hd hd-data" x="0" y="206" width="196" height="22" rx="8"/>
+            <rect class="hd hd-data" x="0" y="220" width="196" height="8"/>
+            <text class="t-lbl t-data" x="12" y="221">3. Run it</text>
+            <rect class="row-w" x="8" y="234" width="180" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="247">run_with_io(), else run()</text>
+            <text class="t-sm" x="12" y="265">rows_produced = live rows</text>
+            <text class="t-sm" x="12" y="279">after minus before</text>
+        </g>
+
+        <!-- every outcome writes the same table -->
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M196 84 H234" marker-end="url(#sch-c2)"/>
+            <text class="t-sm t-ctl" x="200" y="78">skip</text>
+            <path class="arw arw-ctl" d="M196 150 H234" marker-end="url(#sch-c2)"/>
+            <text class="t-sm t-ctl" x="200" y="144">skip</text>
+            <path class="arw arw-data" d="M196 240 H234" marker-end="url(#sch-d2)"/>
+            <text class="t-sm t-data" x="200" y="234">result</text>
+
+            <rect class="blk blk-ctl" x="240" y="60" width="196" height="228" rx="8"/>
+            <rect class="hd hd-ctl" x="240" y="60" width="196" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="240" y="74" width="196" height="8"/>
+            <text class="t-lbl t-ctl" x="252" y="75">produced_zero</text>
+
+            <rect class="row" x="248" y="88" width="180" height="18" rx="3"/>
+            <text class="t-sm" x="256" y="101">ingest</text>
+            <text class="t-sm t-ctl" x="348" y="101">true</text>
+            <rect class="row" x="248" y="110" width="180" height="18" rx="3"/>
+            <text class="t-sm" x="256" y="123">enrich</text>
+            <text class="t-sm t-ctl" x="348" y="123">true</text>
+            <rect class="row" x="248" y="132" width="180" height="18" rx="3"/>
+            <text class="t-sm" x="256" y="145">metrics</text>
+            <text class="t-sm" x="348" y="145">false</text>
+
+            <text class="t-sm" x="252" y="168">one bool per pipeline,</text>
+            <text class="t-sm" x="252" y="182">cleared at the start</text>
+            <text class="t-sm" x="252" y="196">of every tick</text>
+
+            <path class="ln" d="M248 210 H428"/>
+            <text class="t-sm" x="252" y="230">a skip sets the flag,</text>
+            <text class="t-sm" x="252" y="244">so anything downstream</text>
+            <text class="t-sm" x="252" y="258">on a Data edge skips too</text>
+        </g>
+
+        <!-- what a downstream pipeline makes of it -->
+        <g class="anim anim-3">
+            <path class="arw arw-ctl" d="M436 118 H466" marker-end="url(#sch-c2)"/>
+            <text class="t-sm t-ctl" x="440" y="112">read</text>
+
+            <text class="t-sm t-ctl" x="472" y="52">DOWNSTREAM</text>
+            <rect class="blk blk-ctl" x="472" y="60" width="182" height="118" rx="8"/>
+            <rect class="hd hd-ctl" x="472" y="60" width="182" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="472" y="74" width="182" height="8"/>
+            <text class="t-lbl t-ctl" x="484" y="75">report</text>
+            <text class="t-sm" x="484" y="98">after("enrich", Data)</text>
+            <text class="t-sm" x="484" y="116">enrich carries true, so</text>
+            <text class="t-sm" x="484" y="130">report does not run this</text>
+            <text class="t-sm" x="484" y="144">tick, and is flagged too</text>
+            <text class="t-sm t-ctl" x="484" y="166">an Order edge: it runs</text>
+        </g>
+
+        <g class="anim anim-4">
+            <text class="t-sm" x="472" y="212">A skip is not an error.</text>
+            <text class="t-sm" x="472" y="226">tick() returns Ok(()) and</text>
+            <text class="t-sm" x="472" y="240">tries again next tick.</text>
+
+            <path class="ln" d="M0 300 H654"/>
+            <text class="t-sm" x="0" y="318"><tspan class="t-ctl">produced_zero</tspan> is rebuilt from scratch each tick, so a paused pipeline resumes on its own.</text>
+        </g>
+
+        <defs>
+            <marker id="sch-c2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+            <marker id="sch-d2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-control"><i></i> the scheduler's decisions and flags</span>
+        <span class="k-data"><i></i> the run itself, and the rows it netted</span>
+    </div>
+    <figcaption class="dgm-cap">
+        A skip and a zero-row run are <b>indistinguishable downstream</b>, and both write
+        the same flag. That is deliberate, because a <code>Data</code> dependent cares whether
+        new rows exist and not why they do not.
+    </figcaption>
+</div>
+
+<p>
+    The closure is where the <code>io</code> feature earns its place.
+    <code>Pipeline::sink_pending_rows(component)</code> is gated on <code>io</code> and
+    forwards to <code>Sink::pending_rows()</code>, which lets a pipeline pause itself when
+    the sink it writes into has backed up.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>pause the writer when its channel fills</em></div>
+    <pre><code class="language-rust">use saci_connector_channel::ChannelSink;
+use saci_core::prelude::*;
+
+// The receiver is consumed elsewhere; four batches of headroom.
+let (sink, rx) = ChannelSink::new(Transaction::schema(), 4);
+
+sched.add_pipeline_with_config(
+    Pipeline::builder("ingest")
+        .with::&lt;Transaction&gt;()
+        .with_system(IngestSystem)
+        .with_sink("Transaction", sink)
+        .build(),
+    PipelineConfig::new().backpressure(BackpressureSpec::Predicate(Box::new(
+        |p: &amp;Pipeline| p.sink_pending_rows("Transaction").is_some_and(|n| n &gt;= 10_000),
+    ))),
+);</code></pre>
+</div>
+
+<p>
+    Two things about that probe. <code>Sink::pending_rows()</code> returns
+    <code>None</code> by default, so most sinks, file-backed ones included, give the
+    closure nothing to work with. Handle the <code>None</code> deliberately rather than
+    unwrapping it. And <code>ChannelSink</code> answers in <b>rows</b>, as the trait
+    defines it. It tracks the rows it has sent and subtracts the rows the receiver has
+    already taken, so two queued batches of 100 rows read as 200, whatever the channel's
+    slot count is.
+</p>
+
+<p>
+    Without the <code>io</code> feature the predicate still works, but it has to
+    look at something else. It receives the whole <code>&amp;Pipeline</code>, so
+    <code>last_stats()</code> is available. So is any state you captured in the closure: a
+    clock, an <code>Arc&lt;AtomicBool&gt;</code> flipped by an operator, or a queue depth read
+    from elsewhere in your process.
+</p>
+
+<h2 id="errors">Errors and cadence</h2>
+
+<p>
+    A pipeline's error is returned from <code>tick</code> unchanged, by <code>?</code>. The
+    rest of that stage does not run, and neither does any later stage. Only plan failures
+    are re-wrapped, as <code>SaciError::Scheduler</code>.
+</p>
+
+<p>
+    There is no rollback. Pipelines that already ran in that tick kept their effects. Their
+    datasets are mutated and, under <code>io</code>, their sinks have already been written
+    and finished. Systems reached by a retried tick therefore need to be idempotent, exactly
+    as they do under the distributed runner. The next <code>tick</code> starts again from
+    the top of the cached plan, so a pipeline that succeeded before the failure runs a
+    second time.
+</p>
+
+<p>
+    Nothing is carried between ticks except the plan and each pipeline's own data: the skip
+    flags are a fresh vector per tick. A scheduler with no pipelines ticks successfully and
+    does nothing.
+</p>
+
+<h2 id="inspecting">Reading results back</h2>
+
+<p>
+    Every pipeline keeps the <code>RunStats</code> from its most recent run, and the
+    scheduler hands you the pipelines themselves, by slice or by name.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>stats, and mutation between ticks</em></div>
+    <pre><code class="language-rust">// Registration order, not stage order.
+for p in sched.pipelines() {
+    let s = p.last_stats();
+    println!(
+        "{:&lt;8} {:&gt;3} systems  {:&gt;6} rows  {:&gt;5} ms  {} retries",
+        p.name(), s.systems_run, s.rows_produced, s.duration_millis, s.retries_this_batch,
+    );
+}
+
+// Feed a pipeline by hand between ticks.
+if let Some(p) = sched.get_mut("ingest") {
+    p.data_mut().append::&lt;Transaction&gt;(&amp;new_rows)?;
+}</code></pre>
+</div>
+
+<p>
+    A skipped pipeline is not re-run, so its <code>last_stats()</code> still holds the
+    figures from the tick in which it last ran. <code>rows_produced</code> is an
+    <code>isize</code> for that reason. It is a delta, and it can be negative.
+</p>
+
+<h2 id="choosing">When to reach for one</h2>
+
+<table class="rule-table">
+    <thead><tr><th>Reach for</th><th>When</th></tr></thead>
+    <tbody>
+        <tr>
+            <td><strong>One Pipeline</strong></td>
+            <td>One workload over one schema. The pipeline's own stage plan already removes the ordering constraint between independent systems, and a single <code>run()</code> is easier to reason about than a tick.</td>
+        </tr>
+        <tr>
+            <td><strong>A Scheduler</strong></td>
+            <td>Several workloads in one process, especially when they use different schemas, different cadences, or must run in a fixed order, such as an ingest pipeline feeding an enrichment pipeline that a report pipeline follows. Also the right tool when one workload should go quiet while another is idle: that is what a <code>Data</code> edge expresses.</td>
+        </tr>
+        <tr>
+            <td><strong>The distributed runner</strong></td>
+            <td>One workload that must span several nodes with claim leases, checkpoints and crash recovery. See <a href="{{ get_url(path='@/library/distributed.md') }}">Distributed processing</a>.</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    One boundary to know. <code>Scheduler</code> is a <code>saci-core</code> API that you
+    drive from your own binary. <code>saci-service</code> re-exports the type, but a
+    <a href="{{ get_url(path='@/service/_index.md') }}">service configuration</a> declares
+    workflows that its own runners drive, and the service never constructs a scheduler. A
+    standalone config may declare several workflows, which run concurrently with no edges
+    between them; cluster mode takes exactly one. Dependency edges, priority and the
+    data-dependency skip are something you write a <code>main</code> for.
+</p>
+
+<p>
+    That boundary is also where <code>BackpressureSpec::Predicate</code> stops applying.
+    It gates one <code>Pipeline</code> inside a hand-built <code>Scheduler</code>, and a
+    <code>saci-service</code> workflow never constructs a <code>Scheduler</code> at all.
+    What a service workflow gets instead is the runners' own
+    <a href="{{ get_url(path='@/service/operate/flow-control.md') }}">adaptive flow control</a>: an
+    automatic per-source admission target, config-driven rather than a closure, with no
+    predicate to write.
+</p>
+
+<h2 id="next">Next</h2>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/library/io.md') }}" class="next-card">
+        <span class="next-card-label">Moving data</span>
+        <h3>Sources &amp; Sinks</h3>
+        <p>Give a pipeline an inbox and an outbox, plus the sink depth a backpressure predicate reads.</p>
+    </a>
+    <a href="{{ get_url(path='@/library/distributed.md') }}" class="next-card">
+        <span class="next-card-label">Concept 05</span>
+        <h3>Distributed processing</h3>
+        <p>Take one pipeline across several nodes, with leases and checkpoints instead of ticks.</p>
+    </a>
+</div>
+
+{% endblock %}

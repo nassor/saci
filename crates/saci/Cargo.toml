@@ -1,0 +1,152 @@
+[package]
+name = "saci"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Embed SACI as a pure-Rust library: the columnar engine, the connectors that need nothing installed or already running, byte formats, and the wasm processor / native plugin authoring SDKs. No external database or message broker."
+
+[features]
+default = ["engine"]
+
+# One dependency carrying every capability this crate has, for a host-side
+# embedder: the engine, windowed aggregation, every connector and byte format
+# this crate carries, and both authoring SDKs.
+#
+# A wasm processor crate still builds with `--no-default-features --features
+# processor`: `all` reaches saci-core's `runtime` feature through `engine`,
+# and tokio cannot target wasm32-wasip2.
+#
+# `all_bundle_reaches_every_feature` in `crates/saci/tests/feature_bundles.rs`
+# expands this list through the `connectors` and `transformers` groups
+# transitively and requires every feature the crate declares to be reachable,
+# so a connector or byte format left out of its group fails it.
+all = [
+    "engine",
+    "windows",
+    "connectors",
+    "transformers",
+    "transformer-contract",
+    "processor",
+    "plugin",
+]
+
+# The columnar engine: Dataset, Pipeline, System, Scheduler, Component, plus
+# the Source/Sink traits and the schema cast helpers. Forwards saci-core's
+# `io` feature, which itself implies `runtime` (tokio and rayon stage
+# parallelism).
+engine = ["dep:saci-core", "saci-core/io"]
+
+# Beam-style windowed aggregation (WindowSpec, WatermarkState,
+# WindowedSystemBuilder, WindowAccumulator). `engine`, `processor` and
+# `plugin` each enable `dep:saci-core` directly (see both below), so
+# toggling saci-core's own `windows` feature here is enough regardless of
+# which of the three is active.
+windows = ["saci-core?/windows"]
+
+# The transformer contract (Transformer, BatchReader, BatchWriter,
+# MessageDecoder): pulled in by every connector that reads a byte format and
+# by every `transformer-*` feature below. Not meant to be enabled directly.
+transformer-contract = ["dep:saci-transformer"]
+
+# Connectors that need nothing installed or already running: a channel inside
+# the process, local disk, an embedded redb key/value file, an HTTP client, a
+# raw socket, a peer SACI service, and a DataFusion session the caller owns.
+# HTTP, TCP and the peer link speak the network and depend on no particular
+# server product. Excluded are saci-connector-kafka, -nats, -postgresql, -s3
+# and -turso, each of which requires a specific broker, database or object
+# store installed and running first.
+connector-channel = ["engine", "dep:saci-connector-channel"]
+connector-file = ["engine", "dep:saci-connector-file", "transformer-contract"]
+connector-redb = ["engine", "dep:saci-connector-redb", "transformer-contract"]
+connector-http = ["engine", "dep:saci-connector-http", "transformer-contract"]
+connector-tcp = ["engine", "dep:saci-connector-tcp", "transformer-contract"]
+# A `saci` node carries `RecordBatch`es natively, so this one needs no
+# transformer contract.
+connector-saci = ["engine", "dep:saci-connector-saci"]
+connector-datafusion = ["engine", "dep:saci-connector-datafusion"]
+connectors = [
+    "connector-channel",
+    "connector-file",
+    "connector-redb",
+    "connector-http",
+    "connector-tcp",
+    "connector-saci",
+    "connector-datafusion",
+]
+
+# Byte formats a connector reads and writes.
+transformer-arrow-ipc = ["dep:saci-transformer-arrow-ipc", "transformer-contract"]
+transformer-avro = ["dep:saci-transformer-avro", "transformer-contract"]
+transformer-csv = ["dep:saci-transformer-csv", "transformer-contract"]
+transformer-ndjson = ["dep:saci-transformer-ndjson", "transformer-contract"]
+transformer-parquet = ["dep:saci-transformer-parquet", "transformer-contract"]
+transformers = [
+    "transformer-arrow-ipc",
+    "transformer-avro",
+    "transformer-csv",
+    "transformer-ndjson",
+    "transformer-parquet",
+]
+
+# Author a WebAssembly Component Model processor pipeline by hand: `Pipeline`,
+# `System`, `Component` (the trait), `Config`, `Error`, `Result`,
+# `ProcessorState`, `RouteDecision` and `export_pipeline!`. A processor
+# targets wasm32-wasip2, so build with `--no-default-features --features
+# processor`: saci-core then carries its `processor` feature (the
+# sequential pollster executor) instead of `engine`'s `runtime`, which
+# pulls in tokio and cannot target wasm32-wasip2.
+#
+# Does NOT carry the `#[derive(Component)]`/`#[transform]`/`#[fold]`/
+# `#[processor]` macros: their expansions name `::saci_processor::...`
+# literally (crates/saci-macros/src/lib.rs's own doc), which only resolves
+# when `saci-processor` is a direct dependency of the crate invoking them,
+# not a transitive one reached through this facade. A processor crate that
+# wants those macros depends on `saci-processor` directly instead of (or
+# alongside) `saci`.
+processor = ["dep:saci-processor", "dep:saci-core", "saci-core/processor"]
+
+# Author a native plugin by hand: a cdylib the host `dlopen`s, exporting
+# the saci-plugin-abi C ABI through `export_plugin!`. Also enables
+# `dep:saci-core` directly (matching `processor`, above): saci-plugin's own
+# edge to saci-core already asks for `runtime`, so this adds no new feature
+# to the build, only a name this crate can use directly instead of going
+# through `saci-plugin::` for every re-export.
+plugin = ["dep:saci-plugin", "dep:saci-core"]
+
+[dependencies]
+saci-core = { workspace = true, optional = true }
+
+saci-connector-channel = { workspace = true, optional = true }
+saci-connector-file = { workspace = true, optional = true }
+saci-connector-redb = { workspace = true, optional = true }
+saci-connector-http = { workspace = true, optional = true }
+saci-connector-tcp = { workspace = true, optional = true }
+saci-connector-saci = { workspace = true, optional = true }
+saci-connector-datafusion = { workspace = true, optional = true }
+
+saci-transformer = { workspace = true, optional = true }
+saci-transformer-arrow-ipc = { workspace = true, optional = true }
+saci-transformer-avro = { workspace = true, optional = true }
+saci-transformer-csv = { workspace = true, optional = true }
+saci-transformer-ndjson = { workspace = true, optional = true }
+saci-transformer-parquet = { workspace = true, optional = true }
+
+saci-processor = { workspace = true, optional = true }
+saci-plugin = { workspace = true, optional = true }
+
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+[[example]]
+name = "first_pipeline"
+path = "../../examples/native/first_pipeline.rs"
+required-features = ["engine"]

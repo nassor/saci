@@ -1,0 +1,177 @@
+// SACI standalone config: a long-running stream demonstrating all three
+// fan-out splits in ONE workflow.
+//
+//   branching_publish --NDJSON--> branching.orders (NATS core subject)
+//                                    |
+//                                    v  this service (stream mode)
+//   in → out_mirror                       (SOURCE SPLIT: every message, verbatim)
+//   in → router_wasm   → out_wasm_high / out_wasm_low      (WASM SPLIT)
+//   in → router_plugin → out_plugin_premium / out_plugin_standard (PLUGIN SPLIT)
+//
+// Each router decides per pass from the first row it is handed, and a pass
+// carries one message only while the publisher stays slow enough for the
+// source's poll window to close between messages. Both branches of each
+// split fill as the publisher mixes priorities. `stream` mode delivers
+// at-most-once and runs until Ctrl-C.
+//
+// Build the two processors first, from the repository root:
+//   cargo build --release -p branching-wasm --target wasm32-wasip2
+//   cargo build --release -p branching-plugin
+//
+// Start NATS, then run the service and the publisher:
+//   docker run -d --name saci-nats -p 4222:4222 nats:2.11-alpine
+//   cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve \
+//     --config examples/branching/branching.kdl
+//   cargo run -p saci-service --features connector-nats --example branching_publish -- --rate 50
+//
+// Every message lands in out-mirror.csv (source multicast), and each router
+// appends to exactly one of its branch files: priority "high" goes to
+// out-wasm-high.csv and out-plugin-premium.csv, "low" to out-wasm-low.csv and
+// out-plugin-standard.csv.
+//
+// On Windows set SACI_PLUGIN_LIB=target/release/branching_plugin.dll too: the
+// plugin cdylib is branching_plugin.dll there, not libbranching_plugin.so.
+
+mode "standalone"
+
+node id=1 name="saci-branching" data_dir="${SACI_DATA_DIR:-/tmp/saci-branching}"
+
+// A core NATS subscription never reaches EOF, so the interval runner would
+// spin on a source that is never done. The stream runner drives a live source
+// batch by batch instead, and requires exactly one declared source, which
+// this config has.
+run_mode kind="stream"
+
+// Adaptive flow control: one admitted chunk multicasts to three downstream
+// nodes at once (the mirror sink and both routers), and each router then
+// routes every message in that chunk to one of its own two branch sinks by
+// priority, so the rows this source admits reach five sink surfaces in
+// total. A shorter epoch reacts to the live publisher sooner than the 60 s
+// default, a gentler 1.5x growth step keeps the candidate size from
+// swinging as hard as the default 2x, and an explicit 100 ms target keeps
+// the search honest about this workflow's per-message latency contract.
+// min_rows/max_rows/start_rows stay at the hard defaults.
+flow_control {
+    adjust_interval_ms 20000
+    growth_factor 1.5
+    target_latency_ms 100
+}
+
+workflow "branching" {
+    // The source decodes one JSON object per message; the sinks write CSV.
+    // One transformer per byte format the workflow touches.
+    transformer "ndjson_fmt" format="ndjson"
+
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // `component` must be "Order": the load-time graph check compares it
+    // against the component names the processors report from `describe()`.
+    // Both routers decide per pass from this source's first row, so how many
+    // messages a pass carries changes which branch some rows take.
+    source "in" type="NatsSource" component="Order" transformer="ndjson_fmt" {
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-branching"
+            }
+
+            mode kind="core" subject="branching.orders"
+
+            // Both `Order` fields, non-nullable, in schema order. The NDJSON
+            // decode rejects a message that violates the declared types, so
+            // the publisher's output is the contract here.
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+        }
+    }
+
+    // `cargo build --release --target wasm32-wasip2` writes the finished
+    // component here: rustc links the cdylib into a component itself.
+    wasm "router_wasm" module="target/wasm32-wasip2/release/branching_wasm.wasm"
+
+    // A cdylib's file name is platform specific: libbranching_plugin.so on
+    // Linux, libbranching_plugin.dylib on macOS, branching_plugin.dll on
+    // Windows. Override SACI_PLUGIN_LIB to pick another one.
+    plugin "router_plugin" library="${SACI_PLUGIN_LIB:-target/release/libbranching_plugin.so}"
+
+    // The mirror sink proves the source split: every message is written here
+    // verbatim while the same batch also feeds both routers. Within a run
+    // FileSink appends and the CSV header is written once, before the first
+    // batch. Every sink here sets truncate, so each `serve` starts its five
+    // files over rather than adding to the previous run's rows.
+    sink "out_mirror" type="FileSink" component="Order" transformer="csv_fmt" {
+        config {
+            path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-mirror.csv"
+            truncate #true
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+        }
+    }
+
+    sink "out_wasm_high" type="FileSink" component="Order" transformer="csv_fmt" {
+        config {
+            path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-wasm-high.csv"
+            truncate #true
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+        }
+    }
+
+    sink "out_wasm_low" type="FileSink" component="Order" transformer="csv_fmt" {
+        config {
+            path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-wasm-low.csv"
+            truncate #true
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+        }
+    }
+
+    sink "out_plugin_premium" type="FileSink" component="Order" transformer="csv_fmt" {
+        config {
+            path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-plugin-premium.csv"
+            truncate #true
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+        }
+    }
+
+    sink "out_plugin_standard" type="FileSink" component="Order" transformer="csv_fmt" {
+        config {
+            path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-plugin-standard.csv"
+            truncate #true
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+        }
+    }
+
+    // Source split: the mirror link and both router links are all unlabelled,
+    // so every batch multicasts to every downstream.
+    link from="in" to="out_mirror"
+    link from="in" to="router_wasm"
+    link from="in" to="router_plugin"
+
+    // WASM split: each branch names the sink that receives that branch's
+    // batches. Every outbound link of a processor is labelled: a node cannot
+    // mix labelled and unlabelled outbound links.
+    link from="router_wasm" to="out_wasm_high" branch="high"
+    link from="router_wasm" to="out_wasm_low" branch="low"
+
+    // Plugin split.
+    link from="router_plugin" to="out_plugin_premium" branch="premium"
+    link from="router_plugin" to="out_plugin_standard" branch="standard"
+}
+
+http bind="127.0.0.1:0" disabled=#false
+
+// Every live message opens a source-drain span, three runtime spans where
+// it fans out to the mirror sink and both routers, and one more sink-write
+// span at whichever branch each router picks, so a handful of spans open
+// per message at whatever rate the publisher runs. Sampling at 1% keeps
+// that bounded while still surfacing occasional traces for shape.
+// error_sample_ratio stays at 1.0, so a failure is never sampled away.
+observability log_format="pretty" log_level="info" sample_ratio=0.01 error_sample_ratio=1.0

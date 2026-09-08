@@ -1,0 +1,29 @@
+[package]
+name = "saci-transformer-arrow-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "The arrow-ipc byte format for SACI: a Transformer carrying one whole RecordBatch per message, and one Arrow IPC stream per byte stream."
+
+[dependencies]
+# `io` for `cast_batch`: the stream carries its own schema, so a batch is
+# projected onto the declared `schema_fields` with the ingestion layer's
+# existing helper.
+saci-core        = { workspace = true, features = ["io"] }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+# The payload format. Exact-pinned workspace-wide.
+arrow-ipc     = { workspace = true }
+arrow-schema  = { workspace = true }
+# `concat_batches` folds a multi-batch payload window into one batch, and
+# `arrow-cast` supplies the projection's cast kernel.
+arrow-select  = { workspace = true }
+arrow-cast    = { workspace = true }
+
+[dev-dependencies]
+tempfile      = { workspace = true }

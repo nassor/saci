@@ -1,0 +1,578 @@
+{% extends "base.html" %}
+
+{% block title %}Tracing &amp; metrics — SACI{% endblock %}
+{% block description %}SACI emits a three-level span tree behind the tracing feature flag, and saci-service exposes a Prometheus /metrics endpoint carrying thirty-two series. The spans, the config keys, OTLP span export, and what is not there.{% endblock %}
+{% block og_title %}Tracing &amp; metrics — SACI{% endblock %}
+{% block og_description %}One feature flag decides whether anything is emitted at all. Exactly what comes out, and what does not.{% endblock %}
+
+{% block content %}
+
+<div class="page-kicker">Reference</div>
+<h1>Tracing &amp; metrics</h1>
+
+<p class="page-lede">
+    SACI emits structured <code>tracing</code> events, gated behind one feature flag.
+    <code>saci-core</code> emits; <code>saci-service</code> exports. This page is
+    reference: the spans, the config keys, the series and their writers. The two
+    sections "Where instrumentation comes from" and "The spans and events" are
+    explanation, for readers who want the shape of the tree before the exact
+    keys.
+</p>
+
+<dl class="page-facts">
+    <dt>In one line</dt>
+    <dd>A nested span tree, a <code>fmt</code> subscriber, optional OTLP span export, and a <strong>Prometheus endpoint carrying thirty-two series</strong></dd>
+    <dt>You need</dt>
+    <dd>The <code>tracing</code> feature on <code>saci-core</code> or <code>saci-service</code>; the <code>service</code> feature turns it on for you</dd>
+    <dt>Read this if</dt>
+    <dd>You are wiring a subscriber, picking a <code>RUST_LOG</code> filter, pointing spans at a collector, or scraping <code>/metrics</code></dd>
+</dl>
+
+<h2 id="where">Where instrumentation comes from</h2>
+
+<p><strong>Explanation.</strong> The emission sites, the compile-time gate they sit behind, and the two exits.</p>
+
+<p>
+    Two things leave a running SACI process. <code>tracing</code> events and spans go to
+    whatever subscriber you installed, and on to an OTLP collector when one is configured.
+    Prometheus metrics go to the <code>/metrics</code> route on the service's HTTP control
+    plane. One value crosses between them: <code>saci_stage_duration_seconds</code> is
+    measured from the lifetime of the <code>pipeline.stage</code> span.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 466" role="img" aria-labelledby="trc-title trc-desc">
+        <title id="trc-title">Where SACI instrumentation is produced and where it leaves</title>
+        <desc id="trc-desc">
+            Emission sites live in saci-core and saci-service, plus a WebAssembly processor
+            that logs and reports metrics across the component boundary through host-io.
+            Every site sits behind the compile-time cfg(feature = "tracing") gate, and what
+            passes it reaches one tracing subscriber, which forwards spans to an OTLP
+            collector when one is configured. Separately, the watchdog and the runners
+            record thirty-two series that the GET /metrics route encodes in Prometheus text
+            format. One value crosses between the two exits: a layer on the subscriber
+            times each pipeline.stage span and records it as a stage duration sample. The
+            data plane carries no per-row instrumentation.
+        </desc>
+
+        <text class="t-title" x="0" y="14">Instrumentation</text>
+        <text class="t-sm" x="0" y="30">saci-core emits, saci-service exports, one feature decides</text>
+
+        <!-- the data plane: the thing being observed, and it is untouched -->
+        <g class="anim anim-1">
+            <rect class="blk blk-data" x="0" y="44" width="654" height="30" rx="8"/>
+            <text class="t-lbl t-data" x="12" y="63">batch &rarr; run_on &rarr; checkpoint</text>
+            <text class="t-sm t-end" x="642" y="63">spans per run and per stage, no per-row events</text>
+        </g>
+
+        <!-- emission sites -->
+        <g class="anim anim-1">
+            <rect class="blk blk-ctl" x="0" y="92" width="186" height="72" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="92" width="186" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="106" width="186" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="107">saci-core</text>
+
+            <rect class="row" x="8" y="120" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="133">retry: task_attempt</text>
+            <rect class="row" x="8" y="142" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="155">windows::system warn</text>
+        </g>
+
+        <g class="anim anim-2">
+            <rect class="blk blk-ctl" x="0" y="180" width="186" height="152" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="180" width="186" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="194" width="186" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="195">saci-service</text>
+            <text class="t-sm t-end" x="178" y="195">spans + events</text>
+
+            <rect class="row" x="8" y="208" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="221">service::standalone</text>
+            <rect class="row" x="8" y="228" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="241">distributed::runner</text>
+            <rect class="row" x="8" y="248" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="261">consensus::transport</text>
+            <rect class="row" x="8" y="268" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="281">wasm::host_impl</text>
+            <rect class="row" x="8" y="288" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="301">wasm::runner</text>
+            <rect class="row" x="8" y="308" width="170" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="321">service::http, shutdown</text>
+        </g>
+
+        <!-- the processor logs across the component boundary -->
+        <g class="anim anim-3">
+            <rect class="blk blk-bnd" x="0" y="352" width="186" height="64" rx="8"/>
+            <rect class="hd hd-bnd" x="0" y="352" width="186" height="20" rx="8"/>
+            <rect class="hd hd-bnd" x="0" y="364" width="186" height="8"/>
+            <text class="t-lbl t-bnd" x="12" y="366">processor .wasm</text>
+            <text class="t-sm" x="12" y="388">host-io::log</text>
+            <text class="t-sm" x="12" y="404">host-io::metric &rarr; series</text>
+
+            <path class="arw arw-bnd" d="M93 350 V336" marker-end="url(#trc-b)"/>
+            <text class="t-sm t-bnd" x="102" y="346">bridged host-side</text>
+        </g>
+
+        <!-- the compile-time gate -->
+        <g class="anim anim-2">
+            <text class="t-sm t-ctl" x="222" y="158">#[cfg(feature = "tracing")]</text>
+            <rect class="blk blk-ctl" x="222" y="166" width="150" height="76" rx="8"/>
+            <rect class="hd hd-ctl" x="222" y="166" width="150" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="222" y="180" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="234" y="181">feature gate</text>
+
+            <rect class="row" x="230" y="194" width="134" height="18" rx="3"/>
+            <text class="t-sm" x="238" y="207">on: Event emitted</text>
+            <rect class="row-x" x="230" y="216" width="134" height="18" rx="3"/>
+            <text class="t-sm" x="238" y="229">off: not compiled</text>
+
+            <path class="arw arw-ctl" d="M186 128 H202 V196 H214" marker-end="url(#trc-c)"/>
+            <path class="arw arw-ctl" d="M186 256 H202 V212 H214" marker-end="url(#trc-c)"/>
+        </g>
+
+        <!-- the metric writer, which does not go through the gate -->
+        <g class="anim anim-3">
+            <rect class="blk blk-ctl" x="222" y="282" width="150" height="64" rx="8"/>
+            <rect class="hd hd-ctl" x="222" y="282" width="150" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="222" y="294" width="150" height="8"/>
+            <text class="t-lbl t-ctl" x="234" y="296">watchdog</text>
+            <text class="t-sm" x="234" y="318">1 tick / second</text>
+            <text class="t-sm" x="234" y="334">service::http</text>
+        </g>
+
+        <!-- exit one: a subscriber -->
+        <g class="anim anim-4">
+            <rect class="blk blk-ctl" x="406" y="158" width="248" height="100" rx="8"/>
+            <rect class="hd hd-ctl" x="406" y="158" width="248" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="406" y="172" width="248" height="8"/>
+            <text class="t-lbl t-ctl" x="418" y="173">tracing subscriber</text>
+
+            <rect class="row" x="414" y="184" width="232" height="16" rx="3"/>
+            <text class="t-sm" x="422" y="196">EnvFilter: RUST_LOG / log_level</text>
+            <rect class="row" x="414" y="202" width="232" height="16" rx="3"/>
+            <text class="t-sm" x="422" y="214">Sampler: the two sampling ratios</text>
+            <rect class="row" x="414" y="220" width="232" height="16" rx="3"/>
+            <text class="t-sm" x="422" y="232">fmt layer: pretty | json</text>
+            <text class="t-sm" x="418" y="252">&rarr; stdout, dashboard, OTLP spans</text>
+
+            <path class="arw arw-ctl" d="M372 208 H398" marker-end="url(#trc-c)"/>
+        </g>
+
+        <!-- exit two: the scrape endpoint -->
+        <g class="anim anim-4">
+            <path class="ln" d="M406 272 H654"/>
+            <text class="t-sm" x="406" y="268">one value crosses: the stage histogram</text>
+
+            <rect class="blk blk-ctl" x="406" y="284" width="248" height="100" rx="8"/>
+            <rect class="hd hd-ctl" x="406" y="284" width="248" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="406" y="298" width="248" height="8"/>
+            <text class="t-lbl t-ctl" x="418" y="299">GET /metrics</text>
+
+            <rect class="row" x="414" y="312" width="232" height="18" rx="3"/>
+            <text class="t-sm t-ctl" x="422" y="325">21 service series</text>
+            <rect class="row" x="414" y="334" width="232" height="18" rx="3"/>
+            <text class="t-sm t-ctl" x="422" y="347">6 saci_processor_* series</text>
+            <text class="t-sm" x="418" y="369">text/plain; version=0.0.4</text>
+
+            <path class="arw arw-ctl" d="M372 314 H398" marker-end="url(#trc-c)"/>
+        </g>
+
+        <g class="anim anim-4">
+            <path class="ln" d="M0 436 H654"/>
+            <text class="t-sm" x="0" y="456">Turn the feature off and the left column vanishes at compile time. <tspan class="t-ctl">/metrics</tspan> keeps every series except the stage histogram.</text>
+        </g>
+
+        <defs>
+            <marker id="trc-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+            <marker id="trc-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--boundary-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> the work being observed</span>
+        <span class="k-control"><i></i> emission and export</span>
+        <span class="k-boundary"><i></i> the processor, logging across the seam</span>
+    </div>
+    <figcaption class="dgm-cap">
+        The log stream and <code>/metrics</code> are separate exits with one link: a
+        subscriber layer times each <code>pipeline.stage</code> span and records
+        <code>saci_stage_duration_seconds</code>. Every other series is written directly by
+        a runner, the watchdog or the processor host.
+    </figcaption>
+</div>
+
+<h2 id="feature">The tracing feature</h2>
+
+<p><strong>Reference.</strong> The compile-time switch, and the two fallbacks it leaves behind.</p>
+
+<p>
+    Both crates declare it, and it is off by default in <code>saci-core</code>
+    (<code>default = ["runtime"]</code>). In <code>saci-service</code> the
+    <code>service</code> feature includes <code>tracing</code>, and the
+    <code>saci-service</code> binary requires <code>service</code>, so the shipped binary
+    always has instrumentation compiled in.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>TOML</span><em>as declared; the service list is abridged</em></div>
+    <pre><code class="language-toml"># crates/saci-core/Cargo.toml
+tracing = ["dep:tracing"]
+
+# crates/saci-service/Cargo.toml
+tracing = ["dep:tracing", "saci-core/tracing"]
+service = ["saci-core/io", "distributed", "parquet-checkpoint", "tracing", "dep:saci-config", ...]</code></pre>
+</div>
+
+<div class="note">
+    <span class="note-label">Constraint</span>
+    <p>
+        This is a <b>compile-time</b> switch, not a runtime one. Every emission site sits
+        inside <code>#[cfg(feature = "tracing")]</code>, so with the feature off the call
+        <b>and its field formatting</b> are absent from the binary. There is no
+        disabled-level cost to pay, and emission cannot be turned back on without
+        rebuilding.
+    </p>
+</div>
+
+<p>
+    Two sites keep a fallback for the feature-off build, because losing them silently
+    would be worse than the dependency. <code>HostIo::log</code> falls back to
+    <code>eprintln!</code> so processor log lines are never dropped, and
+    <code>DistributedRunner</code>'s claim-release path prints to stderr so a failed
+    release is always visible.
+</p>
+
+<p>
+    Inside a <code>.wasm</code> processor the feature is never available:
+    <code>saci-processor</code> takes <code>saci-core</code> with no default features and
+    only its <code>processor</code> feature. A processor
+    reports through the <code>host-io</code> imports instead: <code>log</code> and
+    <code>metric</code>, which the host bridges into its own subscriber.
+</p>
+
+<p>
+    <b>A processor's <code>println!</code> goes nowhere.</b> The host builds each processor's WASI
+    context with <code>WasiCtxBuilder::new().build()</code> and never calls
+    <code>inherit_stderr()</code>. That builder's documented default discards everything
+    written to stdout and stderr, so <code>println!</code> and <code>eprintln!</code>
+    inside a processor vanish. <code>host-io::log</code> is the only channel out.
+</p>
+
+<h2 id="events">The spans and events, module by module</h2>
+
+<p><strong>Explanation.</strong> The shape of the tree, then the exact names and fields.</p>
+
+<p>
+    Nine span names, plus flat events across the targets tabulated below.
+    <code>pipeline.run</code>, <code>pipeline.stage</code> and
+    <code>system.execute</code> come from <code>saci-core</code>'s execution path at
+    <code>info</code>, and <code>task_attempt</code> comes from the retry driver inside
+    them, also at <code>info</code> but only on a retry. The host adds
+    five, all at <code>debug</code>: <code>workflow.batch</code> around one iteration,
+    <code>source.drain</code>,
+    <code>runtime.run</code>, <code>sink.write</code>, and <code>processor.batch</code>
+    around one out-of-process processor call. One whole tree of those five opens per item,
+    so <code>log_level="info"</code> materialises none of them and
+    <code>log_level="debug"</code> is what brings the per-item waterfall back. The default
+    <code>log_level="error"</code> materialises no span at all.
+</p>
+
+<p>
+    Every host span carries
+    <code>workflow</code>, the declared workflow id, and each node's span carries that
+    node's declared id. Field names below are the exact keys the
+    macros record, so they are what you match on in a JSON log pipeline.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Target</th><th>Levels</th><th>What it reports, and with which fields</th></tr></thead>
+    <tbody>
+        <tr>
+            <td><code>saci_core::pipeline::execution</code></td>
+            <td>info spans</td>
+            <td>Three nested spans per run: <code>pipeline.run</code> with <code>pipeline</code>, <code>stages</code> and <code>rows</code>; <code>pipeline.stage</code> with <code>stage</code> (0-based) and <code>systems</code>; and <code>system.execute</code> with <code>system</code>, the name from <code>SystemMeta</code>. The parallel-stage fan-out re-enters the stage span inside each <code>spawn_blocking</code> closure, so a sliced system's attempts stay under the right parent.</td>
+        </tr>
+        <tr>
+            <td><code>saci_core::retry</code></td>
+            <td>info span on retries, warn, error</td>
+            <td>The <code>task_attempt</code> span at <code>info</code>, carrying <code>attempt</code> (1-based) and <code>max_attempts</code>. It opens only on a retry: a first attempt that succeeds opens no span, so a clean run produces none. Then a <code>warn</code> per failed-but-retryable attempt with <code>error</code>, <code>attempt</code>, <code>max_attempts</code>, <code>delay_ms</code>, and an <code>error</code> on exhaustion with <code>error</code> and <code>attempts</code>. Both the async and the blocking driver emit it, from one shared attempt counter.</td>
+        </tr>
+        <tr>
+            <td><code>saci_core::windows::system</code></td>
+            <td>warn</td>
+            <td>Rows dropped because their timestamp was null: <code>component</code>, <code>time_field</code>, <code>null_count</code>. Needs the <code>windows</code> feature too.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::service::standalone</code></td>
+            <td>debug spans, info, warn, error</td>
+            <td>One <code>workflow.batch</code> span per iteration with <code>workflow</code>, <code>iteration</code> and <code>rows</code>, one <code>source.drain</code> per source with <code>workflow</code>, <code>source</code>, <code>component</code> and <code>rows</code>, one <code>runtime.run</code> per processor with <code>workflow</code>, <code>processor</code>, <code>rows_in</code> and <code>rows_out</code>, and one <code>sink.write</code> per sink with <code>workflow</code>, <code>sink</code>, <code>component</code> and <code>rows</code>, in topological order. Every iteration event names the batch span as its parent, so the whole iteration is one trace. The busiest module.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::service::stream</code></td>
+            <td>debug spans, info, warn, error</td>
+            <td>The same span set per arriving item, minus <code>source.drain</code>: the wait for input precedes the item and would otherwise dominate its latency. Because those spans are <code>debug</code> and the default level omits them, every error and warning here names its own <code>workflow</code>, <code>iteration</code> and node rather than relying on a parent span's fields, and renders as a root record in the Logs tab. Events carry <code>source</code>, <code>sink</code>, <code>processor</code> and <code>error</code>.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::distributed::runner</code></td>
+            <td>debug spans, info, warn, error</td>
+            <td>One <code>workflow.batch</code> span per claimed batch with <code>workflow</code>, <code>claim</code> and <code>rows</code>, holding one <code>runtime.run</code>. Expired-lease sweeps and every release-instead-of-ack path: <code>reclaimed_count</code>, <code>claim_id</code>, <code>error</code>.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::distributed::consensus::transport::server</code></td>
+            <td>info, debug, warn</td>
+            <td>The Raft TCP accept loop: <code>addr</code> on bind, <code>peer</code> per connection, <code>error</code> on frame, decode and encode failures.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::distributed::parquet_checkpoint</code></td>
+            <td>debug</td>
+            <td>A parent-directory <code>fsync</code> that failed after a checkpoint write: <code>error</code>. Needs the <code>parquet-checkpoint</code> feature.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::wasm::host_impl</code></td>
+            <td>trace to error</td>
+            <td>The processor's own <code>host-io::log</code> lines, re-emitted at the level the processor asked for and tagged <code>pipeline</code> and <code>target</code>. They land inside that batch's <code>processor.batch</code> span, because the runtime re-enters it on the blocking thread the guest call runs on. A <code>host-io::metric</code> call records the <code>saci_processor_metric</code> histogram, labelled with the metric name, and also emits a <code>trace</code> event with <code>metric</code> and <code>value</code>.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::wasm::runner</code></td>
+            <td>debug span, warn</td>
+            <td>One <code>processor.batch</code> span per <code>run-batch</code> call, covering the IPC encode, the guest call and the IPC decode: <code>workflow</code>, <code>processor</code>, <code>rows_in</code>, <code>rows_out</code>, <code>systems_run</code>, <code>retries</code>, <code>guest_wall_us</code>, the last four read back off the WIT <code>run-metrics</code> record. The <code>warn</code> covers building the template dataset: <code>describe()</code> failed, or one component's schema would not parse (<code>component</code>, <code>error</code>).</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::plugin::runtime</code></td>
+            <td>debug span, debug</td>
+            <td>The same <code>processor.batch</code> span for a native plugin, with <code>plugin_wall_us</code> in place of <code>guest_wall_us</code>. The <code>debug</code> reports a loaded plugin's <code>plugin</code>, <code>version</code>, <code>stateful</code> and <code>components</code>.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::service::http</code>, <code>::shutdown</code></td>
+            <td>info, debug, warn, error</td>
+            <td>Control-plane bind and clean shutdown, signal receipt, and the 30-second shutdown budget being exceeded.</td>
+        </tr>
+        <tr>
+            <td><code>saci_service::commands::serve</code></td>
+            <td>info, error</td>
+            <td>Binary startup (<code>node_id</code>), which of signal-or-runner-exit fired first, and the exit path.</td>
+        </tr>
+        <tr>
+            <td><code>saci::flow_control</code></td>
+            <td>info</td>
+            <td>The adaptive-flow-control lines: <code>flow control starting</code> per governed source, <code>flow control decision</code> per episode, <code>flow control finished</code> per governed source at runner exit, and one naming each <code>stream</code> source a windowed path leaves ungoverned. The <code>EnvFilter</code> enables this target at <code>info</code> whatever <code>log_level</code> says, and the sampler never drops it, so admission control is readable at the error-only default.</td>
+        </tr>
+        <tr>
+            <td><code>saci::windowing</code></td>
+            <td>warn</td>
+            <td>One condition, per windowed processor node: every row of an arrival is beyond the node's <code>allowed_lateness_ms</code>, so no window opens or closes and its sinks receive nothing. One line opens the run and one ends it, and <code>saci_window_late_arrivals_total</code> counts every arrival in between. Enabled at <code>warn</code> whatever <code>log_level</code> says, and never sampled, because every other number reads healthy while it lasts.</td>
+        </tr>
+        <tr>
+            <td><code>saci::heal</code></td>
+            <td>warn</td>
+            <td>The connector self-healing lines, every one carrying <code>workflow</code>, <code>node</code> and <code>role</code>: <code>connector heal scheduled</code> adds <code>attempt</code>, <code>delay_ms</code> and <code>consecutive</code>; <code>connector healed</code> adds <code>attempt</code>; <code>connector heal failed</code> adds <code>attempt</code> and <code>error</code>; <code>connector heal exhausted</code> adds <code>attempts</code>, the configured maximum it spent; and <code>connector recovered</code> carries the three common fields alone. <code>saci_connector_heals_total</code> and <code>saci_connector_heal_failures_total</code> count the outcomes. Enabled at <code>warn</code> whatever <code>log_level</code> says, and never sampled, so the pair a heal produces is never split by a level filter.</td>
+        </tr>
+        <tr>
+            <td><code>tower_http::trace</code></td>
+            <td>info, debug</td>
+            <td>Not SACI code, but it is in the output: <code>build_router</code> installs <code>TraceLayer::new_for_http()</code>, so each request to <code>/health</code>, <code>/ready</code>, <code>/metrics</code> or <code>/status</code> gets a span and request/response events.</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    Spans nest, so a JSON log line carries its whole ancestry and a collector can
+    reconstruct one trace per iteration. The host draws the outer three levels.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 172" role="img" aria-labelledby="bat-t bat-d">
+        <title id="bat-t">The host spans one iteration opens</title>
+        <desc id="bat-d">
+            workflow.batch wraps one iteration and carries the workflow id, the iteration
+            number and the row count. Inside it, one source.drain span per source carries
+            the source node id, the component it writes and the rows drained; one
+            runtime.run span per processor carries the processor node id and the rows in
+            and out; and one sink.write span per sink carries the sink node id, the
+            component it reads and the rows written. Inside runtime.run sits whatever the
+            runtime opens: pipeline.run and its stage and system spans for a native
+            pipeline, or one processor.batch for a WASM processor or a native plugin.
+        </desc>
+
+        <g class="anim anim-1">
+            <rect class="blk blk-ctl" x="0" y="8" width="654" height="156" rx="8"/>
+            <text class="t-lbl t-ctl" x="12" y="28">workflow.batch</text>
+            <text class="t-sm t-end" x="642" y="28">workflow, iteration, rows</text>
+        </g>
+
+        <g class="anim anim-2">
+            <rect class="row row-r" x="20" y="40" width="614" height="22" rx="3"/>
+            <text class="t-sm" x="30" y="55">source.drain</text>
+            <text class="t-sm t-end" x="624" y="55">source, component, rows</text>
+        </g>
+
+        <g class="anim anim-3">
+            <rect class="blk blk-ctl" x="20" y="70" width="614" height="60" rx="8"/>
+            <text class="t-lbl t-ctl" x="32" y="90">runtime.run</text>
+            <text class="t-sm t-end" x="622" y="90">processor, rows_in, rows_out</text>
+            <rect class="blk blk-bnd" x="40" y="98" width="574" height="24" rx="4"/>
+            <text class="t-sm t-bnd" x="52" y="114">processor.batch</text>
+            <text class="t-sm t-end" x="602" y="114">processor, rows_in, rows_out, retries</text>
+        </g>
+
+        <g class="anim anim-4">
+            <rect class="row row-w" x="20" y="138" width="614" height="22" rx="3"/>
+            <text class="t-sm" x="30" y="153">sink.write</text>
+            <text class="t-sm t-end" x="624" y="153">sink, component, rows</text>
+        </g>
+    </svg>
+    </div>
+    <figcaption class="dgm-cap">
+        One source and one sink around one WASM processor opens five spans per
+        iteration. A native runtime puts <code>pipeline.run</code> where
+        <code>processor.batch</code> sits, and two linked processors open one
+        <code>runtime.run</code> and one <code>processor.batch</code> each.
+    </figcaption>
+</div>
+
+<p>
+    A native pipeline's <code>pipeline.run</code> nests three levels further. A processor
+    opens the same three inside the guest, where the host cannot see them, so a WASM
+    processor is one span rather than a subtree.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 150" role="img" aria-labelledby="spn-t spn-d">
+        <title id="spn-t">The four nested spans a pipeline run opens</title>
+        <desc id="spn-d">
+            pipeline.run wraps the whole call and carries the pipeline name, the stage
+            count and the row count. Inside it, one pipeline.stage span per stage carries
+            the stage index and how many systems it holds. Inside that, one system.execute
+            span per system carries the system name. Innermost, a task_attempt span
+            carrying the attempt number and the maximum, opened only on a retry: a first
+            attempt that succeeds opens none.
+        </desc>
+
+        <g class="anim anim-1">
+            <rect class="blk blk-ctl" x="0" y="8" width="654" height="134" rx="8"/>
+            <text class="t-lbl t-ctl" x="12" y="28">pipeline.run</text>
+            <text class="t-sm t-end" x="642" y="28">pipeline, stages, rows</text>
+        </g>
+
+        <g class="anim anim-2">
+            <rect class="blk blk-ctl" x="20" y="40" width="614" height="98" rx="8"/>
+            <text class="t-lbl t-ctl" x="32" y="60">pipeline.stage</text>
+            <text class="t-sm t-end" x="622" y="60">stage, systems</text>
+        </g>
+
+        <g class="anim anim-3">
+            <rect class="blk blk-ctl" x="40" y="72" width="574" height="62" rx="8"/>
+            <text class="t-lbl t-ctl" x="52" y="92">system.execute</text>
+            <text class="t-sm t-end" x="602" y="92">system</text>
+        </g>
+
+        <g class="anim anim-4">
+            <rect class="row" x="60" y="104" width="534" height="22" rx="3"/>
+            <text class="t-sm" x="70" y="119">task_attempt &middot; retries only</text>
+            <text class="t-sm t-end" x="584" y="119">attempt, max_attempts</text>
+        </g>
+    </svg>
+    </div>
+    <figcaption class="dgm-cap">
+        Three stages of two systems each, all succeeding first try, opens one
+        <code>pipeline.run</code>, three <code>pipeline.stage</code>, six
+        <code>system.execute</code> and <b>zero</b> <code>task_attempt</code> spans. The
+        innermost box appears only once a system has to be retried.
+    </figcaption>
+</div>
+
+<h2 id="subscriber">Installing a subscriber</h2>
+
+<p><strong>Reference.</strong> What a library embedder must do, and what the binary does instead.</p>
+
+<p>
+    SACI never installs a subscriber for you when you use it as a library, so without one
+    every event is discarded. The minimum is <code>tracing-subscriber</code> with the
+    <code>fmt</code> and <code>env-filter</code> features.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>TOML</span><em>path dependencies: these crates are not published</em></div>
+    <pre><code class="language-toml">[dependencies]
+saci-core = { path = "../saci-core", features = ["tracing"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }</code></pre>
+</div>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>install once, before the first pipeline runs</em></div>
+    <pre><code class="language-rust">use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    // build and run your pipeline; the pipeline.run span tree and any
+    // window or runner events now reach stdout
+}</code></pre>
+</div>
+
+<p>
+    The service binary does this for you. <code>saci-service serve</code> calls
+    <code>init_logging</code> before anything else can emit, and treats a
+    second call as an error because the global subscriber is already installed. It stacks
+    the <code>EnvFilter</code>, then one sampled group holding the <code>fmt</code> layer,
+    the inspector's capture layer and an OTLP layer when <code>otlp_endpoint</code> is set,
+    then <code>SpanMetricsLayer</code> for the stage histogram. The group shares one
+    <code>Sampler</code>, so stdout, the dashboard and the collector see the same sampled
+    stream; the histogram sits outside it because metrics are not sampled.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>what the binary calls</em></div>
+    <pre><code class="language-rust">use saci_service::service::config::ObservabilityConfig;
+use saci_service::service::logging::init_logging;
+
+let cfg = ObservabilityConfig::default();  // Pretty, "error", no span export
+// init_logging returns the guard and the inspector handle, None when capture is off.
+let (telemetry, _inspector) = init_logging(&amp;cfg, node_id)?;
+
+// ... run the service ...
+
+// Flush exported spans. Dropping the guard is not enough, because
+// set_tracer_provider keeps a clone in a process-lifetime static.
+telemetry.shutdown().await;</code></pre>
+</div>
+
+<p>
+    When <code>observability.otlp_endpoint</code> is set, <code>init_logging</code> builds
+    an OTLP/HTTP span exporter, appends <code>/v1/traces</code> to the collector root, and
+    installs the tracer provider. The returned <code>TelemetryGuard</code> is load-bearing.
+    Dropping it does not flush, because <code>set_tracer_provider</code> keeps a clone in a
+    process-lifetime static. The caller <b>must</b> call
+    <code>telemetry.shutdown().await</code> before exit. <code>serve</code> does that after
+    the runner stops and before the last log line. Export covers spans only: metrics stay
+    pull-only on <code>/metrics</code>.
+</p>
+
+<p>
+    The keys that drive all of it, the thirty-two series on <code>/metrics</code> and what
+    the endpoint does not carry are on
+    <a href="{{ get_url(path='@/service/operate/observability.md') }}">Logs, metrics and traces</a>.
+</p>
+
+<h2 id="next">Next</h2>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/service/operate/_index.md') }}" class="next-card">
+        <span class="next-card-label">Service</span>
+        <h3>Operating saci-service</h3>
+        <p>The runbook that consumes all of this: probes, scrape config, log aggregation, and what to check when a node stalls.</p>
+    </a>
+    <a href="{{ get_url(path='@/library/reference/benchmarks.md') }}" class="next-card">
+        <span class="next-card-label">Reference</span>
+        <h3>Benchmarks</h3>
+        <p>Measured throughput, from the Criterion harness rather than from a counter on an endpoint.</p>
+    </a>
+</div>
+
+{% endblock %}

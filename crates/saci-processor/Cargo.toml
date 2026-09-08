@@ -1,0 +1,50 @@
+[package]
+name = "saci-processor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Processor SDK for SACI WebAssembly Component Model pipelines. Provides the WIT package saci:pipeline@0.3.0 and the export_pipeline! macro."
+
+# saci-processor is an rlib, not a component. Downstream processor crates depend on it,
+# then run `cargo build --target wasm32-wasip2` on THEIR crate to produce the wasm
+# component. Each one points `wit_bindgen::generate!` at `crates/saci-processor/wit/`.
+# The `export_pipeline!` macro expands into code that references `crate::bindings`,
+# i.e. the caller's generated bindings, not saci-processor's.
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# `processor` is a no-op forwarder: saci-processor already hardcodes `features = ["processor"]`
+# on its saci-core dep below. It exists only so external tooling can pass
+# `--features processor` without cargo rejecting an unknown feature.
+default = []
+processor = []
+# Forwards saci-core's `windows` feature so a processor crate can implement its
+# windowing logic with the same primitives the host uses: WindowSpec,
+# WatermarkState, WindowedSystemBuilder and friends. Enables `saci_processor::windows`.
+windows = ["saci-core/windows"]
+
+[dependencies]
+saci-core    = { workspace = true, features = ["processor"] }
+# The authoring macros: #[derive(Component)], #[transform], #[fold], #[processor].
+# A proc-macro crate, so cargo builds it for the host even when this crate is
+# compiled for wasm32-wasip2.
+saci-macros  = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc    = { workspace = true }
+# Re-exported under `__rt` for `#[derive(Component)]`, whose generated
+# `schema()` traces the Arrow fields from the type. The derive expands in the
+# processor crate, which does not depend on serde_arrow itself.
+serde_arrow  = { workspace = true }
+# serde is a dependency only for the `Serialize`/`Deserialize` bounds on
+# `__rt::Stateful<C>`; see lib.rs for why it is not re-exported.
+serde        = { workspace = true }
+# pollster re-exported under saci_processor::__rt::pollster so the macro can drive
+# Pipeline::run_on (async fn) inside the sync WIT export without forcing users
+# to depend on pollster themselves. Matches saci-core's `processor` feature pin.
+pollster     = { version = "1.0.1" }

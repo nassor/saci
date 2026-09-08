@@ -1,0 +1,176 @@
+// Quick Start: NATS in, two WebAssembly processors, PostgreSQL out.
+//
+//   publisher --NDJSON--> authorizations.raw
+//                            |
+//                            v  this service
+//                         [ validate-go.wasm ] --> [ settle-cs.wasm ]
+//                            |
+//                            v
+//                         public.settlements
+//
+// Run:
+//   cargo run -p saci-service --features connector-nats,connector-postgresql -- validate -c examples/quickstart/quickstart.kdl
+//   cargo run -p saci-service --features connector-nats,connector-postgresql -- serve    -c examples/quickstart/quickstart.kdl
+//
+// NATS and PostgreSQL are opt-in connectors; `wasm` and `transformer-ndjson`
+// are on by default.
+
+mode "standalone"
+
+node id=1 name="quickstart" data_dir="${SACI_DATA_DIR:-/tmp/saci-quickstart}"
+
+// A core NATS subscription never reaches EOF, so the interval runner would spin
+// on a source that is never done. The stream runner drives a live source item by
+// item instead, and requires exactly one declared source, which this config has.
+//
+// Delivery is at-most-once: the stream runner acknowledges nothing and keeps no
+// checkpoints. `DistributedRunner` is the at-least-once path.
+run_mode kind="stream"
+
+// Adaptive flow control: one stream source feeds two chained wasm stages
+// before the sink, so a wider chunk holds both stages' Arrow IPC round trip
+// under one pass. Row bounds sit a step below the hard defaults for a
+// tutorial-sized subject, and an explicit 150 ms target keeps the search
+// honest about a settlement pipeline's own latency contract.
+flow_control {
+    min_rows 512
+    max_rows 16384
+    start_rows 2048
+    target_latency_ms 150
+    adjust_interval_ms 15000
+}
+
+// One workflow declares the whole DAG: the byte format, the source, both
+// processors, the sink, and the explicit links between them.
+workflow "quickstart" {
+    // One JSON object per message, decoded against schema_fields below.
+    transformer "ndjson_fmt" format="ndjson"
+
+    // ---------------------------------------------------------------- source
+
+    source "authorizations-raw" type="NatsSource" component="Order" transformer="ndjson_fmt" {
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "quickstart"
+            }
+
+            mode kind="core" subject="authorizations.raw"
+
+            // All twelve `Order` fields, non-nullable, in schema order. A processor
+            // mutates the Arrow IPC buffer in place and cannot add columns, so
+            // every field either stage touches has to be present from the first
+            // decode.
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "currency" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+            schema_fields "valid" type="boolean" nullable=#false
+            schema_fields "usd_amount" type="float64" nullable=#false
+            schema_fields "usd_amount_display" type="utf8" nullable=#false
+            schema_fields "risk_score" type="float64" nullable=#false
+            schema_fields "flagged" type="boolean" nullable=#false
+            schema_fields "fee" type="float64" nullable=#false
+            schema_fields "review_tier" type="int64" nullable=#false
+            schema_fields "settlement" type="utf8" nullable=#false
+        }
+    }
+
+    // ---------------------------------------------------------------- stages
+    //
+    // Two `wasm` nodes, linked in sequence below, run two processors against
+    // the same in-memory dataset: the Go stage writes `valid`, then the C#
+    // stage reads it and writes `fee` and `review_tier`. Nothing is
+    // re-encoded between them; each stage is one Arrow IPC round-trip across
+    // the host to guest boundary and no transport at all.
+    //
+    // Every stage must declare the same components and report the same schema
+    // fingerprint: each stage's SDK derives it from that stage's own `Order`
+    // declaration, and the loader compares the two rather than generating both
+    // from one canonical schema. A disagreement fails the load.
+    //
+    // Each processor's own `describe()` supplies the component list, so
+    // `component` on the source above and the sink below must name what they
+    // declare: `Order`, and only `Order`.
+
+    wasm "validate" module="examples/quickstart/build/validate-go.wasm" {
+        // An authorisation below this amount is a card-testing probe, not a
+        // purchase. The WIT contract hands config over as strings; the
+        // processor parses.
+        config min_amount="0.50"
+    }
+
+    wasm "settle" module="examples/quickstart/build/settle-cs.wasm" {
+        // Fee in basis points of the authorised amount, plus a flat component.
+        // A valid authorisation above hold_above is held for manual review
+        // (review_tier 1) rather than settled (review_tier 0).
+        config fee_bps="290" fee_fixed="0.30" hold_above="1000"
+    }
+
+    // ------------------------------------------------------------------ sink
+    //
+    // All twelve fields, matching examples/quickstart/schema.sql column for column.
+    // A sink's schema_fields must match the component's RecordBatch field for field,
+    // in order: `PostgresSink` projects nothing, and a batch with a different column
+    // count is rejected rather than partially written. The five fields neither stage
+    // writes (usd_amount, usd_amount_display, risk_score, flagged, settlement)
+    // therefore land as the zero values the publisher sent. `PostgresSink`
+    // never issues CREATE TABLE: the table comes from schema.sql, which compose runs
+    // on first initialisation.
+
+    sink "settlements" type="PostgresSink" component="Order" {
+        config {
+            name "settlements"
+            table "public.settlements"
+            // upsert makes a replayed batch idempotent, so re-running the publisher
+            // does not duplicate rows.
+            write_mode "upsert"
+            conflict_columns "id"
+            // Required when one batch can repeat a conflict key: the highest value
+            // wins. Without it Postgres raises "ON CONFLICT DO UPDATE command
+            // cannot affect row a second time".
+            dedupe_order_column "id"
+
+            connection {
+                dsn "${SACI_PG_DSN:-postgres://postgres:saci@127.0.0.1:5432/saci}"
+                application_name "saci-quickstart"
+                sslmode "disable"
+            }
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "currency" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+            schema_fields "valid" type="boolean" nullable=#false
+            schema_fields "usd_amount" type="float64" nullable=#false
+            schema_fields "usd_amount_display" type="utf8" nullable=#false
+            schema_fields "risk_score" type="float64" nullable=#false
+            schema_fields "flagged" type="boolean" nullable=#false
+            schema_fields "fee" type="float64" nullable=#false
+            schema_fields "review_tier" type="int64" nullable=#false
+            schema_fields "settlement" type="utf8" nullable=#false
+        }
+    }
+
+    link from="authorizations-raw" to="validate"
+    link from="validate" to="settle"
+    link from="settle" to="settlements"
+}
+
+// ----------------------------------------------------------- control plane
+
+http bind="127.0.0.1:8080"
+
+// sample_ratio is named here even though log_level="off" already drops
+// every info-level span and event before sampling runs; flipping log_level
+// to "info" later picks up this 10% grade instead of the full-volume
+// default.
+observability log_level="off" sample_ratio=0.1 error_sample_ratio=1.0 {
+    // On by default; named here so the tutorial's config shows where the
+    // switches are. enabled=#false removes the capture layer, the JSON API and
+    // /ui; ui=#false keeps the JSON API and drops the dashboard.
+    inspector enabled=#true ui=#true
+}

@@ -1,0 +1,727 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline — SACI{% endblock %}
+{% block description %}A Pipeline owns a Dataset and a list of Systems, derives a field-level stage plan from what those systems declare, and runs that plan with per-system retry.{% endblock %}
+{% block og_title %}Pipeline — SACI{% endblock %}
+{% block og_description %}A Dataset, some Systems, and the stage plan SACI derives from the two.{% endblock %}
+
+{% block content %}
+
+<div class="page-kicker">Concept 03</div>
+<h1>Pipeline</h1>
+
+<p class="page-lede">
+    A <code>Pipeline</code> is a <code>Dataset</code>, the systems that operate on it, and
+    the stage plan SACI derives from what those systems declare. You add systems in an
+    order; SACI works out which of them can share a stage.
+</p>
+
+<dl class="page-facts">
+    <dt>In one line</dt>
+    <dd>Data plus systems plus the <strong>plan derived from both</strong></dd>
+    <dt>You need</dt>
+    <dd>Nothing beyond <code>saci-core</code>. <code>ParallelSystem</code> stages need the default <code>runtime</code> feature; <code>run_with_io</code> needs <code>io</code></dd>
+    <dt>Read this if</dt>
+    <dd>You have written a few systems and want to know what order they will run in, and what happens to the batch when one of them fails</dd>
+</dl>
+
+<h2 id="anatomy">What a Pipeline holds</h2>
+
+<p>
+    Five things, and only the first three are yours to fill:
+</p>
+
+<ul>
+    <li>A <code>name: Arc&lt;str&gt;</code>, for logs and for the scheduler's dependency graph.</li>
+    <li>A public <code>data: Dataset</code> field: the columnar data this workload owns.</li>
+    <li>A <code>Vec</code> of systems, held in the order you registered them.</li>
+    <li>Three <code>OnceLock</code>s holding the derived plan: the expanded access metadata, the stage buckets, and one <code>SystemConfig</code> per system.</li>
+    <li>A <code>Cell&lt;RunStats&gt;</code> recording the most recent run. With the <code>io</code> feature, per-component sources and sinks.</li>
+</ul>
+
+<p>
+    You never build the plan. It is a pure function of the systems you added and
+    the schemas they declare against, computed the first time it is needed.
+</p>
+
+<h2 id="build">Building one</h2>
+
+<p>
+    Two forms, same result. <code>Pipeline::new</code> gives you a mutable pipeline whose
+    dataset you populate directly. <code>data</code> is a public field, and
+    <code>data_mut()</code> is there when a borrow reads better.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>construct, then add systems in order</em></div>
+    <pre><code class="language-rust">use saci_core::prelude::*;
+
+let mut pipeline = Pipeline::new("etl");
+
+// Components live on the pipeline's Dataset, not on the pipeline itself.
+pipeline.data.register_component::&lt;Transaction&gt;()?;
+pipeline.data.append::&lt;Transaction&gt;(&amp;seed)?;
+
+pipeline.add_system(ValidateSystem);
+pipeline.add_system(EnrichSystem);
+pipeline.add_system(LimitSystem);
+pipeline.add_system(ReportSystem);</code></pre>
+</div>
+
+<p>
+    The builder chains the same calls and hands back a finished <code>Pipeline</code>. It
+    registers components and resources but does not append rows, so seed data still goes in
+    afterwards.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>builder form</em></div>
+    <pre><code class="language-rust">let mut pipeline = Pipeline::builder("etl")
+    .with::&lt;Transaction&gt;()                 // register a Component
+    .with_resource(Report::default())      // insert a Resource
+    .with_system(ValidateSystem)
+    .with_system(EnrichSystem)
+    .with_system(LimitSystem)
+    .with_system(ReportSystem)
+    .build();
+
+pipeline.data.append::&lt;Transaction&gt;(&amp;seed)?;</code></pre>
+</div>
+
+<p>
+    <code>add_parallel_system</code> and <code>with_parallel_system</code> take a
+    <code>ParallelSystem</code> instead: a system that reads an immutable
+    <code>Dataset</code> and returns a <code>WriteSet</code>. That variant is what lets two
+    systems in one stage execute at the same time. It needs the default
+    <code>runtime</code> feature. A build without it registers the system, then refuses it
+    at run time, because the sequential executor has no thread pool to give it.
+</p>
+
+<h2 id="plan">From declarations to stages</h2>
+
+<p>
+    Every system's <code>meta()</code> names the component fields it reads and writes. SACI
+    walks those declarations, adds an edge for every pair that conflicts on a field, and
+    buckets systems by their longest path from a root. The buckets are the stages.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 392" role="img" aria-labelledby="pl-plan-title pl-plan-desc">
+        <title id="pl-plan-title">Deriving a stage plan from four systems' declarations</title>
+        <desc id="pl-plan-desc">
+            Four systems declare reads and writes over one Transaction component. Five
+            conflict edges follow: validate and limit both write valid, limit reads the
+            usd_amount that enrich writes, and report reads fields all three of them wrote.
+            Validate and enrich share only a read of amount, which is not a conflict, so no
+            edge joins them. Bucketing each system by its longest path from a root yields
+            three stages: validate and enrich together, then limit, then report.
+        </desc>
+
+        <text class="t-title" x="0" y="14">Deriving the stage plan</text>
+        <text class="t-sm" x="0" y="30">Four systems over one Transaction component. An edge can only point forward in registration order.</text>
+
+        <!-- Column 1: what the systems declared -->
+        <g class="anim anim-1">
+            <text class="t-sm t-ctl" x="0" y="46">DECLARED ACCESS</text>
+
+            <rect class="blk blk-ctl" x="0" y="56" width="186" height="62" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="56" width="186" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="68" width="186" height="8"/>
+            <text class="t-lbl" x="12" y="71">[0] validate</text>
+            <text class="t-sm t-ctl" x="12" y="92">reads   amount</text>
+            <text class="t-sm t-data" x="12" y="109">writes  valid</text>
+
+            <rect class="blk blk-ctl" x="0" y="128" width="186" height="62" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="128" width="186" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="140" width="186" height="8"/>
+            <text class="t-lbl" x="12" y="143">[1] enrich</text>
+            <text class="t-sm t-ctl" x="12" y="164">reads   amount, currency</text>
+            <text class="t-sm t-data" x="12" y="181">writes  usd_amount</text>
+
+            <rect class="blk blk-ctl" x="0" y="200" width="186" height="62" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="200" width="186" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="212" width="186" height="8"/>
+            <text class="t-lbl" x="12" y="215">[2] limit</text>
+            <text class="t-sm t-ctl" x="12" y="236">reads   usd_amount</text>
+            <text class="t-sm t-data" x="12" y="253">writes  valid</text>
+
+            <rect class="blk blk-ctl" x="0" y="272" width="186" height="62" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="272" width="186" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="284" width="186" height="8"/>
+            <text class="t-lbl" x="12" y="287">[3] report</text>
+            <text class="t-sm t-ctl" x="12" y="308">reads   valid, usd_amount</text>
+            <text class="t-sm t-data" x="12" y="325">writes  Report resource</text>
+        </g>
+
+        <!-- Column 2: the edges those declarations imply -->
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M188 42 H200" marker-end="url(#pl-c)"/>
+
+            <text class="t-sm t-ctl" x="206" y="46">EDGES THE CONFLICTS IMPLY</text>
+
+            <text class="t-sm" x="206" y="66">0 &rarr; 2</text>
+            <text class="t-sm t-data" x="254" y="66">valid</text>
+            <text class="t-sm" x="332" y="66">write then write</text>
+
+            <text class="t-sm" x="206" y="84">1 &rarr; 2</text>
+            <text class="t-sm t-data" x="254" y="84">usd_amount</text>
+            <text class="t-sm" x="332" y="84">write then read</text>
+
+            <text class="t-sm" x="206" y="102">0 &rarr; 3</text>
+            <text class="t-sm t-data" x="254" y="102">valid</text>
+            <text class="t-sm" x="332" y="102">write then read</text>
+
+            <text class="t-sm" x="206" y="120">1 &rarr; 3</text>
+            <text class="t-sm t-data" x="254" y="120">usd_amount</text>
+            <text class="t-sm" x="332" y="120">write then read</text>
+
+            <text class="t-sm" x="206" y="138">2 &rarr; 3</text>
+            <text class="t-sm t-data" x="254" y="138">valid</text>
+            <text class="t-sm" x="332" y="138">write then read</text>
+
+            <path class="ln" d="M206 152 H418"/>
+
+            <text class="t-sm" x="206" y="170">0 and 1</text>
+            <text class="t-sm t-ctl" x="254" y="170">amount</text>
+            <text class="t-sm" x="332" y="170">read then read</text>
+            <text class="t-sm" x="206" y="186">shared, but neither writes it: no edge</text>
+        </g>
+
+        <!-- Column 2, lower: level assignment -->
+        <g class="anim anim-3">
+            <text class="t-sm t-ctl" x="206" y="214">LONGEST PATH FROM A ROOT</text>
+            <text class="t-sm" x="206" y="234">level[0] = 0</text>
+            <text class="t-sm" x="300" y="234">no incoming edge</text>
+            <text class="t-sm" x="206" y="252">level[1] = 0</text>
+            <text class="t-sm" x="300" y="252">no incoming edge</text>
+            <text class="t-sm" x="206" y="270">level[2] = 1</text>
+            <text class="t-sm" x="300" y="270">max(0, 0) + 1</text>
+            <text class="t-sm" x="206" y="288">level[3] = 2</text>
+            <text class="t-sm" x="300" y="288">max(0, 0, 1) + 1</text>
+        </g>
+
+        <!-- Column 3: the plan that falls out -->
+        <g class="anim anim-4">
+            <path class="arw arw-ctl" d="M418 42 H430" marker-end="url(#pl-c)"/>
+
+            <text class="t-sm t-ctl" x="436" y="46">WHAT stages() RETURNS</text>
+
+            <rect class="blk blk-ctl" x="436" y="56" width="218" height="76" rx="8"/>
+            <rect class="hd hd-ctl" x="436" y="56" width="218" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="436" y="68" width="218" height="8"/>
+            <text class="t-lbl" x="448" y="71">Stage 0: vec![0, 1]</text>
+            <text class="t-sm" x="448" y="92">[0] validate</text>
+            <text class="t-sm" x="448" y="108">[1] enrich</text>
+            <text class="t-sm t-ctl" x="448" y="124">no edge between them</text>
+
+            <path class="arw arw-ctl" d="M545 132 V150" marker-end="url(#pl-c)"/>
+
+            <rect class="blk blk-ctl" x="436" y="156" width="218" height="52" rx="8"/>
+            <rect class="hd hd-ctl" x="436" y="156" width="218" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="436" y="168" width="218" height="8"/>
+            <text class="t-lbl" x="448" y="171">Stage 1: vec![2]</text>
+            <text class="t-sm" x="448" y="194">[2] limit waits on 0 and 1</text>
+
+            <path class="arw arw-ctl" d="M545 208 V226" marker-end="url(#pl-c)"/>
+
+            <rect class="blk blk-ctl" x="436" y="232" width="218" height="52" rx="8"/>
+            <rect class="hd hd-ctl" x="436" y="232" width="218" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="436" y="244" width="218" height="8"/>
+            <text class="t-lbl" x="448" y="247">Stage 2: vec![3]</text>
+            <text class="t-sm" x="448" y="270">[3] report waits on 2</text>
+
+            <text class="t-sm" x="436" y="306">stages() yields indices, not names</text>
+            <text class="t-sm" x="436" y="322">stage_count() = 3</text>
+        </g>
+
+        <g class="anim anim-4">
+            <path class="ln" d="M0 356 H654"/>
+            <text class="t-sm" x="0" y="376">Register <tspan class="t-ctl">limit</tspan> before <tspan class="t-ctl">validate</tspan> and the write/write edge flips direction, and so does the result.</text>
+        </g>
+
+        <defs>
+            <marker id="pl-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> a field some system writes</span>
+        <span class="k-control"><i></i> systems, edges, the derived plan</span>
+    </div>
+    <figcaption class="dgm-cap">
+        SACI never reorders you. An edge is added only from a lower registration index to a
+        higher one, so the graph is <b>acyclic by construction</b> and your <code>add_system</code>
+        order is the tie-break for every conflicting pair.
+    </figcaption>
+</div>
+
+<h3>A stage is a guarantee about ordering, not a promise of concurrency</h3>
+
+<p>
+    Two systems sharing a stage means only that <b>nothing orders them relative to each
+    other</b>. No field or resource conflict was found, so either order is correct. That
+    guarantee <em>licenses</em> running them at the same time. Acting on the licence is a
+    separate decision.
+</p>
+
+<p>
+    The executor makes it per stage, from what the stage's members are and how many rows
+    the dataset holds:
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>The stage</th><th>How it executes</th><th>Retries wait with</th></tr></thead>
+    <tbody>
+        <tr><td>Every member impls <code>ParallelSystem</code>, there are <strong>2 or more</strong>, and the dataset holds at least <code>STAGE_INLINE_THRESHOLD</code> rows (<b>100_000</b>)</td><td><b>Concurrently.</b> One blocking task per system; all are awaited, then the <code>WriteSet</code>s merge and apply once</td><td><code>std::thread::sleep</code></td></tr>
+        <tr><td>Every member impls <code>ParallelSystem</code>, and there is <strong>exactly 1</strong></td><td>Directly, then its <code>WriteSet</code> is applied</td><td><code>tokio::time::sleep</code></td></tr>
+        <tr><td><strong>Any</strong> member is a plain <code>System</code>, or the stage is all-parallel but <strong>under the row threshold</strong></td><td><b>One at a time</b>, in ascending index order. A plain <code>System</code> mutates the <code>Dataset</code> in place; a <code>ParallelSystem</code> has its <code>WriteSet</code> applied as soon as it returns</td><td><code>tokio::time::sleep</code></td></tr>
+    </tbody>
+</table>
+
+<p>
+    So a stage of four plain <code>System</code>s runs strictly one after another, and no
+    wall clock time is saved. Below the row threshold an all-parallel stage runs that way
+    too. One <code>spawn_blocking</code> per system plus the write-set merge costs more
+    than the work it spreads, and stage-mates conflict on nothing, so the result is
+    identical either way. The plan still proved they do not interfere, which is what
+    makes them safe to reorder, to slice, or to hand to a <code>ParallelSystem</code>
+    rewrite later. All three branches accumulate into the same
+    <code>retries_this_batch</code> total.
+</p>
+
+<p>
+    The rules, for a system <b>A</b> registered before a system <b>B</b>. Field keys are
+    <code>(component, field)</code> pairs; resource keys are <code>TypeId</code>s.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Case</th><th>A declares</th><th>B declares</th><th>Edge</th></tr></thead>
+    <tbody>
+        <tr><td>Read after write</td><td>writes <em>F</em></td><td>reads <em>F</em></td><td>A &rarr; B</td></tr>
+        <tr><td>Write after write</td><td>writes <em>F</em></td><td>writes <em>F</em></td><td>A &rarr; B</td></tr>
+        <tr><td>Write after read</td><td>reads <em>F</em></td><td>writes <em>F</em></td><td>A &rarr; B</td></tr>
+        <tr><td>Read after read</td><td>reads <em>F</em></td><td>reads <em>F</em></td><td><strong>none</strong></td></tr>
+        <tr><td>Resource, after a write</td><td>writes <code>R</code></td><td>reads or writes <code>R</code></td><td>A &rarr; B</td></tr>
+        <tr><td>Resource, write after read</td><td>reads <code>R</code></td><td>writes <code>R</code></td><td>A &rarr; B</td></tr>
+    </tbody>
+</table>
+
+<p>
+    <code>read_component(C)</code> and <code>write_component(C)</code> expand to every field
+    in <code>C</code>'s registered schema when the plan is built, so they conflict with
+    anything that touches <code>C</code> at all. Declare fields individually when you want
+    two systems to share a stage.
+</p>
+
+<h2 id="validate">Validation is plan construction</h2>
+
+<p>
+    <code>validate()</code> runs no analysis of its own. It builds the same plan a
+    <code>run</code> builds, against the pipeline's own <code>SchemaRegistry</code>, and
+    <b>keeps it</b>, so a successful <code>validate()</code> leaves <code>stages()</code>
+    readable and makes the first <code>run()</code> free of plan work. Anything it catches
+    is exactly what <code>run()</code> would have caught first:
+</p>
+
+<ul>
+    <li>A declared read or write naming a <b>component that is not registered</b>.</li>
+    <li>A declared read or write naming a <b>field absent from that component's schema</b>. The error lists the fields that do exist.</li>
+    <li>A <code>read_component</code> / <code>write_component</code> naming an unregistered component.</li>
+</ul>
+
+<p>
+    It does not check for cycles, because a cycle cannot occur. An edge is only recorded
+    when the source index is lower than the target index.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>a typo in a field name is a configuration error</em></div>
+    <pre><code class="language-rust">let pipeline = Pipeline::builder("etl")
+    .with::&lt;Transaction&gt;()
+    .with_system(system_fn(
+        SystemMeta::new("convert").write("Transaction", "usd_ammount"),
+        |_: &amp;mut Dataset| Ok(()),
+    ))
+    .build();
+
+let err = pipeline.validate().unwrap_err();
+// Configuration: Pipeline: declared access for field 'Transaction.usd_ammount',
+// but that field does not exist in the component's schema.
+// Known fields: id, amount, currency, valid, usd_amount</code></pre>
+</div>
+
+<p>
+    Once the plan exists you can read it back. Stages are buckets of <b>system indices</b>,
+    ascending within each bucket, in the order you registered them:
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>the plan from the diagram above</em></div>
+    <pre><code class="language-rust">pipeline.validate()?;
+
+assert_eq!(pipeline.stages(), Some(vec![vec![0, 1], vec![2], vec![3]]));
+assert_eq!(pipeline.stage_count(), Some(3));</code></pre>
+</div>
+
+<p>
+    Both return <code>None</code> before the plan has been built and <code>None</code> if
+    building it failed. Adding a system through any of <code>add_system</code>,
+    <code>add_parallel_system</code>, <code>add_system_boxed</code>, or
+    <code>add_parallel_system_boxed</code> clears all three caches, so the next call
+    re-derives everything.
+</p>
+
+<div class="note note-warn">
+    <span class="note-label">The plan is pinned to the first schema registry it sees</span>
+    <p>
+        Nothing else invalidates it. Registering a component on <code>data</code>, inserting
+        a resource, or attaching a source does <b>not</b> clear the cache, and
+        <code>run_on</code> passes the foreign dataset's registry to a slot that is already
+        filled. Whichever dataset triggered the first build is the one every later run is
+        validated and expanded against.
+    </p>
+</div>
+
+<h2 id="run">run, run_on, run_with_io</h2>
+
+<p>
+    Three entry points over the same stage executor.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Call</th><th>Receiver</th><th>Operates on</th><th>Returns</th></tr></thead>
+    <tbody>
+        <tr><td><code>run()</code></td><td><code>&amp;mut self</code></td><td><code>self.data</code></td><td><code>SaciResult&lt;()&gt;</code></td></tr>
+        <tr><td><code>run_on_with_stats(data)</code></td><td><code>&amp;self</code></td><td>a dataset you pass in</td><td><code>SaciResult&lt;RunStats&gt;</code></td></tr>
+        <tr><td><code>run_on(data)</code></td><td><code>&amp;self</code></td><td>a dataset you pass in</td><td><code>SaciResult&lt;()&gt;</code></td></tr>
+        <tr><td><code>run_with_io()</code></td><td><code>&amp;mut self</code></td><td><code>self.data</code>, plus sources and sinks</td><td><code>SaciResult&lt;()&gt;</code></td></tr>
+    </tbody>
+</table>
+
+<p>
+    <code>run_on</code> is the shared-template path: it takes <code>&amp;self</code>, ignores
+    any sources and sinks, and leaves <code>self.data</code> untouched. One pipeline value
+    can therefore be the plan for many independent batches, which is exactly how the
+    <a href="{{ get_url(path='@/library/distributed.md') }}">distributed runner</a> and the WASM
+    processor apply a template to per-partition datasets.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>one plan, many batches</em></div>
+    <pre><code class="language-rust">let template = Pipeline::builder("processor")
+    .with::&lt;Transaction&gt;()
+    .with_system(ValidateSystem)
+    .with_system(EnrichSystem)
+    .build();
+
+for mut batch in incoming_batches {
+    let stats = template.run_on_with_stats(&amp;mut batch).await?;
+    tracing::info!(rows = stats.rows_produced, "batch done");
+}</code></pre>
+</div>
+
+<p>
+    <code>run_on</code> is a thin wrapper that discards those stats.
+    <code>run_on_with_stats</code> both returns them and records them in the shared
+    <code>last_stats</code> cell, so per-call figures must come from the return value.
+    Reading the cell back gives you whichever call finished last.
+</p>
+
+<p>
+    <code>run_with_io</code> drains every registered source into the dataset, calls
+    <code>run()</code>, then drains the dataset to every sink and calls
+    <code>finish()</code> on each. <code>saci-core</code> ships the <code>Source</code> /
+    <code>Sink</code> traits. A connector like <code>saci-connector-file</code> moves bytes, a
+    transformer like <code>saci-transformer-csv</code> turns them into batches. See
+    <a href="{{ get_url(path='@/library/io.md') }}">Sources &amp; Sinks</a>.
+</p>
+
+<h2 id="stats">RunStats</h2>
+
+<p>
+    <code>RunStats</code> is a four-field <code>Copy</code> struct describing the last
+    completed run. <code>last_stats()</code> returns it by value. Before the first run it
+    returns <code>RunStats::default()</code>, all zeroes.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+    <tbody>
+        <tr><td><code>rows_produced</code></td><td><code>isize</code></td><td>Net change in <b>live</b> rows across the call. Negative when systems soft-deleted more rows than they appended.</td></tr>
+        <tr><td><code>systems_run</code></td><td><code>usize</code></td><td>Systems that executed. Counts a system once no matter how many attempts it took.</td></tr>
+        <tr><td><code>duration_millis</code></td><td><code>u64</code></td><td>Wall clock for the call, retry sleeps included.</td></tr>
+        <tr><td><code>retries_this_batch</code></td><td><code>u32</code></td><td>Failed attempts that were followed by another attempt, summed over every system in every stage.</td></tr>
+    </tbody>
+</table>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>after a run</em></div>
+    <pre><code class="language-rust">pipeline.run().await?;
+
+let stats: RunStats = pipeline.last_stats();
+println!(
+    "{} systems, {:+} rows, {} retries, {} ms",
+    stats.systems_run,
+    stats.rows_produced,
+    stats.retries_this_batch,
+    stats.duration_millis,
+);</code></pre>
+</div>
+
+<h2 id="retry">Per-system retry</h2>
+
+<p>
+    Every system carries a <code>SystemConfig</code>, returned by its <code>config()</code>
+    method and snapshotted into the plan alongside the stage buckets. The stage executor
+    never calls a system directly. It hands the call to a retry driver, which counts
+    attempts, sleeps between them, and reports how many retries it consumed.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 330" role="img" aria-labelledby="pl-retry-title pl-retry-desc">
+        <title id="pl-retry-title">Exponential backoff inside a parallel stage</title>
+        <desc id="pl-retry-desc">
+            Two parallel systems share stage zero. The first fails three times and succeeds
+            on its fourth attempt, sleeping about one hundred, two hundred, then four
+            hundred milliseconds in between. The second succeeds immediately and holds its
+            write set untouched while the first retries. Only after every task in the stage
+            has finished are the write sets merged and applied, and the two retry counts are
+            summed into RunStats.retries_this_batch.
+        </desc>
+
+        <text class="t-title" x="0" y="14">One flaky system, one stage</text>
+        <text class="t-sm" x="0" y="30">SystemConfig::default() is ExponentialBackoff { max_retries: 3, base 100 ms, &times;2, cap 30 s, jitter 0.1 }</text>
+
+        <g class="anim anim-1">
+            <text class="t-sm t-ctl" x="0" y="46">STAGE 0, EVERY MEMBER A ParallelSystem</text>
+
+            <rect class="blk blk-ctl" x="0" y="58" width="126" height="44" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="58" width="126" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="70" width="126" height="8"/>
+            <text class="t-lbl" x="10" y="73">[0] validate</text>
+            <text class="t-sm t-ctl" x="10" y="94">retries = 3</text>
+        </g>
+
+        <!-- attempt timeline for the flaky system -->
+        <g class="anim anim-2">
+            <rect class="blk" x="140" y="58" width="74" height="44" rx="6"/>
+            <text class="t-lbl t-mid" x="177" y="78">attempt 1</text>
+            <text class="t-sm t-mid" x="177" y="94">Err</text>
+
+            <path class="arw arw-ctl" d="M216 80 H272" marker-end="url(#pl-rc)"/>
+            <text class="t-sm t-ctl t-mid" x="244" y="72">100 ms</text>
+
+            <rect class="blk" x="274" y="58" width="74" height="44" rx="6"/>
+            <text class="t-lbl t-mid" x="311" y="78">attempt 2</text>
+            <text class="t-sm t-mid" x="311" y="94">Err</text>
+
+            <path class="arw arw-ctl" d="M350 80 H406" marker-end="url(#pl-rc)"/>
+            <text class="t-sm t-ctl t-mid" x="378" y="72">200 ms</text>
+
+            <rect class="blk" x="408" y="58" width="74" height="44" rx="6"/>
+            <text class="t-lbl t-mid" x="445" y="78">attempt 3</text>
+            <text class="t-sm t-mid" x="445" y="94">Err</text>
+
+            <path class="arw arw-ctl" d="M484 80 H540" marker-end="url(#pl-rc)"/>
+            <text class="t-sm t-ctl t-mid" x="512" y="72">400 ms</text>
+
+            <rect class="blk blk-ctl" x="542" y="58" width="74" height="44" rx="6"/>
+            <text class="t-lbl t-mid" x="579" y="78">attempt 4</text>
+            <text class="t-sm t-ctl t-mid" x="579" y="94">Ok</text>
+
+            <text class="t-sm" x="140" y="120">delay = 100 ms &times; 2^n, capped at 30 s, then scaled by 1 &plusmn; 0.1</text>
+            <text class="t-sm" x="140" y="136">max_attempts = max_retries + 1 = 4, so there is no fifth attempt</text>
+        </g>
+
+        <!-- the sibling, untouched -->
+        <g class="anim anim-3">
+            <rect class="blk blk-ctl" x="0" y="156" width="126" height="44" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="156" width="126" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="168" width="126" height="8"/>
+            <text class="t-lbl" x="10" y="171">[1] enrich</text>
+            <text class="t-sm t-ctl" x="10" y="192">retries = 0</text>
+
+            <rect class="blk blk-ctl" x="140" y="156" width="74" height="44" rx="6"/>
+            <text class="t-lbl t-mid" x="177" y="176">attempt 1</text>
+            <text class="t-sm t-ctl t-mid" x="177" y="192">Ok</text>
+
+            <rect class="blk" x="224" y="156" width="336" height="44" rx="6"/>
+            <text class="t-sm" x="238" y="176">done already; its WriteSet is held, not applied</text>
+            <text class="t-sm" x="238" y="192">the retries above never re-run it</text>
+        </g>
+
+        <!-- the join -->
+        <g class="anim anim-4">
+            <path class="arw arw-ctl" d="M579 102 V220" marker-end="url(#pl-rc)"/>
+            <path class="arw arw-ctl" d="M177 200 V220" marker-end="url(#pl-rc)"/>
+
+            <rect class="blk blk-data" x="140" y="226" width="476" height="44" rx="8"/>
+            <rect class="hd hd-data" x="140" y="226" width="476" height="20" rx="8"/>
+            <rect class="hd hd-data" x="140" y="238" width="476" height="8"/>
+            <text class="t-lbl t-data" x="152" y="241">await every task, merge the WriteSets, apply once</text>
+            <text class="t-sm" x="152" y="262">one Err anywhere in the stage and nothing here is applied</text>
+        </g>
+
+        <g class="anim anim-4">
+            <path class="ln" d="M0 288 H654"/>
+            <text class="t-sm" x="0" y="306">RunStats.retries_this_batch = 3 + 0 = <tspan class="t-ctl">3</tspan>, summed over every system in every stage of the call.</text>
+            <text class="t-sm" x="0" y="322">Had attempt 4 also failed: RetryExhausted { attempts: 4 }, and RunStats is never written at all.</text>
+        </g>
+
+        <defs>
+            <marker id="pl-rc" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> the one moment writes reach the Dataset</span>
+        <span class="k-control"><i></i> system attempts, backoff, retry accounting</span>
+    </div>
+    <figcaption class="dgm-cap">
+        <code>retries_this_batch</code> counts <b>failures that were followed by another
+        attempt</b>, not attempts. A clean run of ten systems reports <code>0</code>; a run
+        where one system exhausted its budget reports nothing, because the error escapes
+        before the stats are recorded.
+    </figcaption>
+</div>
+
+<p>
+    Three modes, and their arithmetic. <em>n</em> is the zero-based retry number, so the
+    first wait uses <em>n</em>&nbsp;=&nbsp;0.
+</p>
+
+<table class="rule-table">
+    <thead><tr><th>Mode</th><th>Attempts</th><th>Wait before retry <em>n</em></th></tr></thead>
+    <tbody>
+        <tr><td><code>None</code></td><td>1</td><td>none</td></tr>
+        <tr><td><code>Fixed { retries, delay }</code></td><td><code>retries + 1</code></td><td><code>delay</code>, constant</td></tr>
+        <tr><td><code>ExponentialBackoff { .. }</code></td><td><code>max_retries + 1</code></td><td><code>base_delay * multiplier^n</code>, clamped to <code>max_delay</code>, then multiplied by <code>1 ± jitter</code></td></tr>
+    </tbody>
+</table>
+
+<p>
+    <code>RetryMode::default()</code> is <code>ExponentialBackoff</code> with
+    <code>max_retries: 3</code>, <code>base_delay: 100 ms</code>,
+    <code>multiplier: 2.0</code>, <code>max_delay: 30 s</code>, <code>jitter: 0.1</code>.
+    That is also <code>SystemConfig::default()</code>, which is what
+    <code>System::config()</code> returns unless you override it. It gives the four
+    attempts and the 100 / 200 / 400&nbsp;ms waits in the diagram, each scattered by up to
+    ten percent.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>overriding the default for one system</em></div>
+    <pre><code class="language-rust">use std::time::Duration;
+
+#[async_trait]
+impl System for CallPricingApi {
+    fn meta(&amp;self) -&gt; SystemMeta {
+        SystemMeta::new("call_pricing_api").write("Transaction", "usd_amount")
+    }
+
+    fn config(&amp;self) -&gt; SystemConfig {
+        // Two retries, 50 ms apart, no backoff.
+        SystemConfig::new().with_fixed_retry(2, Duration::from_millis(50))
+    }
+
+    async fn run(&amp;self, data: &amp;mut Dataset) -&gt; SaciResult&lt;()&gt; {
+        // ...
+        Ok(())
+    }
+}</code></pre>
+</div>
+
+<p>
+    <code>SystemConfig::minimal()</code> is the fail-fast setting:
+    <code>RetryMode::None</code>, one attempt. A single failed attempt is still wrapped, so
+    the driver returns <code>SaciError::RetryExhausted { attempts: 1 }</code> rather
+    than the bare error. Reach for <code>source</code> when you need the original error.
+</p>
+
+<p>
+    Two waiting strategies, one counter. Sequential systems retry through
+    <code>run_with_retries</code>, which waits with <code>tokio::time::sleep</code>. An
+    all-parallel stage of two or more systems that clears the row threshold dispatches each system onto a
+    blocking thread, where the driver is <code>run_with_retries_blocking</code> and the wait is
+    <code>std::thread::sleep</code>. Processor builds compiled without the
+    <code>runtime</code> feature have no async timer, so delays are skipped there and
+    retries fire immediately. Either path lands its retry counts in the same total.
+</p>
+
+<p>
+    A retry is observable. Under the <code>tracing</code> feature both drivers open an
+    <code>info</code>-level <code>task_attempt</code> span carrying <code>attempt</code>
+    and <code>max_attempts</code>, but only from the second attempt on. A call that
+    succeeds first try opens none, so a clean run shows no <code>task_attempt</code> at
+    all. Both warn on each failure that will be retried with <code>attempt</code>,
+    <code>max_attempts</code> and <code>delay_ms</code>, and log an error when the budget
+    runs out. See <a href="{{ get_url(path='@/library/tracing.md') }}">Tracing</a>.
+</p>
+
+<h2 id="failure">When a system fails</h2>
+
+<p>
+    An error that survives its retry budget aborts the whole call. What survives in the
+    dataset depends on the kind of stage it happened in.
+</p>
+
+<ul>
+    <li>
+        <b>A stage that runs one at a time</b>, because a plain <code>System</code> is in
+        it or because it sits under the row threshold, stops at the first error. Systems
+        earlier in the stage keep their writes, later systems in that stage never run, and
+        no later stage runs either.
+    </li>
+    <li>
+        <b>A concurrently dispatched stage</b>, meaning all-parallel with two or more
+        members over the row threshold, spawns one task per system
+        and awaits every one of them before inspecting any result. A failing system does
+        not cancel its siblings, and they all burn their own retry budgets.
+        The merged <code>WriteSet</code> is applied only if every task succeeded, which
+        makes that stage all-or-nothing.
+    </li>
+    <li>
+        <b>Either way</b>, <code>RunStats</code> is not written. The error returns before
+        the assignment, so <code>last_stats()</code> still reports the previous batch.
+    </li>
+    <li>
+        Under <code>run_with_io</code>, sinks are never drained and
+        <code>finish()</code> is never called.
+    </li>
+</ul>
+
+<div class="note note-warn">
+    <span class="note-label">Retries re-run against a partly-mutated dataset</span>
+    <p>
+        A sequential <code>System</code> takes <code>&amp;mut Dataset</code> and writes
+        directly. There is no rollback, so a system that fails after appending rows or
+        applying a <code>WriteSet</code> is retried <b>on top of its own partial work</b>.
+        Make retryable systems idempotent. A <code>ParallelSystem</code> helps only in the
+        stage-atomic case. Its <code>WriteSet</code> is held back until the whole stage
+        succeeds, when that stage was dispatched concurrently. A lone
+        <code>ParallelSystem</code>, one sharing a stage with a plain <code>System</code>,
+        and one in a stage under the row threshold all have their <code>WriteSet</code>
+        applied as soon as they return.
+    </p>
+</div>
+
+<h2 id="next">Next</h2>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/library/scheduler.md') }}" class="next-card">
+        <span class="next-card-label">Concept 04</span>
+        <h3>Scheduler</h3>
+        <p>Run several pipelines from one process, with dependencies and backpressure between them.</p>
+    </a>
+    <a href="{{ get_url(path='@/library/io.md') }}" class="next-card">
+        <span class="next-card-label">Moving data</span>
+        <h3>Sources &amp; Sinks</h3>
+        <p>Fill the dataset from Parquet, CSV, NDJSON, or a channel, and drain it back out.</p>
+    </a>
+</div>
+
+{% endblock %}

@@ -1,0 +1,29 @@
+// Type checking only. `tsconfig.build.json` is what emits, and `node --test`
+// strips types natively, so nothing here writes a file.
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Node's type stripping never rewrites a `.js` specifier to `.ts`, so the
+    // tests import `../src/core.ts` by its real name. `src/index.ts` is the one
+    // file they cannot import: it pulls in `saci:pipeline/host-io@0.3.0`, which
+    // only jco resolves.
+    "allowImportingTsExtensions": true,
+    // Rejects enums, namespaces and parameter properties, the TypeScript
+    // syntax that needs a code transform rather than an erase.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/*.ts", "test/*.ts"]
+}
