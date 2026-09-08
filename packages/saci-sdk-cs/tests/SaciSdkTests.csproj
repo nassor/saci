@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Host-targeted tests for the SDK and its generator.
+       No RuntimeIdentifier: the generator has to run and the generated export has
+       to execute, and neither needs a wasm runtime. The wit-bindgen types the
+       generated code targets are hand-written stubs in WitBindgenStubs.cs, which
+       is also what pins the shapes the generator emits against. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Saci.Sdk.Tests</RootNamespace>
+    <AssemblyName>SaciSdkTests</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Saci.Sdk.csproj" />
+
+    <!-- Analyzers do not travel across a ProjectReference, so a project that
+         consumes the SDK by path names the generator itself. A PackageReference to
+         Saci.Sdk carries it in analyzers/dotnet/cs/ instead. -->
+    <ProjectReference Include="../generator/Saci.Sdk.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- xunit 2.x, which the .NET 10 SDK still runs through VSTest, the same
+         stack the codec tests folded into this project used. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

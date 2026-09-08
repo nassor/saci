@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "saci-sdk"
+version = "0.1.0"
+description = "Write SACI WebAssembly processors in Python: one dataclass per component, one function per transform."
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/saci_sdk"]

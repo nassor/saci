@@ -1,0 +1,81 @@
+// SACI standalone config running the Rust processor from
+// `examples/wasm/order_processing/` under `saci-service`.
+//
+// The paths below are CWD-relative, so run from the repository root:
+//   cargo build --release -p order-processing-wasm --target wasm32-wasip2
+//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate \
+//     --config examples/configs/standalone_wasm.kdl --strict
+//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve \
+//     --config examples/configs/standalone_wasm.kdl
+//
+// It reads examples/configs/fixtures/order_processing_input.csv, runs the processor,
+// and writes /tmp/saci-order-processing-out.csv with `valid` and `usd_amount`
+// filled in.
+//
+// The processor has no ingest system: rows arrive in the host's `run-batch` Arrow
+// IPC payload, which is what the CSV source below produces. It also cannot add
+// columns, so every `Transaction` field appears in both schema_fields lists and
+// in the fixture. `valid` is seeded false and `usd_amount` zero; the processor
+// overwrites both. Neither may be blank: the csv transformer turns an empty field
+// into a NULL, the fields are declared non-nullable, and one blank cell fails the
+// whole batch.
+
+mode "standalone"
+
+node id=1 name="saci-order-processing" data_dir="${SACI_DATA_DIR:-/tmp/saci-order-processing}"
+
+run_mode kind="one_shot"
+
+workflow "order-processing" {
+    // Both FileSource and FileSink move CSV bytes, so one declared transformer
+    // serves them both.
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // `component` must be "Transaction": the load-time graph check compares it
+    // against the component names the processor reports from `describe()`.
+    source "csv_orders" type="FileSource" component="Transaction" transformer="csv_fmt" {
+        config {
+            path "examples/configs/fixtures/order_processing_input.csv"
+            schema_fields "id" type="UInt64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#false
+            schema_fields "currency" type="Utf8" nullable=#false
+            schema_fields "valid" type="Boolean" nullable=#false
+            schema_fields "usd_amount" type="Float64" nullable=#false
+        }
+    }
+
+    // `cargo build --release --target wasm32-wasip2` writes the finished
+    // component here: rustc links the cdylib into a component itself.
+    wasm "process_orders" module="target/wasm32-wasip2/release/order_processing_wasm.wasm" {
+        // FX rates the processor reads through the host-io `get-config` import,
+        // one key per non-USD currency. Strings; the processor parses them with
+        // `saci_config_parse`.
+        config fx_eur="1.08" fx_gbp="1.27" fx_jpy="0.0067" fx_cad="0.74"
+    }
+
+    // truncate replaces the file each run. Without it the sink appends, and
+    // csv with has_headers writes a second header line mid-file.
+    sink "csv_out" type="FileSink" component="Transaction" transformer="csv_fmt" {
+        config {
+            path "/tmp/saci-order-processing-out.csv"
+            truncate #true
+            schema_fields "id" type="UInt64" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#false
+            schema_fields "currency" type="Utf8" nullable=#false
+            schema_fields "valid" type="Boolean" nullable=#false
+            schema_fields "usd_amount" type="Float64" nullable=#false
+        }
+    }
+
+    link from="csv_orders" to="process_orders"
+    link from="process_orders" to="csv_out"
+}
+
+http bind="127.0.0.1:0" disabled=#false
+
+// Kept at full grade: a bounded one_shot fixture run produces little span
+// volume, so there is nothing to gain from sampling it down. See
+// standalone.kdl for the flow_control rationale under one_shot.
+observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0

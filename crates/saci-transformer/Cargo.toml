@@ -1,0 +1,22 @@
+[package]
+name = "saci-transformer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "The transformer contract: byte formats SACI connectors read and write."
+
+[dependencies]
+saci-core    = { workspace = true, features = ["runtime"] }
+
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+# `ConfigValue` is part of the factory signature, so every transformer and the
+# host that loads it must agree on one version of this crate.
+saci-config  = { workspace = true }
+
+[dev-dependencies]
+tempfile     = { workspace = true }

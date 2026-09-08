@@ -1,0 +1,181 @@
+// SACI standalone config: the tumbling windowing demo in ONE workflow.
+//
+//   windowed_publish --NDJSON--> windowing.sales.a \
+//                                       |            \
+//                                       v             v  this service (stream mode)
+//                              window_wasm      window_plugin
+//                                       |             |
+//                                       v             v
+//                         public.wasm_window_totals  public.plugin_window_totals
+//
+// Two NATS sources feed BOTH processors (fan-in): each stream item is one
+// batch from one source, and each processor merges the batches into its open
+// windows across items, emitting one WindowTotal row per closed
+// (window_id, symbol) group. The `window` blocks drive the host-side
+// watermark tracking (`saci_window_watermark_seconds`), the dashboard's
+// window chips and the windowing sheet section.
+//
+// Build the two processors first, from the repository root:
+//   cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip2
+//   cargo build --release -p windowing-tumbling-plugin
+//
+// Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
+// then run the service and the publisher:
+//   cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- serve \
+//     --config examples/windowing/tumbling/tumbling.kdl
+//   cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+//
+// On Windows set SACI_PLUGIN_LIB=target/release/windowing_tumbling_plugin.dll
+// too: the plugin cdylib is windowing_tumbling_plugin.dll there, not
+// libwindowing_tumbling_plugin.so.
+
+mode "standalone"
+
+node id=1 name="saci-windowing" data_dir="${SACI_DATA_DIR:-/tmp/saci-windowing}"
+
+// A core NATS subscription never reaches EOF, so the interval runner would
+// spin on a source that is never done. The stream runner drives live sources
+// item by item instead, pulling the two sources round-robin.
+run_mode kind="stream"
+
+// No `flow_control` block: both sources here feed windowed processors, and
+// a stream-mode source on a path to a windowed node builds no controller at
+// all, so a pin would be accepted but inert. See
+// docs/content/service/operate/flow-control.md and the window block below.
+
+workflow "windowing" {
+    // One JSON object per message, decoded against schema_fields below.
+    transformer "ndjson_fmt" format="ndjson"
+
+    // ---------------------------------------------------------------- sources
+    //
+    // Two independent streams of the same Sale shape. Both feed both
+    // processors: the fan-in merge is the whole point of the demo.
+
+    source "sales_a" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-windowing-a"
+            }
+
+            mode kind="core" subject="windowing.sales.a"
+
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    source "sales_b" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-windowing-b"
+            }
+
+            mode kind="core" subject="windowing.sales.b"
+
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    // ------------------------------------------------------------- stages
+    //
+    // A wasm processor and a plugin processor running the same windowing
+    // logic, each fed by both sources. The `window` block is host knowledge:
+    // it validates the inbound streams, tracks the node's watermark
+    // (`saci_window_watermark_seconds`) and is injected into the node's
+    // `config` as `window.*` keys, which the processor reads back through
+    // get-config. One source of truth.
+
+    wasm "window_wasm" module="target/wasm32-wasip2/release/windowing_tumbling_wasm.wasm" {
+        window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+            key_field "symbol"
+        }
+    }
+
+    plugin "window_plugin" library="${SACI_PLUGIN_LIB:-target/release/libwindowing_tumbling_plugin.so}" {
+        window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+            key_field "symbol"
+        }
+    }
+
+    // ----------------------------------------------------------------- sinks
+    //
+    // Each processor writes to its own table. The tables come from
+    // schema.sql, which compose runs on first initialisation; PostgresSink
+    // never issues CREATE TABLE. upsert on (window_id, symbol) keeps a
+    // re-run or a late re-fire idempotent.
+
+    sink "wasm_totals" type="PostgresSink" component="WindowTotal" {
+        config {
+            name "wasm-totals"
+            table "public.wasm_window_totals"
+            write_mode "upsert"
+            conflict_columns "window_id" "symbol"
+
+            connection {
+                dsn "${SACI_PG_DSN:-postgres://postgres:saci@127.0.0.1:5432/saci}"
+                application_name "saci-windowing-wasm"
+                sslmode "disable"
+            }
+
+            schema_fields "window_id" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "count" type="int64" nullable=#false
+            schema_fields "sum" type="float64" nullable=#false
+        }
+    }
+
+    sink "plugin_totals" type="PostgresSink" component="WindowTotal" {
+        config {
+            name "plugin-totals"
+            table "public.plugin_window_totals"
+            write_mode "upsert"
+            conflict_columns "window_id" "symbol"
+
+            connection {
+                dsn "${SACI_PG_DSN:-postgres://postgres:saci@127.0.0.1:5432/saci}"
+                application_name "saci-windowing-plugin"
+                sslmode "disable"
+            }
+
+            schema_fields "window_id" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "count" type="int64" nullable=#false
+            schema_fields "sum" type="float64" nullable=#false
+        }
+    }
+
+    // Fan-in: both sources feed both processors. The stream runner pulls the
+    // sources round-robin, so each processor merges one source's batch at a
+    // time into its open windows.
+    link from="sales_a" to="window_wasm"
+    link from="sales_a" to="window_plugin"
+    link from="sales_b" to="window_wasm"
+    link from="sales_b" to="window_plugin"
+
+    link from="window_wasm" to="wasm_totals"
+    link from="window_plugin" to="plugin_totals"
+}
+
+// ----------------------------------------------------------- control plane
+
+http bind="127.0.0.1:8080"
+
+observability log_format="pretty" log_level="info" sample_ratio=0.02 error_sample_ratio=1.0 {
+    // Kept low: two live sources fan into two processors, each opening a
+    // per-item span per merge, so full sampling would dominate the
+    // inspector buffers fast. error_sample_ratio stays at 1.0, so a decode
+    // or write failure is never sampled away.
+    inspector enabled=#true ui=#true
+}

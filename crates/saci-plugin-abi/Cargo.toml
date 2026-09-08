@@ -1,0 +1,18 @@
+[package]
+name = "saci-plugin-abi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "The C ABI a SACI native plugin exports: two entry symbols, four vtable calls, Arrow IPC in and out. Dependency-free so a host and a processor can share it."
+
+# An rlib on both sides of the boundary. The host links it to call a plugin; a
+# Rust plugin links it to be called. Nothing here allocates or touches the
+# Arrow crates, so neither side inherits a dependency from the other.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]

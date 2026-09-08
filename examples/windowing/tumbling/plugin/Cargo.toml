@@ -1,0 +1,20 @@
+[package]
+name = "windowing-tumbling-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# A sample processor, not a library a downstream consumer would depend on.
+publish = false
+description = "Windowing tumbling demo native plugin: merges two NATS streams into tumbling windows and emits per-window totals."
+
+# A native plugin is a shared library exporting the saci-plugin-abi C ABI.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+saci-plugin = { workspace = true, features = ["windows"] }
+serde = { workspace = true }
+# Traces the nested state component's Arrow schema from a sample, so it matches
+# serde_arrow's encoding exactly.
+serde_arrow = { workspace = true }

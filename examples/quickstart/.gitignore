@@ -1,0 +1,4 @@
+# Built by `cargo xtask quickstart` from the two stage directories. Both
+# components are reproducible from source, unlike
+# crates/saci-service/assets/ui/ which is committed because cargo build embeds it.
+/build/

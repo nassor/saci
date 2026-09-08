@@ -1,0 +1,23 @@
+{
+  "name": "polyglot-score-ts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stage 3 of the SACI polyglot example: scores usd_amount into risk_score/flagged.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.12"
+  },
+  "scripts": {
+    "build": "jco componentize score.ts --wit ../../../../crates/saci-processor/wit --world-name saci-pipeline --disable http --disable fetch-event -o score-ts.wasm",
+    "types": "jco types ../../../../crates/saci-processor/wit --world-name saci-pipeline -o types",
+    "typecheck": "npm run types && tsc"
+  },
+  "dependencies": {
+    "@nassor/saci-sdk": "file:../../../../packages/saci-sdk-ts"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.30.0",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  }
+}

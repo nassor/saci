@@ -1,0 +1,11 @@
+# Copied in by `cargo xtask quickstart` from examples/polyglot/generated/,
+# which the emit command regenerates from the canonical Rust Order definition.
+/SchemaGen.cs
+
+# Build output. The WIT bindings land in obj/ and are regenerated from
+# crates/saci-processor/wit on every build, so they are never committed either.
+bin/
+obj/
+
+# Publish artifact, copied to examples/quickstart/build/ by the same task.
+/settle-cs.wasm

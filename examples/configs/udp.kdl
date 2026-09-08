@@ -1,0 +1,140 @@
+// SACI standalone service configuration driving UDP at both ends.
+//
+// Run:
+//   cargo run --features connector-udp,wasm --bin saci-service -- validate \
+//     --config examples/configs/udp.kdl
+//   cargo run --features connector-udp,wasm --bin saci-service -- serve \
+//     --config examples/configs/udp.kdl
+//
+// UDP delivers nothing. A datagram that leaves the socket is neither
+// acknowledged nor retransmitted, so a peer that is down, a receive buffer
+// that is full and a fragment lost on the path all look like a delivered
+// datagram to the sender. The sink's `probe` block below is the only thing
+// that notices: it asks each peer from time to time whether it is still
+// there, and under on_failure="refuse" a peer that failed its last round is
+// skipped, which turns a batch nobody took into a write error the `heal`
+// block can act on.
+//
+// The source receives and the sink sends: `bind` is an address this process
+// receives datagrams on, `connect` is a peer this process sends them to. One
+// datagram carries exactly one message with no length prefix, because the
+// datagram boundary is the frame, so a sink here feeds a source there.
+//
+// `validate` binds the source's socket, because that is where a busy port
+// surfaces, and the port must be free. It opens no outbound socket: the sink
+// resolves every `connect` address and opens its sockets on the first batch,
+// so a collector that is down surfaces during `serve`, not here.
+
+mode "standalone"
+
+node id=1 name="saci-udp" data_dir="${SACI_DATA_DIR:-/tmp/saci-udp}"
+
+// The source never reaches EOF: it blocks until the next datagram arrives.
+// Only the stream runner can drive that, so config validation rejects
+// `type="udp"` on a source node in any other run mode. One workflow pass runs
+// per arriving datagram. The sink half carries no such rule and runs in every
+// mode.
+run_mode kind="stream"
+
+// Adaptive flow control: every other source (this one included) hands over
+// whatever it produced and the runner slices it at the target, so the
+// admission target still bounds one pass's chunk. max_chunk_bytes is halved
+// from the 8 MiB default because a datagram's payload is already small, and an
+// explicit 50 ms target keeps the search honest about live-datagram latency
+// rather than the 250 ms stream default.
+flow_control {
+    max_chunk_bytes 4194304
+    target_latency_ms 50
+    adjust_interval_ms 10000
+}
+
+// One workflow declares the whole DAG: the byte format each end speaks, the
+// source, the processor, the sink, and the explicit links between them.
+workflow "ticks" {
+    // The transformer that decodes and encodes each datagram's payload.
+    // "ndjson" is one JSON object per datagram, decoded against schema_fields
+    // below, which is the natural shape for a transport that carries one
+    // message per datagram. "arrow-ipc" is one whole RecordBatch per datagram
+    // instead, and needs max_chunk_bytes low enough that a batch still fits
+    // max_datagram_bytes. connector-udp pulls in transformer-ndjson.
+    transformer "json_fmt" format="ndjson"
+
+    // ---------------------------------------------------------------- source
+
+    // The processor's `describe()` supplies the component list, so `component`
+    // on this source and the sink below must name components it declares.
+    source "ticks_in" type="udp" component="Tick" transformer="json_fmt" {
+        config {
+            // Receive address. Producers send datagrams here; several at once
+            // is fine, and ordering holds for neither one producer nor many.
+            bind "${SACI_UDP_BIND:-0.0.0.0:9700}"
+
+            // Decoded batches queued before the receive loop stops reading the
+            // socket. Past that the kernel's receive buffer fills and the OS
+            // drops datagrams, which is what backpressure means here: nothing
+            // tells the producer.
+            buffer 64
+
+            // A multicast group to join, of the same IP family as `bind`, for
+            // a fan-out feed several receivers read:
+            //   multicast_group "239.255.0.1"
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "price" type="float64" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_ticks" module="pipelines/ticks.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads Tick and writes EnrichedTick. A sink's schema_fields must match
+    // the component's RecordBatch field for field, in order.
+
+    sink "ticks_out" type="udp" component="EnrichedTick" transformer="json_fmt" {
+        config {
+            // Peer to send to. Resolved when the factory is built and opened
+            // on the first batch. Name several addresses to fan out; every
+            // message then goes to every peer and the write fails only when
+            // the batch reached nobody.
+            connect "${SACI_UDP_CONNECT:-127.0.0.1:9701}"
+
+            // Per-message cap, the largest payload an IPv4 datagram carries. A
+            // batch holding a larger message is refused whole, before any
+            // datagram is sent.
+            max_datagram_bytes 65507
+
+            // The liveness probe. kind="icmp" reads only what the OS relays:
+            // silence is alive, an ICMP unreachable is death, and it works
+            // against any collector, which is why it is the kind here.
+            // kind="echo" sends a zero-length datagram and waits for one
+            // back, which only another service's `udp` source answers, so
+            // pick it when this sink feeds a SACI source. on_failure="refuse"
+            // stops sending to a peer that failed its last round, so the
+            // write fails and the `retry`, `heal` and `dlq` blocks see it;
+            // "warn" logs and keeps sending. Reconnecting is the `heal` block
+            // and nothing else: a rebuilt sink re-resolves every address and
+            // opens fresh sockets. One round probes every peer at once, so it
+            // costs one timeout_ms however many addresses `connect` names.
+            probe kind="icmp" interval_ms=5000 timeout_ms=1000 on_failure="refuse"
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "price" type="float64" nullable=#true
+        }
+    }
+
+    link from="ticks_in" to="process_ticks"
+    link from="process_ticks" to="ticks_out"
+}
+
+// HTTP control plane. /metrics carries the service's own counters.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 15% grade:
+// one workflow.batch span opens per arriving datagram, so a live producer at
+// any real rate needs sampling well below full to keep stdout and the
+// inspector buffers readable. error_sample_ratio stays at 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.15 error_sample_ratio=1.0

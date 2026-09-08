@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The incremental generator that turns [SaciComponent] / [SaciTransform] /
+       [assembly: SaciProcessor] into the `saci:pipeline/pipeline` export glue.
+
+       netstandard2.0 is not a choice: Roslyn loads analyzers into the compiler
+       process, which runs on .NET Standard 2.0 surface. ExcludeAssets="runtime"
+       keeps the Roslyn assemblies out of the consumer's output, because the
+       compiler supplies them.
+
+       IncludeBuildOutput is false: this assembly is packed into
+       analyzers/dotnet/cs/ by Saci.Sdk.csproj, never into lib/. -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Saci.Sdk.Generators</RootNamespace>
+    <AssemblyName>Saci.Sdk.Generators</AssemblyName>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0"
+                      PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The rule table RS2008 requires of an analyzer that ships diagnostics. -->
+    <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
+  </ItemGroup>
+
+</Project>

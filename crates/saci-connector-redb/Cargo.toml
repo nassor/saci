@@ -1,0 +1,40 @@
+[package]
+name = "saci-connector-redb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "redb Source and Sink for SACI. Stores one self-contained document per batch in an embedded redb file, under generated keys that keep insertion order; a transformer supplies the byte format."
+
+[features]
+# Off by default like saci-connector-s3's: a library consumer may have no
+# subscriber. `connector-redb` in saci-service turns it on.
+tracing = ["dep:tracing", "saci-core/tracing"]
+
+[dependencies]
+saci-core        = { workspace = true, features = ["io"] }
+saci-connector   = { workspace = true }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+serde         = { workspace = true }
+tokio         = { workspace = true }
+# The source spools one entry's bytes to disk because
+# `Transformer::open_reader` takes a concrete `std::fs::File`.
+tempfile      = { workspace = true }
+tracing       = { workspace = true, optional = true }
+
+# The embedded store this connector reads and writes. Same version the host's
+# `distributed` feature already links, declared once in the workspace table.
+redb          = { workspace = true }
+
+[dev-dependencies]
+saci-transformer-csv     = { workspace = true }
+saci-transformer-parquet = { workspace = true }
+tokio                    = { workspace = true, features = ["rt-multi-thread"] }
+tempfile                 = { workspace = true }

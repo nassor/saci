@@ -1,0 +1,152 @@
+// SACI standalone config: the sliding windowing demo in ONE workflow.
+//
+//   windowed_publish --NDJSON--> windowing.sales.a \
+//                    --NDJSON--> windowing.sales.b -> window_sliding (stream mode)
+//                                                            |
+//                                                            v
+//                                              public.sliding_window_totals
+//
+// Two NATS sources feed one processor (fan-in): each stream item is one batch
+// from one source, and the processor merges the batches into every open window
+// that contains each row. A sliding window is `size_ms` long and restarts
+// every `slide_ms`, so one row lands in `ceil(size_ms / slide_ms)` windows at
+// once and each emitted row is a 60-second moving total advancing every 15
+// seconds. The `window` block drives the host-side watermark tracking
+// (`saci_window_watermark_seconds`), the dashboard's window chips and the
+// windowing sheet section.
+//
+// Build the processor first, from the repository root:
+//   cargo build --release -p windowing-sliding-wasm --target wasm32-wasip2
+//
+// Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
+// then run the service and the publisher:
+//   cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve \
+//     --config examples/windowing/sliding/sliding.kdl
+//   cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+
+mode "standalone"
+
+node id=1 name="saci-windowing-sliding" data_dir="${SACI_DATA_DIR:-/tmp/saci-windowing-sliding}"
+
+// A core NATS subscription never reaches EOF, so the interval runner would
+// spin on a source that is never done. The stream runner drives live sources
+// item by item instead, pulling the two sources round-robin.
+run_mode kind="stream"
+
+// No `flow_control` block: both sources here feed a windowed processor, and
+// a stream-mode source on a path to a windowed node builds no controller at
+// all, so a pin would be accepted but inert. See
+// docs/content/service/operate/flow-control.md and the window block below.
+
+workflow "windowing_sliding" {
+    // One JSON object per message, decoded against schema_fields below.
+    transformer "ndjson_fmt" format="ndjson"
+
+    // ---------------------------------------------------------------- sources
+    //
+    // Two independent streams of the same Sale shape, both feeding the
+    // processor: the fan-in merge is what one watermark spans.
+
+    source "sales_a" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-windowing-sliding-a"
+            }
+
+            mode kind="core" subject="windowing.sales.a"
+
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    source "sales_b" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-windowing-sliding-b"
+            }
+
+            mode kind="core" subject="windowing.sales.b"
+
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    // ------------------------------------------------------------- stages
+    //
+    // The `window` block is host knowledge: it validates the inbound streams,
+    // tracks the node's watermark (`saci_window_watermark_seconds`) and is
+    // injected into the node's `config` as `window.*` keys, which the
+    // processor reads back through get-config. One source of truth.
+    //
+    // size_ms is an exact multiple of slide_ms, so every row lands in exactly
+    // four distinct windows: `assign_sliding` returns duplicate ids when it is
+    // not.
+
+    wasm "window_sliding" module="target/wasm32-wasip2/release/windowing_sliding_wasm.wasm" {
+        window kind="sliding" size_ms=60000 slide_ms=15000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+            key_field "symbol"
+        }
+    }
+
+    // ----------------------------------------------------------------- sinks
+    //
+    // The table comes from schema.sql, which compose runs on first
+    // initialisation; PostgresSink never issues CREATE TABLE. upsert on
+    // (window_start_ms, symbol) keeps a re-run or a late re-fire idempotent.
+
+    sink "sliding_totals" type="PostgresSink" component="SlidingTotal" {
+        config {
+            name "sliding-totals"
+            table "public.sliding_window_totals"
+            write_mode "upsert"
+            conflict_columns "window_start_ms" "symbol"
+
+            connection {
+                dsn "${SACI_PG_DSN:-postgres://postgres:saci@127.0.0.1:5432/saci}"
+                application_name "saci-windowing-sliding"
+                sslmode "disable"
+            }
+
+            schema_fields "window_start_ms" type="int64" nullable=#false
+            schema_fields "window_end_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "count" type="int64" nullable=#false
+            schema_fields "sum" type="float64" nullable=#false
+        }
+    }
+
+    // Fan-in: both sources feed the processor. The stream runner pulls them
+    // round-robin, so it merges one source's batch at a time into its open
+    // windows.
+    link from="sales_a" to="window_sliding"
+    link from="sales_b" to="window_sliding"
+
+    link from="window_sliding" to="sliding_totals"
+}
+
+// ----------------------------------------------------------- control plane
+//
+// A port per mode, so tumbling (8080), sliding (8081) and session (8082) can
+// run at once without a bind clash.
+
+http bind="127.0.0.1:8081"
+
+observability log_format="pretty" log_level="info" sample_ratio=0.02 error_sample_ratio=1.0 {
+    // Kept low: two live sources fan into one processor, each opening a
+    // per-item span per merge, so full sampling would dominate the
+    // inspector buffers fast. error_sample_ratio stays at 1.0, so a decode
+    // or write failure is never sampled away.
+    inspector enabled=#true ui=#true
+}

@@ -1,0 +1,193 @@
+// SACI standalone config: the integrity demo, PostgreSQL CDC half.
+//
+//   integrity_check --INSERT/UPDATE--> public.order_audit
+//                                              |
+//                                     pgoutput logical slot
+//                                              v
+//                                      [ verify_audit ] (wasm)
+//                                              |
+//                                              v
+//                                   POST /sink/audit (parquet)
+//
+// A second process, not a second workflow in `integrity.kdl`. `run_mode` is a
+// property of the whole config and the two halves want opposite ones: every
+// PostgreSQL read mode returns `Ok(None)` once it has caught up, and the
+// stream runner reads that as a permanent EOF and retires the source. The
+// interval runner instead treats it as the end of one drain cycle and
+// re-enters, which is what a CDC demo has to show. The stream half's live
+// Kafka, JetStream and channel sources cannot be driven that way, hence two
+// configs, two ports.
+//
+// ── Server prerequisites ───────────────────────────────────────────────────
+//
+// `examples/integrity/schema.sql` and the compose file own these. The slot is
+// the one artefact `slot_autocreate` below can create for itself, and in this
+// demo `integrity_check` creates it first anyway; see the `mode` block.
+//
+//   wal_level = logical
+//   max_replication_slots >= 1
+//   the connecting role has REPLICATION, or is a superuser
+//   CREATE TABLE public.order_audit (
+//       audit_id BIGINT PRIMARY KEY, order_id BIGINT NOT NULL,
+//       status TEXT NOT NULL, revision INTEGER NOT NULL,
+//       changed_ms BIGINT NOT NULL);
+//   CREATE PUBLICATION saci_integrity_pub FOR TABLE public.order_audit;
+//   ALTER TABLE public.order_audit REPLICA IDENTITY FULL;
+//
+// REPLICA IDENTITY FULL is what lets every non-key field below be declared
+// non-nullable. Without it a DELETE carries only the replica-identity columns
+// and every other column would have to be nullable.
+//
+// ── Delivery semantics ─────────────────────────────────────────────────────
+//
+// The slot's confirmed LSN advances at the start of the NEXT drain cycle, not
+// when a batch is handed over, because `Source` has no acknowledgement hook.
+// A crash or a `stop` mid-cycle replays that cycle: delivery is at-least-once
+// and the verifier deduplicates on `audit_id`.
+//
+// ── Lifecycle ──────────────────────────────────────────────────────────────
+//
+// This workflow holds no Channel node and its wasm node names a module, so
+// `rebuild_blocker` returns `None` and `stop`, `start` and `restart` all
+// succeed. That is the contrast the verifier asserts against `ingest` and
+// `settle` in `integrity.kdl`, which answer 409.
+//
+// Build the processor first, from the repository root:
+//   cargo build --release -p integrity-audit-wasm --target wasm32-wasip2
+//
+// Then:
+//   cargo run -p saci-service \
+//     --features connector-postgresql,connector-http,transformer-parquet,wasm \
+//     -- serve --config examples/integrity/integrity_audit.kdl
+
+mode "standalone"
+
+node id=1 name="saci-integrity-audit" data_dir="${SACI_AUDIT_DATA_DIR:-/tmp/saci-integrity/audit}"
+
+// Re-drain every second. `cdc_logical` reports EOF once it is caught up, so
+// the interval runner is what keeps reading; the cadence is the idle poll
+// interval, not a throughput cap, and a cycle that filled its admission
+// credit re-enters immediately instead of waiting it out.
+run_mode kind="interval" interval_ms=1000
+
+// No `store "redb"` block on purpose. The only two things a store persists
+// are processor state blobs and a per-source item counter, and neither is the
+// CDC cursor: `verify_audit` is stateless, and the read position is the
+// replication slot's confirmed LSN, which lives on the PostgreSQL server and
+// therefore already survives a stop, a start and a process restart.
+
+workflow "audit" name="CDC audit verification" {
+    // One Parquet document per batch. Self-describing on a read, but a sink
+    // is where the bytes are written, so the schema is declared below.
+    transformer "parquet_fmt" format="parquet"
+
+    // ---------------------------------------------------------------- source
+    //
+    // No `transformer` key: PostgreSQL builds Arrow batches from the server's
+    // own values and accepts no byte format.
+    source "audit_cdc" type="PostgresSource" component="AuditRow" {
+        retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=30000 jitter=0.1
+
+        config {
+            // Required: the factory is handed only this table, never the node
+            // id, and this is what keys the metric labels and prefixes every
+            // error. Kept equal to the node id.
+            name "audit_cdc"
+            // Rows per emitted RecordBatch.
+            batch_rows 512
+            // 0 drains until caught up within one cycle.
+            max_batches_per_cycle 0
+
+            connection {
+                dsn "${SACI_PG_DSN:-postgres://postgres:saci@127.0.0.1:5432/saci}"
+                application_name "saci-integrity-audit"
+                connect_timeout_ms 5000
+                statement_timeout_ms 30000
+                // The demo compose file serves plaintext on loopback.
+                sslmode "disable"
+            }
+
+            // Decodes `pgoutput` through the SQL slot interface, so an INSERT
+            // and an UPDATE both arrive with their operation. The publication
+            // must already exist.
+            mode kind="cdc_logical" {
+                slot "saci_integrity_slot"
+                publication "saci_integrity_pub"
+                table "public.order_audit"
+                // Left on, and in this demo it is the second party to try:
+                // `integrity_check` creates this slot with the same
+                // statement before it publishes anything, because a logical
+                // slot captures only WAL written after it exists and a slot
+                // created on the first read would miss every change
+                // committed before that cycle. The connector reads the
+                // "already exists" answer as done and adopts the slot.
+                slot_autocreate #true
+                max_changes_per_cycle 10000
+            }
+
+            // `__op` is one of five reserved names `cdc_logical` fills from
+            // the change stream instead of from the tuple (`__lsn`, `__xid`,
+            // `__commit_ts` and `__table` are the others); declare only what
+            // the pipeline reads. Any other `__`-prefixed name is refused.
+            // The rest are the table's own columns, and this list must match
+            // `integrity-audit-wasm`'s `AuditRow` field for field.
+            schema_fields "__op" type="utf8" nullable=#false
+            schema_fields "audit_id" type="int64" nullable=#false
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#false
+            schema_fields "revision" type="int32" nullable=#false
+            schema_fields "changed_ms" type="int64" nullable=#false
+        }
+    }
+
+    // ------------------------------------------------------------- processor
+    //
+    // Stateless: one verdict per change. It renames `__op` to `op` on the way
+    // out, so the CDC metadata reaches the sink under a name a consumer can
+    // read, and folds it into both the `ok` predicate and the checksum.
+    wasm "verify_audit" module="target/wasm32-wasip2/release/integrity_audit_wasm.wasm"
+
+    // ------------------------------------------------------------------ sink
+
+    sink "audit_http" type="HttpSink" component="AuditVerdict" transformer="parquet_fmt" {
+        // Every sink node is wrapped in `RetryingSink` by the builder, so a
+        // refused POST is re-driven. Shortened from the default ladder
+        // because the verifier is a local process.
+        retry max_attempts=5 base_delay_ms=50 multiplier=2.0 max_delay_ms=2000 jitter=0.1
+
+        config {
+            url "${SACI_VERIFY_URL:-http://127.0.0.1:9099}/sink/audit"
+            method "POST"
+            timeout_ms 5000
+
+            headers {
+                content-type "application/vnd.apache.parquet"
+            }
+
+            schema_fields "audit_id" type="int64" nullable=#false
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "op" type="utf8" nullable=#false
+            schema_fields "status" type="utf8" nullable=#false
+            schema_fields "revision" type="int32" nullable=#false
+            schema_fields "changed_ms" type="int64" nullable=#false
+            schema_fields "ok" type="boolean" nullable=#false
+            schema_fields "checksum" type="int64" nullable=#false
+        }
+    }
+
+    link from="audit_cdc" to="verify_audit"
+    link from="verify_audit" to="audit_http"
+}
+
+// ----------------------------------------------------------- control plane
+//
+// A second port, because this is a second process. `control #true` mounts
+// /api/workflows*, which is where the verifier proves that a workflow with no
+// Channel node really does stop and start again.
+http bind="127.0.0.1:8089" control=#true
+
+observability log_format="pretty" log_level="info" sample_ratio=0.2 error_sample_ratio=1.0 {
+    // One source re-drained every second, so the span volume is an order of
+    // magnitude below the stream half's and a higher grade stays readable.
+    inspector enabled=#true ui=#true
+}

@@ -1,0 +1,70 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  # Runs on every trigger, including pull requests. It carries no `environment:`
+  # key: GitHub evaluates a job's environment protection rules when the job
+  # starts, before any step `if:` is read, so a job that names github-pages is
+  # rejected on a PR ref no matter how its steps are guarded.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Zola
+        uses: taiki-e/install-action@v2
+        with:
+          tool: zola@0.23.3
+
+      - name: Build site
+        working-directory: docs
+        run: zola build
+
+      # Reads the rendered pages, so it has to follow the build. Nine concept
+      # pages keep their prose in templates/, which Zola's own index never sees.
+      - name: Build search index
+        working-directory: docs
+        run: python3 search-index.py public
+
+      - name: Setup Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: 'docs/public'
+
+  # Pure deploy: the artifact is already uploaded by `build`. Skipped entirely on
+  # a pull request, so the github-pages environment gate is never evaluated
+  # against `refs/pull/N/merge`.
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    environment:
+      name: "github-pages"
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

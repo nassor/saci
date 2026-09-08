@@ -1,0 +1,461 @@
+{% extends "base.html" %}
+
+{% block title %}Dataset &amp; Components — SACI{% endblock %}
+{% block description %}A Dataset stores one Arrow RecordBatch per registered Component. Register components, append rows, read typed columns, soft-delete, compact, and round-trip through Arrow IPC.{% endblock %}
+{% block og_title %}Dataset &amp; Components — SACI{% endblock %}
+{% block og_description %}One Arrow RecordBatch per Component, all sharing a row count. The container everything else in SACI stands on.{% endblock %}
+
+{% block content %}
+
+<div class="page-kicker">Concept 01</div>
+<h1>Dataset &amp; Components</h1>
+
+<p class="page-lede">
+    A <code>Component</code> is a Rust struct stored as Arrow columns.
+    A <code>Dataset</code> is every component together, sharing one row count.
+</p>
+
+<dl class="page-facts">
+    <dt>In one line</dt>
+    <dd>The container that holds your data as <strong>columns, not rows</strong></dd>
+    <dt>You need</dt>
+    <dd>Nothing beyond <code>saci-core</code>. No feature flag.</dd>
+    <dt>Read this if</dt>
+    <dd>You are about to define your first component, or you want to know why a <code>Row</code> index stops being valid</dd>
+</dl>
+
+<h2 id="anatomy">What a Dataset holds</h2>
+
+<p>
+    Four things, and the central one is <b>one Arrow <code>RecordBatch</code> per
+    registered component</b>, with every batch sharing the dataset's row count. That
+    shared count is what makes a single <code>Row</code> index mean the same record in
+    all of them. A component may hold <em>fewer</em> rows than the count, which a
+    windowing processor's reduced result component does, and never more.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 268" role="img" aria-labelledby="ds-title ds-desc">
+        <title id="ds-title">The anatomy of a Dataset</title>
+        <desc id="ds-desc">
+            A Dataset holds one Arrow RecordBatch per registered component, all with the
+            same row count. It also holds an alive bitmap marking which rows are live, a
+            schema registry, and a resource map of plain Rust singletons. Resources are not
+            part of the columnar data and are not serialized.
+        </desc>
+
+        <text class="t-title" x="0" y="14">Dataset</text>
+        <text class="t-sm" x="0" y="30">row_count = 4 : the same for every component</text>
+
+        <!-- component blocks: the recurring primitive -->
+        <g class="anim anim-1">
+            <rect class="blk blk-data" x="0" y="44" width="152" height="146" rx="8"/>
+            <rect class="hd hd-data" x="0" y="44" width="152" height="22" rx="8"/>
+            <rect class="hd hd-data" x="0" y="58" width="152" height="8"/>
+            <text class="t-lbl t-data" x="12" y="59">Price</text>
+
+            <rect class="row" x="8" y="72" width="136" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="85">symbol : Utf8</text>
+            <rect class="row" x="8" y="94" width="136" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="107">value : Float64</text>
+
+            <path class="ln" d="M8 120 H144"/>
+            <text class="t-sm" x="16" y="136">"AAPL"   150.0</text>
+            <text class="t-sm" x="16" y="150">"MSFT"   300.0</text>
+            <text class="t-sm" x="16" y="164">"GOOG"  2800.0</text>
+            <text class="t-sm" x="16" y="178">"NVDA"   900.0</text>
+        </g>
+
+        <g class="anim anim-2">
+            <rect class="blk blk-data" x="168" y="44" width="152" height="146" rx="8"/>
+            <rect class="hd hd-data" x="168" y="44" width="152" height="22" rx="8"/>
+            <rect class="hd hd-data" x="168" y="58" width="152" height="8"/>
+            <text class="t-lbl t-data" x="180" y="59">Volume</text>
+
+            <rect class="row" x="176" y="72" width="136" height="18" rx="3"/>
+            <text class="t-sm" x="184" y="85">shares : UInt64</text>
+            <rect class="row-x" x="176" y="94" width="136" height="18" rx="3"/>
+            <text class="t-sm" x="184" y="107">n/a</text>
+
+            <path class="ln" d="M176 120 H312"/>
+            <text class="t-sm" x="184" y="136">1_200_000</text>
+            <text class="t-sm" x="184" y="150">  980_000</text>
+            <text class="t-sm" x="184" y="164">  410_000</text>
+            <text class="t-sm" x="184" y="178">2_050_000</text>
+        </g>
+
+        <!-- alive bitmap, aligned to the same rows -->
+        <g class="anim anim-3">
+            <text class="t-sm t-ctl" x="336" y="59">alive</text>
+            <rect class="blk blk-ctl" x="336" y="120" width="30" height="72" rx="6"/>
+            <text class="t-sm t-ctl t-mid" x="351" y="136">1</text>
+            <text class="t-sm t-ctl t-mid" x="351" y="150">1</text>
+            <text class="t-sm t-mid" x="351" y="164">0</text>
+            <text class="t-sm t-ctl t-mid" x="351" y="178">1</text>
+            <text class="t-sm" x="336" y="206">one bit</text>
+            <text class="t-sm" x="336" y="218">per row</text>
+        </g>
+
+        <!-- schema registry -->
+        <g class="anim anim-3">
+            <rect class="blk blk-ctl" x="390" y="44" width="128" height="64" rx="8"/>
+            <rect class="hd hd-ctl" x="390" y="44" width="128" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="390" y="56" width="128" height="8"/>
+            <text class="t-lbl t-ctl" x="402" y="58">SchemaRegistry</text>
+            <text class="t-sm" x="402" y="78">Price    v1</text>
+            <text class="t-sm" x="402" y="92">Volume   v1</text>
+        </g>
+
+        <!-- resources: outside the columnar world -->
+        <g class="anim anim-4">
+            <rect class="blk blk-bnd" x="390" y="126" width="128" height="66" rx="8"/>
+            <rect class="hd hd-bnd" x="390" y="126" width="128" height="20" rx="8"/>
+            <rect class="hd hd-bnd" x="390" y="138" width="128" height="8"/>
+            <text class="t-lbl t-bnd" x="402" y="140">ResourceMap</text>
+            <text class="t-sm" x="402" y="160">FxRates</text>
+            <text class="t-sm" x="402" y="174">Report</text>
+            <text class="t-sm" x="402" y="188">keyed by TypeId</text>
+        </g>
+
+        <!-- what IPC covers -->
+        <g class="anim anim-4">
+            <path class="seam" d="M540 36 V200"/>
+            <text class="t-sm t-data" x="552" y="60">write_ipc()</text>
+            <text class="t-sm" x="552" y="76">covers the columns</text>
+            <text class="t-sm" x="552" y="90">and alive bitmap</text>
+            <text class="t-sm t-bnd" x="552" y="118">resources are</text>
+            <text class="t-sm t-bnd" x="552" y="132">NOT serialized</text>
+            <text class="t-sm" x="552" y="148">re-attach them</text>
+            <text class="t-sm" x="552" y="162">after decoding</text>
+        </g>
+
+        <g class="anim anim-4">
+            <path class="ln" d="M0 240 H654"/>
+            <text class="t-sm" x="0" y="260">Row 2 is soft-deleted: its bit is <tspan class="t-data">0</tspan>, but its bytes are still in both batches until <tspan class="t-data">compact()</tspan>.</text>
+        </g>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> columnar data</span>
+        <span class="k-control"><i></i> bookkeeping</span>
+        <span class="k-boundary"><i></i> not columnar, not serialized</span>
+    </div>
+    <figcaption class="dgm-cap">
+        Both component batches have <b>four rows</b>, so <code>Row(3)</code> means the same
+        record in each. That invariant is why registration has to happen before the first
+        append.
+    </figcaption>
+</div>
+
+<p>
+    A <code>Dataset</code> is useful on its own for ad-hoc columnar work; a
+    <code>Pipeline</code> wraps one together with a set of systems.
+</p>
+
+<h2 id="component">Defining a Component</h2>
+
+<p>
+    A component names itself and provides an Arrow schema. Conversion to and from
+    <code>RecordBatch</code> goes through <code>serde_arrow</code>, so deriving
+    <code>Serialize</code> and <code>Deserialize</code> is enough for most types.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>a component is a struct plus a schema</em></div>
+    <pre><code class="language-rust">use std::sync::Arc;
+use arrow_schema::{DataType, Field, Schema};
+use saci_core::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Price {
+    symbol: String,
+    value: f64,
+}
+
+impl Component for Price {
+    fn name() -&gt; &amp;'static str { "Price" }
+
+    fn schema() -&gt; Arc&lt;Schema&gt; {
+        Arc::new(Schema::new(vec![
+            Field::new("symbol", DataType::Utf8,    false),
+            Field::new("value",  DataType::Float64, false),
+        ]))
+    }
+}</code></pre>
+</div>
+
+<p>
+    Typed <code>FieldRef</code> constants are optional. Systems use them to declare access
+    and <code>ComponentView</code> uses them to fetch typed columns, and neither costs
+    more than a string compare.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>optional, and worth it</em></div>
+    <pre><code class="language-rust">impl Price {
+    pub const SYMBOL: FieldRef&lt;Price&gt; = FieldRef::new("symbol");
+    pub const VALUE:  FieldRef&lt;Price&gt; = FieldRef::new("value");
+}</code></pre>
+</div>
+
+<h2 id="register-and-append">Registering and appending</h2>
+
+<p>
+    Register every component <b>before</b> the first append. Registration reserves the
+    component's batch slot, and appending afterwards would break the shared row count, so
+    <code>register_component</code> returns an error once rows exist.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>register, then append</em></div>
+    <pre><code class="language-rust">let mut data = Dataset::new();
+data.register_component::&lt;Price&gt;()?;
+
+let rows = vec![
+    Price { symbol: "AAPL".into(), value: 150.0 },
+    Price { symbol: "MSFT".into(), value: 300.0 },
+    Price { symbol: "GOOG".into(), value: 2_800.0 },
+];
+
+let range: std::ops::Range&lt;Row&gt; = data.append::&lt;Price&gt;(&amp;rows)?;
+assert_eq!(data.rows(), 3);</code></pre>
+</div>
+
+<div class="note">
+    <span class="note-label">Constraint</span>
+    <p>
+        Every component must receive the <b>same number of new rows</b> per append cycle.
+        Appending 100 rows to one component and 50 to another leaves the dataset
+        inconsistent, and later reads may panic.
+    </p>
+</div>
+
+<p>Or set everything up in one chain with the builder:</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>builder form</em></div>
+    <pre><code class="language-rust">let data = Dataset::builder()
+    .with::&lt;Price&gt;()
+    .with::&lt;Volume&gt;()
+    .with_resource(MarketCalendar::default())
+    .build();</code></pre>
+</div>
+
+<h2 id="reading">Reading columns</h2>
+
+<p>Three ways in, from most raw to most convenient:</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>pick the level you need</em></div>
+    <pre><code class="language-rust">// 1. Raw Arrow, for whole-batch operations
+let batch: &amp;RecordBatch = data.columns::&lt;Price&gt;().expect("registered");
+let value: &amp;ArrayRef    = data.column::&lt;Price&gt;("value").expect("field");
+
+// 2. Typed view: borrows the batch, hands back concrete Arrow arrays
+let prices = data.view::&lt;Price&gt;()?;
+let value  = prices.f64(Price::VALUE)?;
+let symbol = prices.str(Price::SYMBOL)?;
+for i in 0..prices.len() {
+    println!("{} = {}", symbol.value(i), value.value(i));
+}
+
+// 3. Back into Rust structs. Allocates, so keep it for small batches.
+let restored: Vec&lt;Price&gt; = Price::from_record_batch(batch)?;</code></pre>
+</div>
+
+<p>
+    <code>ComponentView</code> accessors are named after the Arrow type:
+    <code>f64</code>, <code>i64</code>, <code>u64</code>, <code>bool</code>,
+    <code>str</code> and <code>ts_ns</code>. They return concrete array types like
+    <code>&amp;Float64Array</code>, so you index without downcasting.
+</p>
+
+<h2 id="lifecycle">Soft delete and compaction</h2>
+
+<p>
+    Deleting a row flips one bit. The bytes stay put until you compact, and compaction
+    <b>renumbers every row</b>.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 168" role="img" aria-labelledby="lc-title lc-desc">
+        <title id="lc-title">Soft delete then compaction</title>
+        <desc id="lc-desc">
+            Marking row 1 dead clears its bit in the alive bitmap but leaves the data in
+            place, so row indices stay valid. Calling compact filters every component
+            batch in one pass and renumbers the surviving rows, which invalidates any Row
+            index held from before.
+        </desc>
+
+        <!-- before -->
+        <g class="anim anim-1">
+            <text class="t-sm" x="0" y="14">after append</text>
+            <rect class="blk blk-data" x="0" y="24" width="120" height="96" rx="8"/>
+            <text class="t-sm" x="12" y="44">Row 0   alive</text>
+            <text class="t-sm" x="12" y="64">Row 1   alive</text>
+            <text class="t-sm" x="12" y="84">Row 2   alive</text>
+            <text class="t-sm" x="12" y="104">Row 3   alive</text>
+        </g>
+
+        <!-- mark_dead -->
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M120 72 H196" marker-end="url(#lc-c)"/>
+            <text class="t-sm t-ctl" x="126" y="64">mark_dead(1)</text>
+            <text class="t-sm" x="126" y="90">O(1)</text>
+
+            <text class="t-sm" x="204" y="14">rows unchanged</text>
+            <rect class="blk blk-data" x="204" y="24" width="120" height="96" rx="8"/>
+            <text class="t-sm" x="216" y="44">Row 0   alive</text>
+            <text class="t-sm t-data" x="216" y="64">Row 1   dead</text>
+            <text class="t-sm" x="216" y="84">Row 2   alive</text>
+            <text class="t-sm" x="216" y="104">Row 3   alive</text>
+            <text class="t-sm" x="204" y="140">indices still valid</text>
+        </g>
+
+        <!-- compact -->
+        <g class="anim anim-3">
+            <path class="arw arw-data" d="M324 72 H408" marker-end="url(#lc-d)"/>
+            <text class="t-sm t-data" x="330" y="64">compact()</text>
+            <text class="t-sm" x="330" y="90">one filter pass</text>
+
+            <text class="t-sm" x="416" y="14">renumbered</text>
+            <rect class="blk blk-data" x="416" y="24" width="140" height="96" rx="8"/>
+            <text class="t-sm" x="428" y="44">Row 0   was 0</text>
+            <text class="t-sm" x="428" y="64">Row 1   was 2</text>
+            <text class="t-sm" x="428" y="84">Row 2   was 3</text>
+            <text class="t-sm t-data" x="428" y="104">3 rows</text>
+            <text class="t-sm t-data" x="416" y="140">old Row values are stale</text>
+        </g>
+
+        <defs>
+            <marker id="lc-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+            <marker id="lc-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <figcaption class="dgm-cap">
+        Hold a <code>Row</code> across a <code>compact()</code> and it now points at a
+        different record. Recompute indices after compacting, or do not compact while
+        indices are live.
+    </figcaption>
+</div>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>delete, then reclaim</em></div>
+    <pre><code class="language-rust">data.mark_dead(Row::new(0));
+assert!(!data.is_alive(Row::new(0)));
+assert_eq!(data.live_rows(), data.rows() - 1);
+
+if data.should_compact() {
+    data.compact()?;  // invalidates existing Row indices
+}</code></pre>
+</div>
+
+<h2 id="resources">Resources</h2>
+
+<p>
+    A resource is a plain Rust singleton stored beside the columns, keyed by
+    <code>TypeId</code>. Use one for configuration, a lookup table, or summary output:
+    anything that is not per-row.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>not columnar</em></div>
+    <pre><code class="language-rust">struct FxRates { eur: f64, gbp: f64 }
+
+data.insert_resource(FxRates { eur: 1.08, gbp: 1.27 });
+
+let rates = data.get_resource::&lt;FxRates&gt;().expect("inserted");
+assert_eq!(rates.eur, 1.08);
+
+// Mutation needs &amp;mut Dataset
+data.get_resource_mut::&lt;FxRates&gt;().unwrap().gbp = 1.30;</code></pre>
+</div>
+
+<p>Systems declare resource access the same way they declare fields:</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>declared access</em></div>
+    <pre><code class="language-rust">SystemMeta::new("convert")
+    .read_resource::&lt;FxRates&gt;()    // shared read
+    .write_resource::&lt;Report&gt;();   // exclusive write</code></pre>
+</div>
+
+<p>
+    Resource conflicts are tracked per <code>TypeId</code>, not per field. Two systems
+    writing the same resource type always land in different stages.
+</p>
+
+<h2 id="ipc">Arrow IPC round-trip</h2>
+
+<p>
+    A dataset serializes to Arrow IPC. Those are the same bytes the
+    <a href="{{ get_url(path='@/library/distributed.md') }}">distributed runner</a> uses for
+    checkpoints and the same bytes that cross the WebAssembly boundary. The
+    <a href="{{ get_url(path='@/library/reference/wire-format.md') }}">wire format reference</a>
+    pins their layout. Encoding sizes the output buffer from the batch's own memory
+    footprint up front, which avoids repeated regrowth as it writes.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>encode and decode</em></div>
+    <pre><code class="language-rust">// Encode
+let mut buf = Vec::new();
+data.write_ipc(&amp;mut buf)?;
+
+// Decode. read_ipc takes any std::io::Read.
+let restored = Dataset::read_ipc(&amp;mut &amp;buf[..])?;
+assert_eq!(restored.rows(), data.rows());</code></pre>
+</div>
+
+<div class="note note-warn">
+    <span class="note-label">What IPC leaves out, and what it checks</span>
+    <p>
+        <b>Resources</b> are absent from the payload, so re-attach them after decoding.
+        Every component in the stream must hold <b>at most the row count</b> the alive
+        bitmap declares, or <code>read_ipc</code> rejects the stream as corrupt. Fewer
+        rows is legal. That is a
+        <a href="{{ get_url(path='@/service/processors/windowing/_index.md') }}">windowing</a>
+        processor's reduced result component.
+    </p>
+</div>
+
+<h2 id="row-type">The Row type</h2>
+
+<p>
+    <code>Row</code> is a transparent <code>u32</code> index into the columnar storage.
+    <code>append</code> hands back the <code>Range&lt;Row&gt;</code> it just wrote, which is
+    the safest way to act on rows you own.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>operate on what you appended</em></div>
+    <pre><code class="language-rust">let range = data.append::&lt;Price&gt;(&amp;rows)?;
+for row in range.clone() {
+    if should_drop(row) {
+        data.mark_dead(row);
+    }
+}</code></pre>
+</div>
+
+<h2 id="next">Next</h2>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/library/systems.md') }}" class="next-card">
+        <span class="next-card-label">Concept 02</span>
+        <h3>Systems</h3>
+        <p>Write a transform, and declare which of these columns it reads and writes.</p>
+    </a>
+    <a href="{{ get_url(path='@/library/pipeline.md') }}" class="next-card">
+        <span class="next-card-label">Concept 03</span>
+        <h3>Pipeline</h3>
+        <p>Hand a Dataset and some Systems to a Pipeline and let it derive the stage plan.</p>
+    </a>
+</div>
+
+{% endblock %}

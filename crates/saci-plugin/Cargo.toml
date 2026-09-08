@@ -1,0 +1,42 @@
+[package]
+name = "saci-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Processor SDK for SACI native plugins. Wires a Pipeline to the saci-plugin-abi C ABI with the export_plugin! macro."
+
+# An rlib. A downstream plugin crate depends on this and sets its own
+# `crate-type = ["cdylib"]`, because the exported C symbols have to come from
+# the final shared library, not from here.
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# Forwards saci-core's `windows` feature so a plugin crate can implement its
+# windowing logic with the same primitives the host uses: WindowSpec,
+# WatermarkState, WindowedSystemBuilder and friends. Enables
+# `saci_plugin::windows`.
+windows = ["saci-core/windows"]
+
+[dependencies]
+saci-plugin-abi = { workspace = true }
+# `runtime` on purpose: a native plugin is a host-side shared library, so it
+# keeps the rayon stage parallelism that feature carries. Taking this
+# dependency through saci-processor instead would pin it to `processor` and
+# silently drop that.
+saci-core       = { workspace = true, features = ["runtime"] }
+
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+arrow-ipc      = { workspace = true }
+
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+base64         = { workspace = true }
+# Drives the async `Pipeline::run_on_with_stats` from inside the synchronous C
+# ABI entry points. Matches the executor saci-processor uses for the same reason.
+pollster       = { version = "1.0.1" }

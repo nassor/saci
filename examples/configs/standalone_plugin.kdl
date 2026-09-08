@@ -1,0 +1,70 @@
+// SACI standalone config running the native plugin fixture from
+// `crates/saci-plugin-smoketest/` under `saci-service`.
+//
+// The paths below are CWD-relative, so run from the repository root:
+//   cargo build -p saci-plugin-smoketest
+//   cargo run -p saci-service --features connector-file,transformer-csv,plugin -- validate \
+//     --config examples/configs/standalone_plugin.kdl --strict
+//   cargo run -p saci-service --features connector-file,transformer-csv,plugin -- serve \
+//     --config examples/configs/standalone_plugin.kdl
+//
+// It reads examples/configs/fixtures/counter_input.csv, runs the plugin, and
+// writes /tmp/saci-counter-out.csv with `seen` filled in.
+//
+// A native plugin runs in-process with full host privileges and cannot be
+// preempted, so `library` is an operator-trusted path. Set `sha3_256` to pin the
+// exact artifact; the service refuses to start when the file's digest differs.
+
+mode "standalone"
+
+node id=1 name="saci-counter-plugin" data_dir="${SACI_DATA_DIR:-/tmp/saci-counter-plugin}"
+
+run_mode kind="one_shot"
+
+workflow "counter" {
+    // Both FileSource and FileSink move CSV bytes, so one declared transformer
+    // serves them both.
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // `component` must be "Counter": the load-time graph check compares it
+    // against the component names the plugin reports from `describe`.
+    source "csv_counters" type="FileSource" component="Counter" transformer="csv_fmt" {
+        config {
+            path "examples/configs/fixtures/counter_input.csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "seen" type="Int64" nullable=#false
+        }
+    }
+
+    // A cdylib's file name is platform specific: libsaci_plugin_smoketest.so on
+    // Linux, libsaci_plugin_smoketest.dylib on macOS, saci_plugin_smoketest.dll on
+    // Windows. Override SACI_PLUGIN_LIB to pick another one.
+    plugin "process_counter" library="${SACI_PLUGIN_LIB:-target/debug/libsaci_plugin_smoketest.so}" {
+        // Read by the plugin through the host's `get_config` callback. Strings;
+        // the plugin parses them with `saci_config_parse`.
+        config "smoketest.multiplier"="1"
+    }
+
+    // truncate replaces the file each run. Without it the sink appends, and
+    // csv with has_headers writes a second header line mid-file.
+    sink "csv_out" type="FileSink" component="Counter" transformer="csv_fmt" {
+        config {
+            path "/tmp/saci-counter-out.csv"
+            truncate #true
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "seen" type="Int64" nullable=#false
+        }
+    }
+
+    link from="csv_counters" to="process_counter"
+    link from="process_counter" to="csv_out"
+}
+
+http bind="127.0.0.1:0" disabled=#false
+
+// Kept at full grade: a bounded one_shot fixture run produces little span
+// volume, so there is nothing to gain from sampling it down. See
+// standalone.kdl for the flow_control rationale under one_shot.
+observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0

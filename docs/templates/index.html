@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+
+{% block title %}SACI — batch pipelines that schedule themselves{% endblock %}
+{% block description %}SACI is a columnar batch processing engine. Declare which Arrow fields each transform touches; SACI works out the execution order, runs independent work in parallel, and loads the pipeline as a WebAssembly component written in any language that targets WASI 0.2.{% endblock %}
+{% block og_title %}SACI — batch pipelines that schedule themselves{% endblock %}
+{% block og_description %}Declare which Arrow fields each transform touches. SACI works out the execution order, runs independent work in parallel, and loads the pipeline as a WebAssembly component.{% endblock %}
+
+{% block content %}
+
+<section class="hero">
+    <div class="hero-eyebrow"><b>Apache Arrow</b> &middot; WebAssembly components &middot; Rust &middot; Go &middot; Python &middot; TypeScript &middot; Kotlin &middot; C#</div>
+
+    <h1>Batch pipelines that<br>work out <span class="hl">their own order</span></h1>
+
+    <p class="hero-lede">
+        SACI is a columnar batch processing engine for Rust, built on Apache Arrow.
+        You write transforms in Rust, Go, Python, TypeScript, Kotlin, or C# and say which
+        columns each one reads and writes. <strong>SACI derives the execution plan</strong>,
+        runs independent work concurrently, and loads the whole pipeline as a
+        WebAssembly component.
+    </p>
+
+    <div class="hero-actions">
+        <a class="btn" href="{{ get_url(path='@/service/_index.md') }}">Run the service</a>
+        <a class="btn btn-ghost" href="{{ get_url(path='@/library/_index.md') }}">Use it as a library</a>
+    </div>
+
+    <div class="badges">
+        <span class="badge">License <b>AGPL-3.0-only</b></span>
+        <span class="badge">Rust <b>1.95+</b></span>
+        <span class="badge badge-accent">Status <b>experimental</b></span>
+    </div>
+</section>
+
+<h2 id="two-ways">Two ways to use SACI</h2>
+
+<p>
+    The pipeline code is the same either way. The choice is who owns the process: one
+    binary you configure, or your own binary that links the engine.
+</p>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/service/_index.md') }}" class="next-card">
+        <span class="next-card-label">Service</span>
+        <h3>Run the service</h3>
+        <p>A KDL file names the sources, formats, processors and sinks. One binary runs it, and a processor is a WebAssembly component in Rust, Go, Python, TypeScript, Kotlin or C#.</p>
+    </a>
+    <a href="{{ get_url(path='@/library/_index.md') }}" class="next-card">
+        <span class="next-card-label">As a Library</span>
+        <h3>Embed the engine</h3>
+        <p><code>saci-core</code> in your own crate. You own <code>main</code> and call <code>pipeline.run()</code>, with a debugger on the same process.</p>
+    </a>
+</div>
+
+<h2 id="fit">Is SACI a fit?</h2>
+
+<div class="positioning-grid">
+    <div class="positioning-col positioning-is">
+        <div class="positioning-label">Reach for SACI when</div>
+        <ul>
+            <li>Work arrives as <strong>batches of 100k to 100M rows</strong>, or as a <strong>stream of individual items</strong></li>
+            <li>The transform is <strong>imperative code</strong> that SQL expresses awkwardly</li>
+            <li>Schemas are <strong>wide</strong>: tens to hundreds of columns, and each step reads a few</li>
+            <li>You need <strong>recovery time</strong> to be a design constraint, not an afterthought</li>
+        </ul>
+    </div>
+    <div class="positioning-col positioning-isnot">
+        <div class="positioning-label">Look elsewhere when</div>
+        <ul>
+            <li>You want <strong>SQL</strong>. There is no query planner here; DataFusion will win</li>
+            <li>You need <strong>hard real-time guarantees</strong>. Stream mode is sub-millisecond per item in-process, but it is not a real-time scheduler</li>
+            <li>You need <strong>exactly-once delivery</strong>. Recovery is at-least-once, so a sink has to tolerate the same batch twice</li>
+            <li>Your data is <strong>under ~10k rows</strong>. A plain <code>Vec</code> will beat this</li>
+        </ul>
+    </div>
+</div>
+
+<h2 id="why">Why columns</h2>
+
+<p>
+    Storing each field as a contiguous Arrow column, instead of a row per record, changes
+    what the machine has to move.
+</p>
+
+<div class="grid-3">
+    <div class="card">
+        <div class="feature-icon" aria-hidden="true">&#9646;</div>
+        <h3>Read only what you touch</h3>
+        <p>A system reading 3 of 50 columns loads <strong>24&nbsp;MB instead of 400&nbsp;MB</strong> per million rows. The rest never enters cache.</p>
+    </div>
+    <div class="card">
+        <div class="feature-icon control" aria-hidden="true">&#8644;</div>
+        <h3>Handoff is a pointer</h3>
+        <p>Passing a batch between stages is an <code>Arc</code> clone: one atomic increment, no buffer copy.</p>
+    </div>
+    <div class="card">
+        <div class="feature-icon boundary" aria-hidden="true">&#9671;</div>
+        <h3>Checkpoints are a memcpy</h3>
+        <p>Arrow IPC writes contiguous buffers, so crash recovery decodes <strong>6&times; faster</strong> than a row-oriented equivalent at 1M rows.</p>
+    </div>
+</div>
+
+<p>
+    <a href="{{ get_url(path='@/library/reference/benchmarks.md') }}">See the benchmark numbers and how they were measured</a>
+</p>
+
+<h2 id="name">Where the name comes from</h2>
+
+<p>
+    SACI is <b>Self-orchestrated Autonomous Compute Interface</b>. Self-orchestrated
+    because you never write a stage list: each <code>System</code> declares the Arrow
+    fields it reads and writes, and the schedule follows from those declarations
+    alone. The <code>Component</code> and <code>System</code> vocabulary comes from
+    ECS, the Entity Component System pattern from game development, which organises
+    game entities as components that systems act on each frame. SACI swaps the entity
+    for a data <code>Pipeline</code>. A frame of entities becomes a batch of Arrow
+    columns, and systems group by the fields each one names rather than by whole
+    components.
+</p>
+
+<h2 id="prior-art">Prior art</h2>
+
+<p>
+    <a href="https://github.com/conduitio/conduit">Conduit</a> is the strongest
+    influence on this project. It streams data between stores in Go, and builds a
+    pipeline from source and destination connectors plus processors. The plugin
+    contract is language-agnostic, so a connector can be written in anything.
+    Standalone processors run as WebAssembly, and Conduit either embeds in your own
+    binary or runs as a service you hand a config to. Every one of those Conduit shapes
+    is here, with a WIT world in place of the gRPC interface.
+</p>
+
+<p>
+    The unit of work differs. A Conduit pipeline carries records; a SACI
+    pipeline carries Arrow batches, and works out its execution order from the columns
+    each system declares.
+</p>
+
+<div class="note">
+    <span class="note-label">Where this project is</span>
+    <p>
+        SACI explores two questions: how far specialised coding agents can maintain a
+        non-trivial multi-crate Rust codebase, and what a Rust-native batch engine with
+        WebAssembly extensibility should look like. It is <b>not production-ready</b>, and
+        the crates are not published to crates.io. Feedback and contributions are welcome.
+    </p>
+</div>
+
+{% endblock %}

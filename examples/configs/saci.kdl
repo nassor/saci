@@ -1,0 +1,115 @@
+// SACI standalone service configuration driving a service-to-service link at
+// both ends.
+//
+// Run:
+//   cargo run --features connector-saci,wasm --bin saci-service -- validate \
+//     --config examples/configs/saci.kdl
+//   cargo run --features connector-saci,wasm --bin saci-service -- serve \
+//     --config examples/configs/saci.kdl
+//
+// The source listens and the sink dials: `bind` is an address this process
+// accepts peer services on, `connect` is a peer service this process pushes
+// batches to. Both halves carry `RecordBatch`es over Arrow IPC, so neither
+// names a `transformer`; a sink here feeds a source in another saci-service
+// and nothing in between chooses a byte format.
+//
+// `connect` takes several addresses, tried in order until one accepts a
+// session:
+//
+//   connect "b.internal:9701" "b-standby.internal:9701"
+//
+// A peer that is unreachable is skipped and the next is tried. A peer that
+// answers `reject` ends the attempt at once, because a refusal is about the
+// two configs rather than about the network, and every peer in the list would
+// say the same thing.
+//
+// `node name` below is what the peer sees as `peer_service` in its own
+// `saci_peer_source_*` series and `peer.receive` spans, so name a service
+// after the role it plays rather than after the host it runs on. With no
+// `name`, the peer sees the decimal `node id`.
+//
+// `validate` binds the source's listener, because that is where a busy port
+// surfaces, and the port must be free. It opens no outbound connection: the
+// sink resolves its `connect` addresses and dials on the first batch, so peers
+// that are down surface during `serve`, not here.
+
+mode "standalone"
+
+node id=1 name="saci-a" data_dir="${SACI_DATA_DIR:-/tmp/saci-saci}"
+
+// The source never reaches EOF: it blocks until the next batch arrives. Only
+// the stream runner can drive that, so config validation rejects `type="saci"`
+// on a source node in any other run mode. One workflow pass runs per arriving
+// batch. The sink half carries no such rule and runs in every mode.
+run_mode kind="stream"
+
+// One workflow declares the whole DAG: the source, the processor, the sink,
+// and the explicit links between them. No `transformer` node: a `saci` node
+// resolves no format.
+workflow "ticks" {
+    // ---------------------------------------------------------------- source
+
+    // The processor's `describe()` supplies the component list, so `component`
+    // on this source and the sink below must name components it declares.
+    source "ticks_in" type="saci" component="Tick" {
+        config {
+            // Listen address. Peer services connect here and push batches;
+            // several at once is fine, and ordering holds within one session.
+            bind "${SACI_SACI_BIND:-0.0.0.0:9700}"
+
+            // Received batches queued before backpressure reaches the sending
+            // services through TCP flow control.
+            buffer 64
+
+            // Per-frame cap, 8 MiB. A peer that announces more has its
+            // session closed and the listener stays up.
+            max_frame_bytes 8388608
+
+            // What a peer must declare in its hello. A peer announcing other
+            // fields is refused with a message naming both schemas, so the
+            // mismatch is found at the handshake rather than at the first
+            // batch.
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "price" type="float64" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_ticks" module="pipelines/ticks.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads Tick and writes EnrichedTick. A sink's schema_fields must match
+    // the component's RecordBatch field for field, in order.
+
+    sink "ticks_out" type="saci" component="EnrichedTick" {
+        config {
+            // Peers to dial, in order. Resolved when the factory is built and
+            // dialled on the first batch.
+            connect "${SACI_SACI_CONNECT:-127.0.0.1:9701}"
+
+            // How long to wait for a peer's accept or reject before treating
+            // it as down and trying the next one.
+            handshake_timeout_ms 5000
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "price" type="float64" nullable=#true
+        }
+    }
+
+    link from="ticks_in" to="process_ticks"
+    link from="process_ticks" to="ticks_out"
+}
+
+// HTTP control plane. /metrics carries the service's own counters plus the
+// saci_peer_source_* series labelled with the peer that fed this source.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 15% grade:
+// one workflow.batch span opens per arriving batch, so a live peer at any real
+// rate needs sampling well below full to keep stdout and the inspector buffers
+// readable. error_sample_ratio stays at 1.0. Set otlp_endpoint on both
+// services for a received batch's span to join the sending batch's trace.
+observability log_format="pretty" log_level="info" sample_ratio=0.15 error_sample_ratio=1.0

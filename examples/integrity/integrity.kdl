@@ -1,0 +1,433 @@
+// SACI standalone config: the integrity demo, stream half.
+//
+//   integrity_check --NDJSON--> kafka integrity.orders ─┐
+//   integrity_check --CSV file--> catalog.csv ─┐        │
+//                                              v        v
+//                                          [ classify ] (wasm)
+//                                          /     |      \
+//                              express/  /   standard\   \ all
+//                                       v             v    v
+//                          POST /sink/express  /sink/standard  channel "classified"
+//                                                                     |
+//   integrity_check --NDJSON--> nats INTEGRITY/integrity.payments ─┐   |
+//                                                                  v   v
+//                                                            [ aggregate ] (wasm, windowed)
+//                                                                    |
+//                                                                    v
+//                                                            POST /sink/window
+//
+// Every sink posts to the one HTTP endpoint `integrity_check` serves, which is
+// also the publisher and the verifier: it recomputes each derived field and
+// each checksum from what it published and compares.
+//
+// The PostgreSQL CDC third of the demo lives in `integrity_audit.kdl`, a
+// separate process. `run_mode` is a property of the whole config, and the two
+// halves want opposite ones: a Kafka consumer, a JetStream consumer and a
+// ChannelSource never reach EOF, which only the stream runner can drive, while
+// every PostgreSQL read mode returns EOF once it is caught up and needs a
+// runner that re-enters. In stream mode an EOF retires a source permanently.
+//
+// ── Delivery semantics, the thing this example exists to teach ─────────────
+//
+// Kafka's offset commit, JetStream's acks and the CDC slot's LSN all advance
+// at the start of the NEXT `next_batch` call, not when a batch is handed to
+// the workflow. So `pause`/`resume` is lossless: the runner stays alive and
+// calls `next_batch` again. `stop`/`start` and any crash redeliver the last
+// in-flight batch, because the call that would have acknowledged it never
+// happened. The verifier deduplicates on `order_id` and `(window_id, region)`
+// for exactly that reason.
+//
+// ── Lifecycle ──────────────────────────────────────────────────────────────
+//
+// Both workflows here hold a Channel node, so `ServiceBuilder::rebuild_blocker`
+// refuses `stop`, `start` and `restart` on them with 409: an mpsc pair is
+// created once per process and the sink being the only Sender is what gives
+// the source a real EOF. `pause`/`resume` stays available, because it keeps
+// the runner and every resource it holds alive. `audit`, in the other config,
+// holds no Channel node and its wasm node names a module, so it is
+// restartable; the verifier asserts both halves of that contrast.
+//
+// Build the three processors first, from the repository root:
+//   cargo build --release -p integrity-classify-wasm -p integrity-aggregate-wasm \
+//     -p integrity-audit-wasm --target wasm32-wasip2
+//
+// Start Kafka, NATS and PostgreSQL (docker compose -f examples/integrity/docker-compose.yml up -d),
+// then the publisher/verifier, then both services. That order is enforced:
+// the publisher's startup reset deletes this topic, its consumer group, the
+// JetStream messages, the audit table and the replication slot, so it refuses
+// to run at all while either control plane answers.
+//   cargo run -p saci-service --example integrity_check
+//   cargo run -p saci-service \
+//     --features connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm,windows \
+//     -- serve --config examples/integrity/integrity.kdl
+//   cargo run -p saci-service \
+//     --features connector-postgresql,connector-http,transformer-parquet,wasm \
+//     -- serve --config examples/integrity/integrity_audit.kdl
+
+mode "standalone"
+
+node id=1 name="saci-integrity" data_dir="${SACI_DATA_DIR:-/tmp/saci-integrity/stream}"
+
+// A Kafka consumer, a JetStream consumer and a ChannelSource all block rather
+// than report EOF, so the stream runner drives them item by item, one batch
+// from one source per pass, rotating round-robin.
+run_mode kind="stream"
+
+// No `store "redb"` block on purpose. Both processors carry cross-batch state,
+// and in stream mode the runner threads every processor's checkpoint blob from
+// one item to the next in memory whether a store exists or not
+// (`prior[i] = out.state` in crates/saci-service/src/service/stream.rs), so
+// the catalog `classify` accumulates and the windows `aggregate` holds work
+// without a file. A store adds one thing here: those blobs are also written to
+// disk and loaded back when the workflow is built, and the blob that comes
+// back carries `aggregate`'s watermark. This example's simulated clock
+// restarts at the same epoch every run, so a restored watermark would sit a
+// whole run ahead of the first arrival, every arrival would be beyond
+// `allowed_lateness_ms`, and /sink/window would receive nothing while both
+// order sinks came out complete. `classify` would lose nothing either way:
+// `catalog_file` below is re-read on every build.
+// `examples/configs/redb.kdl` is where the store block is demonstrated.
+
+workflow "ingest" name="Order ingest and classification" {
+    // One JSON object per line for Kafka messages and for the express sink.
+    transformer "ndjson_fmt" format="ndjson"
+    // One record per line for the catalog file and the standard sink. On a
+    // stream surface, which is what both FileSource and HttpSink use,
+    // `has_headers` defaults to #true, so the catalog file is read with a
+    // header row and every POST /sink/standard body carries one.
+    transformer "csv_fmt" format="csv"
+
+    // ---------------------------------------------------------------- sources
+
+    // Declared FIRST on purpose, and the guarantee is exactly one arrival
+    // deep. The stream runner primes every source's first poll concurrently
+    // into a per-index slot, then starts its rotation at the first declared
+    // source, so this source's FIRST arrival is item #1; a tail left by
+    // chunking is served before any other source is polled, so that arrival
+    // drains whole. A SECOND arrival from this source would not be: the
+    // rotation advances to `orders_kafka` once the first is drained. So the
+    // catalog must arrive as one `next_batch` return, which is what
+    // `catalog.csv` being one small committed file buys. A sku `classify`
+    // has not seen yet is not an error, it just classifies as
+    // taxable=false, which is a different answer than the verifier expects.
+    //
+    // FileSource reads the file once and reports EOF; there is no tailing
+    // and no re-read. EOF only drops it from the rotation, which is why a
+    // one-shot source is legal here at all: `orders_kafka` keeps feeding
+    // items.
+    source "catalog_file" type="FileSource" component="Catalog" transformer="csv_fmt" {
+        config {
+            // Committed beside this config, so `cargo xtask validate` and a
+            // clean checkout both resolve it: FileSource opens its path when
+            // the factory is built, `validate` included. The publisher reads
+            // the same file to predict every `taxable` flag, so all three
+            // must name one file.
+            path "${SACI_CATALOG_FILE:-examples/integrity/catalog.csv}"
+
+            // csv is not self-describing, so the reader needs the schema. It
+            // must match `integrity-classify-wasm`'s `Catalog` field for
+            // field: the host compares the two at load time and refuses the
+            // link otherwise.
+            schema_fields "sku" type="utf8" nullable=#false
+            schema_fields "name" type="utf8" nullable=#false
+            schema_fields "taxable" type="boolean" nullable=#false
+            schema_fields "weight_kg" type="float64" nullable=#false
+        }
+    }
+
+    source "orders_kafka" type="KafkaSource" component="Order" transformer="ndjson_fmt" {
+        // Branch routing is per batch: the processor reads the first row's
+        // priority and the whole batch follows it. A batch that mixed
+        // priorities would post half its rows to the wrong sink. The
+        // publisher therefore gives each Kafka message one priority, and this
+        // block is what keeps one message equal to one batch: `batch_size 1`
+        // alone is not enough, because `Source::request_batch_rows` overwrites
+        // it before every poll whenever a flow controller is live.
+        flow_control {
+            enabled #false
+        }
+
+        config {
+            brokers "${SACI_KAFKA_BROKERS:-localhost:9092}"
+            topic "integrity.orders"
+            // Named rather than left to the connector default because a
+            // re-run has to drop it: deleting the topic does not drop
+            // committed offsets, and a surviving group replays the previous
+            // run's messages as orders the verifier never published.
+            group_id "saci-integrity"
+            // Messages per RecordBatch, in force only because the controller
+            // above is off.
+            batch_size 1
+            // How long one poll keeps collecting after its first message.
+            // Short, because a batch is one message anyway.
+            poll_timeout_ms 5
+            auto_offset_reset "earliest"
+            // Commit the previous batch's offsets at the start of the next
+            // poll. Spelled out because it is the reason a stop/start
+            // redelivers the last in-flight message.
+            commit_on_drain #true
+            // Never report EOF: a Kafka consumer is a live source, and an EOF
+            // would retire it from the stream rotation for good.
+            stop_at_end #false
+
+            provision {
+                create #true
+                partitions 1
+                replication_factor 1
+            }
+
+            // Matches `integrity-classify-wasm`'s `Order` field for field.
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "sku" type="utf8" nullable=#false
+            schema_fields "qty" type="int32" nullable=#false
+            schema_fields "unit_price" type="float64" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+            schema_fields "event_ms" type="int64" nullable=#false
+        }
+    }
+
+    // ------------------------------------------------------------- processor
+    //
+    // Declares three components: `Order` and `Catalog` arrive from the two
+    // sources, `ClassifiedOrder` is produced and read by the three sinks.
+    // Two sources feeding *different* components of one processor is legal:
+    // the stream runner delivers one source's batch per item and clears the
+    // dataset afterwards, so the other component is simply empty that pass.
+
+    wasm "classify" module="target/wasm32-wasip2/release/integrity_classify_wasm.wasm"
+
+    // ----------------------------------------------------------------- sinks
+    //
+    // Three sinks, one component, three different wire formats. Every sink
+    // node is wrapped in `RetryingSink` by the builder regardless of run mode,
+    // so a refused POST is re-driven rather than lost; the explicit block below
+    // just shortens the default backoff, because the verifier is a local
+    // process and a slow retry ladder would look like a dropped batch.
+
+    sink "express_http" type="HttpSink" component="ClassifiedOrder" transformer="ndjson_fmt" {
+        retry max_attempts=5 base_delay_ms=50 multiplier=2.0 max_delay_ms=2000 jitter=0.1
+
+        config {
+            url "${SACI_VERIFY_URL:-http://127.0.0.1:9099}/sink/express"
+            method "POST"
+            timeout_ms 5000
+
+            headers {
+                content-type "application/x-ndjson"
+            }
+
+            // A sink always declares the schema its bodies are written with.
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "sku" type="utf8" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+            schema_fields "qty" type="int32" nullable=#false
+            schema_fields "unit_price" type="float64" nullable=#false
+            schema_fields "line_total" type="float64" nullable=#false
+            schema_fields "taxable" type="boolean" nullable=#false
+            schema_fields "branch" type="utf8" nullable=#false
+            schema_fields "checksum" type="int64" nullable=#false
+            schema_fields "event_ms" type="int64" nullable=#false
+        }
+    }
+
+    sink "standard_http" type="HttpSink" component="ClassifiedOrder" transformer="csv_fmt" {
+        retry max_attempts=5 base_delay_ms=50 multiplier=2.0 max_delay_ms=2000 jitter=0.1
+
+        config {
+            url "${SACI_VERIFY_URL:-http://127.0.0.1:9099}/sink/standard"
+            method "POST"
+            timeout_ms 5000
+
+            headers {
+                content-type "text/csv"
+            }
+
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "sku" type="utf8" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+            schema_fields "qty" type="int32" nullable=#false
+            schema_fields "unit_price" type="float64" nullable=#false
+            schema_fields "line_total" type="float64" nullable=#false
+            schema_fields "taxable" type="boolean" nullable=#false
+            schema_fields "branch" type="utf8" nullable=#false
+            schema_fields "checksum" type="int64" nullable=#false
+            schema_fields "event_ms" type="int64" nullable=#false
+        }
+    }
+
+    // The in-process bridge into the `settle` workflow. No transformer: a
+    // channel carries RecordBatches, not bytes. `buffer` is the mpsc depth in
+    // batches; the sink reports the queued row backlog to flow control.
+    sink "settle_bridge" type="ChannelSink" component="ClassifiedOrder" {
+        config name="classified" buffer=256 {
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "sku" type="utf8" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+            schema_fields "qty" type="int32" nullable=#false
+            schema_fields "unit_price" type="float64" nullable=#false
+            schema_fields "line_total" type="float64" nullable=#false
+            schema_fields "taxable" type="boolean" nullable=#false
+            schema_fields "branch" type="utf8" nullable=#false
+            schema_fields "checksum" type="int64" nullable=#false
+            schema_fields "event_ms" type="int64" nullable=#false
+        }
+    }
+
+    link from="catalog_file" to="classify"
+    link from="orders_kafka" to="classify"
+
+    // Every outbound link of one node is labelled or none is, so the bridge
+    // carries a label too. The processor names two branches per order batch:
+    // the priority one, which selects exactly one HTTP sink, and the constant
+    // `all`, which always selects the bridge. A catalog-only batch names none,
+    // so it reaches no sink at all.
+    link from="classify" to="express_http" branch="express"
+    link from="classify" to="standard_http" branch="standard"
+    link from="classify" to="settle_bridge" branch="all"
+}
+
+workflow "settle" name="Windowed settlement" {
+    // Node ids are unique across every workflow in a config, so this cannot
+    // reuse `ingest`'s `ndjson_fmt` id even though the format is the same.
+    transformer "payments_ndjson" format="ndjson"
+    // Self-describing, so the sink writes the schema into every body and the
+    // verifier reads it back without a declaration of its own.
+    transformer "arrow_fmt" format="arrow-ipc"
+
+    // ---------------------------------------------------------------- sources
+
+    // The consumer half of the `classified` channel. Exactly one
+    // ChannelSource and one ChannelSink may claim a name; a dangling half is
+    // a load-time error.
+    source "bridge_in" type="ChannelSource" component="ClassifiedOrder" {
+        config name="classified" buffer=256 {
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "sku" type="utf8" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "priority" type="utf8" nullable=#false
+            schema_fields "qty" type="int32" nullable=#false
+            schema_fields "unit_price" type="float64" nullable=#false
+            schema_fields "line_total" type="float64" nullable=#false
+            schema_fields "taxable" type="boolean" nullable=#false
+            schema_fields "branch" type="utf8" nullable=#false
+            schema_fields "checksum" type="int64" nullable=#false
+            schema_fields "event_ms" type="int64" nullable=#false
+        }
+    }
+
+    // JetStream rather than a core subject, so a paused-then-resumed workflow
+    // loses nothing: a durable consumer keeps its position on the server, and
+    // core NATS is at-most-once with no subscriber. THIS SERVICE owns the
+    // stream's settings through `stream_provision`; the publisher waits for
+    // the stream to exist rather than creating it, so there is one owner.
+    source "payments_nats" type="NatsSource" component="Payment" transformer="payments_ndjson" {
+        config {
+            batch_size 500
+            poll_timeout_ms 5
+            // A JetStream consumer is a live source; an EOF would retire it.
+            stop_at_end #false
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-integrity-settle"
+            }
+
+            mode kind="jetstream" {
+                stream "INTEGRITY"
+                // Named and durable: an ephemeral consumer's position is
+                // forgotten when the connection drops, which would silently
+                // skip payments across a pause.
+                durable_name "saci-integrity-payments"
+                filter_subjects "integrity.payments"
+                ack_policy "explicit"
+                deliver_policy kind="all"
+                ack_wait_ms 30000
+                max_ack_pending 1000
+                fetch_expires_ms 5000
+                api_timeout_ms 5000
+
+                stream_provision {
+                    create #true
+                    subjects "integrity.>"
+                    retention "limits"
+                    storage "file"
+                }
+            }
+
+            // Matches `integrity-aggregate-wasm`'s `Payment` field for field.
+            schema_fields "payment_id" type="int64" nullable=#false
+            schema_fields "order_id" type="int64" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+            schema_fields "currency" type="utf8" nullable=#false
+            schema_fields "settled" type="boolean" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "event_ms" type="int64" nullable=#false
+        }
+    }
+
+    // ------------------------------------------------------------- processor
+    //
+    // The `window` block is host knowledge, not just a hint: it validates that
+    // every component reaching this node carries `time_field` as Int64 or a
+    // timestamp, tracks the node's watermark
+    // (`saci_window_watermark_seconds`), and is injected into the node's
+    // config as `window.*` keys, which the processor reads back through
+    // get-config. One source of truth for the geometry.
+    //
+    // A source on a path to a windowed node builds no flow controller at all:
+    // a credit-sized slice would let a throughput measurement choose the
+    // boundaries at which the node observes event time. Arrivals stay whole,
+    // sized by each connector's own `batch_size`.
+    wasm "aggregate" module="target/wasm32-wasip2/release/integrity_aggregate_wasm.wasm" {
+        window kind="tumbling" size_ms=10000 time_field="event_ms" allowed_lateness_ms=2000 {
+            key_field "region"
+        }
+    }
+
+    // ------------------------------------------------------------------ sink
+
+    sink "window_http" type="HttpSink" component="RegionTotal" transformer="arrow_fmt" {
+        retry max_attempts=5 base_delay_ms=50 multiplier=2.0 max_delay_ms=2000 jitter=0.1
+
+        config {
+            url "${SACI_VERIFY_URL:-http://127.0.0.1:9099}/sink/window"
+            method "POST"
+            timeout_ms 5000
+
+            headers {
+                content-type "application/vnd.apache.arrow.stream"
+            }
+
+            schema_fields "window_id" type="int64" nullable=#false
+            schema_fields "region" type="utf8" nullable=#false
+            schema_fields "order_count" type="int64" nullable=#false
+            schema_fields "payment_count" type="int64" nullable=#false
+            schema_fields "order_amount" type="float64" nullable=#false
+            schema_fields "payment_amount" type="float64" nullable=#false
+            schema_fields "checksum" type="int64" nullable=#false
+        }
+    }
+
+    link from="bridge_in" to="aggregate"
+    link from="payments_nats" to="aggregate"
+    link from="aggregate" to="window_http"
+}
+
+// ----------------------------------------------------------- control plane
+//
+// `control #true` mounts /api/workflows*, which is what the verifier drives:
+// pause and resume on `ingest` and `settle`, and a 409 on stop/start/restart
+// because both hold a Channel node. It is the default; spelled out because
+// this example is about the lifecycle plane.
+http bind="127.0.0.1:8088" control=#true
+
+observability log_format="pretty" log_level="info" sample_ratio=0.02 error_sample_ratio=1.0 {
+    // Two live sources plus a bridge, each item opening its own span tree, so
+    // full sampling would fill the inspector buffers in seconds.
+    // error_sample_ratio stays at 1.0: a refused POST is never sampled away.
+    inspector enabled=#true ui=#true
+}

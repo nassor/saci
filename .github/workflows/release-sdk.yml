@@ -1,0 +1,105 @@
+name: Release SDK packages
+
+# Publishes the five saci-sdk packages as release assets, plus the Go module tag
+# the proxy serves. Toolchain versions match the `polyglot` job in ci.yml and
+# examples/polyglot/PINS.md.
+
+on:
+  push:
+    tags:
+      - 'sdk-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Pack and publish
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.25.5'
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '24'
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
+    - uses: actions/setup-java@v5
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+
+    - uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: '8.14.4'
+
+    - uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Install the Python build frontend
+      run: pip install build
+
+    # The tag is the release's identity, so a tag that disagrees with
+    # packages/VERSION would publish assets under the wrong name.
+    - name: Assert the tag matches packages/VERSION
+      run: |
+        version="$(cat packages/VERSION)"
+        tagged="${GITHUB_REF_NAME#sdk-v}"
+        if [ "${version}" != "${tagged}" ]; then
+          echo "packages/VERSION is ${version}, tag ${GITHUB_REF_NAME} says ${tagged}" >&2
+          exit 1
+        fi
+        echo "VERSION=${version}" >> "${GITHUB_ENV}"
+
+    - name: Pack every package
+      run: cargo xtask pack-sdk
+
+    # The Kotlin install line resolves from the Pages site, which serves
+    # docs/static/ verbatim. A release whose Maven repository was never committed
+    # would document an install that 404s.
+    - name: Assert the Maven repository is committed
+      run: |
+        for module in saci-sdk-kt saci-sdk-kt-jvm saci-sdk-kt-wasm-wasi saci-sdk-kt-ksp; do
+          dir="docs/static/maven/io/github/nassor/${module}/${VERSION}"
+          git ls-files --error-unmatch "${dir}" >/dev/null
+        done
+
+    - name: Create the release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create "${GITHUB_REF_NAME}" \
+          --title "saci-sdk ${VERSION}" \
+          --notes "One package per language.
+
+        \`\`\`bash
+        go get github.com/nassor/saci/packages/saci-sdk-go@v${VERSION}
+        pip install saci_sdk-${VERSION}-py3-none-any.whl
+        npm install ./nassor-saci-sdk-${VERSION}.tgz
+        dotnet nuget add source <download-dir> -n saci-local && dotnet add package Saci.Sdk --version ${VERSION}
+        \`\`\`
+
+        Kotlin resolves from https://nassor.github.io/saci/maven:
+
+        \`\`\`kotlin
+        repositories { maven(\"https://nassor.github.io/saci/maven\") }
+        dependencies { implementation(\"io.github.nassor:saci-sdk-kt:${VERSION}\") }
+        \`\`\`
+
+        Reference: https://nassor.github.io/saci/library/reference/sdk-packages/" \
+          target/arrow-ipc-dist/*
+
+    # Go resolves a module in a subdirectory from a tag prefixed with that
+    # subdirectory, so the module proxy needs this second tag.
+    - name: Tag the Go module
+      run: |
+        git tag "packages/saci-sdk-go/v${VERSION}" "${GITHUB_SHA}"
+        git push origin "packages/saci-sdk-go/v${VERSION}"

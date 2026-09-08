@@ -1,0 +1,11 @@
+# Node 3 — follower
+node_id: 3
+listen: "0.0.0.0:9003"
+bootstrap: false
+data_dir: /data/node3
+output_dir: /data/output/node3
+peers:
+  - "node1:9001"
+  - "node2:9002"
+log_json: true
+generator_interval_secs: 10

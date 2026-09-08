@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}Page Not Found — SACI{% endblock %}
+{% block description %}The requested page could not be found in the SACI documentation.{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div class="hero-eyebrow">404</div>
+    <h1>That page isn't here</h1>
+    <p class="hero-lede">
+        The link may be stale, or the page may have been folded into another one.
+    </p>
+    <div class="hero-actions">
+        <a class="btn" href="{{ get_url(path='@/service/first-pipeline.md') }}">Your first pipeline</a>
+        <a class="btn btn-ghost" href="{{ get_url(path='/') }}">Start from the top</a>
+    </div>
+</section>
+{% endblock %}

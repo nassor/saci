@@ -1,0 +1,219 @@
+@import "tailwindcss";
+@source "../src/**/*.rs";
+
+/* --------------------------------------------------------------------------
+   Tokens
+
+   Copied from docs/static/styles.css so the dashboard and the documentation
+   site are the same product visually. `light-dark()` reads the used
+   `color-scheme`, which inherits from :root, so one declaration covers both
+   themes and there is no theme toggle to keep in sync.
+   -------------------------------------------------------------------------- */
+:root {
+    color-scheme: light dark;
+
+    /* Surface */
+    --background:  light-dark(hsl(0 0% 100%),      hsl(240 10% 3.9%));
+    --foreground:  light-dark(hsl(240 10% 3.9%),   hsl(0 0% 98%));
+    --card:        light-dark(hsl(0 0% 100%),      hsl(240 8% 6.5%));
+    --muted:       light-dark(hsl(240 5% 96%),     hsl(240 5% 11%));
+    --muted-foreground: light-dark(hsl(240 4% 46%), hsl(240 5% 65%));
+    --accent:      light-dark(hsl(240 5% 95%),     hsl(240 5% 14%));
+    --border:      light-dark(hsl(240 6% 90%),     hsl(240 5% 17%));
+    --ring:        light-dark(hsl(240 5% 55%),     hsl(240 5% 70%));
+
+    /* Brand: the data plane doubles as the primary action colour */
+    --primary:     light-dark(hsl(28 88% 38%),     hsl(33 96% 60%));
+    --primary-foreground: light-dark(hsl(0 0% 100%), hsl(240 10% 4%));
+
+    /* Planes */
+    --data:        light-dark(hsl(28 88% 38%),     hsl(33 96% 60%));
+    --control:     light-dark(hsl(174 84% 24%),    hsl(172 66% 47%));
+    --boundary:    light-dark(hsl(266 62% 48%),    hsl(266 86% 76%));
+
+    /* The one token the docs palette has no equivalent for: none of the three
+       planes (data, control, boundary) means "error". Same
+       hsl()-in-light-dark() shape and the same light/dark relationship as the
+       planes above. */
+    --destructive: light-dark(hsl(0 72% 42%),      hsl(0 84% 65%));
+
+    --radius: 0.625rem;
+
+    --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+    /* Diagram tokens, consumed directly by the graph's SVG shapes rather than
+       through Tailwind's utility generator: they colour a handful of rects and
+       paths, not layout. */
+    --dgm-bg:      light-dark(hsl(240 5% 98%),  hsl(240 8% 7%));
+    --dgm-blk:     light-dark(hsl(0 0% 100%),   hsl(240 6% 11.5%));
+    --dgm-edge:    light-dark(hsl(240 6% 84%),  hsl(240 5% 22%));
+    --dgm-hd-data: light-dark(hsl(33 78% 90%),  hsl(31 34% 21%));
+    --dgm-hd-ctl:  light-dark(hsl(172 42% 89%), hsl(179 26% 18%));
+    --dgm-hd-bnd:  light-dark(hsl(266 52% 93%), hsl(265 27% 24%));
+    --dgm-row-r:   light-dark(hsl(174 84% 30% / 0.16), hsl(172 66% 47% / 0.26));
+    --dgm-row-w:   light-dark(hsl(28 88% 45% / 0.18),  hsl(33 96% 60% / 0.30));
+    --dgm-mute:    light-dark(hsl(240 5% 72%),  hsl(240 6% 34%));
+}
+
+/* --------------------------------------------------------------------------
+   shadcn's variable contract, bridged onto the tokens above through Tailwind
+   v4's `@theme inline`, so shadcn's own class recipes (bg-background,
+   text-muted-foreground, ...) work unmodified.
+
+   Where the docs palette has no dedicated token: --popover and
+   --card-foreground reuse --card and --foreground, --secondary reuses --muted,
+   and --input reuses --border. Current shadcn declares no
+   --destructive-foreground (it was dropped upstream; components hardcode
+   text-white over a destructive background), so none is declared here either.
+   -------------------------------------------------------------------------- */
+@theme inline {
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--foreground);
+    --color-popover: var(--card);
+    --color-popover-foreground: var(--foreground);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-secondary: var(--muted);
+    --color-secondary-foreground: var(--foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--foreground);
+    --color-destructive: var(--destructive);
+    --color-border: var(--border);
+    --color-input: var(--border);
+    --color-ring: var(--ring);
+    --radius-lg: var(--radius);
+    --font-sans: var(--font-sans);
+    --font-mono: var(--font-mono);
+}
+
+body {
+    font-family: var(--font-sans);
+}
+
+/* --------------------------------------------------------------------------
+   Edge flow
+
+   The dash offset animates rather than the path, so the browser composites one
+   stroke instead of re-tessellating a curve every frame. The period comes from
+   the rate through a custom property the graph sets inline, so speeding up a
+   busy edge costs one style write and no re-render.
+   -------------------------------------------------------------------------- */
+@keyframes saci-dash {
+    to { stroke-dashoffset: -32; }
+}
+
+.saci-edge-flow {
+    animation: saci-dash var(--saci-dash-dur, 2s) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .saci-edge-flow { animation: none; }
+    .saci-particle { display: none; }
+}
+
+/* --------------------------------------------------------------------------
+   Severity vocabulary
+
+   One chip class per `tracing` level, drawn from the tokens above rather than
+   a palette of its own: error is the destructive token, warn the data plane,
+   info the control plane, and the two trace levels fall back to the muted
+   foregrounds. `color-mix` derives the fill and the border from the same
+   token, so a chip stays legible in both colour schemes without a second
+   declaration.
+   -------------------------------------------------------------------------- */
+.saci-lvl {
+    display: inline-block;
+    min-width: 3.5rem;
+    padding: 0 0.375rem;
+    border: 1px solid transparent;
+    border-radius: 0.25rem;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    line-height: 1.25rem;
+    text-align: center;
+}
+
+.saci-lvl-error {
+    color: var(--destructive);
+    border-color: color-mix(in oklab, var(--destructive) 40%, transparent);
+    background: color-mix(in oklab, var(--destructive) 14%, transparent);
+}
+
+.saci-lvl-warn {
+    color: var(--data);
+    border-color: color-mix(in oklab, var(--data) 40%, transparent);
+    background: color-mix(in oklab, var(--data) 14%, transparent);
+}
+
+.saci-lvl-info {
+    color: var(--control);
+    border-color: color-mix(in oklab, var(--control) 40%, transparent);
+    background: color-mix(in oklab, var(--control) 14%, transparent);
+}
+
+.saci-lvl-debug {
+    color: var(--muted-foreground);
+    border-color: var(--border);
+    background: var(--muted);
+}
+
+.saci-lvl-trace {
+    color: var(--dgm-mute);
+    border-color: var(--border);
+}
+
+/* One structured field, as `key=value`. The key carries the colour so a row
+   of chips scans by key without a second element per pair. */
+.saci-kv {
+    display: inline-block;
+    max-width: 22rem;
+    overflow: hidden;
+    padding: 0 0.25rem;
+    border-radius: 0.25rem;
+    background: var(--muted);
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    line-height: 1.125rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.saci-kv > b {
+    color: color-mix(in oklab, var(--control) 70%, var(--foreground));
+    font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------
+   Graph and waterfall
+
+   A wide graph keeps its authored size and scrolls, the same rule the docs
+   site's `.dgm-scroll` follows: fitting it to the viewport instead would
+   shrink every label past reading size on a fan-out of six sinks.
+   -------------------------------------------------------------------------- */
+.saci-canvas {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+}
+
+.saci-node .saci-node-bg {
+    transition: stroke 120ms linear;
+}
+
+.saci-node:hover .saci-node-bg {
+    stroke: var(--ring);
+}
+
+.saci-bar {
+    transition: opacity 120ms linear;
+}
+
+.saci-bar:hover {
+    opacity: 1;
+}

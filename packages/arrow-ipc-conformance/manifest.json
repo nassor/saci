@@ -1,0 +1,282 @@
+{
+  "cases": [
+    {
+      "accept": {
+        "columns": {
+          "amount": {
+            "type": "float64",
+            "values": [
+              100.0,
+              -5.0,
+              1000000.0,
+              60000.0,
+              0.0,
+              20000.0
+            ]
+          },
+          "currency": {
+            "type": "utf8",
+            "values": [
+              "EUR",
+              "GBP",
+              "JPY",
+              "USD",
+              "EUR",
+              "USD"
+            ]
+          },
+          "id": {
+            "type": "int64",
+            "values": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ]
+          },
+          "valid": {
+            "type": "bool",
+            "values": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ]
+          }
+        },
+        "component": "Order",
+        "components": [
+          "Order",
+          "__alive"
+        ],
+        "rows": 6
+      },
+      "expect": "accept",
+      "name": "baseline",
+      "note": "A stream straight out of Dataset::write_ipc. Every codec must accept it and read these values back.",
+      "vector": "vectors/baseline.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "trailing_bytes",
+      "note": "Bytes follow the zero-length terminator. The stream is complete at the terminator, so anything after it means the producer and consumer disagree about the payload.",
+      "reason": "trailing_bytes",
+      "vector": "vectors/trailing_bytes.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "missing_terminator",
+      "note": "The zero-length terminator is absent, so the segment loop runs off the end.",
+      "reason": "truncated_stream",
+      "vector": "vectors/missing_terminator.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "segment_longer_than_stream",
+      "note": "A segment's declared length runs past the end of the payload.",
+      "reason": "truncated_stream",
+      "vector": "vectors/segment_longer_than_stream.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "empty_segment",
+      "note": "A segment carrying only an end-of-stream marker declares no component and must be reported as empty rather than as a wrong header type.",
+      "reason": "empty_segment",
+      "vector": "vectors/empty_segment.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "bad_continuation_marker",
+      "note": "A message must open with 0xFFFFFFFF.",
+      "reason": "bad_continuation",
+      "vector": "vectors/bad_continuation_marker.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "message_longer_than_segment",
+      "note": "A message's metadata length runs past the end of its segment.",
+      "reason": "truncated_message",
+      "vector": "vectors/message_longer_than_segment.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "extra_message_in_segment",
+      "note": "A segment carries exactly one Schema and one RecordBatch. A second RecordBatch means the reader would silently ignore data.",
+      "reason": "extra_message",
+      "vector": "vectors/extra_message_in_segment.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "bytes_after_segment_marker",
+      "note": "A segment is spent once its end-of-stream marker is read. Bytes after it mean the reader would silently drop data.",
+      "reason": "extra_message",
+      "vector": "vectors/bytes_after_segment_marker.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "first_message_not_schema",
+      "note": "A segment opens with its Schema message.",
+      "reason": "first_message_not_schema",
+      "vector": "vectors/first_message_not_schema.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "dictionary_batch",
+      "note": "Dictionary encoding is outside this format. The refusal names it specifically, because a dictionary batch is a plausible thing for a writer to emit and a confusing thing to diagnose.",
+      "reason": "dictionary_batch",
+      "vector": "vectors/dictionary_batch.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "unknown_header_type",
+      "note": "The second message must be a RecordBatch, and the refusal echoes the header type it actually found.",
+      "reason": "second_message_not_record_batch",
+      "vector": "vectors/unknown_header_type.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "negative_row_count",
+      "note": "A negative declared row count must be refused by the codec, not turned into a native allocation error deeper in.",
+      "reason": "bad_row_count",
+      "vector": "vectors/negative_row_count.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "overflowing_row_count",
+      "note": "A declared row count no allocation could satisfy must be refused up front.",
+      "reason": "bad_row_count",
+      "vector": "vectors/overflowing_row_count.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "nodes_field_count_mismatch",
+      "note": "The node count must equal the schema's field count. A short nodes vector means the buffer walk would read another field's buffers.",
+      "reason": "nodes_field_mismatch",
+      "vector": "vectors/nodes_field_count_mismatch.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "buffer_overruns_body",
+      "note": "A buffer whose declared span leaves the message body must be refused before any column is read.",
+      "reason": "buffer_overruns_body",
+      "vector": "vectors/buffer_overruns_body.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "negative_buffer_length",
+      "note": "A negative buffer length is not a usable span.",
+      "reason": "buffer_overruns_body",
+      "vector": "vectors/negative_buffer_length.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "missing_component_key",
+      "note": "A segment without the __saci_component metadata key declares no component, so nothing can address it.",
+      "reason": "missing_component_key",
+      "vector": "vectors/missing_component_key.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "compressed_batch",
+      "note": "A genuinely LZ4-compressed record batch, written by arrow-rs. The format carries no compression, so every codec refuses it rather than reading the compressed bytes as values.",
+      "reason": "compressed_batch",
+      "vector": "vectors/compressed_batch.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "unknown_component",
+      "note": "Addressing a component the stream does not carry.",
+      "op": {
+        "component": "Nope",
+        "kind": "component"
+      },
+      "reason": "unknown_component",
+      "vector": "vectors/baseline.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "unknown_field",
+      "note": "Addressing a field the component does not declare.",
+      "op": {
+        "component": "Order",
+        "field": "nope",
+        "kind": "column",
+        "type": "float64"
+      },
+      "reason": "unknown_field",
+      "vector": "vectors/baseline.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "type_mismatch",
+      "note": "Reading a Float64 column as Int64.",
+      "op": {
+        "component": "Order",
+        "field": "amount",
+        "kind": "column",
+        "type": "int64"
+      },
+      "reason": "type_mismatch",
+      "vector": "vectors/baseline.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "row_out_of_range",
+      "note": "Writing past the last row.",
+      "op": {
+        "component": "Order",
+        "field": "usd_amount",
+        "kind": "set",
+        "row": 9999,
+        "type": "float64",
+        "value": 1.0
+      },
+      "reason": "row_out_of_range",
+      "vector": "vectors/baseline.saci"
+    },
+    {
+      "expect": "reject",
+      "name": "variable_width_write",
+      "note": "Writing a Utf8 column in place. Changing a string's length would move every later offset and the buffer lengths in the RecordBatch metadata.",
+      "op": {
+        "component": "Order",
+        "field": "settlement",
+        "kind": "set",
+        "row": 0,
+        "type": "utf8",
+        "value": "X"
+      },
+      "reason": "variable_width_write",
+      "vector": "vectors/baseline.saci"
+    }
+  ],
+  "component": "Order",
+  "format_version": 1,
+  "generated_by": "@generated by `cargo run -p saci-service --features conformance --example conformance_vectors -- emit`",
+  "reasons": [
+    "bad_continuation",
+    "bad_row_count",
+    "buffer_overruns_body",
+    "compressed_batch",
+    "dictionary_batch",
+    "empty_segment",
+    "extra_message",
+    "first_message_not_schema",
+    "missing_component_key",
+    "nodes_field_mismatch",
+    "row_out_of_range",
+    "second_message_not_record_batch",
+    "trailing_bytes",
+    "truncated_message",
+    "truncated_stream",
+    "type_mismatch",
+    "unknown_component",
+    "unknown_field",
+    "variable_width_write"
+  ],
+  "schema_fingerprint": "f6405a7b"
+}

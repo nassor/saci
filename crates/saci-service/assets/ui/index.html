@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>saci-service</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <div id="saci-app"></div>
+  <!-- The module URL is absolute, not `./app.js`: the page is served at both
+       `/ui` and `/ui/`, and a relative specifier resolves against the document
+       URL, so `./app.js` would ask for `/app.js` from `/ui`. `init()` with no
+       argument then resolves `app_bg.wasm` through `import.meta.url`, which is
+       `/ui/app.js`, so the wasm URL follows automatically. -->
+  <script type="module">
+    import init from '/ui/app.js';
+    await init();
+  </script>
+</body>
+</html>

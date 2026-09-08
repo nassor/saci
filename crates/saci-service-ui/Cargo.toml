@@ -1,0 +1,43 @@
+[package]
+name = "saci-service-ui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+publish = false
+description = "The saci-service live dashboard: a client-side-rendered Leptos app served from /ui."
+license = "AGPL-3.0-only"
+
+# Not a workspace member. This crate only builds for wasm32-unknown-unknown, so
+# `cargo test --workspace --all-features` would try to compile it for the host
+# and fail; the root manifest excludes the path and this crate keeps its own
+# lock file. `cargo xtask ui` runs its fmt and clippy gates, because
+# `cargo fmt --all` and `cargo clippy --all-targets` only walk members.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The JSON contract, shared verbatim with the server. `saci-service` itself
+# cannot compile for wasm32-unknown-unknown (its non-optional `saci-core`
+# dependency pulls tokio and mio), which is why the wire types live in their
+# own crate.
+saci-inspector-wire = { path = "../saci-inspector-wire" }
+
+leptos = { version = "0.8", features = ["csr"] }
+gloo-net = { version = "0.7", default-features = false, features = ["http", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["DomRect", "Document", "Element", "HtmlElement", "Window"] }
+console_error_panic_hook = "0.1"
+
+[profile.release]
+# The bundle is committed and served from the binary, so size matters more than
+# the last few percent of speed. `opt-level = "z"` plus LTO is the smallest
+# `wasm-bindgen --target web` output without a `wasm-opt` pass, which nothing
+# else in this repository's toolchain installs.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

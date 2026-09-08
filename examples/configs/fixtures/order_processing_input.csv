@@ -1,0 +1,6 @@
+id,amount,currency,valid,usd_amount
+1,120.0,EUR,false,0.0
+2,4300.0,USD,false,0.0
+3,75.5,GBP,false,0.0
+4,-50.0,EUR,false,0.0
+5,900000.0,JPY,false,0.0

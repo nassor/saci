@@ -1,0 +1,59 @@
+[package]
+name = "saci-connector-nats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "NATS Source and Sink for SACI, core subjects or JetStream, with the factories that build them from service configuration."
+
+[dependencies]
+saci-core        = { workspace = true, features = ["io"] }
+saci-connector   = { workspace = true }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+# `display::ArrayFormatter` renders one cell as a per-row subject, header value
+# or Nats-Msg-Id. The payload codecs live in the transformer crates.
+arrow-cast    = { workspace = true }
+async-trait   = { workspace = true }
+# `join_all` awaits every in-flight JetStream publish ack concurrently, and
+# `StreamExt::next` drives both the core subscriber and a JetStream Batch.
+futures-util  = { workspace = true }
+serde         = { workspace = true }
+tokio         = { workspace = true, features = ["fs"] }
+# `Client::publish` and `PublishMessage::payload` take `Bytes`; `Bytes::from(Vec<u8>)`
+# hands the transformer's encoded payload over without a copy.
+bytes         = "1.12"
+
+# Pure-Rust NATS client. `default-features = false` sheds the kv, object-store,
+# service and websockets surfaces this connector does not use; `ring` is not
+# optional because tokio-rustls needs a crypto provider and `src/crypto.rs`
+# `compile_error!`s without one. `server_2_10` is what makes consumer
+# `filter_subjects` and stream `metadata` / `compression` exist as struct fields
+# at all; `server_2_12` is what makes `stream_provision.allow_atomic` one, and
+# `server_2_14` the atomic batch's commit-ack `batch`/`count` fields.
+#
+# The RFC 3339 timestamp behind `deliver_policy kind = "by_start_time"` is parsed
+# with `async_nats::datetime::parse_rfc3339`, so no datetime crate is named here:
+# the alias behind it is `time::OffsetDateTime` or `chrono::DateTime<Utc>`
+# depending on a feature any crate in the graph may flip.
+async-nats = { version = "0.50.0", default-features = false, features = [
+    "jetstream", "nkeys", "nuid", "ring", "server_2_10", "server_2_12", "server_2_14",
+] }
+
+[dev-dependencies]
+# The payload formats the round-trip tests exercise, constructed directly.
+saci-transformer-arrow-ipc = { workspace = true }
+saci-transformer-ndjson    = { workspace = true }
+
+# The NATS server the integration tests drive. Pinned here rather than in
+# `[workspace.dependencies]`, matching saci-connector-kafka and
+# saci-connector-postgresql.
+testcontainers = "0.28"
+anyhow         = { workspace = true }
+tokio          = { workspace = true, features = ["rt-multi-thread"] }
+serde_json     = { workspace = true }

@@ -1,0 +1,34 @@
+[package]
+name = "polyglot-settle-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# A sample processor component, not a library a downstream consumer would
+# depend on.
+publish = false
+description = "Stage 6 of the polyglot example: the Rust processor that writes `settlement` and keeps a cross-batch ledger."
+
+# This is a processor pipeline component, NOT a binary. `cargo build --target wasm32-wasip2`
+# links the cdylib straight into a Component Model component exporting the
+# saci-pipeline world from saci-processor's WIT package.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+saci-processor = { workspace = true }
+# `#[derive(Component)]` requires `Serialize`/`Deserialize` alongside it, and
+# serde's own expansion names the literal `serde` crate at the call site, so it
+# is a direct dependency rather than a re-export.
+serde          = { workspace = true }
+
+# The bindings generator, invoked by the `#[processor]` expansion. Gated on
+# wasm32 because that expansion is: the host build of this crate is an empty
+# cdylib and has no use for the generator or its proc-macro dependency tree.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { workspace = true }
+
+# Drives the pipeline's async `run_on` from the synchronous host tests, the same
+# way the `#[processor]` expansion drives it inside `run-batch`.
+[dev-dependencies]
+pollster = "0.4"

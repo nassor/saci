@@ -1,0 +1,149 @@
+mode "standalone"
+
+node id=1 name="saci-multi-workflow" data_dir="${SACI_DATA_DIR:-/tmp/saci-multi-workflow}"
+
+// A core NATS subscription never reaches EOF, so the stream runner drives
+// every workflow's sources item by item.
+run_mode kind="stream"
+
+workflow "route" {
+    transformer "ndjson_fmt" format="ndjson"
+
+    // "router" decides per pass from this source's first row, so how many
+    // messages a pass carries changes which branch some rows take.
+    source "orders_in" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+        // Adaptive flow control, scoped to this source alone: "settle"'s
+        // two sources below feed the windowed window_sales node, and a
+        // stream-mode source on that path builds no controller at all, so a
+        // block declared there would be accepted but inert.
+        flow_control {
+            min_rows 512
+            max_rows 65536
+            start_rows 2048
+            adjust_interval_ms 20000
+        }
+
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-multi-route"
+            }
+
+            mode kind="core" subject="multi.orders"
+
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    wasm "router" module="target/wasm32-wasip2/release/multi_workflow_router_wasm.wasm"
+
+    // The rush branch: routed batches land in PostgreSQL untouched.
+    sink "rush_sales" type="PostgresSink" component="Sale" {
+        config {
+            name "rush-sales"
+            table "public.rush_sales"
+            write_mode "upsert"
+            conflict_columns "timestamp_ms" "symbol"
+
+            connection {
+                dsn "${SACI_PG_DSN:-postgres://postgres:saci@127.0.0.1:5432/saci}"
+                application_name "saci-multi-route"
+                sslmode "disable"
+            }
+
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    // The standard branch bridges into the settle workflow on this channel.
+    sink "standard_bridge" type="ChannelSink" component="Sale" {
+        config name="standard" buffer=64 {
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    link from="orders_in" to="router"
+    link from="router" to="rush_sales" branch="rush"
+    link from="router" to="standard_bridge" branch="standard"
+}
+
+workflow "settle" {
+    transformer "settle_ndjson" format="ndjson"
+
+    // Fan-in: the bridged channel plus a second live NATS subject, both
+    // carrying the Sale schema the windowed processor declares.
+    source "standard_in" type="ChannelSource" component="Sale" {
+        config name="standard" buffer=64 {
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    source "offsets_in" type="NatsSource" component="Sale" transformer="settle_ndjson" {
+        config {
+            batch_size 2500
+            poll_timeout_ms 5
+
+            connection {
+                servers "${SACI_NATS_URL:-nats://localhost:4222}"
+                name "saci-multi-settle"
+            }
+
+            mode kind="core" subject="multi.offsets"
+
+            schema_fields "timestamp_ms" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "amount" type="float64" nullable=#false
+        }
+    }
+
+    wasm "window_sales" module="target/wasm32-wasip2/release/windowing_tumbling_wasm.wasm" {
+        window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+            key_field "symbol"
+        }
+    }
+
+    sink "window_totals" type="PostgresSink" component="WindowTotal" {
+        config {
+            name "window-totals"
+            table "public.window_totals"
+            write_mode "upsert"
+            conflict_columns "window_id" "symbol"
+
+            connection {
+                dsn "${SACI_PG_DSN:-postgres://postgres:saci@127.0.0.1:5432/saci}"
+                application_name "saci-multi-settle"
+                sslmode "disable"
+            }
+
+            schema_fields "window_id" type="int64" nullable=#false
+            schema_fields "symbol" type="utf8" nullable=#false
+            schema_fields "count" type="int64" nullable=#false
+            schema_fields "sum" type="float64" nullable=#false
+        }
+    }
+
+    link from="standard_in" to="window_sales"
+    link from="offsets_in" to="window_sales"
+    link from="window_sales" to="window_totals"
+}
+
+http bind="127.0.0.1:8080"
+
+observability log_format="pretty" log_level="info" sample_ratio=0.05 error_sample_ratio=1.0 {
+    // Two workflows share this process: "route" forwards a live NATS subject
+    // through a router, "settle" fans two sources into a windowed processor,
+    // so every pass across both opens its own per-item span. Kept low to
+    // bound that volume. error_sample_ratio stays at 1.0.
+    inspector enabled=#true ui=#true
+}

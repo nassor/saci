@@ -1,0 +1,9 @@
+sku,name,taxable,weight_kg
+SKU-001,anvil,true,12.5
+SKU-002,rope,false,1.25
+SKU-003,lantern,true,0.8
+SKU-004,tent,false,4.4
+SKU-005,compass,true,0.15
+SKU-006,canteen,false,0.6
+SKU-007,rations,true,2
+SKU-008,map,false,0.05

@@ -1,0 +1,15 @@
+root = true
+
+# LF everywhere, in the editor as well as in git (.gitattributes) and in
+# rustfmt (rustfmt.toml). No indentation or trimming rules: this file exists
+# for line endings and encoding only.
+[*]
+charset = utf-8
+end_of_line = lf
+
+# The Pages-served Maven repository is byte-exact: its artifacts carry
+# committed .md5/.sha1/.sha256/.sha512 siblings that Gradle verifies, so
+# nothing here may be rewritten on save.
+[docs/static/maven/**]
+charset = unset
+end_of_line = unset

@@ -1,0 +1,139 @@
+# cargo-nextest configuration. Reference: https://nexte.st/docs/configuration/reference/.
+#
+# Two profiles:
+# - `default`: the everyday-iteration profile. Skips every test that needs a
+#   Docker daemon — the testcontainers-backed connector suites, the Raft-chaos
+#   suites, and connector_matrix.rs's full_matrix, the four-container sweep
+#   in saci-service::connector_matrix (that file's Docker-free
+#   dimensions_cover_the_registry test stays in this profile) — plus the one
+#   test that reaches a live remote service without a container, turso's
+#   synced_roundtrip. `cargo nextest run --workspace --all-features` finishes in
+#   seconds and is safe to run constantly.
+# - `ci`: the full profile. Runs every test nextest discovers, including the
+#   ones `default` skips and any `#[ignore]`d test, via
+#   `cargo nextest run --workspace --all-features --profile ci --run-ignored all`.
+#   Reserved for CI and for the final verification step of a plan, not for
+#   routine local runs. full_matrix is itself `#[ignore]`d, so `--profile ci`
+#   without `--run-ignored` skips it too; it reaches CI only through its own
+#   job, which passes `--profile ci` explicitly: `--test` selects a cargo
+#   build target, not a nextest filter, so it cannot bypass `default`'s
+#   `default-filter`, which excludes full_matrix by name; only switching to
+#   `ci`'s `default-filter = "all()"` does.
+#
+# `cargo test --workspace --all-features --doc` still runs on its own:
+# nextest does not execute doctests.
+
+[profile.default]
+# Excluded whole binaries are entirely testcontainers-driven: every test in
+# the file starts a container (see docs/content/service/connectors/kafka.md and
+# nats.md, and crates/saci-connector-postgresql/tests/common/mod.rs), or, for
+# the three Raft suites, a Toxiproxy container plus an N-node cluster.
+# Excluded test() clauses pick out the container-driven tests inside an
+# otherwise-fast file:
+# kafka_service.rs and nats_service.rs each pair two real-container tests
+# (the source-to-sink round trip and the dead letter store's record, replay
+# and consume cycle) with their pure-config tests, and postgres_service.rs
+# and s3_service.rs
+# each pair one real-container test with a pure-config test; raft_consensus_chaos.rs
+# pairs its Docker-gated cluster tests with two Docker-free modules, `unit`
+# over the state machine and its redb storage and `idempotency` over a
+# single-node store, both of which stay in the fast profile; and
+# connector_matrix.rs pairs full_matrix, which starts one container apiece
+# for Kafka, NATS, PostgreSQL and MinIO/S3 and holds all four for its whole
+# run, with dimensions_cover_the_registry, a Docker-free contract test
+# asserting the factory registry matches the matrix's own dimension lists,
+# which stays. distributed_integration_chaos.rs's full_stack_chaos_monkey_60s
+# opts out via `#[ignore]` alone, with no filter entry, and is reachable
+# through `--run-ignored`. full_matrix is `#[ignore]`d too, but is also
+# named directly below, so `default` skips it even if `--run-ignored` is
+# passed alongside `--workspace --all-features`.
+#
+# The runner suites (distributed_scheduler, runner_chaos, checkpoint_chaos,
+# wasm_chaos, distributed_processor_state) need no entry: they drive the
+# in-memory fixture in tests/common/memory_store.rs, not a container.
+#
+# turso's synced_roundtrip is the one exclusion with no container in it. It
+# reads SACI_TURSO_URL/SACI_TURSO_TOKEN and drives a synced replica against
+# whatever endpoint they name, clearing and rewriting a fixed table there, so on
+# a machine that has those variables set it is neither fast nor side-effect-free
+# to run constantly — and the sync engine's HTTP client sets no timeout, so an
+# endpoint that stalls holds the test open (the test itself now bounds its own
+# waits; this entry is what keeps the fast profile from paying for a live
+# endpoint at all). `ci` still runs it: with no credentials it soft-skips in
+# milliseconds.
+default-filter = '''
+not (
+    binary_id(=saci-connector-kafka::kafka_roundtrip)
+    or binary_id(=saci-connector-nats::nats_roundtrip)
+    or binary_id(=saci-connector-postgresql::sink)
+    or binary_id(=saci-connector-postgresql::source_cursor)
+    or binary_id(=saci-connector-postgresql::source_logical)
+    or binary_id(=saci-connector-postgresql::all_types)
+    or binary_id(=saci-connector-s3::round_trip)
+    or binary_id(=saci-connector-turso::synced_roundtrip)
+    or (binary_id(=saci-service::connector_matrix) and test(=full_matrix))
+    or binary_id(=saci-service::transport_chaos)
+    or binary_id(=saci-service::distributed_harness_smoke)
+    or (binary_id(=saci-service::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/)))
+    or (binary_id(=saci-service::kafka_service) and (test(=a_kafka_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_kafka_store_records_a_refused_batch_and_replays_it)))
+    or (binary_id(=saci-service::nats_service) and (test(=a_nats_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_jetstream_store_records_a_refused_batch_and_replays_it)))
+    or (binary_id(=saci-service::postgres_service) and test(=a_postgres_source_and_sink_move_rows_through_the_standalone_runner))
+    or (binary_id(=saci-service::s3_service) and test(=an_s3_source_and_sink_move_rows_through_the_standalone_runner))
+)
+'''
+
+[profile.ci]
+default-filter = "all()"
+# The heaviest Docker chaos tests run past nextest's default 60s slow
+# threshold (transport_chaos's bandwidth test allows up to 60s for the
+# follower to reconverge on top of container startup, and
+# full_stack_chaos_monkey_60s takes ~70-100s), so raise it to keep CI output
+# from being spuriously flagged SLOW. Nothing here terminates a test early.
+slow-timeout = "180s"
+
+# Each Raft chaos test starts its own Toxiproxy container plus an N-node
+# cluster with one proxy per directed edge, then asserts on election and
+# log-convergence deadlines. saci-service::connector_matrix's full_matrix
+# starts one container apiece for Kafka, NATS, PostgreSQL and MinIO/S3 and
+# drives every source/sink/transformer/processor-runtime combination against
+# them concurrently in one process. Unlike the other connector suites, which
+# each need only their own container, every binary in this group holds
+# multiple containers or enough host CPU at once to saturate the Docker
+# daemon, so the group takes the machine one binary at a time.
+# raft_consensus_chaos.rs's `unit` and `idempotency` modules drive a local
+# redb file, contend for nothing, and are left out of the group. The group
+# name covers both kinds of heavy Docker test: the Raft chaos suites and the
+# connector matrix. The two overrides below still match the whole
+# `connector_matrix` binary rather than naming full_matrix alone: grouping
+# the cheap dimensions_cover_the_registry test alongside it costs nothing
+# and keeps both filter expressions identical to the other four binaries'.
+[test-groups.heavy-docker]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'binary_id(=saci-service::transport_chaos) or (binary_id(=saci-service::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/))) or binary_id(=saci-service::distributed_harness_smoke) or binary_id(=saci-service::distributed_integration_chaos) or binary_id(=saci-service::connector_matrix)'
+test-group = "heavy-docker"
+
+# saci-service::connector_matrix's full_matrix runs four container startups
+# end to end behind the whole source x sink x transformer x processor-runtime
+# product. A measured run takes about 920s on a fast 16-core local box, and a
+# GitHub Actions runner is slower still, so this threshold sits well past that
+# measured figure for headroom; with no override at all every run would be
+# flagged SLOW for reporting a real result, not a hang. Placed before the
+# heavy-docker override below so it wins `slow-timeout`: that override still
+# supplies `test-group`, because nextest resolves each setting independently
+# against the first matching override that specifies it.
+#
+# `success-output` is here for the same binary because this test's whole value
+# is the report it prints: the per-case matrix, the per-processor grids, the
+# supported/rejected/skipped/FAILED totals and the maximal workflow all go to
+# stdout, and nextest shows a passing test's output to nobody by default. A
+# green tick with no report says nothing about what the run covered.
+[[profile.ci.overrides]]
+filter = 'binary_id(=saci-service::connector_matrix)'
+slow-timeout = "2400s"
+success-output = "final"
+
+[[profile.ci.overrides]]
+filter = 'binary_id(=saci-service::transport_chaos) or (binary_id(=saci-service::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/))) or binary_id(=saci-service::distributed_harness_smoke) or binary_id(=saci-service::distributed_integration_chaos) or binary_id(=saci-service::connector_matrix)'
+test-group = "heavy-docker"

@@ -1,0 +1,650 @@
+{% extends "base.html" %}
+
+{% block title %}Systems — SACI{% endblock %}
+{% block description %}A System is a struct with a run method plus a meta() that names every Arrow field it reads and writes. That declaration is the entire input to stage scheduling.{% endblock %}
+{% block og_title %}Systems — SACI{% endblock %}
+{% block og_description %}Declare which columns you touch, and SACI derives the execution plan. Field granularity is what lets two systems write one component at once.{% endblock %}
+
+{% block content %}
+
+<div class="page-kicker">Concept 02</div>
+<h1>Systems</h1>
+
+<p class="page-lede">
+    A <code>System</code> is a plain Rust struct with a <code>run</code> method.
+    Its <code>meta()</code> names every field it touches, and that declaration is
+    the only thing the scheduler ever looks at.
+</p>
+
+<dl class="page-facts">
+    <dt>In one line</dt>
+    <dd>A transform that <strong>declares its own reads and writes</strong>, per field, up front</dd>
+    <dt>You need</dt>
+    <dd>Nothing beyond <code>saci-core</code>. Concurrent stages need its default <code>runtime</code> feature</dd>
+    <dt>Read this if</dt>
+    <dd>You are writing your first transform, or two of your systems refuse to share a stage and you want to know which declaration is forcing them apart</dd>
+</dl>
+
+<h2 id="trait">What a System is</h2>
+
+<p>
+    Four methods, one of them required. <code>run</code> receives
+    <code>&amp;mut Dataset</code> and may do anything to it. The other three are
+    declarations about that run: what it touches, how failure is retried, and
+    whether it needs an async state machine at all.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>the trait, as declared in saci-core</em></div>
+    <pre><code class="language-rust">#[async_trait]
+pub trait System: Send + Sync {
+    /// Defaults to an empty declaration named after the concrete type.
+    fn meta(&amp;self) -&gt; SystemMeta {
+        SystemMeta::new(std::any::type_name::&lt;Self&gt;())
+    }
+
+    /// Defaults to exponential backoff, 3 retries.
+    fn config(&amp;self) -&gt; SystemConfig {
+        SystemConfig::default()
+    }
+
+    /// The only required method.
+    async fn run(&amp;self, data: &amp;mut Dataset) -&gt; Result&lt;(), SaciError&gt;;
+
+    /// Sync fast-path. Returning Some(_) skips the async state machine.
+    fn run_sync(&amp;self, _data: &amp;mut Dataset) -&gt; Option&lt;Result&lt;(), SaciError&gt;&gt; {
+        None
+    }
+}</code></pre>
+</div>
+
+<p>
+    The executor calls <code>run_sync</code> first and only awaits <code>run</code>
+    when it returns <code>None</code>, so a purely synchronous body costs no
+    <code>Box&lt;dyn Future&gt;</code> allocation. The <code>meta()</code> default is an
+    <em>empty</em> declaration: a system that never overrides it declares no access at
+    all. See <a href="#wrong-meta">When meta() is wrong</a>.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 248" role="img" aria-labelledby="sys-anat-title sys-anat-desc">
+        <title id="sys-anat-title">The two halves of a system: its declaration and its body</title>
+        <desc id="sys-anat-desc">
+            On the left, meta() lists two reads and one write. In the middle, the Order
+            component's four field rows are tinted from that declaration: amount and rate
+            are read, total is written, status is untouched. On the right, the body of run()
+            uses exactly those three columns. Nothing in the engine compares the two
+            sides, so the declaration is a promise, not a description.
+        </desc>
+
+        <text class="t-title" x="0" y="14">AddTotal</text>
+        <text class="t-sm" x="0" y="30">one struct, two obligations, and the engine only ever reads one of them</text>
+
+        <text class="t-sm t-mid" x="194" y="48">declares</text>
+        <text class="t-sm t-mid" x="406" y="48">permits</text>
+
+        <!-- the declaration -->
+        <g class="anim anim-1">
+            <rect class="blk blk-ctl" x="0" y="56" width="176" height="120" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="56" width="176" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="0" y="70" width="176" height="8"/>
+            <text class="t-lbl t-ctl" x="12" y="71">meta()</text>
+
+            <rect class="row-r" x="8" y="84" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="97">.reads(Order::AMOUNT)</text>
+            <rect class="row-r" x="8" y="106" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="119">.reads(Order::RATE)</text>
+            <rect class="row-w" x="8" y="128" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="141">.writes(Order::TOTAL)</text>
+            <rect class="row-x" x="8" y="150" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="163">status: not named</text>
+        </g>
+
+        <!-- the component it is talking about -->
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M176 116 H206" marker-end="url(#sys-a-c)"/>
+
+            <rect class="blk blk-data" x="212" y="56" width="176" height="120" rx="8"/>
+            <rect class="hd hd-data" x="212" y="56" width="176" height="22" rx="8"/>
+            <rect class="hd hd-data" x="212" y="70" width="176" height="8"/>
+            <text class="t-lbl t-data" x="224" y="71">Order</text>
+
+            <rect class="row-r" x="220" y="84" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="228" y="97">amount : Float64</text>
+            <text class="t-sm t-ctl t-end" x="372" y="97">read</text>
+            <rect class="row-r" x="220" y="106" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="228" y="119">rate : Float64</text>
+            <text class="t-sm t-ctl t-end" x="372" y="119">read</text>
+            <rect class="row-w" x="220" y="128" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="228" y="141">total : Float64</text>
+            <text class="t-sm t-data t-end" x="372" y="141">write</text>
+            <rect class="row-x" x="220" y="150" width="160" height="18" rx="3"/>
+            <text class="t-sm" x="228" y="163">status : Utf8</text>
+            <text class="t-sm t-end" x="372" y="163">untouched</text>
+        </g>
+
+        <!-- the body -->
+        <g class="anim anim-3">
+            <path class="arw arw-data" d="M388 116 H418" marker-end="url(#sys-a-d)"/>
+
+            <rect class="blk blk-ctl" x="424" y="56" width="230" height="120" rx="8"/>
+            <rect class="hd hd-ctl" x="424" y="56" width="230" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="424" y="70" width="230" height="8"/>
+            <text class="t-lbl t-ctl" x="436" y="71">run(&amp;mut Dataset)</text>
+
+            <text class="t-sm" x="434" y="94">let o = data.view::&lt;Order&gt;()?;</text>
+            <text class="t-sm" x="434" y="110">let a = o.f64(Order::AMOUNT)?;</text>
+            <text class="t-sm" x="434" y="126">let r = o.f64(Order::RATE)?;</text>
+            <text class="t-sm" x="434" y="142">// total = a * r, per row</text>
+            <text class="t-sm" x="434" y="158">data.apply_write_set(ws)?;</text>
+        </g>
+
+        <g class="anim anim-4">
+            <path class="ln" d="M0 200 H654"/>
+            <text class="t-sm" x="0" y="218">The plan is built from <tspan class="t-ctl">meta()</tspan> alone. Nothing inspects the body of <tspan class="t-ctl">run()</tspan>.</text>
+            <text class="t-sm" x="0" y="234">Write <tspan class="t-data">status</tspan> here anyway and no error fires: the plan is just wrong from then on.</text>
+        </g>
+
+        <defs>
+            <marker id="sys-a-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+            <marker id="sys-a-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> columns, and the writes that land in them</span>
+        <span class="k-control"><i></i> the system: its declaration and its body</span>
+    </div>
+    <figcaption class="dgm-cap">
+        <code>meta()</code> is a <b>promise</b> about the body, and the engine never
+        checks one against the other. That is what keeps the plan cheap to build, and
+        what makes a wrong declaration expensive.
+    </figcaption>
+</div>
+
+<p>
+    That system in full. <code>Order</code> is a component with
+    <code>FieldRef</code> constants, exactly as set up on the
+    <a href="{{ get_url(path='@/library/dataset.md') }}">Dataset</a> page. The
+    <a href="{{ get_url(path='@/library/first-pipeline.md') }}">native tutorial</a>
+    walks a full pipeline of these from <code>main</code>.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>declaration and body, side by side</em></div>
+    <pre><code class="language-rust">use std::sync::Arc;
+use arrow_array::Float64Array;
+use saci_core::prelude::*;
+
+struct AddTotal;
+
+#[async_trait]
+impl System for AddTotal {
+    fn meta(&amp;self) -&gt; SystemMeta {
+        SystemMeta::new("add_total")
+            .reads(Order::AMOUNT)
+            .reads(Order::RATE)
+            .writes(Order::TOTAL)
+    }
+
+    async fn run(&amp;self, data: &amp;mut Dataset) -&gt; SaciResult&lt;()&gt; {
+        // The view borrows `data`, so compute first, then write.
+        let totals: Vec&lt;f64&gt; = {
+            let o = data.view::&lt;Order&gt;()?;
+            let amount = o.f64(Order::AMOUNT)?;
+            let rate   = o.f64(Order::RATE)?;
+            (0..o.len())
+                .map(|i| amount.value(i) * rate.value(i))
+                .collect()
+        };
+
+        data.apply_write_set(
+            WriteSet::new().put("Order", "total", Arc::new(Float64Array::from(totals))),
+        )
+    }
+}</code></pre>
+</div>
+
+<p>
+    <code>apply_write_set</code> checks that the component is registered, that the
+    field exists in its schema, and that the array length equals the dataset's row
+    count. It does <em>not</em> check the write against <code>meta()</code>.
+</p>
+
+<h2 id="meta">SystemMeta and FieldRef</h2>
+
+<p>
+    <code>SystemMeta</code> is a name plus six lists: fields read, fields written,
+    whole components read, whole components written, resource types read, resource
+    types written. Every builder method takes <code>self</code> and returns
+    <code>Self</code>, so declarations chain.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>three ways to name the same access</em></div>
+    <pre><code class="language-rust">// Typed. The component name comes from Order::name(), not a string literal.
+SystemMeta::new("enrich")
+    .reads(Order::AMOUNT)
+    .writes(Order::TOTAL);
+
+// Stringly. Identical effect; useful when there are no FieldRef constants.
+SystemMeta::new("enrich")
+    .read("Order", "amount")
+    .write("Order", "total");
+
+// Whole component. Expands to every field in the component's Arrow schema
+// when the plan is built.
+SystemMeta::new("ingest")
+    .write_component("Order");</code></pre>
+</div>
+
+<p>
+    A <code>FieldRef&lt;C&gt;</code> is a <code>&amp;'static str</code> tagged with the
+    component type. It is zero-cost, <code>Copy</code>, and constructible in a
+    <code>const</code>. Its only job is to stop you from pairing a field name with
+    the wrong component, and it doubles as the argument to
+    <code>ComponentView</code> accessors because it implements
+    <code>AsRef&lt;str&gt;</code>.
+</p>
+
+<p>
+    Declarations are checked when the plan is built, against the dataset's
+    <code>SchemaRegistry</code>. Naming an unregistered component, or a field that
+    is not in that component's schema, is a <code>SaciError::Configuration</code>. The
+    field error lists the names it did find, which is usually enough to spot the typo.
+</p>
+
+<p>
+    <code>meta()</code> is called once, when the plan is built, and the result is cached
+    until the system set changes. A system that returns a different declaration on a
+    later call does not get a new plan.
+</p>
+
+<h2 id="disjoint">Why disjoint writes parallelize</h2>
+
+<p>
+    Access is declared per field rather than per component, and that is what makes this work.
+    Two systems that write <em>different</em> fields of the <em>same</em> component
+    have no dependency on each other, so they share a stage. Two systems that write
+    the <em>same</em> field are forced apart. Nothing else about the two enters the decision.
+</p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 268" role="img" aria-labelledby="sys-stage-title sys-stage-desc">
+        <title id="sys-stage-title">Disjoint writes share a stage; a shared write splits into two</title>
+        <desc id="sys-stage-desc">
+            On the left, two parallel systems both read Order.amount but write different
+            fields, valid and score. Shared reads create no dependency and their writes do
+            not overlap, so no edge is added and both execute together in stage zero. On the
+            right, discount and tax both write Order.total, which adds a write-write edge and
+            splits them into stage zero and stage one.
+        </desc>
+
+        <path class="ln" d="M330 8 V258"/>
+
+        <!-- LEFT: disjoint writes -->
+        <g class="anim anim-1">
+            <text class="t-title" x="0" y="14">different fields</text>
+            <text class="t-sm" x="0" y="32">two ParallelSystems, no shared write</text>
+
+            <rect class="blk" x="0" y="44" width="312" height="92" rx="8"/>
+            <text class="t-sm t-ctl" x="10" y="60">Stage 0</text>
+
+            <rect class="blk blk-ctl" x="10" y="68" width="130" height="60" rx="8"/>
+            <rect class="hd hd-ctl" x="10" y="68" width="130" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="10" y="80" width="130" height="8"/>
+            <text class="t-lbl t-ctl" x="20" y="82">validate</text>
+            <rect class="row-r" x="18" y="92" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="26" y="104">reads  amount</text>
+            <rect class="row-w" x="18" y="110" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="26" y="122">writes valid</text>
+
+            <text class="t-sm t-mid" x="156" y="100">no</text>
+            <text class="t-sm t-mid" x="156" y="112">edge</text>
+
+            <rect class="blk blk-ctl" x="172" y="68" width="130" height="60" rx="8"/>
+            <rect class="hd hd-ctl" x="172" y="68" width="130" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="172" y="80" width="130" height="8"/>
+            <text class="t-lbl t-ctl" x="182" y="82">score</text>
+            <rect class="row-r" x="180" y="92" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="188" y="104">reads  amount</text>
+            <rect class="row-w" x="180" y="110" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="188" y="122">writes score</text>
+        </g>
+
+        <g class="anim anim-2">
+            <rect class="blk blk-data" x="0" y="150" width="312" height="96" rx="8"/>
+            <rect class="hd hd-data" x="0" y="150" width="312" height="20" rx="8"/>
+            <rect class="hd hd-data" x="0" y="162" width="312" height="8"/>
+            <text class="t-lbl t-data" x="12" y="164">Order</text>
+
+            <rect class="row-r" x="8" y="176" width="296" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="189">amount : Float64</text>
+            <text class="t-sm t-end" x="300" y="189">read by both</text>
+            <rect class="row-w" x="8" y="198" width="296" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="211">valid : Boolean</text>
+            <text class="t-sm t-end" x="300" y="211">validate writes</text>
+            <rect class="row-w" x="8" y="220" width="296" height="18" rx="3"/>
+            <text class="t-sm" x="16" y="233">score : Float64</text>
+            <text class="t-sm t-end" x="300" y="233">score writes</text>
+        </g>
+
+        <!-- RIGHT: same field -->
+        <g class="anim anim-3">
+            <text class="t-title" x="348" y="14">same field</text>
+            <text class="t-sm" x="348" y="32">discount and tax both write total</text>
+
+            <rect class="blk" x="348" y="44" width="306" height="92" rx="8"/>
+            <text class="t-sm t-ctl" x="358" y="60">Stage 0</text>
+
+            <rect class="blk blk-ctl" x="358" y="68" width="130" height="60" rx="8"/>
+            <rect class="hd hd-ctl" x="358" y="68" width="130" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="358" y="80" width="130" height="8"/>
+            <text class="t-lbl t-ctl" x="368" y="82">discount</text>
+            <rect class="row-r" x="366" y="92" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="374" y="104">reads  amount</text>
+            <rect class="row-w" x="366" y="110" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="374" y="122">writes total</text>
+
+            <text class="t-sm t-data" x="502" y="100">total is exclusive</text>
+            <text class="t-sm" x="502" y="114">for this stage</text>
+        </g>
+
+        <g class="anim anim-4">
+            <path class="arw arw-ctl" d="M420 138 V158" marker-end="url(#sys-b-c)"/>
+            <text class="t-sm t-ctl" x="436" y="152">write-write edge</text>
+
+            <rect class="blk" x="348" y="166" width="306" height="92" rx="8"/>
+            <text class="t-sm t-ctl" x="358" y="182">Stage 1</text>
+
+            <rect class="blk blk-ctl" x="358" y="190" width="130" height="60" rx="8"/>
+            <rect class="hd hd-ctl" x="358" y="190" width="130" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="358" y="202" width="130" height="8"/>
+            <text class="t-lbl t-ctl" x="368" y="204">tax</text>
+            <rect class="row-r" x="366" y="214" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="374" y="226">reads  rate</text>
+            <rect class="row-w" x="366" y="232" width="114" height="16" rx="3"/>
+            <text class="t-sm" x="374" y="244">writes total</text>
+
+            <text class="t-sm" x="502" y="222">waits for</text>
+            <text class="t-sm t-ctl" x="502" y="236">discount</text>
+        </g>
+
+        <defs>
+            <marker id="sys-b-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-data"><i></i> the component being written</span>
+        <span class="k-control"><i></i> systems and the stages they land in</span>
+    </div>
+    <figcaption class="dgm-cap">
+        Neither system on the left knows the other exists. They
+        share a stage purely because they <b>named different fields</b>. Widen either one
+        to <code>write_component("Order")</code> and the left half becomes the right half.
+    </figcaption>
+</div>
+
+<p>
+    Systems are numbered by registration order. For any two systems <em>i</em> and
+    <em>j</em> with <em>i</em> registered first, SACI adds the edge
+    <em>i</em> &rarr; <em>j</em> when they share a field and at least one of them writes it:
+</p>
+
+<ol>
+    <li><em>i</em> writes <em>F</em>, <em>j</em> reads <em>F</em>: <strong>read after write</strong>.</li>
+    <li><em>i</em> writes <em>F</em>, <em>j</em> writes <em>F</em>: <strong>write after write</strong>.</li>
+    <li><em>i</em> reads <em>F</em>, <em>j</em> writes <em>F</em>: <strong>write after read</strong>.</li>
+    <li>The same three cases for resources, at whole-<code>TypeId</code> granularity.</li>
+</ol>
+
+<p>
+    Two systems that only <em>read</em> the same field get no edge, which is why
+    <code>amount</code> above is free. Edges always point from the
+    earlier-registered system to the later one, so registration order breaks every
+    tie and the graph cannot contain a cycle. A system's stage index is then the
+    longest path that reaches it, and the stage list is that bucketing.
+</p>
+
+<div class="note note-warn">
+    <span class="note-label">Same stage is not the same as concurrent</span>
+    <p>
+        A stage runs its members concurrently only when <b>every</b> member is a
+        <code>ParallelSystem</code>, there is more than one of them, and the dataset
+        holds at least <code>STAGE_INLINE_THRESHOLD</code> rows, which is
+        <b>100_000</b>. A stage holding
+        any plain <code>System</code>, or one under that row count, runs its members
+        one after another on the same
+        task, which is correct and no faster than putting them in separate stages. Sharing
+        a stage starts to pay only once both systems are <code>ParallelSystem</code>s and
+        the batch is large enough.
+    </p>
+</div>
+
+<h2 id="system-fn">The system_fn shortcut</h2>
+
+<p>
+    For a stateless transform, such as seeding rows or printing a summary, a whole
+    struct plus <code>impl System</code> is noise. <code>system_fn</code> pairs
+    a <code>SystemMeta</code> with a closure and hands back something that implements
+    <code>System</code>.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>meta stays explicit; only the struct goes away</em></div>
+    <pre><code class="language-rust">use saci_core::prelude::*;
+
+let load = system_fn(
+    SystemMeta::new("load").write_component("Order"),
+    |data: &amp;mut Dataset| {
+        data.append::&lt;Order&gt;(&amp;seed_rows())?;
+        Ok(())
+    },
+);
+
+pipeline.add_system(load);</code></pre>
+</div>
+
+<p>
+    The closure signature is
+    <code>Fn(&amp;mut Dataset) -&gt; Result&lt;(), SaciError&gt; + Send + Sync + 'static</code>,
+    synchronous by design. <code>system_fn</code> always implements
+    <code>run_sync</code>, so these systems never build an async state machine.
+    <code>meta()</code> is not optional here: the closure has no type name to fall back
+    on, so you pass the declaration in.
+</p>
+
+<h2 id="resources">Declaring resource access</h2>
+
+<p>
+    Resources are the non-columnar half of a <code>Dataset</code>: Rust singletons
+    keyed by <code>TypeId</code>. Systems declare them the same way, at coarser
+    granularity. A resource has no fields to name, so the unit of conflict is the
+    whole type.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>whole-type granularity, not field</em></div>
+    <pre><code class="language-rust">SystemMeta::new("convert")
+    .reads(Order::AMOUNT)          // field granularity
+    .writes(Order::TOTAL)
+    .read_resource::&lt;FxRates&gt;()    // TypeId granularity
+    .write_resource::&lt;Report&gt;();</code></pre>
+</div>
+
+<p>
+    So two systems writing the same resource type always get an edge and always land
+    in different stages, no matter which part of it each one touches. If that
+    ordering is costing you a stage, split the resource into two types.
+</p>
+
+<p>
+    A <code>ParallelSystem</code> only ever sees <code>&amp;Dataset</code> and so
+    cannot mutate a resource in place. Express the mutation as a
+    <code>ResourceUpdate</code> attached to the returned <code>WriteSet</code>; the
+    executor applies those on the main thread, after the stage's column writes have
+    been committed.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>deferred resource write from a parallel system</em></div>
+    <pre><code class="language-rust">Ok(WriteSet::new()
+    .put("Order", "score", Arc::new(Float64Array::from(scores)))
+    .with_resource(ResourceUpdate::new(Report { scored: n })))</code></pre>
+</div>
+
+<h2 id="parallel">ParallelSystem and row slices</h2>
+
+<p>
+    <code>ParallelSystem</code> is the same idea against an immutable dataset. It
+    takes <code>&amp;Dataset</code> and returns a <code>WriteSet</code> instead of
+    mutating in place, which is what lets several of them run at once inside one stage.
+    Its <code>meta()</code> has <b>no default</b>, so you must declare access.
+</p>
+
+<div class="code">
+    <div class="code-cap"><span>Rust</span><em>one kernel, two entry points</em></div>
+    <pre><code class="language-rust">use std::ops::Range;
+
+struct Score;
+
+impl Score {
+    fn compute(&amp;self, data: &amp;Dataset, rows: Range&lt;u32&gt;) -&gt; SaciResult&lt;Vec&lt;f64&gt;&gt; {
+        let o = data.view::&lt;Order&gt;()?;
+        let amount = o.f64(Order::AMOUNT)?;
+        Ok(rows.map(|i| amount.value(i as usize).log10()).collect())
+    }
+}
+
+#[async_trait]
+impl ParallelSystem for Score {
+    fn meta(&amp;self) -&gt; SystemMeta {
+        SystemMeta::new("score")
+            .reads(Order::AMOUNT)
+            .writes(Order::SCORE)
+    }
+
+    // Whole-dataset path. Always required.
+    async fn run(&amp;self, data: &amp;Dataset) -&gt; SaciResult&lt;WriteSet&gt; {
+        let scores = self.compute(data, data.row_range())?;
+        Ok(WriteSet::new().put("Order", "score", Arc::new(Float64Array::from(scores))))
+    }
+
+    // Opt into slice parallelism. Default returns None.
+    fn run_slice(
+        &amp;self,
+        data: &amp;Dataset,
+        rows: Range&lt;u32&gt;,
+    ) -&gt; Option&lt;Result&lt;SliceWriteSet, SaciError&gt;&gt; {
+        let scores = match self.compute(data, rows.clone()) {
+            Ok(s) =&gt; s,
+            Err(e) =&gt; return Some(Err(e)),
+        };
+        Some(Ok(SliceWriteSet::new(rows).put(
+            "Order",
+            "score",
+            Arc::new(Float64Array::from(scores)),
+        )))
+    }
+}
+
+pipeline.add_parallel_system(Score);</code></pre>
+</div>
+
+<p>
+    Slice parallelism is gated on two conditions, both checked before any thread is
+    spawned. The dataset must hold at least
+    <code>saci_core::system::SLICE_PARALLEL_THRESHOLD</code> rows, which is
+    <b>100_000</b>, and <code>run_slice</code> must return <code>Some</code>. When
+    either fails, the executor calls plain <code>run</code> over the whole dataset
+    instead. Below the threshold, rayon's fan-out costs more than the work it
+    distributes.
+</p>
+
+<p>
+    When both hold, the row range is cut into between one and four chunks per CPU, and
+    <code>SACI_SLICE_CHUNKS_PER_CPU</code> overrides the four. The chunks run
+    under rayon inside <code>spawn_blocking</code>, and the results go to
+    <code>merge_slices</code>. The default implementation concatenates each field's
+    segments in slice order with <code>arrow_select::concat::concat</code>. Override
+    it only when concatenation is the wrong merge, such as reducing per-slice statistics
+    to one scalar.
+</p>
+
+<p>
+    Two sharp edges here. The capability check calls
+    <code>run_slice(data, 0..0)</code> and throws the result away, so your
+    implementation must tolerate an <b>empty range</b> without panicking. And on
+    processor builds, where the <code>runtime</code> feature is off, registering a
+    <code>ParallelSystem</code> is an error at run time: that path accepts plain
+    <code>System</code> impls only.
+</p>
+
+<h2 id="wrong-meta">When meta() is wrong</h2>
+
+<p>
+    Two failure modes, and they are far apart in cost.
+</p>
+
+<p>
+    <b>Naming something that does not exist is caught.</b> When the plan is built,
+    every declared <code>(component, field)</code> pair is looked up in the
+    dataset's <code>SchemaRegistry</code>. An unregistered component or an unknown
+    field is a <code>SaciError::Configuration</code>, and
+    <code>read_component</code> / <code>write_component</code> fail the same way if
+    the component is not registered. You get this from
+    <code>Pipeline::validate()</code>, or from the first <code>run</code>, whichever
+    comes first: both build the plan.
+</p>
+
+<p>
+    <b>Declaring less than you touch is not caught.</b> No part of the engine
+    compares <code>meta()</code> against the body of <code>run</code>. A sequential
+    <code>System</code> holds <code>&amp;mut Dataset</code> and can write any
+    registered component it likes, declared or not. An understated declaration produces
+    missing edges, so the plan schedules dependent work as if it were independent.
+</p>
+
+<div class="note note-warn">
+    <span class="note-label">The undeclared write</span>
+    <p>
+        Two <code>ParallelSystem</code> impls that both write <code>Order.total</code> while
+        only one declares it get no edge, share a stage, and have their write sets merged
+        key by key. <b>One write silently overwrites the other</b>, and which one wins
+        depends on task completion order. A <code>debug_assert!</code> catches the
+        duplicate key in debug builds; a release build says nothing. The most common way
+        to reach this state is to forget <code>meta()</code> entirely, since the default
+        declares no access at all.
+    </p>
+</div>
+
+<p>
+    Over-declaring is the safe direction. Extra reads and writes only add edges,
+    which costs stages and therefore wall-clock time, never correctness. If you are
+    unsure whether a body touches a field, declare it, measure
+    <code>Pipeline::stage_count()</code>, and tighten afterwards.
+</p>
+
+<h2 id="next">Next</h2>
+
+<div class="next-steps-grid">
+    <a href="{{ get_url(path='@/library/pipeline.md') }}" class="next-card">
+        <span class="next-card-label">Concept 03</span>
+        <h3>Pipeline</h3>
+        <p>Hand a Dataset and these systems to a Pipeline and watch it derive the stage plan you just learned to predict.</p>
+    </a>
+    <a href="{{ get_url(path='@/library/scheduler.md') }}" class="next-card">
+        <span class="next-card-label">Concept 04</span>
+        <h3>Scheduler</h3>
+        <p>Run several pipelines from one process, with declared dependencies between them.</p>
+    </a>
+</div>
+
+{% endblock %}

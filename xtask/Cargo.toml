@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# No dependencies, deliberately. Every task here shells out to a toolchain that
+# is already a prerequisite, so an argument parser or an HTTP client would only
+# add compile time to `cargo xtask` and entries to the workspace lock file.
+[dependencies]

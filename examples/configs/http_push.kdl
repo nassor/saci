@@ -1,0 +1,154 @@
+// SACI standalone service configuration reading documents pushed over HTTP.
+//
+// Run:
+//   cargo run --features connector-http,transformer-ndjson,wasm --bin saci-service -- validate \
+//     --config examples/configs/http_push.kdl
+//   cargo run --features connector-http,transformer-ndjson,wasm --bin saci-service -- serve \
+//     --config examples/configs/http_push.kdl
+//
+// The source listens and the sink dials: `bind` is an address this process
+// accepts documents on, `url` is an endpoint this process sends each batch to.
+// One request carries one whole document in the format the transformer names,
+// which is exactly what an HttpSink writes, so a sink there feeds this source
+// here.
+//
+// One listener serves HTTP/1.1 and HTTP/2 on that port: the HTTP/2 connection
+// preface is sniffed, so a client with prior knowledge and an HTTP/1.1 client
+// share it. A `tls` block terminates TLS and picks between the two over ALPN,
+// and `quic_bind` adds HTTP/3 on its own UDP port.
+//
+// A request is answered 202 once its document is queued, 404 on another path,
+// 405 on a method `methods` does not list, 401 on a missing or wrong bearer
+// token, 413 on a body over max_body_bytes, and 400 on a document the format
+// could not read. A document is queued whole or not at all, so a retry of any
+// of those refusals duplicates no rows. A client that stops waiting for its
+// 202, say on a timeout while the ingest channel is full, cannot know whether
+// its document was queued, because the request is served to completion
+// regardless, so its retry queues that document a second time: ingest is
+// at-least-once.
+//
+// `validate` binds the source's listener, because that is where a busy port
+// surfaces, and the port must be free. It opens no outbound connection: the
+// sink sends its first request on the first batch, so an endpoint that is down
+// surfaces during `serve`, not here.
+
+mode "standalone"
+
+node id=1 name="saci-http-push" data_dir="${SACI_DATA_DIR:-/tmp/saci-http-push}"
+
+// The source never reaches EOF: it blocks until the next request arrives.
+// Only the stream runner can drive that, so config validation rejects
+// `type="HttpPushSource"` on a source node in any other run mode. One workflow
+// pass runs per queued batch. The sink half carries no such rule and runs in
+// every mode.
+run_mode kind="stream"
+
+// One workflow declares the whole DAG: the byte format each end speaks, the
+// source, the processor, the sink, and the explicit links between them.
+workflow "orders" {
+    // The transformer that reads each arriving body and writes each body the
+    // sink sends. "ndjson" is a block of JSON objects decoded against
+    // schema_fields below; csv, parquet, avro and arrow-ipc work the same way,
+    // one whole document per request. connector-http implies no transformer
+    // feature, so this config picks.
+    transformer "json_fmt" format="ndjson"
+
+    // ---------------------------------------------------------------- source
+
+    // The processor's `describe()` supplies the component list, so `component`
+    // on this source and the sink below must name components it declares.
+    source "orders_in" type="HttpPushSource" component="Order" transformer="json_fmt" {
+        config {
+            // Listen address. Clients send documents here; several at once is
+            // fine, and ordering holds within one request.
+            bind "${SACI_HTTP_PUSH_BIND:-127.0.0.1:9700}"
+
+            // The one path that accepts documents. Every other path is a 404.
+            path "/orders"
+
+            // The methods that accept documents. Any other method is a 405
+            // carrying an `allow` header with these.
+            methods "POST" "PUT"
+
+            // The token every request must present as
+            // `authorization: Bearer <token>`. Substitution runs over the
+            // whole file before the parser, so a real deployment keeps the
+            // token in an env var and the default here is only for a local
+            // run.
+            auth {
+                bearer "${SACI_HTTP_PUSH_TOKEN:-dev-token}"
+            }
+
+            // Largest body accepted, 64 MiB. A client that announces or sends
+            // more gets a 413 and the listener stays up.
+            max_body_bytes 67108864
+
+            // Decoded batches queued before a request in flight waits for its
+            // response, which is how backpressure reaches the client.
+            buffer 64
+
+            // Certificate and key to terminate TLS with, and a UDP port to
+            // serve HTTP/3 on, advertised as `alt-svc` on every TCP response.
+            // quic_bind needs the `tls` block:
+            //   tls {
+            //       cert_file "/etc/saci/server.pem"
+            //       key_file "/etc/saci/server.key"
+            //   }
+            //   quic_bind "127.0.0.1:9700"
+
+            // ndjson carries no schema, so the declared one is handed to it. A
+            // format that carries its own (parquet, avro) refuses this key, so
+            // a push source over one adds schema_from "body": the fields below
+            // stay behind for the workflow graph check and are compared
+            // against the schema each body turned out to carry.
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads Order and writes EnrichedOrder. A sink's schema_fields must match
+    // the component's RecordBatch field for field, in order.
+
+    sink "orders_out" type="HttpSink" component="EnrichedOrder" transformer="json_fmt" {
+        config {
+            // Endpoint every batch is sent to, one request per batch. Point it
+            // at another service's HttpPushSource to chain the two.
+            url "${SACI_HTTP_PUSH_SINK_URL:-http://127.0.0.1:9701/orders}"
+
+            method "POST"
+
+            timeout_ms 30000
+
+            // content-type follows the transformer's format, so ndjson sends
+            // application/x-ndjson unless a `headers` entry names one. A push
+            // source on the other end needs the bearer token its `auth` block
+            // demands:
+            //   headers {
+            //       authorization "Bearer ${SACI_HTTP_PUSH_TOKEN:-dev-token}"
+            //   }
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "total" type="float64" nullable=#true
+        }
+    }
+
+    link from="orders_in" to="process_orders"
+    link from="process_orders" to="orders_out"
+}
+
+// HTTP control plane. /metrics carries the service's own counters, including
+// the connector's own saci_http_* series.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 15% grade:
+// one workflow.batch span opens per queued batch, so a live client at any real
+// rate needs sampling well below full to keep stdout and the inspector buffers
+// readable. error_sample_ratio stays at 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.15 error_sample_ratio=1.0

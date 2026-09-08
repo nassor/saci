@@ -1,0 +1,31 @@
+// Type checking only. `jco componentize` does the transpile, so nothing here
+// emits.
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Permits an import specifier carrying the `.ts` extension, which Node's
+    // type stripping needs because it never rewrites a `.js` specifier to
+    // `.ts`. No file in this stage imports one: `score.ts` imports the bare
+    // `@nassor/saci-sdk` specifier, resolved through that package's own
+    // `exports` map, so no `paths` entry is involved either. This stage sets
+    // `noEmit` below, which is what makes the setting legal here.
+    "allowImportingTsExtensions": true,
+    // Rejects enums, namespaces and parameter properties, the TypeScript
+    // syntax that needs a code transform rather than an erase.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["*.ts", "types/**/*.d.ts"]
+}

@@ -1,0 +1,73 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Quick Start's second stage: a C# processor that reads `valid` and
+       `amount` and writes `fee` and `review_tier`.
+
+       Structurally identical to examples/polyglot/stages/csharp-tier: this is
+       the same toolchain doing the same job on the same `Order` schema, so the
+       property set, the pinned ILCompiler version and the in-place WIT
+       reference are all deliberately the same. componentize-dotnet does the
+       whole job in one `dotnet build`: it runs wit-bindgen over the canonical
+       WIT world, compiles to a core wasm module through NativeAOT LLVM, and
+       wraps that module into a component with the wasm-tools it ships.
+
+       The stage's only source file is SettleStage.cs. wit-bindgen runs as an
+       MSBuild target before csc, so its output is already an ordinary <Compile>
+       item when Saci.Sdk's generator runs in the same pass, which is what lets the
+       generator emit the export class itself. -->
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>QuickstartSettle</RootNamespace>
+    <AssemblyName>settle-cs</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- The NativeAOT-LLVM compiler version BytecodeAlliance.Componentize.DotNet.Wasm.SDK
+         0.8.0-preview00011 depends on. It has to be named here because the
+         cross-compilation host package below is versioned in lockstep with it, and
+         the build warns when the two diverge. -->
+    <IlcLlvmVersion>10.0.0-rc.1.26306.1</IlcLlvmVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The SDK, a plain net10.0 library that also carries the Arrow IPC codec.
+         Only this project carries the wasi-wasm RID. Nothing reflects, so
+         PublishTrimmed needs no trimmer root: the generator bakes every field
+         accessor and transform call into this compilation. The generated export
+         glue catches ArrowIpcException by name, which resolves from the same
+         Saci.Sdk assembly. -->
+    <ProjectReference Include="../../../../packages/saci-sdk-cs/Saci.Sdk.csproj" />
+
+    <!-- Analyzers do not travel across a ProjectReference, so the in-repo
+         consumer names the generator itself. A PackageReference to Saci.Sdk would
+         carry it in analyzers/dotnet/cs/ instead. -->
+    <ProjectReference Include="../../../../packages/saci-sdk-cs/generator/Saci.Sdk.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
+
+    <!-- The ILCompiler that runs on this machine. The LLVM variant opts out of the
+         SDK's ResolvedILCompilerPack resolution, so nothing adds the host-RID
+         compiler implicitly and the publish fails asking for it by name. The RID
+         is derived rather than pinned so the same csproj cross-compiles from
+         Windows, Linux and macOS. -->
+    <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).Microsoft.DotNet.ILCompiler.LLVM" Version="$(IlcLlvmVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The single canonical WIT copy, referenced in place. Vendoring it here
+         would desynchronise the moment pipeline.wit changes. -->
+    <Wit Include="../../../../crates/saci-processor/wit" World="saci-pipeline" />
+  </ItemGroup>
+
+</Project>

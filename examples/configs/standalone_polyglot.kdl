@@ -1,0 +1,108 @@
+// SACI standalone config running one stage of the polyglot example under
+// `saci-service`: the Python processor from `examples/polyglot/stages/python-enrich/`.
+//
+// The paths below are CWD-relative, so run from the repository root:
+//   cargo xtask polyglot   # builds all six processors
+//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate \
+//     --config examples/configs/standalone_polyglot.kdl --strict
+//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve \
+//     --config examples/configs/standalone_polyglot.kdl
+//
+// It reads examples/configs/fixtures/polyglot_orders.csv, runs the Python
+// component, and writes /tmp/saci-polyglot-out.csv with `usd_amount` filled in.
+//
+// One stage here, for a minimal round-trip demo: the `wasm` node names the
+// Python component only. Declared several times with explicit `link`s between
+// them, the workflow chains several components in one process against the
+// same in-memory dataset; `examples/quickstart/quickstart.kdl` is a two-stage
+// instance. The full six-language chain stays a driver,
+// `examples/polyglot/polyglot_orders.rs`, because it asserts every
+// stage's exact output to pin the codec across languages, not because the
+// config file cannot express the chain.
+//
+// Every column appears in the CSV because the processors mutate Arrow IPC bytes in
+// place and cannot add columns, so all twelve `Order` fields must be present in
+// both schema_fields lists. Three consequences show up in the fixture:
+//
+//   * `settlement` reads `PENDING`, not an empty string. The csv transformer
+//     turns an empty field into a NULL, and the field is declared non-nullable,
+//     so an empty value fails the whole batch and no rows are ingested. Only the
+//     Rust stage writes this column, and it is not in this pipeline.
+//   * `valid` is pre-seeded true/false. The Python stage reads it to decide
+//     whether to convert a row, and the Go stage that would produce it is not in
+//     this pipeline either.
+//   * `fee` and `review_tier` are pre-seeded 0.0 and 0. The Kotlin stage that
+//     would write `fee` and the C# stage that would write `review_tier` are not
+//     in this single-stage pipeline either.
+
+mode "standalone"
+
+node id=1 name="saci-polyglot" data_dir="${SACI_DATA_DIR:-/tmp/saci-polyglot}"
+
+run_mode kind="one_shot"
+
+workflow "polyglot" {
+    // Both FileSource and FileSink move CSV bytes, so one declared transformer
+    // serves them both.
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // `component` must be "Order": the load-time graph check compares it
+    // against the component names the processor reports from `describe()`.
+    source "csv_orders" type="FileSource" component="Order" transformer="csv_fmt" {
+        config {
+            path "examples/configs/fixtures/polyglot_orders.csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "region" type="Utf8" nullable=#false
+            schema_fields "currency" type="Utf8" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#false
+            schema_fields "valid" type="Boolean" nullable=#false
+            schema_fields "usd_amount" type="Float64" nullable=#false
+            schema_fields "usd_amount_display" type="Utf8" nullable=#false
+            schema_fields "risk_score" type="Float64" nullable=#false
+            schema_fields "flagged" type="Boolean" nullable=#false
+            schema_fields "fee" type="Float64" nullable=#false
+            schema_fields "review_tier" type="Int64" nullable=#false
+            schema_fields "settlement" type="Utf8" nullable=#false
+        }
+    }
+
+    // The Python stage carries the most config keys, so it exercises `get-config`.
+    wasm "enrich" module="examples/polyglot/build/enrich-py.wasm" {
+        // FX rates the processor reads through the host-io `get-config` import.
+        // Strings; the processor parses them.
+        config fx_eur="1.10" fx_gbp="1.30" fx_jpy="0.0068"
+    }
+
+    // truncate replaces the file each run. Without it the sink appends, and
+    // csv with has_headers writes a second header line mid-file.
+    sink "csv_out" type="FileSink" component="Order" transformer="csv_fmt" {
+        config {
+            path "/tmp/saci-polyglot-out.csv"
+            truncate #true
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "region" type="Utf8" nullable=#false
+            schema_fields "currency" type="Utf8" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#false
+            schema_fields "valid" type="Boolean" nullable=#false
+            schema_fields "usd_amount" type="Float64" nullable=#false
+            schema_fields "usd_amount_display" type="Utf8" nullable=#false
+            schema_fields "risk_score" type="Float64" nullable=#false
+            schema_fields "flagged" type="Boolean" nullable=#false
+            schema_fields "fee" type="Float64" nullable=#false
+            schema_fields "review_tier" type="Int64" nullable=#false
+            schema_fields "settlement" type="Utf8" nullable=#false
+        }
+    }
+
+    link from="csv_orders" to="enrich"
+    link from="enrich" to="csv_out"
+}
+
+http bind="127.0.0.1:0" disabled=#false
+
+// Kept at full grade: a bounded one_shot fixture run produces little span
+// volume, so there is nothing to gain from sampling it down. See
+// standalone.kdl for the flow_control rationale under one_shot.
+observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0

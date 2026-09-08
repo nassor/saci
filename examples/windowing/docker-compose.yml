@@ -1,0 +1,43 @@
+# The two containers the windowing demo needs: NATS as the publisher's ingest
+# transport into saci-service, and PostgreSQL as the destination for both
+# window-total tables.
+#
+# Images track the ones the connector test suites already exercise through
+# testcontainers (nats:2.11-alpine, postgres:18-alpine), so what the demo
+# runs is what CI runs.
+#
+#   docker compose -f examples/windowing/docker-compose.yml up -d
+#   docker compose -f examples/windowing/docker-compose.yml down -v
+services:
+  nats:
+    image: nats:2.11-alpine
+    # -js enables JetStream. The demo uses core subjects, which need no
+    # flag, but leaving JetStream on means switching a config to
+    # `kind = "jetstream"` needs no compose change.
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -q -O- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: saci
+      POSTGRES_DB: saci
+    ports:
+      - "5432:5432"
+    volumes:
+      # PostgreSQL runs every .sql in this directory once, on first
+      # initialisation of an empty data directory. `PostgresSink` never issues
+      # CREATE TABLE, so the tables have to exist before the sinks' first
+      # write.
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d saci"]
+      interval: 2s
+      timeout: 3s
+      retries: 15

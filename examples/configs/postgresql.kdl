@@ -1,0 +1,215 @@
+// SACI standalone service configuration driving PostgreSQL at both ends.
+//
+// Run:
+//   export SACI_PG_DSN='postgres://saci@localhost:5432/app'
+//   cargo run --features connector-postgresql,wasm --bin saci-service -- validate \
+//     --config examples/configs/postgresql.kdl
+//   cargo run --features connector-postgresql,wasm --bin saci-service -- serve \
+//     --config examples/configs/postgresql.kdl
+//
+// The source decodes `pgoutput` logical replication for public.orders and the
+// sink upserts the pipeline's output into public.enriched_orders.
+//
+// `validate` opens no database connection: both factories parse and validate
+// their config, build their TLS setup, and stop there. The first drain cycle is
+// where an unreachable server, a missing table or a mistyped column surfaces.
+//
+// Server prerequisites for the cdc_logical source:
+//   wal_level = logical
+//   max_replication_slots >= 1
+//   the connecting role has REPLICATION, or is a superuser
+//   CREATE PUBLICATION saci_orders_pub FOR TABLE public.orders;
+//   PostgreSQL 10 or newer (pgoutput's own floor; this connector decodes its
+//   text tuples, not the `binary` option, so no higher version is needed)
+//
+// A DELETE carries only replica-identity columns unless the table is
+// REPLICA IDENTITY FULL, so every non-key field below is nullable.
+
+mode "standalone"
+
+node id=1 name="saci-postgres" data_dir="${SACI_DATA_DIR:-/tmp/saci-postgres}"
+
+// Re-drain every 2 s. Each Postgres mode returns EOF once it is caught up, so
+// the interval runner drives it without the stream runner.
+run_mode kind="interval" interval_ms=2000
+
+// Adaptive flow control: how many rows the runner admits from a source per
+// pass, and how large the Arrow chunk handed downstream is. On by default
+// for every source; declared here only to shorten the adjustment epoch.
+// Adjustment decisions land at the close of one epoch (adjust_interval_ms),
+// never per pass: this workflow redrains every 2 s, so the 60 s default
+// would take thirty iterations to run one experiment. 10 s reacts sooner,
+// at the cost of noisier per-epoch throughput measurements. Every other
+// key below is the hard default, target_latency_ms included: it defaults
+// to 0 in every batch mode (continuous and interval), because neither
+// carries a per-item latency contract the way stream mode does.
+flow_control {
+    min_rows 1024
+    max_rows 65536
+    start_rows 4096
+    max_chunk_bytes 8388608
+    adjust_interval_ms 10000
+}
+
+// One workflow declares the whole DAG: the source, the processor, the sink,
+// and the explicit links between them.
+workflow "orders" {
+    // ---------------------------------------------------------------- source
+
+    // The processor's `describe()` supplies the component list, so `component`
+    // on this source and the sink below must name components it declares.
+    source "pg_orders" type="PostgresSource" component="OrderChange" {
+        // Every source retries a failed operation with exponential backoff
+        // before the error reaches the runner. The `retry` child sits beside
+        // `config`; the connector's own `connection.reconnect` inside config
+        // composes beneath it: reconnect re-establishes the session, and the
+        // wrapper still retries the drained operation if it fails.
+        retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=30000 jitter=0.1
+
+        // This source's own logical-replication reader is already sized by
+        // batch_rows below; rows pins the runner's admission credit to match
+        // it exactly, so every pass admits one whole decoded chunk and the
+        // adaptive search never touches this source. Every other source
+        // (there is only one here) would stay under the top-level policy.
+        flow_control {
+            rows 8192
+        }
+
+        // The `source` node's own id is what the service logs; the `name` inside
+        // `config` is what the connector sees, because the factory is handed only
+        // that table. It keys the metric labels and prefixes every error, so keep
+        // the two equal.
+        config {
+            name "pg_orders"
+            // Rows per emitted RecordBatch.
+            batch_rows 8192
+            // 0 drains until caught up; a positive value caps batches per iteration.
+            max_batches_per_cycle 0
+
+            connection {
+                // Env-var placeholders are substituted before the file is parsed,
+                // so no credential needs to live here. Nothing in the connector
+                // ever logs the DSN, the user or the password: errors name the
+                // target as host:port/dbname.
+                dsn "${SACI_PG_DSN}"
+                // Optional override: `password_file` wins over `password`, for
+                // secret mounts.
+                // password_file "/run/secrets/saci-pg-password"
+                application_name "saci-pg_orders"
+                connect_timeout_ms 5000
+                statement_timeout_ms 30000
+                // disable, prefer (default) or require. `require` needs the
+                // connector's `tls` feature, which the saci-service
+                // `connector-postgresql` feature turns on.
+                sslmode "require"
+                // PEM bundle of trusted roots. Absent means the OS trust store.
+                // sslrootcert "/etc/ssl/certs/pg-ca.pem"
+
+                reconnect max_attempts=3 base_delay_ms=100 multiplier=2.0 \
+                    max_delay_ms=30000 jitter=0.1
+            }
+
+            // polling, cdc_trigger or cdc_logical.
+            mode kind="cdc_logical" {
+                slot "saci_orders_slot"
+                publication "saci_orders_pub"
+                table "public.orders"
+                slot_autocreate #true
+                // upto_nchanges for each peek.
+                max_changes_per_cycle 10000
+            }
+
+            // `__`-prefixed fields are the reserved metadata columns cdc_logical
+            // fills: __op (utf8), __lsn (int64), __xid (int64), __commit_ts
+            // (timestamp_micros_utc) and __table (utf8). Declare only the ones the
+            // pipeline needs.
+            schema_fields "__op" type="utf8" nullable=#false
+            schema_fields "__lsn" type="int64" nullable=#false
+            schema_fields "__commit_ts" type="timestamp_micros_utc" nullable=#true
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            // numeric maps to decimal128 and needs an explicit precision and scale.
+            // A value carrying more fractional digits than `scale` is an error,
+            // never a truncation.
+            schema_fields "amount" type="decimal128" precision=18 scale=4 nullable=#true
+            // pg_type names the PostgreSQL type explicitly when it differs from
+            // what `type` alone would default to, and asserts the server's
+            // column really has it. `jsonb`'s own default `type` is "json";
+            // naming it "utf8" with pg_type = "jsonb" reads the same document
+            // through the generic text route instead.
+            schema_fields "payload" type="utf8" pg_type="jsonb" nullable=#true
+            // list needs a scalar item: a one-dimensional PostgreSQL array is
+            // the only shape Arrow's List here can hold, so int4[][] is refused.
+            schema_fields "tags" type="list" item="utf8" nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads OrderChange and writes EnrichedOrder. A sink's schema_fields must
+    // match the component's RecordBatch field for field, in order, so pointing
+    // a sink at the source's component would mean repeating the source's
+    // schema verbatim.
+
+    sink "pg_enriched" type="PostgresSink" component="EnrichedOrder" {
+        // A failed write or finish retries the same way, so a dropped session
+        // mid-COPY re-queues the rows instead of failing the cycle.
+        retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=30000 jitter=0.1
+
+        config {
+            name "pg_enriched"
+            table "public.enriched_orders"
+            // append, upsert or ignore_conflicts. upsert makes a replayed drain
+            // cycle idempotent, which is what makes the at-least-once source safe
+            // end to end.
+            write_mode "upsert"
+            conflict_columns "id"
+            // An omitted update_columns means every declared column except the
+            // conflict columns.
+            //
+            // dedupe_order_column is required when one batch can repeat a conflict
+            // key: the highest value of this column wins. Without it Postgres
+            // raises "ON CONFLICT DO UPDATE command cannot affect row a second
+            // time".
+            dedupe_order_column "source_lsn"
+            // Rows per COPY chunk inside one transaction.
+            chunk_rows 65536
+            // 0 flushes on every write_batch, which is one transaction per
+            // iteration.
+            flush_rows 0
+            truncate_before_first_write #false
+
+            connection dsn="${SACI_PG_DSN}" application_name="saci-pg_enriched" sslmode="require"
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "source_lsn" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            // pg_type pins the exact target typmod: a narrower scale than the
+            // column's own is refused at load time, before any write.
+            schema_fields "total" type="decimal128" precision=18 scale=4 nullable=#true \
+                pg_type="numeric(18,4)"
+            // A one-dimensional array writes through COPY FORMAT binary the
+            // same way it reads: pg_type names the array type and asserts it.
+            schema_fields "tags" type="list" item="utf8" pg_type="text[]" nullable=#true
+        }
+    }
+
+    link from="pg_orders" to="process_orders"
+    link from="process_orders" to="pg_enriched"
+}
+
+// HTTP control plane. /metrics carries the connector's counters:
+// saci_postgres_source_rows_total, saci_postgres_source_wal_lag_bytes,
+// saci_postgres_sink_flushes_total and the rest.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 30%
+// grade: a cdc_logical source redraining every 2 s produces a steady
+// stream of per-item spans, so 30% keeps enough of them to see the shape
+// of a run without the full volume. error_sample_ratio stays at 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.3 error_sample_ratio=1.0

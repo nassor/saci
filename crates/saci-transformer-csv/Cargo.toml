@@ -1,0 +1,22 @@
+[package]
+name = "saci-transformer-csv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "The csv byte format for SACI: a Transformer reading and writing CSV through arrow-csv."
+
+[dependencies]
+saci-core        = { workspace = true, features = ["runtime"] }
+saci-transformer = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-csv     = { workspace = true }
+arrow-schema  = { workspace = true }
+arrow-select  = { workspace = true }
+
+[dev-dependencies]
+tempfile      = { workspace = true }

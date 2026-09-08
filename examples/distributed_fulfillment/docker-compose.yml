@@ -1,0 +1,94 @@
+
+
+# 3-node SACI fulfillment cluster.
+#
+# node1 bootstraps the Raft cluster and runs the order generator.
+# node2 and node3 join as followers and process work claimed from the cluster.
+#
+# All invoice output is written to the shared `data` volume under
+# /data/output/node{N}/.
+#
+# Run:
+#   docker compose up --build
+#
+# Watch logs:
+#   docker compose logs -f --tail=50 node1 node2 node3
+#
+# Inspect output:
+#   docker compose run --rm node1 ls /data/output/node1/
+
+services:
+  node1:
+    build:
+      context: ../..
+      dockerfile: examples/distributed_fulfillment/Dockerfile
+    # Shell-form command so ${VAR} expansion works.
+    command: >-
+      --node-id 1
+      --bootstrap
+      --listen 0.0.0.0:9001
+      --data-dir /data/node1
+      --output-dir /data/output/node1
+      --peers node2:9002,node3:9003
+      --log-json
+    environment:
+      RUST_LOG: "saci=info,distributed_fulfillment=trace"
+    volumes:
+      - data:/data
+    ports:
+      - "9001:9001"
+    healthcheck:
+      # Raft binds a TCP port; check it's accepting connections.
+      test: ["CMD-SHELL", "wget -qO /dev/null --timeout=2 http://127.0.0.1:9001/ 2>&1 | grep -q '' || nc -z 127.0.0.1 9001"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: on-failure
+
+  node2:
+    build:
+      context: ../..
+      dockerfile: examples/distributed_fulfillment/Dockerfile
+    command: >-
+      --node-id 2
+      --listen 0.0.0.0:9002
+      --data-dir /data/node2
+      --output-dir /data/output/node2
+      --peers node1:9001,node3:9003
+      --log-json
+    environment:
+      RUST_LOG: "saci=info,distributed_fulfillment=trace"
+    volumes:
+      - data:/data
+    ports:
+      - "9002:9002"
+    depends_on:
+      node1:
+        condition: service_started
+    restart: on-failure
+
+  node3:
+    build:
+      context: ../..
+      dockerfile: examples/distributed_fulfillment/Dockerfile
+    command: >-
+      --node-id 3
+      --listen 0.0.0.0:9003
+      --data-dir /data/node3
+      --output-dir /data/output/node3
+      --peers node1:9001,node2:9002
+      --log-json
+    environment:
+      RUST_LOG: "saci=info,distributed_fulfillment=trace"
+    volumes:
+      - data:/data
+    ports:
+      - "9003:9003"
+    depends_on:
+      node1:
+        condition: service_started
+    restart: on-failure
+
+volumes:
+  data:
