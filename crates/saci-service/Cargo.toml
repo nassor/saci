@@ -76,6 +76,7 @@ all = [
     "inspector",
     "tracing",
     "connector-channel",
+    "connector-clickhouse",
     "connector-file",
     "connector-http",
     "connector-kafka",
@@ -189,6 +190,13 @@ connector-postgresql = [
     "saci-connector-postgresql/metrics",
     "saci-connector-postgresql/tls",
 ]
+# ClickHouse speaks native ArrowStream over HTTP.
+connector-clickhouse = [
+    "service",
+    "dep:saci-connector-clickhouse",
+    "saci-connector-clickhouse/tracing",
+    "saci-connector-clickhouse/tls",
+]
 # Turso is embedded-first, and its synced mode pulls hyper and rustls and
 # replicates from a Turso endpoint, so it stays opt-in with the other four.
 connector-turso = [
@@ -249,6 +257,7 @@ saci-plugin-abi = { workspace = true, optional = true }
 # crate's own dependency graph cannot target.
 saci-inspector-wire = { workspace = true, optional = true }
 saci-connector-channel = { workspace = true, optional = true }
+saci-connector-clickhouse = { workspace = true, optional = true }
 saci-connector-file = { workspace = true, optional = true }
 saci-connector-http = { workspace = true, optional = true }
 saci-connector-kafka = { workspace = true, optional = true }
@@ -460,6 +469,7 @@ postcard      = { workspace = true }
 anyhow        = { workspace = true }
 sha3          = { workspace = true }
 libc          = { workspace = true }
+clickhouse    = { workspace = true }
 # `tests/stream_mode.rs`, `examples/native/stream_latency.rs` and the service
 # unit tests drive these two directly, so they are dev-dependencies as well as
 # optional ones.

@@ -71,6 +71,7 @@ not (
     or binary_id(=saci-connector-postgresql::all_types)
     or binary_id(=saci-connector-s3::round_trip)
     or binary_id(=saci-connector-turso::synced_roundtrip)
+    or binary_id(=saci-connector-clickhouse::roundtrip)
     or (binary_id(=saci-service::connector_matrix) and test(=full_matrix))
     or binary_id(=saci-service::transport_chaos)
     or binary_id(=saci-service::distributed_harness_smoke)
@@ -79,6 +80,7 @@ not (
     or (binary_id(=saci-service::nats_service) and (test(=a_nats_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_jetstream_store_records_a_refused_batch_and_replays_it)))
     or (binary_id(=saci-service::postgres_service) and test(=a_postgres_source_and_sink_move_rows_through_the_standalone_runner))
     or (binary_id(=saci-service::s3_service) and test(=an_s3_source_and_sink_move_rows_through_the_standalone_runner))
+    or (binary_id(=saci-service::clickhouse_service) and test(=a_clickhouse_source_and_sink_move_rows_through_the_standalone_runner))
 )
 '''
 

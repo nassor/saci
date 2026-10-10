@@ -4,6 +4,7 @@ members = [
     "crates/saci-config",
     "crates/saci-connector",
     "crates/saci-connector-channel",
+    "crates/saci-connector-clickhouse",
     "crates/saci-connector-file",
     "crates/saci-connector-http",
     "crates/saci-connector-kafka",
@@ -88,6 +89,7 @@ saci-core                  = { path = "crates/saci-core", version = "0.1.0", def
 saci-config                = { path = "crates/saci-config", version = "0.1.0" }
 saci-connector             = { path = "crates/saci-connector", version = "0.1.0" }
 saci-connector-channel     = { path = "crates/saci-connector-channel", version = "0.1.0" }
+saci-connector-clickhouse  = { path = "crates/saci-connector-clickhouse", version = "0.1.0" }
 saci-connector-file        = { path = "crates/saci-connector-file", version = "0.1.0" }
 saci-connector-http        = { path = "crates/saci-connector-http", version = "0.1.0" }
 saci-connector-kafka       = { path = "crates/saci-connector-kafka", version = "0.1.0" }
@@ -156,7 +158,7 @@ tracing       = { version = "0.1.44" }
 rayon         = { version = "1.12.0" }
 num_cpus      = { version = "1.17.0" }
 fnv           = { version = "1.0.7" }
-rand          = { version = "0.10.2" }
+rand          = { version = "0.10.3" }
 uuid          = { version = "1.26.1", features = ["v7", "serde"] }
 # Loads a repo-root `.env` so cloud-service credentials (Turso and any later
 # one) resolve without a manual export. Never overrides an existing variable.
@@ -167,7 +169,10 @@ dotenvy       = { version = "0.15" }
 # feature, which installs a `#[global_allocator]` and would collide with the
 # allocator every host binary already sets; `fts` is unneeded. `sync` adds the
 # HTTP/TLS path for a synced remote replica (Turso Cloud / sqld).
-turso         = { version = "=0.7.2", default-features = false, features = ["sync"] }
+turso         = { version = "=0.8.2", default-features = false, features = ["sync"] }
+
+# The ClickHouse client used by the `clickhouse` connector.
+clickhouse    = { version = "0.15.2", default-features = false, features = ["lz4"] }
 
 # The embedded key/value store. saci-service's `distributed` feature keeps its
 # local state file and its raft log in one, and saci-connector-redb uses one as
@@ -175,8 +180,8 @@ turso         = { version = "=0.7.2", default-features = false, features = ["syn
 redb          = { version = "4.3.0" }
 
 # WASM component model host
-wasmtime      = { version = "48.0.2", features = ["component-model"] }
-wasmtime-wasi = { version = "48.0.2" }
+wasmtime      = { version = "49.0.2", features = ["component-model"] }
+wasmtime-wasi = { version = "49.0.2" }
 sha3          = { version = "0.12.0" }
 
 # WASM component model guest. Every Rust processor component invokes

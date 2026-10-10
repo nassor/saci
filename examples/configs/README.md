@@ -26,6 +26,7 @@ run with:
 | `standalone_plugin.kdl` | `connector-file,transformer-csv,plugin` |
 | `postgresql.kdl` | `connector-postgresql,wasm` |
 | `turso.kdl` | `connector-turso,wasm` |
+| `clickhouse.kdl` | `connector-clickhouse,wasm` |
 | `s3.kdl` | `connector-s3,transformer-csv,wasm` |
 | `cluster.kdl` | `service-cluster,wasm`; it declares no source, sink or transformer |
 | `kafka.kdl` | `connector-kafka,wasm` |
@@ -139,6 +140,7 @@ explicitly, there is no implicit default format.
 | `HttpPushSource` | Documents a client pushes in, one whole document per request, stream mode only | `bind`, `schema_fields` | `saci-connector-http` | `connector-http` |
 | `PostgresSource` | Polling, outbox or `pgoutput` reads | `name`, `connection`, `mode`, `schema_fields` (optionally `pg_type` per field) | `saci-connector-postgresql` | `connector-postgresql` |
 | `TursoSource` | Embedded or synced reads: cursor polling, full dump, or the change table | `name`, `connection`, `mode`, `schema_fields` | `saci-connector-turso` | `connector-turso` |
+| `ClickhouseSource` | Polling, dump or custom SELECT query | `name`, `connection`, `mode`, `schema_fields` | `saci-connector-clickhouse` | `connector-clickhouse` |
 | `KafkaSource` | Consumes a Kafka topic | `brokers`, `topic`, `schema_fields` | `saci-connector-kafka` | `connector-kafka` |
 | `S3Source` | Lists a prefix once and drains every object in key order | `connection`, `schema_fields` | `saci-connector-s3` | `connector-s3` |
 | `tcp` | Live framed messages off a listener, stream mode only | `bind`, `schema_fields` | `saci-connector-tcp` | `connector-tcp` |
@@ -155,6 +157,7 @@ explicitly, there is no implicit default format.
 | `HttpSink` | One request per batch, body written by its `transformer` | `url`, `schema_fields`, optional `method` | `saci-connector-http` | `connector-http` |
 | `PostgresSink` | `COPY FORMAT binary`, optional upsert | `name`, `connection`, `table`, `schema_fields` (optionally `pg_type` per field) | `saci-connector-postgresql` | `connector-postgresql` |
 | `TursoSink` | Prepared `INSERT` with optional `ON CONFLICT` upsert, `deferred`/`immediate`/`concurrent` transactions, change capture and encryption | `name`, `connection`, `table`, `write_mode`, `schema_fields` | `saci-connector-turso` | `connector-turso` |
+| `ClickhouseSink` | Bulk load via Arrow IPC streaming over HTTP, optional truncate | `name`, `connection`, `table`, `schema_fields` | `saci-connector-clickhouse` | `connector-clickhouse` |
 | `KafkaSink` | Produces to a Kafka topic | `brokers`, `topic`, `schema_fields` | `saci-connector-kafka` | `connector-kafka` |
 | `S3Sink` | Accumulates rows and uploads one object per flush | `connection`, `schema_fields` | `saci-connector-s3` | `connector-s3` |
 | `tcp` | Dials a peer and writes one length-prefixed frame per message | `connect`, `schema_fields` | `saci-connector-tcp` | `connector-tcp` |

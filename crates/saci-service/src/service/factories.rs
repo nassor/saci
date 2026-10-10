@@ -41,6 +41,8 @@
 
 #[cfg(feature = "connector-channel")]
 pub use saci_connector_channel::{ChannelSinkFactory, ChannelSourceFactory};
+#[cfg(feature = "connector-clickhouse")]
+pub use saci_connector_clickhouse::{ClickhouseSinkFactory, ClickhouseSourceFactory};
 #[cfg(feature = "connector-file")]
 pub use saci_connector_file::{FileSinkFactory, FileSourceFactory};
 #[cfg(feature = "connector-http")]
@@ -96,6 +98,8 @@ use super::builder::ServiceBuilder;
 pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
     ("ChannelSource", "connector-channel"),
     ("ChannelSink", "connector-channel"),
+    ("ClickhouseSource", "connector-clickhouse"),
+    ("ClickhouseSink", "connector-clickhouse"),
     ("FileSource", "connector-file"),
     ("FileSink", "connector-file"),
     ("HttpSource", "connector-http"),
@@ -390,6 +394,11 @@ pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
     let builder = builder
         .register_source(PostgresSourceFactory)
         .register_sink(PostgresSinkFactory);
+
+    #[cfg(feature = "connector-clickhouse")]
+    let builder = builder
+        .register_source(ClickhouseSourceFactory)
+        .register_sink(ClickhouseSinkFactory);
 
     #[cfg(feature = "connector-turso")]
     let builder = builder

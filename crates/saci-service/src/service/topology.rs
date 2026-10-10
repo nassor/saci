@@ -64,6 +64,11 @@ const DETAIL_ALLOWLIST: &[(&str, &[&str])] = &[
     ("NatsSink", &["mode.kind", "mode.stream", "mode.subject"]),
     ("PostgresSource", &["mode.kind", "mode.table"]),
     ("PostgresSink", &["table", "write_mode"]),
+    (
+        "ClickhouseSource",
+        &["mode.kind", "mode.table", "mode.query"],
+    ),
+    ("ClickhouseSink", &["table", "write_mode"]),
     ("TursoSource", &["mode.kind", "mode.table"]),
     ("TursoSink", &["table", "write_mode"]),
     ("S3Source", &["connection.bucket", "prefix"]),

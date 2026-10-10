@@ -8,7 +8,7 @@ team has validated against the `saci:pipeline@0.3.0` WIT package.
 
 | Tool              | Version  | Install                                                       |
 | ----------------- | -------- | ------------------------------------------------------------- |
-| `wasmtime`        | 48.0.2   | `cargo install wasmtime-cli --locked --version 48.0.2`        |
+| `wasmtime`        | 48.0.5   | `cargo install wasmtime-cli --locked --version 48.0.5`        |
 | `wit-bindgen`     | 0.62.0   | workspace dependency; no separate install                     |
 | `wasm-tools`      | 1.246.2  | `cargo install wasm-tools --locked --version 1.246.2`        |
 | Rust target       | `wasm32-wasip2` | `rustup target add wasm32-wasip2`                    |

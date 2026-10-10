@@ -29,6 +29,7 @@
     feature = "connector-channel",
     feature = "connector-file",
     feature = "connector-http",
+    feature = "connector-clickhouse",
     feature = "connector-kafka",
     feature = "connector-nats",
     feature = "connector-postgresql",

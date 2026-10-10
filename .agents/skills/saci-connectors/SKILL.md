@@ -28,7 +28,7 @@ heal rebuilds with the same identity; `builder.rs`'s `build_source_node`/`build_
 
 `saci-core`'s `io` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
 connector moves bytes and a transformer turns bytes into `RecordBatch`es and back, so transport and
-format are separate crates. Connectors: `saci-connector-channel`, `-file`, `-http`, `-kafka`,
+format are separate crates. Connectors: `saci-connector-channel`, `-clickhouse`, `-file`, `-http`, `-kafka`,
 `-nats`, `-postgresql`, `-redb`, `-s3`, `-saci`, `-tcp`, `-turso`, `-udp`. Transformers:
 `saci-transformer-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet`, each registered under its own
 `format` name. A byte-carrying source or sink node names a declared `transformer` node's id;
@@ -164,6 +164,11 @@ workflow holding one as `restartable: false`.
   `concurrent` (MVCC), plus `capture` and page-level `encryption`. Pins `turso = "=0.7.2"` with
   `default-features = false, features = ["sync"]`: the crate's default `mimalloc` feature would
   install a second global allocator.
+- `saci-connector-clickhouse`: `ClickhouseSource`, `ClickhouseSink`, ClickHouse HTTP client with
+  native `ArrowStream` format. Source modes `polling` (cursor column, optional initial cursor and
+  tiebreak column), `dump` (paginated full table scan), and `query` (arbitrary SQL statement);
+  sink write mode `append` with optional `truncate_before_first_write`. No transformer needed:
+  ClickHouse sends and accepts Arrow IPC streams directly.
 - `saci-connector-redb`: `RedbSource`, `RedbSink`, an embedded redb key/value file as a
   transport, `directory`/`file`/`table` naming it. One entry per non-empty batch, keyed
   `{key_prefix}{seq:020}{key_suffix}` so lexicographic key order is insertion order; the sink
@@ -274,7 +279,7 @@ workflow holding one as `restartable: false`.
 
 `saci-service`:
 
-- `connector-channel`, `connector-file`, `connector-http`, `connector-kafka`, `connector-nats`,
+- `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`, `connector-nats`,
   `connector-postgresql`, `connector-redb`, `connector-s3`, `connector-saci`, `connector-tcp`,
   `connector-turso`, `connector-udp`:
   one per connector
@@ -288,9 +293,9 @@ workflow holding one as `restartable: false`.
   them, and none needs an extra build toolchain. HTTP, TCP, UDP and the peer link speak the
   network,
   and they qualify because they are generic primitives tied to no server product. `connector-kafka`,
-  `connector-nats`, `connector-postgresql`, `connector-s3` and `connector-turso` each need a
+  `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso` and `connector-clickhouse` each need a
   specific broker, database or object store running first, so each is opt-in instead. `all` turns
-  on every one of the twelve. `connector-kafka`, `connector-nats` and `connector-udp` imply
+  on every one of the thirteen. `connector-kafka`, `connector-nats` and `connector-udp` imply
   `transformer-ndjson` and
   `connector-tcp` implies `transformer-arrow-ipc`, so the connector feature alone is runnable. No
   connector resolves a format implicitly: a byte-carrying node names a declared `transformer`
@@ -305,7 +310,7 @@ workflow holding one as `restartable: false`.
 - `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
   `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector crate that
   needs nothing installed or already running. Deliberately excludes `saci-connector-kafka`,
-  `-nats`, `-postgresql`, `-s3` and `-turso`, each of which requires a specific broker, database or
+  `-nats`, `-postgresql`, `-s3`, `-turso` and `-clickhouse`, each of which requires a specific broker, database or
   object store installed and running first.
 
 ## Build prerequisites

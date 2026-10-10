@@ -336,13 +336,14 @@ pub enum Connector {
     Kafka,
     Nats,
     Postgresql,
+    Clickhouse,
     S3,
     Turso,
     Redb,
 }
 
 /// Every connector this matrix covers, in report order.
-pub const CONNECTORS: [Connector; 13] = [
+pub const CONNECTORS: [Connector; 14] = [
     Connector::Channel,
     Connector::File,
     Connector::Http,
@@ -353,11 +354,11 @@ pub const CONNECTORS: [Connector; 13] = [
     Connector::Kafka,
     Connector::Nats,
     Connector::Postgresql,
+    Connector::Clickhouse,
     Connector::S3,
     Connector::Turso,
     Connector::Redb,
 ];
-
 /// Which transformer surface a connector drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
@@ -383,6 +384,7 @@ impl Connector {
             Self::Kafka => "kafka",
             Self::Nats => "nats",
             Self::Postgresql => "postgresql",
+            Self::Clickhouse => "clickhouse",
             Self::S3 => "s3",
             Self::Turso => "turso",
             Self::Redb => "redb",
@@ -391,7 +393,9 @@ impl Connector {
 
     fn surface(self) -> Surface {
         match self {
-            Self::Channel | Self::Postgresql | Self::Turso | Self::Saci => Surface::Rows,
+            Self::Channel | Self::Postgresql | Self::Turso | Self::Saci | Self::Clickhouse => {
+                Surface::Rows
+            }
             Self::File | Self::Http | Self::HttpPush | Self::S3 | Self::Redb => Surface::Stream,
             Self::Tcp | Self::Udp | Self::Kafka | Self::Nats => Surface::Message,
         }
@@ -413,6 +417,7 @@ impl Connector {
             Self::Nats => Some(Resource::Nats),
             Self::Postgresql => Some(Resource::Postgres),
             Self::S3 => Some(Resource::S3),
+            Self::Clickhouse => Some(Resource::Clickhouse),
         }
     }
 
@@ -438,6 +443,7 @@ impl Connector {
             Self::Kafka => "KafkaSource",
             Self::Nats => "NatsSource",
             Self::Postgresql => "PostgresSource",
+            Self::Clickhouse => "ClickhouseSource",
             Self::S3 => "S3Source",
             Self::Turso => "TursoSource",
             Self::Redb => "RedbSource",
@@ -461,6 +467,7 @@ impl Connector {
             Self::Kafka => Some("KafkaSink"),
             Self::Nats => Some("NatsSink"),
             Self::Postgresql => Some("PostgresSink"),
+            Self::Clickhouse => Some("ClickhouseSink"),
             Self::S3 => Some("S3Sink"),
             Self::Turso => Some("TursoSink"),
             Self::Redb => Some("RedbSink"),
@@ -814,6 +821,15 @@ impl RowKind {
             // variant, so the source/sink config does not parse.
             Self::Ping => "seq bigint PRIMARY KEY",
             Self::Counter => "id bigint PRIMARY KEY, seen bigint NOT NULL",
+        }
+    }
+
+    /// `CREATE TABLE` column list for a ClickHouse end.
+    fn clickhouse_columns(self) -> &'static str {
+        match self {
+            Self::Order => "id Int64, label String, total Float64",
+            Self::Ping => "seq UInt64",
+            Self::Counter => "id Int64, seen Int64",
         }
     }
 
@@ -1373,6 +1389,7 @@ pub enum Resource {
     Nats,
     Postgres,
     S3,
+    Clickhouse,
 }
 
 impl Resource {
@@ -1382,6 +1399,7 @@ impl Resource {
             Self::Nats => "nats",
             Self::Postgres => "postgres",
             Self::S3 => "s3",
+            Self::Clickhouse => "clickhouse",
         }
     }
 }
@@ -1410,6 +1428,12 @@ pub struct S3Resource {
     pub connection: saci_connector_s3::S3ConnectionConfig,
 }
 
+/// A live ClickHouse server.
+pub struct ClickhouseResource {
+    _container: ContainerAsync<GenericImage>,
+    pub url: String,
+}
+
 /// The four containers, each started at most once.
 #[derive(Default)]
 pub struct Resources {
@@ -1417,6 +1441,7 @@ pub struct Resources {
     nats: OnceCell<Option<NatsResource>>,
     postgres: OnceCell<Option<PostgresResource>>,
     s3: OnceCell<Option<S3Resource>>,
+    clickhouse: OnceCell<Option<ClickhouseResource>>,
 }
 
 impl Resources {
@@ -1436,6 +1461,13 @@ impl Resources {
         self.s3.get_or_init(try_start_s3).await.as_ref()
     }
 
+    pub async fn clickhouse(&self) -> Option<&ClickhouseResource> {
+        self.clickhouse
+            .get_or_init(try_start_clickhouse)
+            .await
+            .as_ref()
+    }
+
     /// Start all four containers before any case runs, and report which came
     /// up.
     ///
@@ -1450,6 +1482,7 @@ impl Resources {
             Resource::Nats,
             Resource::Postgres,
             Resource::S3,
+            Resource::Clickhouse,
         ] {
             up.push((resource, self.available(resource).await));
         }
@@ -1472,6 +1505,7 @@ impl Resources {
             Resource::Nats => self.nats().await.is_some(),
             Resource::Postgres => self.postgres().await.is_some(),
             Resource::S3 => self.s3().await.is_some(),
+            Resource::Clickhouse => self.clickhouse().await.is_some(),
         }
     }
 }
@@ -1724,6 +1758,43 @@ async fn try_start_s3() -> Option<S3Resource> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// Start ClickHouse, or report why not.
+async fn try_start_clickhouse() -> Option<ClickhouseResource> {
+    let image = GenericImage::new("clickhouse/clickhouse-server", "24.8-alpine")
+        .with_exposed_port(8123_u16.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Ready for connections"));
+
+    let container = match image.start().await {
+        Ok(container) => container,
+        Err(e) => {
+            eprintln!("SKIP: clickhouse container unavailable: {e}");
+            return None;
+        }
+    };
+    let port = match container.get_host_port_ipv4(8123_u16.tcp()).await {
+        Ok(port) => port,
+        Err(e) => {
+            eprintln!("SKIP: cannot map the clickhouse port: {e}");
+            return None;
+        }
+    };
+    let url = format!("http://127.0.0.1:{port}");
+
+    let client = clickhouse::Client::default().with_url(&url);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if client.query("SELECT 1").execute().await.is_ok() {
+            return Some(ClickhouseResource {
+                _container: container,
+                url,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    eprintln!("SKIP: clickhouse never accepted a connection");
+    None
 }
 
 // ── Fixtures and uniqueness ──────────────────────────────────────────────────
@@ -2620,6 +2691,10 @@ enum Readback {
         prefix: String,
         format: Format,
     },
+    Clickhouse {
+        url: String,
+        table: String,
+    },
 }
 
 /// The endpoint a config names: the live container's, or an unreachable
@@ -2628,6 +2703,7 @@ struct Endpoints {
     brokers: String,
     nats_url: String,
     dsn: String,
+    clickhouse_url: String,
     s3: saci_connector_s3::S3ConnectionConfig,
 }
 
@@ -2641,6 +2717,11 @@ impl Endpoints {
             None
         };
         let s3 = if live { resources.s3().await } else { None };
+        let clickhouse = if live {
+            resources.clickhouse().await
+        } else {
+            None
+        };
         Self {
             brokers: kafka.map_or_else(|| "127.0.0.1:1".to_string(), |k| k.brokers.clone()),
             nats_url: nats.map_or_else(|| "nats://127.0.0.1:1".to_string(), |n| n.url.clone()),
@@ -2648,6 +2729,8 @@ impl Endpoints {
                 || "postgres://postgres:saci@127.0.0.1:1/postgres".to_string(),
                 |p| p.dsn.clone(),
             ),
+            clickhouse_url: clickhouse
+                .map_or_else(|| "http://127.0.0.1:1".to_string(), |c| c.url.clone()),
             s3: s3.map_or_else(
                 || saci_connector_s3::S3ConnectionConfig {
                     bucket: "saci-matrix-placeholder".to_string(),
@@ -2994,6 +3077,34 @@ async fn prepare_source(
                 row.postgres_cursor()
             );
         }
+        Connector::Clickhouse => {
+            let table = unique("matrix_in").to_lowercase();
+            if live {
+                let client = clickhouse::Client::default().with_url(&endpoints.clickhouse_url);
+                client
+                    .query(&format!(
+                        "CREATE TABLE {table} ({}) ENGINE = MergeTree ORDER BY {}",
+                        row.clickhouse_columns(),
+                        row.postgres_cursor()
+                    ))
+                    .execute()
+                    .await
+                    .map_err(|e| format!("clickhouse seed table: {e}"))?;
+                client
+                    .query(&row.postgres_seed(&table, index))
+                    .execute()
+                    .await
+                    .map_err(|e| format!("clickhouse seed rows: {e}"))?;
+            }
+            side.kdl = format!(
+                "    source \"in\" type=\"ClickhouseSource\" component=\"{component}\" {{\n\
+                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
+                 \x20           connection url=\"{}\"\n\
+                 \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
+                endpoints.clickhouse_url,
+                row.postgres_cursor()
+            );
+        }
         Connector::Turso => {
             // Embedded, so there is no container: an OS-assigned temp file
             // isolates the case exactly as a unique topic or table would.
@@ -3262,6 +3373,33 @@ async fn prepare_sink(
                 ),
                 Readback::Postgres {
                     dsn: endpoints.dsn.clone(),
+                    table,
+                },
+            )
+        }
+        Connector::Clickhouse => {
+            let table = unique("matrix_out").to_lowercase();
+            if read_back {
+                let client = clickhouse::Client::default().with_url(&endpoints.clickhouse_url);
+                client
+                    .query(&format!(
+                        "CREATE TABLE {table} ({}) ENGINE = MergeTree ORDER BY {}",
+                        row.clickhouse_columns(),
+                        row.postgres_cursor()
+                    ))
+                    .execute()
+                    .await
+                    .map_err(|e| format!("clickhouse sink table: {e}"))?;
+            }
+            (
+                format!(
+                    "    sink \"out\" type=\"ClickhouseSink\" component=\"{component}\" {{\n\
+                     \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
+                     \x20           connection url=\"{}\"\n{fields}\n        }}\n    }}",
+                    endpoints.clickhouse_url
+                ),
+                Readback::Clickhouse {
+                    url: endpoints.clickhouse_url.clone(),
                     table,
                 },
             )
@@ -3683,6 +3821,87 @@ async fn read_back(
                     }
                 })
                 .collect());
+        }
+        Readback::Clickhouse { url, table } => {
+            let client = clickhouse::Client::default().with_url(&url);
+            let columns = row
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect::<Vec<_>>();
+            let query = format!(
+                "SELECT {} FROM {table} ORDER BY {}",
+                columns.join(", "),
+                row.postgres_cursor()
+            );
+            let bytes = client
+                .query(&query)
+                .fetch_bytes("ArrowStream")
+                .map_err(|e| format!("clickhouse readback fetch: {e}"))?
+                .collect()
+                .await
+                .map_err(|e| format!("clickhouse readback collect: {e}"))?;
+
+            let cursor = std::io::Cursor::new(bytes);
+            let reader = arrow_ipc::reader::StreamReader::try_new(cursor, None)
+                .map_err(|e| format!("clickhouse readback stream: {e}"))?;
+
+            let mut out = Vec::new();
+            for batch in reader {
+                let b = batch.map_err(|e| format!("clickhouse readback batch: {e}"))?;
+                for i in 0..b.num_rows() {
+                    let formatted = match row {
+                        RowKind::Order => {
+                            let id = b
+                                .column(0)
+                                .as_any()
+                                .downcast_ref::<arrow_array::Int64Array>()
+                                .unwrap()
+                                .value(i);
+                            let label = b
+                                .column(1)
+                                .as_any()
+                                .downcast_ref::<arrow_array::StringArray>()
+                                .unwrap()
+                                .value(i);
+                            let total = b
+                                .column(2)
+                                .as_any()
+                                .downcast_ref::<arrow_array::Float64Array>()
+                                .unwrap()
+                                .value(i);
+                            format!("{id}|{label}|{total:.4}")
+                        }
+                        RowKind::Ping => {
+                            let seq = b
+                                .column(0)
+                                .as_any()
+                                .downcast_ref::<arrow_array::UInt64Array>()
+                                .unwrap()
+                                .value(i);
+                            seq.to_string()
+                        }
+                        RowKind::Counter => {
+                            let id = b
+                                .column(0)
+                                .as_any()
+                                .downcast_ref::<arrow_array::Int64Array>()
+                                .unwrap()
+                                .value(i);
+                            let seen = b
+                                .column(1)
+                                .as_any()
+                                .downcast_ref::<arrow_array::Int64Array>()
+                                .unwrap()
+                                .value(i);
+                            format!("{id}|{seen}")
+                        }
+                    };
+                    out.push(formatted);
+                }
+            }
+            return Ok(out);
         }
         Readback::Turso { path, table, .. } => {
             let conn = turso_client(&path).await?;
@@ -4497,6 +4716,7 @@ pub async fn run_maximal(
                 Connector::File,
                 Connector::Redb,
                 Connector::Postgresql,
+                Connector::Clickhouse,
                 Connector::Turso,
                 Connector::Saci,
             ],
@@ -4505,6 +4725,7 @@ pub async fn run_maximal(
                 Connector::File,
                 Connector::Redb,
                 Connector::Postgresql,
+                Connector::Clickhouse,
                 Connector::Turso,
                 Connector::Saci,
             ],

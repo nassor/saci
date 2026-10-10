@@ -217,7 +217,7 @@ crates/
 │                             # substitution names the variables inserted, never a value.
 ├── saci-connector/           # SourceFactory, SinkFactory, ConnectorContext, NodeIdentity,
 │                             # ChannelBridge, rebuildable. skill saci-connectors
-├── saci-connector-{channel,file,http,kafka,nats,postgresql,redb,s3,saci,tcp,turso,udp}/
+├── saci-connector-{channel,clickhouse,file,http,kafka,nats,postgresql,redb,s3,saci,tcp,turso,udp}/
 │                             # One crate per connector. skill saci-connectors
 ├── saci-transformer/         # Transformer, BatchReader, BatchWriter, MessageDecoder,
 │                             # TransformerFactory, TransformerRegistry. skill saci-transformers
@@ -284,11 +284,11 @@ every transformer,
 so `cargo install saci-service` yields a runnable binary with no flags. A connector ships by
 default only when nothing has to be installed or already running for it to work; every connector
 that needs a specific broker, database or object store first is opt-in instead:
-`connector-postgresql`, `connector-nats`, `connector-s3`, `connector-kafka` and
-`connector-turso`. `connector-kafka` also needs `cmake` and a C toolchain for vendored
+`connector-postgresql`, `connector-nats`, `connector-s3`, `connector-kafka`,
+`connector-turso` and `connector-clickhouse`. `connector-kafka` also needs `cmake` and a C toolchain for vendored
 librdkafka; `connector-turso`'s synced mode pulls hyper and rustls. `distributed-raft` and
 `service-cluster` are opt-in too, because a cluster node is a deliberate deployment choice. `all`
-turns on every capability the crate carries, including all five opt-in connectors, the native
+turns on every capability the crate carries, including all six opt-in connectors, the native
 plugin host and a Raft cluster node, but excludes `conformance`, the corpus generator's own
 switch. The full table, `connector-*`, `transformer-*`, `wasm`, `plugin`, `distributed`,
 `distributed-raft`, `service`, `service-cluster`, `metrics`, `inspector`, `parquet-checkpoint`,
@@ -308,7 +308,7 @@ The **default** bundle is `engine` alone.
 - `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
   `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector crate that
   needs nothing installed or already running. Deliberately excludes `saci-connector-kafka`,
-  `-nats`, `-postgresql`, `-s3` and `-turso`, each of which requires a specific broker, database or
+  `-nats`, `-postgresql`, `-s3`, `-turso` and `-clickhouse`, each of which requires a specific broker, database or
   object store installed and running first.
 - `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`, `transformer-ndjson`,
   `transformer-parquet` (`transformers` enables all five): one per byte-format crate.
