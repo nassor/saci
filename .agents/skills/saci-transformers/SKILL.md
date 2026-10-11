@@ -94,7 +94,9 @@ transformer shares that pin with the processor wire format, see skill `saci-proc
    facade's `all` through the groups transitively, so it fails until the feature is in
    `transformers`.
 4. Add the format to `FORMATS` and the capability table in
-   `crates/saci-service/tests/connector_matrix.rs`.
+   `crates/saci-service/tests/common/matrix.rs`, and to the `live_slices!` formats list in
+   `crates/saci-service/tests/connector_matrix.rs`; `every_slice_has_a_test` fails until both
+   agree.
 5. Add the format name and its feature to `BUILTIN_TRANSFORMER_FEATURES`;
    `builtin_transformer_table_matches_the_registry` fails until you do.
 6. A page under `docs/content/service/formats/` (skill `saci-docs`).

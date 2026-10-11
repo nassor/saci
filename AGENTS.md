@@ -18,7 +18,7 @@ profiles and the `saci-core` engine reference. "skill `X`" below means that path
 
 | Skill | Read before |
 |---|---|
-| `saci-connectors` | touching `saci-connector` or any `saci-connector-*` crate, a `SourceFactory`/`SinkFactory` registration, `ConnectorContext`, a connector config under `examples/configs/`, or `connector_matrix.rs` |
+| `saci-connectors` | touching `saci-connector` or any `saci-connector-*` crate, a `SourceFactory`/`SinkFactory` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
 | `saci-transformers` | touching `saci-transformer` or any `saci-transformer-*` crate, a `format` registration, or a transformer option |
 | `saci-processors` | touching `saci-processor`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci-service/src/wasm/`, `packages/`, or `examples/{wasm,polyglot,quickstart,conformance}/` |
 | `saci-plugins` | touching `saci-plugin`, `saci-plugin-abi`, `saci-plugin-smoketest`, `crates/saci-service/src/plugin/`, `crates/saci-service/src/service/plugin_loader.rs`, or `examples/plugins/` |
@@ -40,7 +40,7 @@ of that change, to be fixed before the change is finished.
 cargo build                                                  # Build (workspace default members)
 cargo nextest run --workspace --all-features                 # Fast suite: skips Docker/chaos tests, run this constantly
 cargo nextest run --workspace --all-features --profile ci --run-ignored all  # Full suite, what CI runs; last step of a plan
-cargo nextest run -p saci-service --all-features --profile ci --test connector_matrix --run-ignored ignored-only  # Connector matrix; --profile ci required since --test can't bypass default's exclusion, see Testing below
+cargo xtask matrix                                           # Connector matrix: shared containers, one nextest process per slice; see Testing below
 cargo test --workspace --all-features --doc                  # Doc tests (nextest does not run these)
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps  # Rustdoc lints; public items of workspace members only, no #[cfg(test)] modules, no saci-service-ui
 cargo fmt --all -- --check                                   # Check formatting
@@ -89,8 +89,8 @@ bundle and the excluded `saci-service-ui` crate's own fmt and clippy gates: skil
 
 Tests run through [`cargo-nextest`](https://nexte.st), not bare `cargo test`, via
 `.config/nextest.toml`. `cargo install cargo-nextest --locked --version 0.9.143` installs it. Two
-nextest profiles cover most of the workspace, plus one suite that neither runs by default; which
-to reach for depends on why you're running tests:
+nextest profiles cover most of the workspace, and a third, `matrix`, runs the connector matrix
+alone; which to reach for depends on why you're running tests:
 
 - `cargo nextest run --workspace --all-features` (the `default` profile): the everyday command.
   It compiles the same `--all-features` closure as always, but skips every test that needs a
@@ -117,23 +117,27 @@ to reach for depends on why you're running tests:
   leader halfway through the window costs it the office: a random single-edge fault only starves a
   follower of heartbeats when it happens to land on an edge out of the leader, so the election that
   proves liveness is forced by cutting every link of the current leader rather than left to the
-  dice (the term-advance assertion was ~10% flaky on a shared runner before that),
-  plus `connector_matrix.rs`'s `full_matrix`: `ci`'s `default-filter = "all()"` carries none of
-  `default`'s exclusions, so this command also pays for the matrix's four containers).
-  This is the full suite to run as the last verification step of a plan, not something to reach
-  for on every edit. `ci.yml` splits it into three: the `test` job runs `--profile ci` without
-  `--run-ignored`, a separate `distributed_chaos` job runs only `full_stack_chaos_monkey_60s`
-  (`--test distributed_integration_chaos --run-ignored ignored-only`), and a separate
-  `connector_matrix` job runs only `full_matrix`, so that neither test ever sits on `test`'s
-  critical path. Regenerating or reordering the Docker/chaos exclusion list itself lives only in
-  `.config/nextest.toml`; nothing here restates it, so that file is the one place to update when a
-  test moves between the two profiles.
-- `crates/saci-service/tests/connector_matrix.rs` (the `heavy-docker` test group, `ci.yml`'s
-  `connector_matrix` job): one `full_matrix` test over every {source, sink, format, processor
-  runtime} tuple, `#[ignore]`d and excluded from `default`, reached only through the command above
-  with `--profile ci`, because `--test` selects a build target and cannot bypass `default`'s
-  exclusion; plus the Docker-free `dimensions_cover_the_registry`. Dimensions, rejection sites and
-  isolation: skill `saci-connectors`.
+  dice (the term-advance assertion was ~10% flaky on a shared runner before that)). `ci`'s
+  `default-filter` drops only the connector matrix's `live::` slices, which need the containers
+  `cargo xtask matrix` starts. This is the full suite to run as the last verification step of a
+  plan, not something to reach for on every edit. `ci.yml` splits it into three: the `test` job
+  runs `--profile ci` without `--run-ignored`, a separate `distributed_chaos` job runs only
+  `full_stack_chaos_monkey_60s` (`--test distributed_integration_chaos --run-ignored
+  ignored-only`), and the `connector_matrix` jobs run the matrix, so that none of them sits on
+  `test`'s critical path. Regenerating or reordering the Docker/chaos exclusion list itself lives
+  only in `.config/nextest.toml`; nothing here restates it, so that file is the one place to
+  update when a test moves between the profiles.
+- `cargo xtask matrix` (the `matrix` profile, `ci.yml`'s `connector_matrix_build` and
+  `connector_matrix` jobs): `crates/saci-service/tests/connector_matrix.rs` holds one `#[ignore]`d
+  test per {source, processor, format} slice, `live::<source>::<processor>::<format>`, each
+  running that source against every sink, plus `live::maximal::workflow`. nextest runs each in its
+  own process, so the slices run in parallel; the task builds both processor fixtures, starts one
+  container apiece for Kafka, NATS, PostgreSQL, RustFS and ClickHouse, names them in
+  `SACI_MATRIX_*` variables every slice reads, runs `cargo nextest run --profile matrix
+  --run-ignored all` plus any argument given (`-E 'test(/^live::kafka::/)'` for one source), and
+  removes the containers. CI compiles the binary once into a nextest archive and runs one job per
+  source from it (`--archive-file`). The same file's Docker-free tests run under every profile.
+  Dimensions, rejection sites and isolation: skill `saci-connectors`.
 
 `cargo test --workspace --all-features --doc` remains a separate, always-bare-`cargo-test` step in
 both this file and `ci.yml`: nextest does not run doctests.
@@ -191,17 +195,17 @@ instead of `never`.
 `_keepalive` binding carries the reasoning in full. A test whose callsites sit in its own body,
 like the filter tests in `crates/saci-service/src/service/logging.rs`, needs none of this.
 
-The Raft chaos suites and the connector matrix are the exception, and the one place a runner
-feature does the work. The `heavy-docker` test group caps `max-threads = 1` over
-`transport_chaos`, `raft_consensus_chaos`, `distributed_harness_smoke`,
-`distributed_integration_chaos` and `connector_matrix`, so those five take the machine one test at
-a time. Unlike a connector test, which needs only its own container, each Raft chaos binary
-contends for the Docker daemon, for host ports, and for enough CPU to run 3 to 5 raft nodes while
-asserting on election and log-convergence deadlines; `connector_matrix` holds five containers
-(Kafka, NATS, PostgreSQL, S3, ClickHouse) at once for its whole run instead. The group is declared once
-and applied through an override in **both** profiles: `distributed_integration_chaos` and
-`connector_matrix` are in it even though `default` never reaches either binary, because `ci` does.
-Adding another heavy-Docker binary to the group means adding it to both `filter` expressions.
+The Raft chaos suites are the exception, and the one place a runner feature does the work. The
+`heavy-docker` test group caps `max-threads = 1` over `transport_chaos`, `raft_consensus_chaos`,
+`distributed_harness_smoke` and `distributed_integration_chaos`, so those four take the machine
+one test at a time. Unlike a connector test, which needs only its own container, each Raft chaos
+binary contends for the Docker daemon, for host ports, and for enough CPU to run 3 to 5 raft
+nodes while asserting on election and log-convergence deadlines. The group is declared once and
+applied through an override in **both** profiles: `distributed_integration_chaos` is in it even
+though `default` never reaches that binary, because `ci` does. Adding another heavy-Docker binary
+to the group means adding it to both `filter` expressions. The connector matrix's slices are
+outside the group on purpose: they start no container of their own, so they run in parallel
+against the ones `cargo xtask matrix` started.
 
 ## Workspace layout
 
@@ -249,7 +253,7 @@ packages/                     # Apache-2.0 subtree: one SDK per language plus th
                               # conformance corpus. skill saci-processors
 docs/                         # Zola site in two areas, service and library. skill saci-docs
 xtask/                        # The task runner behind `cargo xtask <command>`: quickstart,
-                              # polyglot, plugins, ui, bench, pack-sdk, validate, demo,
+                              # polyglot, plugins, ui, bench, pack-sdk, validate, demo, matrix,
                               # check-wasm-processor, processor-ipc-roundtrip. One module per
                               # command, zero dependencies, so it drives Go, .NET, npm, Gradle
                               # and wasm-tools identically on Windows, Linux and macOS. Exit
@@ -498,9 +502,9 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   `tests/`, run through `cargo nextest`. See "Testing" for the fast/full profile split, the
   Docker soft-skip convention, and why testcontainers-backed tests are safe to run in parallel.
 - Every new source connector, sink connector, transformer, and processor runtime is added to
-  `crates/saci-service/tests/connector_matrix.rs`'s dimension lists in the same change that
-  introduces it; `dimensions_cover_the_registry` fails on an omission. Skill `saci-connectors` has
-  the checklist.
+  `crates/saci-service/tests/connector_matrix.rs`'s dimension lists and its `live_slices!` lists
+  in the same change that introduces it; `dimensions_cover_the_registry` and
+  `every_slice_has_a_test` fail on an omission. Skill `saci-connectors` has the checklist.
 - Benchmarks use Criterion in each crate's `benches/`. Run them through `cargo xtask bench`, never
   bare `cargo bench`. The harness fixes `RUSTFLAGS`, compiles as a separate step so criterion does
   not share the machine with rustc, and takes the benchmark binary from cargo's own `Executable`

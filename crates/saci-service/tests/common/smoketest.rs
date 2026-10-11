@@ -3,11 +3,10 @@
 //! runtime loader and a seeded dataset.
 //!
 //! Used by `wasm_roundtrip.rs`, `processor_metrics.rs`, `workflow_branching.rs`,
-//! `workflow_metrics.rs` and `workflow_dag.rs`, and by `connector_matrix.rs` for the
-//! artifact path alone. They live in separate test binaries because
-//! `processor_metrics` and `workflow_metrics` each install a process-global meter
-//! provider, which must be in place before any `run_on` builds the instruments. Each
-//! binary uses a subset of this module.
+//! `workflow_metrics.rs` and `workflow_dag.rs`. They live in separate test
+//! binaries because `processor_metrics` and `workflow_metrics` each install a
+//! process-global meter provider, which must be in place before any `run_on`
+//! builds the instruments. Each binary uses a subset of this module.
 #![allow(dead_code, reason = "each test binary uses a subset of the fixture")]
 
 use std::collections::HashMap;

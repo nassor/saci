@@ -235,21 +235,23 @@ jobs:
     # Toxiproxy, chaos-injecting latency/bandwidth/reset-peer/partition
     # faults for ~70-100s. Isolated in its own job so its runtime never sits
     # on the `test` job's critical path. `--test` scopes discovery to this
-    # one binary so `--run-ignored ignored-only` can't pick up the other two
+    # one binary so `--run-ignored ignored-only` can't pick up the other
     # unrelated `#[ignore]`d tests: `saci-service`'s lib unit test
     # `test_second_init_returns_error` (a global-tracing-subscriber race) and
-    # connector_matrix.rs's full_matrix, run by the `connector_matrix` job
-    # below.
+    # the connector matrix's slices, run by the `connector_matrix` jobs below.
     - name: Full-stack distributed chaos test
       run: cargo nextest run -p saci-service --features distributed-raft --test distributed_integration_chaos --run-ignored ignored-only
 
-  # Isolated in its own job because it holds four containers (Kafka, NATS,
-  # PostgreSQL, MinIO/S3) for its entire run and walks the full connector x
-  # sink x transformer x processor-runtime product, so its runtime must not
-  # sit on the `test` job's critical path.
-  connector_matrix:
-    name: Connector Matrix
+  # The connector matrix is one test per {source, processor, format} slice
+  # (`crates/saci-service/tests/connector_matrix.rs`). This job compiles them
+  # once into a nextest archive, which also carries both processor fixtures
+  # (`archive.include` in .config/nextest.toml), and lists the slice groups:
+  # one per source connector, plus `maximal` for the maximal workflow.
+  connector_matrix_build:
+    name: Connector Matrix (build)
     runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.groups.outputs.groups }}
     steps:
     - uses: actions/checkout@v5
 
@@ -291,8 +293,62 @@ jobs:
     - name: Build smoketest native plugin
       run: cargo build -p saci-plugin-smoketest
 
-    - name: Connector/transformer/processor matrix
-      run: cargo nextest run -p saci-service --all-features --profile ci --test connector_matrix --run-ignored ignored-only
+    - name: Archive the matrix
+      run: cargo nextest archive -p saci-service --all-features --profile matrix --test connector_matrix --archive-file connector-matrix.tar.zst
+
+    # Test names are `live::<group>::...`, so the second path segment of
+    # every test the `matrix` profile selects is its group. A connector added
+    # to the matrix gets its job here with no edit to this file.
+    - name: List the slice groups
+      id: groups
+      run: |
+        groups=$(cargo nextest list --archive-file connector-matrix.tar.zst --profile matrix --run-ignored all --message-format json \
+          | jq -c '[.["rust-suites"][].testcases | to_entries[] | select(.value["filter-match"].status == "matches") | .key | split("::")[1]] | unique')
+        echo "groups=$groups" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@v5
+      with:
+        name: connector-matrix
+        path: connector-matrix.tar.zst
+        retention-days: 1
+
+  # One job per group, all from the same archive, so nothing here compiles
+  # but the xtask runner. `cargo xtask matrix` starts the five containers
+  # (Kafka, NATS, PostgreSQL, RustFS, ClickHouse) the group's slices share,
+  # and nextest runs those slices in parallel against them.
+  connector_matrix:
+    name: Connector Matrix (${{ matrix.group }})
+    needs: connector_matrix_build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.connector_matrix_build.outputs.groups) }}
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.99.0  # Rust minimum version
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest@0.9.143
+
+    - uses: actions/download-artifact@v5
+      with:
+        name: connector-matrix
+
+    - name: Connector matrix, ${{ matrix.group }}
+      run: cargo xtask matrix --archive-file connector-matrix.tar.zst -E 'test(/^live::${{ matrix.group }}::/)'
 
   wasm_processor:
     name: WASM Processor (wasm32-wasip2)

@@ -183,26 +183,29 @@
 //! item's sink write is never visible through them: the counters stop one item
 //! short whatever the wait. The driver therefore waits for one item less than
 //! the frame, datagram or document count and gives the last item a settle
-//! window. That window is wall clock, and every case future is polled by one
-//! task (`PipelineRuntime` is `?Send`, so no case can be spawned), so the
-//! `tcp`-, `udp`-, `saci`-, `http-push`- and `opentelemetry`-sourced cases run
-//! as a second phase, after the other 2520 have finished competing for the poll
-//! loop. See [`Case::phases`].
+//! window. That window is wall clock, and every case future of a slice is
+//! polled by one task (`PipelineRuntime` is `?Send`, so no case can be
+//! spawned). A slice has one source, so the at most 14 cases sharing that task
+//! all run in the same mode, and a stream-mode case never waits on a poll loop
+//! busy with one-shot cases. See [`Case::slice`].
 //!
 //! # Isolation
 //!
-//! One container per external resource for the whole run, behind a
-//! [`OnceCell`]. Cases run concurrently under a [`Semaphore`] and isolate
-//! themselves inside the shared resource: a nanosecond timestamp plus an atomic
-//! counter names a unique Kafka topic, NATS stream and subject, PostgreSQL
-//! table pair, S3 object prefix (one bucket for the run), channel name and temp
-//! directory. Every TCP, UDP, QUIC and HTTP socket binds `127.0.0.1:0`.
+//! Each slice runs in its own nextest process against one shared container
+//! per external resource, which `cargo xtask matrix` starts for the whole run
+//! and names through `SACI_MATRIX_*` variables (see [`Resources`]). Cases run
+//! concurrently and isolate themselves inside the shared resource: a
+//! nanosecond timestamp, the process id and an atomic counter name a unique
+//! Kafka topic, NATS stream and subject, PostgreSQL and ClickHouse table, S3
+//! object prefix (one bucket for the run), channel name and temp directory.
+//! A socket the harness holds binds `127.0.0.1:0`; a source the config names
+//! a port for gets one from [`next_port`]'s per-slot block instead.
 //!
 //! A resource is gated per case, never globally: a case is [`Outcome::Skipped`]
-//! only when it needs a live resource that is unavailable. A build-time refusal
-//! needs no resource at all — nothing in this workspace connects while a
-//! factory builds — so those cases run against a placeholder endpoint and keep
-//! their coverage on a machine with no Docker daemon.
+//! only when it needs a live resource whose variable is unset. A build-time
+//! refusal needs no resource at all, because nothing in this workspace
+//! connects while a factory builds, so those cases run against a placeholder
+//! endpoint and keep their coverage on a machine with no Docker daemon.
 //!
 //! # Two places the assertion is deliberately loose
 //!
@@ -303,7 +306,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use redb::ReadableDatabase as _;
-use tokio::sync::{OnceCell, RwLock, Semaphore};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use saci_core::dataset::Dataset;
@@ -315,12 +318,8 @@ use saci_service::service::builder::ServiceBuilder;
 use saci_service::service::config::ServiceConfig;
 use saci_service::service::factories::register_builtin_factories;
 use saci_service::service::standalone::{StandaloneStats, run_standalone};
-use saci_service::wasm::WasmEngine;
+use saci_service::wasm::{WasmEngine, WasmPipelineRuntime};
 use saci_transformer::Transformer;
-
-use testcontainers::core::{ExecCommand, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 // ── Dimensions ───────────────────────────────────────────────────────────────
 
@@ -969,18 +968,27 @@ pub struct Case {
 }
 
 impl Case {
-    /// Every case, split into the two phases they run in.
+    /// One slice: `source` against every sink, for one processor and one
+    /// format, in report order.
     ///
-    /// A `tcp`-sourced case needs `run_mode kind="stream"`, whose runner is
-    /// cancelled rather than reaching EOF, and the live stats it is cancelled
-    /// on are published one item behind. Those cases therefore need a settle
-    /// window measured in wall clock, which only means anything when the
-    /// process is not also driving a thousand other cases: every case future
-    /// is polled by one task, because `PipelineRuntime` is `?Send` and cannot
-    /// be spawned. Running them as a second phase is what makes that window
-    /// hold.
-    pub fn phases() -> (Vec<Self>, Vec<Self>) {
-        Self::all().into_iter().partition(|c| !c.stream_mode())
+    /// A slice is what one live test runs. Every case in it shares its run
+    /// mode, because [`Case::stream_mode`] depends on the source alone, so a
+    /// stream-mode case's settle window is never measured on a poll loop that
+    /// is also driving one-shot cases. The sink dimension drops every
+    /// connector [`Connector::has_sink`] answers `false` for: an `http-push`
+    /// node has no writing half to declare.
+    pub fn slice(source: Connector, processor: ProcessorKind, format: Format) -> Vec<Self> {
+        CONNECTORS
+            .iter()
+            .copied()
+            .filter(|c| c.has_sink())
+            .map(|sink| Self {
+                source,
+                sink,
+                format,
+                processor,
+            })
+            .collect()
     }
 
     /// The canonical report position: processor, then format, then source,
@@ -1004,31 +1012,6 @@ impl Case {
                 .position(|c| *c == self.sink)
                 .unwrap_or(CONNECTORS.len()),
         )
-    }
-
-    /// Every case, in report order.
-    ///
-    /// The sink dimension drops every connector [`Connector::has_sink`]
-    /// answers `false` for: an `http-push` node has no writing half to
-    /// declare.
-    fn all() -> Vec<Self> {
-        let sinks = CONNECTORS.iter().copied().filter(|c| c.has_sink());
-        let mut cases = Vec::with_capacity(CONNECTORS.len() * sinks.clone().count() * 18);
-        for processor in PROCESSORS {
-            for format in FORMATS {
-                for source in CONNECTORS {
-                    for sink in sinks.clone() {
-                        cases.push(Self {
-                            source,
-                            sink,
-                            format,
-                            processor,
-                        });
-                    }
-                }
-            }
-        }
-        cases
     }
 
     fn row(self) -> RowKind {
@@ -1309,7 +1292,7 @@ impl Report {
         );
         for report in &self.cases {
             // One line per case: a failed case's detail also carries the whole
-            // config it ran, which the failure list in `full_matrix` prints in
+            // config it ran, which the failure list in `run_slice` prints in
             // full.
             println!(
                 "{:<12} {:<12} {:<10} {:<8} {:<10} {:<8} {:>8.1?}  {}",
@@ -1351,7 +1334,12 @@ impl Report {
                         .map(|c| format!("{:<4}", &c.label()[..3.min(c.label().len())]))
                         .collect::<String>()
                 );
-                for source in CONNECTORS {
+                // A slice covers one source, so a grid row for a source the
+                // report holds no case of would be all `?`.
+                for source in CONNECTORS
+                    .into_iter()
+                    .filter(|source| grid.keys().any(|(s, _)| s == source))
+                {
                     let row: String = CONNECTORS
                         .iter()
                         .filter(|c| c.has_sink())
@@ -1397,7 +1385,7 @@ impl Report {
 
 // ── Shared resources ─────────────────────────────────────────────────────────
 
-/// One external resource, started once for the whole run.
+/// One external resource, shared by every slice of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resource {
     Kafka,
@@ -1406,6 +1394,15 @@ pub enum Resource {
     S3,
     Clickhouse,
 }
+
+/// Every resource, in report order.
+const RESOURCES: [Resource; 5] = [
+    Resource::Kafka,
+    Resource::Nats,
+    Resource::Postgres,
+    Resource::S3,
+    Resource::Clickhouse,
+];
 
 impl Resource {
     fn label(self) -> &'static str {
@@ -1417,411 +1414,268 @@ impl Resource {
             Self::Clickhouse => "clickhouse",
         }
     }
+
+    /// The variable whose presence makes this resource live.
+    fn variable(self) -> &'static str {
+        match self {
+            Self::Kafka => KAFKA_BROKERS,
+            Self::Nats => NATS_URL,
+            Self::Postgres => POSTGRES_DSN,
+            Self::S3 => S3_ENDPOINT,
+            Self::Clickhouse => CLICKHOUSE_URL,
+        }
+    }
 }
+
+// The endpoint variables `cargo xtask matrix` (`xtask/src/matrix.rs`) sets.
+// Each value is what a client in this file dials as it is.
+
+/// `host:port` of a Kafka broker advertising that same address.
+const KAFKA_BROKERS: &str = "SACI_MATRIX_KAFKA_BROKERS";
+/// `nats://host:port` of a NATS server running JetStream.
+const NATS_URL: &str = "SACI_MATRIX_NATS_URL";
+/// A `postgres://` DSN.
+const POSTGRES_DSN: &str = "SACI_MATRIX_POSTGRES_DSN";
+/// `http://host:port` of an S3-compatible endpoint. The three variables after
+/// it name the run's one bucket, which already exists, and its credentials.
+const S3_ENDPOINT: &str = "SACI_MATRIX_S3_ENDPOINT";
+const S3_BUCKET: &str = "SACI_MATRIX_S3_BUCKET";
+const S3_ACCESS_KEY_ID: &str = "SACI_MATRIX_S3_ACCESS_KEY_ID";
+const S3_SECRET_ACCESS_KEY: &str = "SACI_MATRIX_S3_SECRET_ACCESS_KEY";
+/// `http://host:port` of ClickHouse's HTTP interface.
+const CLICKHOUSE_URL: &str = "SACI_MATRIX_CLICKHOUSE_URL";
+
+/// How long a named endpoint may take to answer before its slice fails.
+///
+/// Counted from the slice's own start, which can be moments after the
+/// containers': the first slices of a run wait out the servers' startup, and
+/// ClickHouse is the slowest of the five to answer on a cold runner.
+const READY_BUDGET: Duration = Duration::from_secs(180);
 
 /// A live Kafka broker.
 pub struct KafkaResource {
-    _container: ContainerAsync<GenericImage>,
     pub brokers: String,
 }
 
 /// A live NATS server with JetStream enabled.
 pub struct NatsResource {
-    _container: ContainerAsync<GenericImage>,
     pub url: String,
 }
 
 /// A live PostgreSQL server.
 pub struct PostgresResource {
-    _container: ContainerAsync<GenericImage>,
     pub dsn: String,
 }
 
-/// A live S3-compatible endpoint with one bucket created.
+/// A live S3-compatible endpoint with the run's one bucket created.
 pub struct S3Resource {
-    _container: ContainerAsync<GenericImage>,
     pub connection: saci_connector_s3::S3ConnectionConfig,
 }
 
 /// A live ClickHouse server.
 pub struct ClickhouseResource {
-    _container: ContainerAsync<GenericImage>,
     pub url: String,
 }
 
-/// The five containers, each started at most once.
-#[derive(Default)]
+/// The five resources, each live or absent for the whole slice.
+///
+/// Every endpoint comes from its variable rather than from a container
+/// started here: nextest runs each slice in a process of its own, so a
+/// container per process would be one per slice. An unset variable leaves its
+/// resource absent and every case needing it [`Outcome::Skipped`]. A set one
+/// names a resource the run was promised, so an endpoint that never answers
+/// fails the slice instead of skipping its cases.
 pub struct Resources {
-    kafka: OnceCell<Option<KafkaResource>>,
-    nats: OnceCell<Option<NatsResource>>,
-    postgres: OnceCell<Option<PostgresResource>>,
-    s3: OnceCell<Option<S3Resource>>,
-    clickhouse: OnceCell<Option<ClickhouseResource>>,
+    kafka: Option<KafkaResource>,
+    nats: Option<NatsResource>,
+    postgres: Option<PostgresResource>,
+    s3: Option<S3Resource>,
+    clickhouse: Option<ClickhouseResource>,
 }
 
 impl Resources {
-    pub async fn kafka(&self) -> Option<&KafkaResource> {
-        self.kafka.get_or_init(try_start_kafka).await.as_ref()
-    }
-
-    pub async fn nats(&self) -> Option<&NatsResource> {
-        self.nats.get_or_init(try_start_nats).await.as_ref()
-    }
-
-    pub async fn postgres(&self) -> Option<&PostgresResource> {
-        self.postgres.get_or_init(try_start_postgres).await.as_ref()
-    }
-
-    pub async fn s3(&self) -> Option<&S3Resource> {
-        self.s3.get_or_init(try_start_s3).await.as_ref()
-    }
-
-    pub async fn clickhouse(&self) -> Option<&ClickhouseResource> {
-        self.clickhouse
-            .get_or_init(try_start_clickhouse)
-            .await
-            .as_ref()
-    }
-
-    /// Start all five containers before any case runs, and report which came
-    /// up.
+    /// Read every variable and wait until each named endpoint answers.
     ///
-    /// Lazily starting them from inside a case would put every readiness poll
-    /// on the same task that is driving a thousand other case futures, so a
-    /// slow server could miss the readiness deadline its own `try_start_*`
-    /// sets for want of being polled.
-    pub async fn warm(&self) -> Vec<(Resource, bool)> {
-        let mut up = Vec::new();
-        for resource in [
-            Resource::Kafka,
-            Resource::Nats,
-            Resource::Postgres,
-            Resource::S3,
-            Resource::Clickhouse,
-        ] {
-            up.push((resource, self.available(resource).await));
+    /// Every wait ends before any case starts, so a readiness poll never
+    /// shares the poll loop with the slice's case futures.
+    pub async fn connect() -> Self {
+        let (kafka, nats, postgres, clickhouse) = tokio::join!(
+            await_kafka(),
+            await_nats(),
+            await_postgres(),
+            await_clickhouse()
+        );
+        Self {
+            kafka,
+            nats,
+            postgres,
+            s3: s3_from_env(),
+            clickhouse,
         }
-        up
     }
 
-    /// The report line naming which resources a run had.
-    pub fn describe(up: &[(Resource, bool)]) -> String {
-        up.iter()
-            .map(|(resource, live)| {
-                format!("{}={}", resource.label(), if *live { "up" } else { "down" })
+    pub fn kafka(&self) -> Option<&KafkaResource> {
+        self.kafka.as_ref()
+    }
+
+    pub fn nats(&self) -> Option<&NatsResource> {
+        self.nats.as_ref()
+    }
+
+    pub fn postgres(&self) -> Option<&PostgresResource> {
+        self.postgres.as_ref()
+    }
+
+    pub fn s3(&self) -> Option<&S3Resource> {
+        self.s3.as_ref()
+    }
+
+    pub fn clickhouse(&self) -> Option<&ClickhouseResource> {
+        self.clickhouse.as_ref()
+    }
+
+    /// The report line naming which resources a slice had.
+    pub fn describe(&self) -> String {
+        RESOURCES
+            .iter()
+            .map(|resource| {
+                let state = if self.available(*resource) {
+                    "up"
+                } else {
+                    "unset"
+                };
+                format!("{}={state}", resource.label())
             })
             .collect::<Vec<_>>()
             .join(" ")
     }
 
-    async fn available(&self, resource: Resource) -> bool {
+    fn available(&self, resource: Resource) -> bool {
         match resource {
-            Resource::Kafka => self.kafka().await.is_some(),
-            Resource::Nats => self.nats().await.is_some(),
-            Resource::Postgres => self.postgres().await.is_some(),
-            Resource::S3 => self.s3().await.is_some(),
-            Resource::Clickhouse => self.clickhouse().await.is_some(),
+            Resource::Kafka => self.kafka.is_some(),
+            Resource::Nats => self.nats.is_some(),
+            Resource::Postgres => self.postgres.is_some(),
+            Resource::S3 => self.s3.is_some(),
+            Resource::Clickhouse => self.clickhouse.is_some(),
         }
     }
 }
 
-/// Start a single-node KRaft broker, or report why not.
-///
-/// The advertised listener has to name a host port before the container runs,
-/// so the port is reserved here and mapped explicitly.
-async fn try_start_kafka() -> Option<KafkaResource> {
+/// A variable's value, with an empty one read as unset.
+fn variable(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// Poll `ready` until it answers `true`, panicking with the variable's name
+/// and value once [`READY_BUDGET`] runs out.
+async fn await_ready<F, Fut>(name: &str, value: &str, mut ready: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let deadline = Instant::now() + READY_BUDGET;
+    while Instant::now() < deadline {
+        if ready().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("{name}={value} did not answer within {READY_BUDGET:?}");
+}
+
+async fn await_kafka() -> Option<KafkaResource> {
     use rdkafka::ClientConfig;
     use rdkafka::consumer::{BaseConsumer, Consumer};
 
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
-    let port = listener.local_addr().ok()?.port();
-    drop(listener);
-
-    let image = GenericImage::new("apache/kafka", "3.9.0")
-        .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
-        .with_env_var("KAFKA_NODE_ID", "1")
-        .with_env_var("KAFKA_PROCESS_ROLES", "broker,controller")
-        .with_env_var("KAFKA_LISTENERS", "PLAINTEXT://:9092,CONTROLLER://:9093")
-        .with_env_var(
-            "KAFKA_ADVERTISED_LISTENERS",
-            format!("PLAINTEXT://127.0.0.1:{port}"),
-        )
-        .with_env_var("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
-        .with_env_var(
-            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
-            "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
-        )
-        .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
-        .with_env_var("KAFKA_INTER_BROKER_LISTENER_NAME", "PLAINTEXT")
-        .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
-        .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
-        .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
-        .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
-        .with_env_var("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false")
-        .with_mapped_port(port, 9092.tcp());
-
-    let container = match image.start().await {
-        Ok(container) => container,
-        Err(e) => {
-            eprintln!("SKIP: kafka container unavailable: {e}");
-            return None;
+    let brokers = variable(KAFKA_BROKERS)?;
+    let probe = brokers.as_str();
+    await_ready(KAFKA_BROKERS, &brokers, move || {
+        let brokers = probe.to_owned();
+        // `fetch_metadata` blocks, and the other three waits share this task.
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut cfg = ClientConfig::new();
+                cfg.set("bootstrap.servers", &brokers);
+                cfg.create::<BaseConsumer>().is_ok_and(|consumer| {
+                    consumer
+                        .fetch_metadata(None, Duration::from_secs(5))
+                        .is_ok()
+                })
+            })
+            .await
+            .unwrap_or(false)
         }
-    };
-    let brokers = format!("127.0.0.1:{port}");
-
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < deadline {
-        let mut cfg = ClientConfig::new();
-        cfg.set("bootstrap.servers", &brokers);
-        if let Ok(consumer) = cfg.create::<BaseConsumer>()
-            && consumer
-                .fetch_metadata(None, Duration::from_secs(5))
-                .is_ok()
-        {
-            return Some(KafkaResource {
-                _container: container,
-                brokers,
-            });
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    eprintln!("SKIP: kafka broker never accepted a connection");
-    None
+    })
+    .await;
+    Some(KafkaResource { brokers })
 }
 
-/// Start a JetStream-enabled NATS server, or report why not.
-async fn try_start_nats() -> Option<NatsResource> {
-    let image = GenericImage::new("nats", "2.11-alpine")
-        .with_exposed_port(4222_u16.tcp())
-        .with_cmd(["-js", "-sd", "/tmp/nats"]);
-
-    let container = match image.start().await {
-        Ok(container) => container,
-        Err(e) => {
-            eprintln!("SKIP: nats container unavailable: {e}");
-            return None;
-        }
-    };
-    let port = match container.get_host_port_ipv4(4222_u16.tcp()).await {
-        Ok(port) => port,
-        Err(e) => {
-            eprintln!("SKIP: nats container port unavailable: {e}");
-            return None;
-        }
-    };
-    let url = format!("nats://127.0.0.1:{port}");
-
+async fn await_nats() -> Option<NatsResource> {
+    let url = variable(NATS_URL)?;
+    let probe = url.as_str();
     // `-js` starts the subsystem after the client port opens, so a JetStream
     // API round trip is the only sound readiness gate.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < deadline {
-        if let Ok(client) = async_nats::connect(&url).await {
-            let js = async_nats::jetstream::new(client);
-            match js.get_stream("SACI_MATRIX_PROBE").await {
-                Err(e) if e.to_string().contains("timed out") => {}
-                _ => {
-                    return Some(NatsResource {
-                        _container: container,
-                        url,
-                    });
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    eprintln!("SKIP: nats server never answered the JetStream API");
-    None
+    await_ready(NATS_URL, &url, move || async move {
+        let Ok(client) = async_nats::connect(probe).await else {
+            return false;
+        };
+        let js = async_nats::jetstream::new(client);
+        !matches!(
+            js.get_stream("SACI_MATRIX_PROBE").await,
+            Err(e) if e.to_string().contains("timed out")
+        )
+    })
+    .await;
+    Some(NatsResource { url })
 }
 
-/// Start PostgreSQL, or report why not.
-async fn try_start_postgres() -> Option<PostgresResource> {
-    const PASSWORD: &str = "saci";
-
-    let image = GenericImage::new("postgres", "18-alpine")
-        .with_exposed_port(5432_u16.tcp())
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_env_var("POSTGRES_PASSWORD", PASSWORD)
-        .with_cmd(["postgres", "-c", "fsync=off", "-c", "max_connections=400"]);
-
-    let container = match image.start().await {
-        Ok(container) => container,
-        Err(e) => {
-            eprintln!("SKIP: postgres container unavailable: {e}");
-            return None;
-        }
-    };
-    let port = match container.get_host_port_ipv4(5432_u16.tcp()).await {
-        Ok(port) => port,
-        Err(e) => {
-            eprintln!("SKIP: cannot map the postgres port: {e}");
-            return None;
-        }
-    };
-    let dsn = format!("postgres://postgres:{PASSWORD}@127.0.0.1:{port}/postgres");
-
-    // The readiness line is logged once during initdb, so poll the real server.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < deadline {
-        if let Ok((client, connection)) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await
-        {
-            let driver = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            let ready = client.simple_query("SELECT 1").await.is_ok();
-            driver.abort();
-            if ready {
-                return Some(PostgresResource {
-                    _container: container,
-                    dsn,
-                });
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    eprintln!("SKIP: postgres never accepted a connection");
-    None
+async fn await_postgres() -> Option<PostgresResource> {
+    let dsn = variable(POSTGRES_DSN)?;
+    let probe = dsn.as_str();
+    await_ready(POSTGRES_DSN, &dsn, move || async move {
+        let Ok((client, connection)) = tokio_postgres::connect(probe, tokio_postgres::NoTls).await
+        else {
+            return false;
+        };
+        let driver = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let ready = client.simple_query("SELECT 1").await.is_ok();
+        driver.abort();
+        ready
+    })
+    .await;
+    Some(PostgresResource { dsn })
 }
 
-/// Start an S3-compatible endpoint and create the run's one bucket, or report
-/// why not.
-async fn try_start_s3() -> Option<S3Resource> {
-    const ACCESS_KEY: &str = "saciaccesskey";
-    const SECRET_KEY: &str = "sacisecretkey";
-
-    let image = GenericImage::new("rustfs/rustfs", "1.0.0-rc.3")
-        .with_exposed_port(9000_u16.tcp())
-        .with_env_var("RUSTFS_ACCESS_KEY", ACCESS_KEY)
-        .with_env_var("RUSTFS_SECRET_KEY", SECRET_KEY)
-        .with_env_var("RUSTFS_ADDRESS", "0.0.0.0:9000")
-        .with_env_var("RUSTFS_CONSOLE_ENABLE", "false");
-    let container = match image.start().await {
-        Ok(container) => container,
-        Err(e) => {
-            eprintln!("SKIP: rustfs container unavailable: {e}");
-            return None;
-        }
-    };
-    let port = match container.get_host_port_ipv4(9000_u16.tcp()).await {
-        Ok(port) => port,
-        Err(e) => {
-            eprintln!("SKIP: rustfs container port unavailable: {e}");
-            return None;
-        }
-    };
-    let connection = saci_connector_s3::S3ConnectionConfig {
-        bucket: format!("saci-matrix-{}", nanos()),
-        endpoint: Some(format!("http://127.0.0.1:{port}")),
-        access_key_id: Some(ACCESS_KEY.to_string()),
-        secret_access_key: Some(SECRET_KEY.to_string()),
-        allow_http: true,
-        ..Default::default()
-    };
-
-    // A signed CreateBucket through the container's own curl both waits out
-    // startup and creates the run's single bucket.
-    let deadline = Instant::now() + Duration::from_secs(180);
-    let user = format!("{ACCESS_KEY}:{SECRET_KEY}");
-    loop {
-        // Inside the container the server listens on 9000; the mapped port
-        // exists only on the host, so a probe run through `docker exec` names
-        // the container's own port.
-        let url = format!("http://127.0.0.1:9000/{}", connection.bucket);
-        let cmd = ExecCommand::new([
-            "curl",
-            "-fsS",
-            "-o",
-            "/dev/null",
-            "-X",
-            "PUT",
-            "--aws-sigv4",
-            "aws:amz:us-east-1:s3",
-            "--user",
-            user.as_str(),
-            url.as_str(),
-        ]);
-        match container.exec(cmd).await {
-            Ok(mut result) => {
-                // The exit code is only final once the exec's output streams
-                // have been consumed; reading it straight away reports
-                // `None` for a command that has in fact succeeded.
-                let _ = result.stdout_to_vec().await;
-                let _ = result.stderr_to_vec().await;
-                match result.exit_code().await {
-                    Ok(Some(0)) => {
-                        return Some(S3Resource {
-                            _container: container,
-                            connection,
-                        });
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("SKIP: rustfs exec exit code unavailable: {e}");
-                        return None;
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("SKIP: rustfs exec failed: {e}");
-                return None;
-            }
-        }
-        if Instant::now() >= deadline {
-            eprintln!("SKIP: rustfs never accepted a signed CreateBucket within 180s");
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-/// Start ClickHouse, or report why not.
-async fn try_start_clickhouse() -> Option<ClickhouseResource> {
-    // The image pins the `default` user to `127.0.0.1`/`::1` unless a
-    // user/password or access management is configured, and a published port
-    // reaches the container from the gateway, so the connection below would be
-    // refused with `AUTHENTICATION_FAILED`. Setting access management opens
-    // `<ip>::/0</ip>` and needs no password.
-    //
-    // No log wait either: ClickHouse writes `Ready for connections` to a file
-    // inside the container, not to its stdout or stderr, so a `WaitFor` here
-    // would time out with the server already up. The `SELECT 1` loop below is
-    // the readiness gate instead.
-    let image = GenericImage::new("clickhouse/clickhouse-server", "24.8-alpine")
-        .with_exposed_port(8123_u16.tcp())
-        .with_env_var("CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", "1");
-
-    let container = match image.start().await {
-        Ok(container) => container,
-        Err(e) => {
-            eprintln!("SKIP: clickhouse container unavailable: {e}");
-            return None;
-        }
-    };
-    let port = match container.get_host_port_ipv4(8123_u16.tcp()).await {
-        Ok(port) => port,
-        Err(e) => {
-            eprintln!("SKIP: cannot map the clickhouse port: {e}");
-            return None;
-        }
-    };
-    let url = format!("http://127.0.0.1:{port}");
-
+async fn await_clickhouse() -> Option<ClickhouseResource> {
+    let url = variable(CLICKHOUSE_URL)?;
     let client = clickhouse::Client::default().with_url(&url);
-    // Wider than the others': ClickHouse is the largest of the five images and
-    // the slowest to answer a query on a cold, loaded runner.
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while Instant::now() < deadline {
-        if client.query("SELECT 1").execute().await.is_ok() {
-            return Some(ClickhouseResource {
-                _container: container,
-                url,
-            });
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    eprintln!("SKIP: clickhouse never accepted a connection");
-    None
+    let client = &client;
+    await_ready(CLICKHOUSE_URL, &url, move || async move {
+        client.query("SELECT 1").execute().await.is_ok()
+    })
+    .await;
+    Some(ClickhouseResource { url })
+}
+
+/// The S3 endpoint needs no wait: `cargo xtask matrix` created the bucket
+/// through the server before any slice started.
+fn s3_from_env() -> Option<S3Resource> {
+    let endpoint = variable(S3_ENDPOINT)?;
+    let required = |name: &str| {
+        variable(name).unwrap_or_else(|| panic!("{S3_ENDPOINT} is set but {name} is not"))
+    };
+    Some(S3Resource {
+        connection: saci_connector_s3::S3ConnectionConfig {
+            bucket: required(S3_BUCKET),
+            endpoint: Some(endpoint),
+            access_key_id: Some(required(S3_ACCESS_KEY_ID)),
+            secret_access_key: Some(required(S3_SECRET_ACCESS_KEY)),
+            allow_http: true,
+            ..Default::default()
+        },
+    })
 }
 
 // ── Fixtures and uniqueness ──────────────────────────────────────────────────
@@ -1829,28 +1683,47 @@ async fn try_start_clickhouse() -> Option<ClickhouseResource> {
 /// The two processor artifacts, resolved once, and the one engine every wasm
 /// case compiles the component against.
 pub struct Fixtures {
-    /// `target/wasm32-wasip2/release/saci_processor_smoketest.wasm`.
+    /// `<target>/wasm32-wasip2/release/saci_processor_smoketest.wasm`.
     pub wasm: PathBuf,
     /// The `saci-plugin-smoketest` cdylib under the running profile.
     pub plugin: PathBuf,
-    /// Shared by every case through
+    /// Shared by every case of a slice through
     /// [`ServiceBuilder::with_wasm_engine`], so the 4 MB component is
-    /// Cranelift-compiled once for the whole matrix instead of once per case.
+    /// Cranelift-compiled once per slice instead of once per case.
     ///
-    /// That compile is synchronous and takes about 1.7 s on one fast core.
-    /// `PipelineRuntime` is `?Send`, so every case future is polled by one
-    /// task: a per-case compile blocks every other case for its whole
-    /// duration, and the 239 wasm cases that reach the processor node would
-    /// hold the poll loop for over 400 s on a fast machine and several times
-    /// that on a two core runner, past every in-flight case's
-    /// [`CASE_BUDGET`]. One engine also means one epoch ticker task rather
-    /// than one per case.
+    /// That compile is synchronous: about 1.7 s on one fast core, and well
+    /// over a minute in a debug test build on a CI runner whose cores every
+    /// other slice is also using. `PipelineRuntime` is `?Send`, so every case
+    /// future of a slice is polled by one task, and a compile inside a case
+    /// stalls every other case for its whole duration. A ClickHouse request
+    /// stalled that long finds its connection closed by the server and fails,
+    /// so [`Fixtures::compile_wasm`] runs it before any case starts. One engine
+    /// also means one epoch ticker task rather than one per case.
     pub engine: WasmEngine,
 }
 
 impl Fixtures {
     /// Resolve both artifacts, reporting the build command for a missing one.
-    pub fn resolve(wasm: PathBuf) -> Result<Self, String> {
+    ///
+    /// Both are found from `current_exe`, which is
+    /// `<target>/<profile>/deps/<test-bin>`, rather than from a path compiled
+    /// into the binary. A binary run from a nextest archive sits in the
+    /// archive's extracted target directory, next to the two copies the
+    /// `matrix` profile's `archive.include` packed (`.config/nextest.toml`).
+    pub fn resolve() -> Result<Self, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        let profile = exe
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| format!("no profile directory above {}", exe.display()))?;
+        let target = profile
+            .parent()
+            .ok_or_else(|| format!("no target directory above {}", profile.display()))?;
+
+        let wasm = target
+            .join("wasm32-wasip2")
+            .join("release")
+            .join("saci_processor_smoketest.wasm");
         if !wasm.exists() {
             return Err(format!(
                 "smoketest component not found at {}; run `cargo build --release \
@@ -1858,7 +1731,11 @@ impl Fixtures {
                 wasm.display()
             ));
         }
-        let plugin = plugin_artifact();
+        let plugin = profile.join(format!(
+            "{}saci_plugin_smoketest{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ));
         if !plugin.exists() {
             return Err(format!(
                 "smoketest plugin not found at {}; run `cargo build -p saci-plugin-smoketest` first",
@@ -1872,21 +1749,22 @@ impl Fixtures {
             engine,
         })
     }
-}
 
-/// Locate the built cdylib under whichever profile the test binary itself ran
-/// under: `current_exe` is `<target>/<profile>/deps/<test-bin>`.
-fn plugin_artifact() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let profile = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("profile directory above deps/");
-    profile.join(format!(
-        "{}saci_plugin_smoketest{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    ))
+    /// Compile the component into [`Fixtures::engine`]'s cache, so no case
+    /// pays for it while other cases' requests are in flight.
+    pub fn compile_wasm(&self) -> Result<(), String> {
+        let bytes = std::fs::read(&self.wasm)
+            .map_err(|e| format!("reading {}: {e}", self.wasm.display()))?;
+        WasmPipelineRuntime::from_bytes(
+            self.engine.clone(),
+            "precompile",
+            &bytes,
+            std::collections::HashMap::new(),
+            1,
+        )
+        .map(drop)
+        .map_err(|e| format!("compiling {}: {e}", self.wasm.display()))
+    }
 }
 
 fn nanos() -> u128 {
@@ -1896,14 +1774,17 @@ fn nanos() -> u128 {
         .as_nanos()
 }
 
-/// A name no other case in this process can collide with: the process start
-/// timestamp plus a monotonic counter.
+/// A name no other case of the run can collide with: the process start
+/// timestamp, the process id and a monotonic counter. Every slice of a run
+/// shares the same containers, so a name unique within one process is not
+/// enough.
 fn unique(stem: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     static BASE: LazyLock<u128> = LazyLock::new(nanos);
     format!(
-        "{stem}_{}_{}",
+        "{stem}_{}_{}_{}",
         *BASE,
+        std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }
@@ -2457,22 +2338,57 @@ fn exchange(mut stream: std::net::TcpStream, body: &[u8]) -> Option<Vec<u8>> {
     Some(request)
 }
 
-/// A free port for a `tcp` source's `bind`, which the config needs before the
-/// factory binds it for real.
+/// A free port for a listening source's `bind` (`tcp`, `saci`, `http-push`,
+/// `opentelemetry`), which the config needs before the factory binds it.
 fn reserved_port() -> Result<u16, String> {
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = probe.local_addr().map_err(|e| e.to_string())?.port();
-    drop(probe);
-    Ok(port)
+    next_port(|port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
 }
 
-/// A free port for a `udp` source's `bind`, reserved on a datagram socket so
+/// A free port for a `udp` source's `bind`, probed on a datagram socket so
 /// the port it hands out is free for a datagram socket.
 fn reserved_udp_port() -> Result<u16, String> {
-    let probe = std::net::UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = probe.local_addr().map_err(|e| e.to_string())?.port();
-    drop(probe);
-    Ok(port)
+    next_port(|port| std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok())
+}
+
+/// The first port of the range [`next_port`] hands out from.
+const PORT_RANGE_START: u16 = 20_000;
+/// Ports per nextest slot.
+const PORT_BLOCK: u16 = 200;
+
+/// A port nothing else in the run is handed, that a probe bind found free.
+///
+/// Binding `:0` and dropping the probe races: until the factory binds the
+/// port again, any socket on the host can take it, and with every slice of a
+/// run connecting to the same containers, outgoing connections churn through
+/// the ephemeral range constantly. So ports come from below every ephemeral
+/// range (Linux starts at 32768, Windows and macOS at 49152), in a block of
+/// their own per `NEXTEST_TEST_GLOBAL_SLOT`, which nextest keeps unique among
+/// the tests running at once. Inside a process an atomic counter walks the
+/// block, starting at an offset taken from the process id, so the next test
+/// in the same slot starts away from the ports its predecessor just closed.
+/// The probe bind only skips a port something outside the run holds.
+fn next_port(free: impl Fn(u16) -> bool) -> Result<u16, String> {
+    static NEXT: LazyLock<AtomicU64> =
+        LazyLock::new(|| AtomicU64::new(u64::from(std::process::id())));
+    let slots = (32_768 - PORT_RANGE_START) / PORT_BLOCK;
+    let slot = std::env::var("NEXTEST_TEST_GLOBAL_SLOT")
+        .ok()
+        .and_then(|slot| slot.parse::<u16>().ok())
+        .unwrap_or(0);
+    if slot >= slots {
+        return Err(format!(
+            "nextest slot {slot} has no port block: run with at most {slots} test threads"
+        ));
+    }
+    let base = PORT_RANGE_START + slot * PORT_BLOCK;
+    for _ in 0..PORT_BLOCK {
+        let offset = NEXT.fetch_add(1, Ordering::Relaxed) % u64::from(PORT_BLOCK);
+        let port = base + u16::try_from(offset).map_err(|e| e.to_string())?;
+        if free(port) {
+            return Ok(port);
+        }
+    }
+    Err(format!("no free port in {base}..{}", base + PORT_BLOCK))
 }
 
 // ── Source and sink assembly ─────────────────────────────────────────────────
@@ -2745,20 +2661,12 @@ struct Endpoints {
 }
 
 impl Endpoints {
-    async fn resolve(resources: &Resources, live: bool) -> Self {
-        let kafka = if live { resources.kafka().await } else { None };
-        let nats = if live { resources.nats().await } else { None };
-        let postgres = if live {
-            resources.postgres().await
-        } else {
-            None
-        };
-        let s3 = if live { resources.s3().await } else { None };
-        let clickhouse = if live {
-            resources.clickhouse().await
-        } else {
-            None
-        };
+    fn resolve(resources: &Resources, live: bool) -> Self {
+        let kafka = if live { resources.kafka() } else { None };
+        let nats = if live { resources.nats() } else { None };
+        let postgres = if live { resources.postgres() } else { None };
+        let s3 = if live { resources.s3() } else { None };
+        let clickhouse = if live { resources.clickhouse() } else { None };
         Self {
             brokers: kafka.map_or_else(|| "127.0.0.1:1".to_string(), |k| k.brokers.clone()),
             nats_url: nats.map_or_else(|| "nats://127.0.0.1:1".to_string(), |n| n.url.clone()),
@@ -4174,38 +4082,30 @@ const CASE_BUDGET: Duration = Duration::from_secs(180);
 /// Build and run one case, then assert its expectation.
 ///
 /// The returned report is the only channel: a failure is recorded rather than
-/// panicked, so one broken combination does not hide the other 3779.
-pub async fn run_case(
-    case: Case,
-    resources: &Resources,
-    fixtures: &Fixtures,
-    permits: &Semaphore,
-) -> CaseReport {
+/// panicked, so one broken combination does not hide the others of its slice.
+pub async fn run_case(case: Case, resources: &Resources, fixtures: &Fixtures) -> CaseReport {
     let expect = case.expect();
 
     for resource in case.resources() {
-        if !resources.available(resource).await {
+        if !resources.available(resource) {
             return CaseReport {
                 case,
                 outcome: Outcome::Skipped,
                 site: None,
-                detail: format!("{} unavailable", resource.label()),
+                detail: format!(
+                    "{} unavailable: {} unset",
+                    resource.label(),
+                    resource.variable()
+                ),
                 elapsed: Duration::ZERO,
             };
         }
     }
 
-    let _permit = permits
-        .acquire()
-        .await
-        .expect("the matrix semaphore is never closed");
-
-    // Timed from the permit, so the column is the case's own cost rather than
-    // how long it queued behind the concurrency bound.
     let started = Instant::now();
-    // Bounded, because one case that never returns holds its permit and keeps
-    // `join_all` from resolving: every other case's result would be lost with
-    // no report printed at all.
+    // Bounded, because one case that never returns keeps `join_all` from
+    // resolving: every other case's result would be lost with no report
+    // printed at all.
     let result = tokio::time::timeout(CASE_BUDGET, execute(case, &expect, resources, fixtures))
         .await
         .unwrap_or_else(|_| Err(format!("timed out after {CASE_BUDGET:?}")));
@@ -4252,7 +4152,7 @@ async fn execute(
             ..
         }
     );
-    let endpoints = Endpoints::resolve(resources, !build_only).await;
+    let endpoints = Endpoints::resolve(resources, !build_only);
 
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
     // One source per case, so it is source 0 and its ids are unoffset.
@@ -4809,7 +4709,7 @@ pub async fn run_maximal(
     fixtures: &Fixtures,
 ) -> Result<MaximalReport, String> {
     let started = Instant::now();
-    let endpoints = Endpoints::resolve(resources, true).await;
+    let endpoints = Endpoints::resolve(resources, true);
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
 
     let mut available = Vec::new();
@@ -4818,7 +4718,7 @@ pub async fn run_maximal(
         match connector.resource() {
             None => available.push(connector),
             Some(resource) => {
-                if resources.available(resource).await {
+                if resources.available(resource) {
                     available.push(connector);
                 } else {
                     excluded.push(format!(

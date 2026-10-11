@@ -397,40 +397,51 @@ the directory rather than a hand-maintained list.
 Docker-backed tests soft-skip when no daemon is reachable; the `try_start` convention is in
 `AGENTS.md`'s Testing section.
 
-`crates/saci-service/tests/connector_matrix.rs` (the `heavy-docker` test group, `ci.yml`'s
-`connector_matrix` job) covers 3780 cases, one per `{source connector, sink connector, byte
-format, processor runtime}` tuple over 15 source connectors and 14 sink connectors
-(`HttpPushSource` registers a source and no sink, so the two dimensions are no longer one list),
-6 formats (the five
-transformers plus the absence of one, for the six connectors that carry `RecordBatch`es
-natively) and 3 processor runtimes (native pipeline, WASM component, native plugin), plus one
-maximal workflow declaring every node kind at once. One format applies to both the source and
-the sink of a case; the independent source-format x sink-format cross product (22680 cases) is
-deliberately not taken, because a mixed pair adds no connector or transformer coverage over the
-two paired cases that already cover each half. `full_matrix` is the one test here that starts a
-container: nextest gives each test *binary*, not each test, its own process, so it alone starts
-exactly one container per external resource (Kafka, NATS, PostgreSQL, S3, ClickHouse) for its whole
-run, isolating every case by a unique topic, subject, table, object prefix, file path or
-OS-assigned port and running them all concurrently in-process. A rejected case asserts both the
-refusal and where it lands: `build` (`ServiceConfig::load` or `ServiceBuilder::build_all`
-returns an error containing a predicted fragment) or `run` (the service builds but the runner
-reports a non-fatal error and no row reaches the sink). There is deliberately no third site for
-a clean run that delivers nothing: that is what a silent bug looks like, so such a combination
-gets fixed rather than recorded. A build refusal touches no live resource, so that coverage
-holds with no Docker daemon at all; a case whose resource has no reachable container is skipped
-individually instead, so Docker-free combinations still run. `full_matrix` is excluded from the
-`default` profile and `#[ignore]`d, so `--profile ci` skips it too; it reaches CI only through
-the `connector_matrix` job (`cargo nextest run -p saci-service --all-features --profile ci
---test connector_matrix --run-ignored ignored-only`). `--profile ci` is required there: `--test`
-selects a cargo build target, not a nextest filter, so it cannot bypass `default`'s exclusion of
-`full_matrix` itself. The job builds both the wasm and the native-plugin smoketest fixtures
-first, and prints the test's own report (per-case grids, the supported/rejected/skipped/FAILED
-totals, the maximal workflow) on a pass as well as a failure. The same file also holds
-`dimensions_cover_the_registry`, a Docker-free, non-`#[ignore]`d test comparing the real
-factory registry's `source_names`/`sink_names` against `CONNECTORS` through
-`Connector::source_type`/`Connector::sink_type`, and its registered transformer `formats`
-against `FORMATS`, as sorted name sets rather than counts; it starts no container and runs
-under the `default` profile like any other fast test.
+`crates/saci-service/tests/connector_matrix.rs` (`cargo xtask matrix`, the `matrix` nextest
+profile, `ci.yml`'s `connector_matrix_build` and `connector_matrix` jobs) covers 3780 cases, one
+per `{source connector, sink connector, byte format, processor runtime}` tuple over 15 source
+connectors and 14 sink connectors (`HttpPushSource` registers a source and no sink, so the two
+dimensions are not one list), 6 formats (the five transformers plus the absence of one, for the
+six connectors that carry `RecordBatch`es natively) and 3 processor runtimes (native pipeline,
+WASM component, native plugin), plus one maximal workflow declaring every node kind at once. One
+format applies to both the source and the sink of a case; the independent source-format x
+sink-format cross product (22680 cases) is deliberately not taken, because a mixed pair adds no
+connector or transformer coverage over the two paired cases that already cover each half.
+
+The cases are split into 270 `#[ignore]`d tests, one per `{source, processor, format}` slice,
+named `live::<source>::<processor>::<format>` and each running its source against all 14 sinks,
+plus `live::maximal::workflow`. The `live_slices!` macro generates them from three hand-written
+lists. nextest runs every test in its own process, so the slices run in parallel and a slice
+starts no container: `cargo xtask matrix` (`xtask/src/matrix.rs`) starts one apiece for Kafka,
+NATS, PostgreSQL, RustFS and ClickHouse with `docker run`, creates the run's S3 bucket, and runs
+`cargo nextest run --profile matrix --run-ignored all` with the endpoints in `SACI_MATRIX_*`
+variables, passing any further argument through (`-E 'test(/^live::kafka::/)'` runs one source).
+Without `--archive-file` it builds both processor fixtures first. `Resources::connect` reads the
+variables: an unset one skips every case needing that resource, and a set one that does not
+answer within 180 s fails the slice. Cases isolate themselves inside the shared containers by a
+topic, subject, table, object prefix or file path named from the process start time, the process
+id and a counter, and by OS-assigned ports. `Fixtures::resolve` finds both fixtures from the test
+binary's own target directory, which is what lets an archived binary find the copies the
+`matrix` profile's `archive.include` packed. CI's build job compiles the binary once into a
+nextest archive and lists the groups (the second segment of each test name); one
+`connector_matrix` job per group runs `cargo xtask matrix --archive-file ... -E
+'test(/^live::<group>::/)'`, so a new connector gets a job with no workflow edit. The `default`
+and `ci` profiles both exclude `live::`, and `matrix` selects only it, with `fail-fast = false`,
+a 10 minute termination and every slice's report printed on a pass as well.
+
+A rejected case asserts both the refusal and where it lands: `build` (`ServiceConfig::load` or
+`ServiceBuilder::build_all` returns an error containing a predicted fragment) or `run` (the
+service builds but the runner reports a non-fatal error and no row reaches the sink). There is
+deliberately no third site for a clean run that delivers nothing: that is what a silent bug looks
+like, so such a combination gets fixed rather than recorded. A build refusal touches no live
+resource, so that coverage holds with no Docker daemon at all.
+
+The same file holds two Docker-free tests that run under every profile.
+`dimensions_cover_the_registry` compares the real factory registry's `source_names`/`sink_names`
+against `CONNECTORS` through `Connector::source_type`/`Connector::sink_type`, and its registered
+transformer `formats` against `FORMATS`, as sorted name sets rather than counts.
+`every_slice_has_a_test` compares the `live_slices!` lists against `CONNECTORS`, `PROCESSORS` and
+`FORMATS`, so a dimension entry with no slice test fails.
 
 `saci-connector-turso::synced_roundtrip` follows the same shape for a remote endpoint rather than a
 container: it soft-skips when `SACI_TURSO_URL` or `SACI_TURSO_TOKEN` is unset, when the probe
@@ -477,8 +488,12 @@ crates run alongside each other instead of one binary finishing before the next 
    `BUILTIN_CONNECTOR_FEATURES` in every build, so a misspelled or Rust-type-named key fails
    there rather than silently rendering no detail.
 7. Add an entry to `CONNECTORS`, the capability table and the maximal workflow in
-   `crates/saci-service/tests/connector_matrix.rs`; `dimensions_cover_the_registry` fails until
-   this is done. A connector or transformer not in the matrix is not considered wired.
+   `crates/saci-service/tests/common/matrix.rs`, and to the `live_slices!` sources list in
+   `crates/saci-service/tests/connector_matrix.rs`; `dimensions_cover_the_registry` and
+   `every_slice_has_a_test` fail until this is done. A connector that needs a server adds a
+   `Resource`, its `SACI_MATRIX_*` variable and readiness wait in `matrix.rs`, and its
+   container to `services()` in `xtask/src/matrix.rs`. A connector or transformer not in the
+   matrix is not considered wired.
 8. Docker-backed tests: `tests/common/mod.rs` with `try_start() -> Option<Container>`, and the
    crate's `tests/` added to the `default` profile exclusion in `.config/nextest.toml`.
 9. A runnable config under `examples/configs/` and a page under

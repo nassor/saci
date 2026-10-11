@@ -16,6 +16,7 @@ mod ci;
 mod demo;
 mod examples;
 mod generated;
+mod matrix;
 mod pack;
 mod plugins;
 mod polyglot;
@@ -42,6 +43,7 @@ Commands
   processor-ipc-roundtrip   Host-to-processor Arrow IPC round-trip gate
   validate [--only=LIST]    Validate every runnable example config
   demo <name>               Build and run an example pipeline
+  matrix [nextest args]     Run the connector matrix against shared containers
 
 `cargo xtask <command> --help` prints that command's own usage.";
 
@@ -72,6 +74,7 @@ fn main() -> ExitCode {
         "processor-ipc-roundtrip" => ci::processor_ipc_roundtrip(rest),
         "validate" => validate::run(rest),
         "demo" => demo::run(rest),
+        "matrix" => matrix::run(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(())

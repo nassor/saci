@@ -1,26 +1,27 @@
-//! The connector/transformer/processor matrix, in one test.
+//! The connector/transformer/processor matrix, one test per slice.
 //!
 //! Every `{source connector, sink connector, byte format, processor runtime}`
 //! combination is built from KDL, assembled through the real factory registry,
 //! run through the real standalone or stream runner, and asserted against the
-//! capability table in [`matrix`]. The maximal workflow follows in the same
-//! test.
+//! capability table in [`matrix`].
 //!
-//! There is exactly one test function because nextest gives every test its own
-//! process: a second one would start a second Kafka broker, NATS server,
-//! PostgreSQL server, S3 endpoint and ClickHouse server. All five are started
-//! once here, behind a `OnceCell`, and shared by every case.
+//! The `live` module holds one test per `{source, processor, format}` slice,
+//! named `live::<source>::<processor>::<format>`, each running its source
+//! against every sink, plus `live::maximal::workflow`. nextest runs every test
+//! in its own process, so the slices run in parallel; none of them starts a
+//! container. They read the Kafka, NATS, PostgreSQL, S3 and ClickHouse
+//! endpoints from the `SACI_MATRIX_*` variables `cargo xtask matrix` sets
+//! after starting one container per resource for the whole run, and skip the
+//! cases that need a resource whose variable is unset.
 //!
 //! ```bash
-//! rustup target add wasm32-wasip2
-//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
-//! cargo build -p saci-plugin-smoketest
-//! cargo nextest run -p saci-service --all-features --test connector_matrix \
-//!     --run-ignored ignored-only
+//! cargo xtask matrix                                 # every slice
+//! cargo xtask matrix -E 'test(/^live::kafka::/)'     # one source's slices
 //! ```
 //!
-//! `#[ignore]`d: it is a whole-matrix sweep against five containers, not a
-//! per-edit check.
+//! Every live test is `#[ignore]`d and reached only through the `matrix`
+//! nextest profile the task selects; the other tests here are Docker-free and
+//! run under every profile.
 
 #![cfg(all(
     feature = "service",
@@ -56,71 +57,39 @@ use saci_core::error::SaciError;
 use saci_service::service::builder::ServiceBuilder;
 use saci_service::service::factories::register_builtin_factories;
 use saci_transformer::{ConfigMap, ConfigValue, unsupported};
-use tokio::sync::Semaphore;
 
 #[path = "common/matrix.rs"]
 mod matrix;
-#[path = "common/smoketest.rs"]
-mod smoketest;
 
 use matrix::{
-    CONNECTORS, Case, Connector, FORMATS, Fixtures, Format, Report, Resources, run_case,
-    run_maximal,
+    CONNECTORS, Case, Connector, FORMATS, Fixtures, Format, PROCESSORS, ProcessorKind, Report,
+    Resources, run_case, run_maximal,
 };
 
-/// How many cases build and run at once.
+/// Run one slice and fail on any case that missed its expectation.
 ///
-/// Each case owns its own temp directory, channel, topic, stream, table and
-/// object prefix, and every listener binds `127.0.0.1:0`, so the only shared
-/// state is the five containers.
-const CONCURRENCY: usize = 16;
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "whole connector matrix against five containers; run explicitly"]
-async fn full_matrix() {
+/// Every case of the slice runs at once: `PipelineRuntime` is `?Send`, so
+/// `join_all` polls them all on this one task, and a slice has at most one
+/// case per sink.
+async fn run_slice(source: Connector, processor: ProcessorKind, format: Format) {
     let started = Instant::now();
-    let fixtures = Fixtures::resolve(smoketest::smoketest_wasm_path()).expect("processor fixtures");
-    let resources = Resources::default();
-    let permits = Semaphore::new(CONCURRENCY);
+    let fixtures = Fixtures::resolve().expect("processor fixtures");
+    if processor == ProcessorKind::Wasm {
+        fixtures
+            .compile_wasm()
+            .expect("smoketest component compiles");
+    }
+    let resources = Resources::connect().await;
+    println!("resources: {}", resources.describe());
 
-    // Every container is started before any case runs: a readiness poll that
-    // shares the poll loop with a thousand case futures can miss its budget
-    // for want of being polled.
-    let up = resources.warm().await;
-    println!("resources: {}", Resources::describe(&up));
-
-    // `PipelineRuntime` is `?Send`, so a case future cannot be spawned onto the
-    // runtime: `join_all` polls every case on this one task and the semaphore
-    // bounds how many are past their resource gate. The `tcp`-sourced cases run
-    // as a second phase because their stream runner is stopped by cancellation
-    // on a wall-clock settle window, which only holds when the task is not also
-    // driving the other thousand cases.
-    let (batch_cases, stream_cases) = Case::phases();
-    let batch_reports = futures::future::join_all(
-        batch_cases
-            .iter()
-            .copied()
-            .map(|case| run_case(case, &resources, &fixtures, &permits)),
+    let reports = futures::future::join_all(
+        Case::slice(source, processor, format)
+            .into_iter()
+            .map(|case| run_case(case, &resources, &fixtures)),
     )
     .await;
-    let stream_reports = futures::future::join_all(
-        stream_cases
-            .iter()
-            .copied()
-            .map(|case| run_case(case, &resources, &fixtures, &permits)),
-    )
-    .await;
-
-    let maximal = run_maximal(&resources, &fixtures).await;
-
-    let mut reports = batch_reports;
-    reports.extend(stream_reports);
     let report = Report::new(reports, started.elapsed());
     report.print();
-    match &maximal {
-        Ok(report) => report.print(),
-        Err(e) => println!("\n=== maximal workflow ===\nFAILED: {e}"),
-    }
 
     let failures = report.failures();
     let named = failures
@@ -134,7 +103,142 @@ async fn full_matrix() {
         failures.len(),
         report.cases.len()
     );
-    maximal.expect("the maximal workflow must build and deliver rows");
+}
+
+/// One module per source, one per processor inside it, one test per format
+/// inside that. Each list also becomes a constant, which
+/// [`every_slice_has_a_test`] compares against the matrix's own dimensions.
+macro_rules! live_slices {
+    (
+        sources: [$($source:ident => $connector:ident),* $(,)?],
+        processors: $processors:tt,
+        formats: $formats:tt $(,)?
+    ) => {
+        pub const SOURCES: &[Connector] = &[$(Connector::$connector),*];
+        pub const PROCESSORS: &[ProcessorKind] = live_slices!(@list ProcessorKind $processors);
+        pub const FORMATS: &[Format] = live_slices!(@list Format $formats);
+        $(
+            pub mod $source {
+                use super::*;
+                live_slices!(@processors $connector $processors $formats);
+            }
+        )*
+    };
+    (@list $kind:ident [$($name:ident => $variant:ident),* $(,)?]) => {
+        &[$($kind::$variant),*]
+    };
+    (@processors $connector:ident [$($processor:ident => $kind:ident),* $(,)?] $formats:tt) => {
+        $(
+            pub mod $processor {
+                use super::*;
+                live_slices!(@formats $connector $kind $formats);
+            }
+        )*
+    };
+    (@formats $connector:ident $kind:ident [$($format:ident => $variant:ident),* $(,)?]) => {
+        $(
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "needs the containers `cargo xtask matrix` starts"]
+            async fn $format() {
+                run_slice(Connector::$connector, ProcessorKind::$kind, Format::$variant).await;
+            }
+        )*
+    };
+}
+
+/// The Docker-backed tests, reached through `cargo xtask matrix`.
+mod live {
+    use super::*;
+
+    live_slices! {
+        sources: [
+            channel => Channel,
+            file => File,
+            http => Http,
+            http_push => HttpPush,
+            tcp => Tcp,
+            udp => Udp,
+            saci => Saci,
+            kafka => Kafka,
+            nats => Nats,
+            postgresql => Postgresql,
+            clickhouse => Clickhouse,
+            s3 => S3,
+            turso => Turso,
+            redb => Redb,
+            opentelemetry => OpenTelemetry,
+        ],
+        processors: [native => Native, wasm => Wasm, plugin => Plugin],
+        formats: [
+            none => None,
+            arrow_ipc => ArrowIpc,
+            avro => Avro,
+            csv => Csv,
+            ndjson => Ndjson,
+            parquet => Parquet,
+        ],
+    }
+
+    /// The maximal workflow: every available source, every processor runtime
+    /// and every available sink in one stream-mode workflow.
+    pub mod maximal {
+        use super::*;
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "needs the containers `cargo xtask matrix` starts"]
+        async fn workflow() {
+            let fixtures = Fixtures::resolve().expect("processor fixtures");
+            fixtures
+                .compile_wasm()
+                .expect("smoketest component compiles");
+            let resources = Resources::connect().await;
+            println!("resources: {}", resources.describe());
+            let report = run_maximal(&resources, &fixtures)
+                .await
+                .expect("the maximal workflow must build and deliver rows");
+            report.print();
+        }
+    }
+}
+
+/// Every `{source, processor, format}` slice of the matrix has a live test.
+///
+/// The live tests are generated from hand-written lists, because a test name
+/// has to be an identifier. A connector, runtime or format added to the
+/// matrix's dimensions and not to those lists would compile, and no test
+/// would ever run its slices.
+#[test]
+fn every_slice_has_a_test() {
+    let mut sources = live::SOURCES.to_vec();
+    sources.sort_unstable();
+    let mut expected = CONNECTORS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        sources, expected,
+        "connector_matrix.rs's live_slices! sources must list every entry of CONNECTORS"
+    );
+
+    let labels = |kinds: &[ProcessorKind]| {
+        let mut labels: Vec<&str> = kinds.iter().map(|kind| kind.label()).collect();
+        labels.sort_unstable();
+        labels
+    };
+    assert_eq!(
+        labels(live::PROCESSORS),
+        labels(&PROCESSORS),
+        "connector_matrix.rs's live_slices! processors must list every entry of PROCESSORS"
+    );
+
+    let labels = |formats: &[Format]| {
+        let mut labels: Vec<&str> = formats.iter().map(|format| format.label()).collect();
+        labels.sort_unstable();
+        labels
+    };
+    assert_eq!(
+        labels(live::FORMATS),
+        labels(&FORMATS),
+        "connector_matrix.rs's live_slices! formats must list every entry of FORMATS"
+    );
 }
 
 /// The registered factories `register_builtin_factories` wires up must match
