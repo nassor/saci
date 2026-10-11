@@ -10,23 +10,25 @@
 //! # Dimensions
 //!
 //! - **Connectors**: `channel`, `file`, `http`, `http-push`, `tcp`, `udp`,
-//!   `saci`, `kafka`, `nats`, `postgresql`, `redb`, `s3`, `turso`. All of them
-//!   drive both ends except `http-push`, which registers a source and no sink,
-//!   so the source dimension is one longer than the sink dimension.
+//!   `saci`, `kafka`, `nats`, `postgresql`, `clickhouse`, `redb`, `s3`,
+//!   `turso`, `opentelemetry`. All of them drive both ends except `http-push`,
+//!   which registers a source and no sink, so the source dimension is one
+//!   longer than the sink dimension.
 //! - **Byte formats**: `arrow-ipc`, `avro`, `csv`, `ndjson`, `parquet`, plus
-//!   [`Format::None`] for the three connectors that carry `RecordBatch`es
-//!   natively (`channel`, `postgresql`, `turso`).
+//!   [`Format::None`] for the six connectors that carry `RecordBatch`es
+//!   natively (`channel`, `postgresql`, `turso`, `saci`, `clickhouse`,
+//!   `opentelemetry`).
 //! - **Processor runtimes**: a native [`Pipeline`] registered through
 //!   [`ServiceBuilder::with_runtime`], the `saci-processor-smoketest`
 //!   WebAssembly component loaded from `module`, and the
 //!   `saci-plugin-smoketest` cdylib loaded from `library`.
 //!
 //! One format per case, applied to every byte-carrying end. The independent
-//! source-format x sink-format cross product is not taken: it is 16848 cases
-//! against 2808, and a mixed pair adds no connector or transformer coverage
+//! source-format x sink-format cross product is not taken: it is 22680 cases
+//! against 3780, and a mixed pair adds no connector or transformer coverage
 //! over the two paired cases that already cover both halves.
 //!
-//! The transformer dimension is not reduced either: every one of the 2808
+//! The transformer dimension is not reduced either: every one of the 3780
 //! cases runs, so nothing is traded away to fit a time budget.
 //!
 //! # Row schema per processor
@@ -61,7 +63,7 @@
 //!
 //! | Connector | Surface | Evidence |
 //! |---|---|---|
-//! | `channel`, `postgresql` | rows | neither crate mentions a transformer method |
+//! | `channel`, `postgresql`, `turso`, `saci`, `clickhouse`, `opentelemetry` | rows | none of their crates resolves a transformer |
 //! | `file` | stream | `saci-connector-file/src/{source,sink}.rs` call `open_reader`/`open_writer` |
 //! | `redb` | stream | `saci-connector-redb/src/{source,sink}.rs` spool one entry |
 //! | `http` | stream | `saci-connector-http/src/{source,sink}.rs` spool a whole document |
@@ -183,9 +185,9 @@
 //! the frame, datagram or document count and gives the last item a settle
 //! window. That window is wall clock, and every case future is polled by one
 //! task (`PipelineRuntime` is `?Send`, so no case can be spawned), so the
-//! `tcp`-, `udp`-, `saci`- and `http-push`-sourced cases run as a second
-//! phase, after the other 1944 have finished competing for the poll loop. See
-//! [`Case::phases`].
+//! `tcp`-, `udp`-, `saci`-, `http-push`- and `opentelemetry`-sourced cases run
+//! as a second phase, after the other 2520 have finished competing for the poll
+//! loop. See [`Case::phases`].
 //!
 //! # Isolation
 //!
@@ -340,10 +342,11 @@ pub enum Connector {
     S3,
     Turso,
     Redb,
+    OpenTelemetry,
 }
 
 /// Every connector this matrix covers, in report order.
-pub const CONNECTORS: [Connector; 14] = [
+pub const CONNECTORS: [Connector; 15] = [
     Connector::Channel,
     Connector::File,
     Connector::Http,
@@ -358,6 +361,7 @@ pub const CONNECTORS: [Connector; 14] = [
     Connector::S3,
     Connector::Turso,
     Connector::Redb,
+    Connector::OpenTelemetry,
 ];
 /// Which transformer surface a connector drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,14 +392,18 @@ impl Connector {
             Self::S3 => "s3",
             Self::Turso => "turso",
             Self::Redb => "redb",
+            Self::OpenTelemetry => "opentelemetry",
         }
     }
 
     fn surface(self) -> Surface {
         match self {
-            Self::Channel | Self::Postgresql | Self::Turso | Self::Saci | Self::Clickhouse => {
-                Surface::Rows
-            }
+            Self::Channel
+            | Self::Postgresql
+            | Self::Turso
+            | Self::Saci
+            | Self::Clickhouse
+            | Self::OpenTelemetry => Surface::Rows,
             Self::File | Self::Http | Self::HttpPush | Self::S3 | Self::Redb => Surface::Stream,
             Self::Tcp | Self::Udp | Self::Kafka | Self::Nats => Surface::Message,
         }
@@ -412,7 +420,8 @@ impl Connector {
             | Self::Udp
             | Self::Saci
             | Self::Turso
-            | Self::Redb => None,
+            | Self::Redb
+            | Self::OpenTelemetry => None,
             Self::Kafka => Some(Resource::Kafka),
             Self::Nats => Some(Resource::Nats),
             Self::Postgresql => Some(Resource::Postgres),
@@ -447,6 +456,7 @@ impl Connector {
             Self::S3 => "S3Source",
             Self::Turso => "TursoSource",
             Self::Redb => "RedbSource",
+            Self::OpenTelemetry => "OpenTelemetryMetricsSource",
         }
     }
 
@@ -471,6 +481,7 @@ impl Connector {
             Self::S3 => Some("S3Sink"),
             Self::Turso => Some("TursoSink"),
             Self::Redb => Some("RedbSink"),
+            Self::OpenTelemetry => Some("OpenTelemetryMetricsSink"),
         }
     }
 
@@ -1196,7 +1207,11 @@ impl Case {
     fn stream_mode(self) -> bool {
         matches!(
             self.source,
-            Connector::Tcp | Connector::Udp | Connector::Saci | Connector::HttpPush
+            Connector::Tcp
+                | Connector::Udp
+                | Connector::Saci
+                | Connector::HttpPush
+                | Connector::OpenTelemetry
         )
     }
 }
@@ -1434,7 +1449,7 @@ pub struct ClickhouseResource {
     pub url: String,
 }
 
-/// The four containers, each started at most once.
+/// The five containers, each started at most once.
 #[derive(Default)]
 pub struct Resources {
     kafka: OnceCell<Option<KafkaResource>>,
@@ -1468,7 +1483,7 @@ impl Resources {
             .as_ref()
     }
 
-    /// Start all four containers before any case runs, and report which came
+    /// Start all five containers before any case runs, and report which came
     /// up.
     ///
     /// Lazily starting them from inside a case would put every readiness poll
@@ -1762,9 +1777,19 @@ async fn try_start_s3() -> Option<S3Resource> {
 
 /// Start ClickHouse, or report why not.
 async fn try_start_clickhouse() -> Option<ClickhouseResource> {
+    // The image pins the `default` user to `127.0.0.1`/`::1` unless a
+    // user/password or access management is configured, and a published port
+    // reaches the container from the gateway, so the connection below would be
+    // refused with `AUTHENTICATION_FAILED`. Setting access management opens
+    // `<ip>::/0</ip>` and needs no password.
+    //
+    // No log wait either: ClickHouse writes `Ready for connections` to a file
+    // inside the container, not to its stdout or stderr, so a `WaitFor` here
+    // would time out with the server already up. The `SELECT 1` loop below is
+    // the readiness gate instead.
     let image = GenericImage::new("clickhouse/clickhouse-server", "24.8-alpine")
         .with_exposed_port(8123_u16.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Ready for connections"));
+        .with_env_var("CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", "1");
 
     let container = match image.start().await {
         Ok(container) => container,
@@ -1783,7 +1808,9 @@ async fn try_start_clickhouse() -> Option<ClickhouseResource> {
     let url = format!("http://127.0.0.1:{port}");
 
     let client = clickhouse::Client::default().with_url(&url);
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // Wider than the others': ClickHouse is the largest of the five images and
+    // the slowest to answer a query on a cold, loaded runner.
+    let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         if client.query("SELECT 1").execute().await.is_ok() {
             return Some(ClickhouseResource {
@@ -2470,6 +2497,11 @@ struct SourceSide {
     /// is serving. Kept apart from `tcp` because the driver is an HTTP client
     /// rather than a socket, and one document is one request.
     http_push: Option<(String, Vec<Vec<u8>>)>,
+    /// `(url, body bytes)` an `OpenTelemetryMetricsSource` is fed once the
+    /// runner is serving. Kept apart from `http_push` because the body is an
+    /// OTLP request rather than a document in one of the byte formats, and
+    /// the listener answers it `200` rather than `202`.
+    otlp: Option<(String, Vec<Vec<u8>>)>,
     /// How to build this source again outside the service, so a run-time
     /// refusal can be asserted on its own message. `StandaloneStats` counts
     /// non-fatal errors without keeping their text, so the runner alone can
@@ -2695,6 +2727,11 @@ enum Readback {
         url: String,
         table: String,
     },
+    /// An `OpenTelemetryMetricsSink` posts its batches at a stand-in
+    /// collector, which answers `200` and keeps every body.
+    Otlp {
+        probe: HttpProbe,
+    },
 }
 
 /// The endpoint a config names: the live container's, or an unreachable
@@ -2853,6 +2890,7 @@ async fn prepare_source(
         tcp: None,
         udp: None,
         http_push: None,
+        otlp: None,
         probe: None,
         _probe: None,
         _dir: None,
@@ -2975,6 +3013,37 @@ async fn prepare_source(
                  \x20       config {{\n            bind \"{bind}\"\n            path \"/matrix\"\n            buffer 8{schema_from_kdl}\n{fields}\n        }}\n    }}"
             );
             side.http_push = Some((format!("http://{bind}/matrix"), documents));
+        }
+        Connector::OpenTelemetry => {
+            let bind = format!("127.0.0.1:{}", reserved_port()?);
+            // An OTLP body is not one of the byte formats, so the feed is built
+            // by the connector's own encoder from the rows this source is meant
+            // to deliver: one request per case, holding every row of `batch`.
+            // `seedable` gates it like every other seed here.
+            let bodies = if seedable {
+                let request = saci_connector_opentelemetry::schema::record_batch_to_export_request(
+                    &batch, None, None,
+                )
+                .map_err(|e| format!("opentelemetry feed: {e}"))?;
+                vec![
+                    saci_connector_opentelemetry::schema::encode(
+                        saci_connector_opentelemetry::Encoding::Protobuf,
+                        &request,
+                    )
+                    .map_err(|e| format!("opentelemetry feed: {e}"))?,
+                ]
+            } else {
+                Vec::new()
+            };
+            // The declared schema is what the source projects onto, so the
+            // link check sees the row's own schema and the body above is read
+            // through it.
+            side.kdl = format!(
+                "    source \"in\" type=\"OpenTelemetryMetricsSource\" component=\"{component}\" \
+                 {{\n            config {{\n            bind \"{bind}\"\n            \
+                 path \"/v1/metrics\"\n            buffer 8\n{fields}\n        }}\n    }}"
+            );
+            side.otlp = Some((format!("http://{bind}/v1/metrics"), bodies));
         }
         Connector::Tcp => {
             let bind = format!("127.0.0.1:{}", reserved_port()?);
@@ -3274,6 +3343,17 @@ async fn prepare_sink(
                  filter it out of the sink dimension"
                     .to_string(),
             );
+        }
+        Connector::OpenTelemetry => {
+            // The stand-in collector answers an empty `200`, which is OTLP's
+            // success response, and keeps every body it was posted.
+            let probe = HttpProbe::spawn(Vec::new())?;
+            let kdl = format!(
+                "    sink \"out\" type=\"OpenTelemetryMetricsSink\" component=\"{component}\" {{\n\
+                 \x20       config {{\n            url \"{}\"\n            encoding \"protobuf\"\n{fields}\n        }}\n    }}",
+                probe.url
+            );
+            (kdl, Readback::Otlp { probe })
         }
         Connector::Tcp => {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3678,6 +3758,37 @@ async fn read_back(
             }
             return Ok(rendered);
         }
+        Readback::Otlp { probe } => {
+            // The sink posts one body per batch, and a body identical to the
+            // one before it is one delivery rather than two: the engine's
+            // contract is at-least-once.
+            let mut rendered: Vec<String> = Vec::new();
+            let mut previous: Option<Vec<String>> = None;
+            for body in probe.finish() {
+                if body.is_empty() {
+                    continue;
+                }
+                let request = saci_connector_opentelemetry::schema::decode(
+                    saci_connector_opentelemetry::Encoding::Protobuf,
+                    "opentelemetry readback",
+                    &body,
+                )
+                .map_err(|e| format!("opentelemetry readback: {e}"))?;
+                let (batch, _) =
+                    saci_connector_opentelemetry::schema::export_request_to_record_batches(
+                        &request,
+                        Some(&row.schema()),
+                    )
+                    .map_err(|e| format!("opentelemetry readback: {e}"))?;
+                let group = row.render(&batch, widened_unsigned)?;
+                if previous.as_ref() == Some(&group) {
+                    continue;
+                }
+                rendered.extend(group.iter().cloned());
+                previous = Some(group);
+            }
+            return Ok(rendered);
+        }
         Readback::Tcp { listener, format } => {
             // The sink dialled while the run was live and its connection was
             // closed when the built service dropped, so the frames are already
@@ -4063,7 +4174,7 @@ const CASE_BUDGET: Duration = Duration::from_secs(180);
 /// Build and run one case, then assert its expectation.
 ///
 /// The returned report is the only channel: a failure is recorded rather than
-/// panicked, so one broken combination does not hide the other 2807.
+/// panicked, so one broken combination does not hide the other 3779.
 pub async fn run_case(
     case: Case,
     resources: &Resources,
@@ -4209,17 +4320,24 @@ async fn execute(
             source.tcp.clone(),
             source.udp.clone(),
             source.http_push.clone(),
+            source.otlp.clone(),
         ) {
-            (Some((bind, frames)), _, _) => Feed::Tcp { bind, frames },
-            (None, Some((bind, datagrams)), _) => Feed::Udp { bind, datagrams },
-            (None, None, Some((url, documents))) => Feed::HttpPush {
+            (Some((bind, frames)), _, _, _) => Feed::Tcp { bind, frames },
+            (None, Some((bind, datagrams)), _, _) => Feed::Udp { bind, datagrams },
+            (None, None, Some((url, documents)), _) => Feed::HttpPush {
                 url,
                 documents,
                 accepted: matches!(expect, Expect::Supported),
             },
-            (None, None, None) => {
+            (None, None, None, Some((url, bodies))) => Feed::Otlp {
+                url,
+                bodies,
+                accepted: matches!(expect, Expect::Supported),
+            },
+            (None, None, None, None) => {
                 return Err(
-                    "a stream-mode case must be tcp-, udp-, saci- or http-push-sourced".to_string(),
+                    "a stream-mode case must be tcp-, udp-, saci-, http-push- or                      opentelemetry-sourced"
+                        .to_string(),
                 );
             }
         };
@@ -4478,6 +4596,13 @@ enum Feed {
         /// the case is here to observe.
         accepted: bool,
     },
+    Otlp {
+        url: String,
+        bodies: Vec<Vec<u8>>,
+        /// Does every POST have to be answered `200`, OTLP's success response?
+        /// A case whose source refuses the body answers `400` instead.
+        accepted: bool,
+    },
 }
 
 impl Feed {
@@ -4488,6 +4613,7 @@ impl Feed {
             Self::Tcp { frames, .. } => frames.len(),
             Self::Udp { datagrams, .. } => datagrams.len(),
             Self::HttpPush { documents, .. } => documents.len(),
+            Self::Otlp { bodies, .. } => bodies.len(),
         }
     }
 
@@ -4508,7 +4634,24 @@ impl Feed {
                 url,
                 documents,
                 accepted,
-            } => drive_http_push_stream(url, documents, accepted, live, targets, cancel).await,
+            } => {
+                drive_push_stream(
+                    url,
+                    documents,
+                    accepted.then_some(202),
+                    live,
+                    targets,
+                    cancel,
+                )
+                .await
+            }
+            Self::Otlp {
+                url,
+                bodies,
+                accepted,
+            } => {
+                drive_push_stream(url, bodies, accepted.then_some(200), live, targets, cancel).await
+            }
         }
     }
 }
@@ -4553,8 +4696,8 @@ async fn drive_udp_stream(
     Ok(())
 }
 
-/// Post every document at an `http-push` source, wait until the runner has
-/// reported `targets`, then cancel.
+/// Post every body at a listening source, wait until the runner has reported
+/// `targets`, then cancel.
 ///
 /// The listener is bound by the factory while the service is built, so a
 /// request sent before the accept loop starts waits in the backlog: that is
@@ -4565,10 +4708,10 @@ async fn drive_udp_stream(
 /// The snapshot throttle is the same as [`drive_tcp_stream`]'s, and so is the
 /// answer to it: `targets` is one item short and the last item gets a settle
 /// window rather than a wait.
-async fn drive_http_push_stream(
+async fn drive_push_stream(
     url: String,
-    documents: Vec<Vec<u8>>,
-    accepted: bool,
+    bodies: Vec<Vec<u8>>,
+    expected_status: Option<u16>,
     live: Arc<RwLock<StandaloneStats>>,
     targets: StreamTargets,
     cancel: CancellationToken,
@@ -4577,12 +4720,10 @@ async fn drive_http_push_stream(
     // installed process-wide; idempotent.
     saci_service::service::install_ring_provider();
     let client = reqwest::Client::new();
-    for document in documents {
-        let sent = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.post(&url).body(document).send(),
-        )
-        .await;
+    for body in bodies {
+        let sent =
+            tokio::time::timeout(Duration::from_secs(10), client.post(&url).body(body).send())
+                .await;
         let status = match sent {
             Ok(Ok(response)) => response.status(),
             Ok(Err(e)) => {
@@ -4597,9 +4738,11 @@ async fn drive_http_push_stream(
         // A supported case must be queued whole; a refused one is answered
         // by the source's own refusal, which the case asserts through its
         // [`SourceProbe`] instead.
-        if accepted && status.as_u16() != 202 {
+        if let Some(expected) = expected_status
+            && status.as_u16() != expected
+        {
             cancel.cancel();
-            return Err(format!("{url} answered {status}, expected 202 Accepted"));
+            return Err(format!("{url} answered {status}, expected {expected}"));
         }
     }
 
@@ -4719,6 +4862,7 @@ pub async fn run_maximal(
                 Connector::Clickhouse,
                 Connector::Turso,
                 Connector::Saci,
+                Connector::OpenTelemetry,
             ],
             &[
                 Connector::Channel,
@@ -4728,6 +4872,7 @@ pub async fn run_maximal(
                 Connector::Clickhouse,
                 Connector::Turso,
                 Connector::Saci,
+                Connector::OpenTelemetry,
             ],
         ),
         (
@@ -4738,12 +4883,14 @@ pub async fn run_maximal(
                 Connector::Kafka,
                 Connector::Nats,
                 Connector::S3,
+                Connector::OpenTelemetry,
             ],
             &[
                 Connector::Http,
                 Connector::Kafka,
                 Connector::Nats,
                 Connector::S3,
+                Connector::OpenTelemetry,
             ],
         ),
         (
@@ -4770,6 +4917,7 @@ pub async fn run_maximal(
     let mut tcp_feeds: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
     let mut udp_feeds: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
     let mut http_push_feeds: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
+    let mut otlp_feeds: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
     let mut paired: Vec<String> = Vec::new();
     let mut keepalive: Vec<SourceSide> = Vec::new();
     let mut expected_rows = 0usize;
@@ -4845,6 +4993,9 @@ pub async fn run_maximal(
             }
             if let Some((url, documents)) = side.http_push.clone() {
                 http_push_feeds.push((url, documents));
+            }
+            if let Some((url, bodies)) = side.otlp.clone() {
+                otlp_feeds.push((url, bodies));
             }
             if let Some(workflow) = side.paired.clone() {
                 paired.push(workflow);
@@ -5020,6 +5171,25 @@ observability log_level="error"
                 if response.status().as_u16() != 202 {
                     return Err(format!(
                         "{url} answered {}, expected 202 Accepted",
+                        response.status()
+                    ));
+                }
+            }
+        }
+        // An OTLP request is answered `200`, the success response of the
+        // specification, rather than the `202` a document listener uses.
+        for (url, bodies) in &otlp_feeds {
+            for body in bodies {
+                let response = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    push_client.post(url).body(body.clone()).send(),
+                )
+                .await
+                .map_err(|_| format!("posting a body to {url} timed out"))?
+                .map_err(|e| format!("post a body to {url}: {e}"))?;
+                if response.status().as_u16() != 200 {
+                    return Err(format!(
+                        "{url} answered {}, expected 200",
                         response.status()
                     ));
                 }

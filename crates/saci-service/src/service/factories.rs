@@ -7,11 +7,14 @@
 //! crate decides whether it is compiled in and registered:
 //!
 //! - `connector-channel`: [`ChannelSourceFactory`], [`ChannelSinkFactory`]
+//! - `connector-clickhouse`: [`ClickhouseSourceFactory`], [`ClickhouseSinkFactory`]
 //! - `connector-file`: [`FileSourceFactory`], [`FileSinkFactory`]
 //! - `connector-http`: [`HttpSourceFactory`], [`HttpSinkFactory`],
 //!   [`HttpPushSourceFactory`]
 //! - `connector-kafka`: [`KafkaSourceFactory`], [`KafkaSinkFactory`]
 //! - `connector-nats`: [`NatsSourceFactory`], [`NatsSinkFactory`]
+//! - `connector-opentelemetry`: [`OpenTelemetryMetricsSourceFactory`],
+//!   [`OpenTelemetryMetricsSinkFactory`]
 //! - `connector-postgresql`: [`PostgresSourceFactory`], [`PostgresSinkFactory`]
 //! - `connector-redb`: [`RedbSourceFactory`], [`RedbSinkFactory`]
 //! - `connector-s3`: [`S3SourceFactory`], [`S3SinkFactory`]
@@ -51,6 +54,10 @@ pub use saci_connector_http::{HttpPushSourceFactory, HttpSinkFactory, HttpSource
 pub use saci_connector_kafka::{KafkaSinkFactory, KafkaSourceFactory};
 #[cfg(feature = "connector-nats")]
 pub use saci_connector_nats::{NatsSinkFactory, NatsSourceFactory};
+#[cfg(feature = "connector-opentelemetry")]
+pub use saci_connector_opentelemetry::{
+    OpenTelemetryMetricsSinkFactory, OpenTelemetryMetricsSourceFactory,
+};
 #[cfg(feature = "connector-postgresql")]
 pub use saci_connector_postgresql::{PostgresSinkFactory, PostgresSourceFactory};
 #[cfg(feature = "connector-redb")]
@@ -109,6 +116,8 @@ pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
     ("KafkaSink", "connector-kafka"),
     ("NatsSource", "connector-nats"),
     ("NatsSink", "connector-nats"),
+    ("OpenTelemetryMetricsSource", "connector-opentelemetry"),
+    ("OpenTelemetryMetricsSink", "connector-opentelemetry"),
     ("PostgresSource", "connector-postgresql"),
     ("PostgresSink", "connector-postgresql"),
     ("RedbSource", "connector-redb"),
@@ -389,6 +398,11 @@ pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
     let builder = builder
         .register_source(NatsSourceFactory)
         .register_sink(NatsSinkFactory);
+
+    #[cfg(feature = "connector-opentelemetry")]
+    let builder = builder
+        .register_source(OpenTelemetryMetricsSourceFactory)
+        .register_sink(OpenTelemetryMetricsSinkFactory);
 
     #[cfg(feature = "connector-postgresql")]
     let builder = builder

@@ -2,7 +2,7 @@
 name = "saci-service-ui"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95.0"
+rust-version = "1.99.0"
 publish = false
 description = "The saci-service live dashboard: a client-side-rendered Leptos app served from /ui."
 license = "AGPL-3.0-only"

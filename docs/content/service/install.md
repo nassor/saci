@@ -84,12 +84,12 @@ cargo install --path crates/saci-service
 ```
 
 No feature flags. The default build is what a running service needs on a machine with nothing
-else installed: the WebAssembly component runtime, five connectors, five formats and windowed
+else installed: the WebAssembly component runtime, seven connectors, five formats and windowed
 aggregation.
 
 | Capability | In the default build |
 |---|---|
-| Sources and sinks | File, redb, HTTP, TCP and in-process channels |
+| Sources and sinks | File, redb, HTTP, TCP, UDP, SACI and in-process channels |
 | Formats | csv, ndjson, parquet, avro and arrow-ipc |
 | Processors | the WebAssembly component runtime, windowing included |
 | PostgreSQL | no: opt in with `--features connector-postgresql` |
@@ -97,6 +97,8 @@ aggregation.
 | S3 | no: opt in with `--features connector-s3` |
 | Kafka | no: opt in with `--features connector-kafka` |
 | Turso | no: opt in with `--features connector-turso` |
+| ClickHouse | no: opt in with `--features connector-clickhouse` |
+| OpenTelemetry | no: opt in with `--features connector-opentelemetry` |
 | Native plugins | no: opt in with `--features plugin` |
 | Cluster mode | no: opt in with `--features service-cluster` |
 
@@ -138,9 +140,10 @@ A `command not found` here means the cargo bin directory is not on your PATH.
 ## What stays opt-in
 
 A connector ships by default only when nothing has to be installed or already running for it to
-work. PostgreSQL, NATS, S3, Kafka and Turso each need their own database, broker or object store
-running before the connector does anything, so each sits outside the default build alongside
-native plugins and cluster mode. Add one by reinstalling with its flag, from the same checkout:
+work. PostgreSQL, NATS, S3, Kafka, Turso, ClickHouse and OpenTelemetry each need their own database,
+broker, object store or OTLP endpoint running before the connector does anything, so each sits
+outside the default build alongside native plugins and cluster mode. Add one by reinstalling with
+its flag, from the same checkout:
 
 - PostgreSQL: `--features connector-postgresql`.
 - NATS: `--features connector-nats`.
@@ -150,6 +153,10 @@ native plugins and cluster mode. Add one by reinstalling with its flag, from the
   [Kafka](@/service/connectors/kafka.md).
 - Turso needs no extra toolchain, but its synced mode pulls hyper and rustls and replicates from a
   Turso endpoint, so it stays opt-in. Install with `--features connector-turso`.
+- ClickHouse needs a running ClickHouse server. Install with `--features connector-clickhouse` when
+  you need [ClickHouse](@/service/connectors/clickhouse.md).
+- OpenTelemetry needs a running OTLP endpoint. Install with `--features connector-opentelemetry`
+  when you need [OpenTelemetry](@/service/connectors/opentelemetry.md).
 - Native plugins replace the sandbox with a shared library, so opting in is an
   explicit choice. Install with `--features plugin`, then follow
   [A Rust plugin](@/service/plugins/rust.md).
@@ -157,7 +164,7 @@ native plugins and cluster mode. Add one by reinstalling with its flag, from the
   deliberate deployment choice. Install with `--features service-cluster`, then
   follow [Running a cluster](@/service/operate/cluster.md).
 
-`--features all` turns on every capability at once: all five connectors above, native plugins and
+`--features all` turns on every capability at once: all seven connectors above, native plugins and
 cluster mode. It excludes only `conformance`, the Arrow IPC conformance corpus generator's own
 switch, not a capability a running service needs.
 

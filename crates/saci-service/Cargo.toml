@@ -81,6 +81,7 @@ all = [
     "connector-http",
     "connector-kafka",
     "connector-nats",
+    "connector-opentelemetry",
     "connector-postgresql",
     "connector-redb",
     "connector-s3",
@@ -183,6 +184,15 @@ connector-http = [
 # `transformer` explicitly.
 connector-kafka = ["service", "dep:saci-connector-kafka", "transformer-ndjson"]
 connector-nats = ["service", "dep:saci-connector-nats", "transformer-ndjson"]
+# OTLP/HTTP is the wire format itself: an OpenTelemetry node names no
+# `transformer`, so this feature implies none. The crate's `tracing` feature is
+# on here so the data points an Arrow view cannot represent, and every request
+# the listener drops, reach an operator.
+connector-opentelemetry = [
+    "service",
+    "dep:saci-connector-opentelemetry",
+    "saci-connector-opentelemetry/tracing",
+]
 connector-postgresql = [
     "service",
     "dep:saci-connector-postgresql",
@@ -262,6 +272,7 @@ saci-connector-file = { workspace = true, optional = true }
 saci-connector-http = { workspace = true, optional = true }
 saci-connector-kafka = { workspace = true, optional = true }
 saci-connector-nats = { workspace = true, optional = true }
+saci-connector-opentelemetry = { workspace = true, optional = true }
 saci-connector-postgresql = { workspace = true, optional = true }
 saci-connector-turso = { workspace = true, optional = true }
 saci-connector-s3 = { workspace = true, optional = true }

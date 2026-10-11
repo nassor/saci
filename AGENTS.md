@@ -5,7 +5,7 @@ Guidance for coding agents working in this repository.
 ## Project
 
 SACI is a distributed batch processing engine for Rust built on Apache Arrow. Pipelines compile to
-WebAssembly components; a host binary loads them at runtime. Edition 2024, MSRV 1.95.0.
+WebAssembly components; a host binary loads them at runtime. Edition 2024, MSRV 1.99.0.
 
 The repository root is a **virtual manifest**: there is no root `src/`. Every command that names a
 target needs `-p <crate>`.
@@ -156,8 +156,8 @@ one resolve is cheaper than a per-package one: `-p` resolves features for one cr
 `--workspace` resolve takes the union every member asks for and reuses most of the
 `--all-features` artifacts. The timings compare the resolve strategies, measured as compile time
 on top of identical cold `--all-features` bases: `--workspace --lib` 24.7s, `--workspace` over
-all targets 35.0s, `-p saci-service --lib` 56.2s. Current scale at those three rungs is 1691,
-1906 and 553 tests. Every count here is what nextest runs under the `default` profile, which
+all targets 35.0s, `-p saci-service --lib` 56.2s. Current scale at those three rungs is 2014,
+2347 and 557 tests. Every count here is what nextest runs under the `default` profile, which
 `cargo nextest list` reports too; the profile's excluded tests are in neither.
 
 Docker-backed tests soft-skip rather than fail when no daemon is reachable: each crate's
@@ -197,8 +197,8 @@ feature does the work. The `heavy-docker` test group caps `max-threads = 1` over
 `distributed_integration_chaos` and `connector_matrix`, so those five take the machine one test at
 a time. Unlike a connector test, which needs only its own container, each Raft chaos binary
 contends for the Docker daemon, for host ports, and for enough CPU to run 3 to 5 raft nodes while
-asserting on election and log-convergence deadlines; `connector_matrix` holds four containers
-(Kafka, NATS, PostgreSQL, MinIO/S3) at once for its whole run instead. The group is declared once
+asserting on election and log-convergence deadlines; `connector_matrix` holds five containers
+(Kafka, NATS, PostgreSQL, S3, ClickHouse) at once for its whole run instead. The group is declared once
 and applied through an override in **both** profiles: `distributed_integration_chaos` and
 `connector_matrix` are in it even though `default` never reaches either binary, because `ci` does.
 Adding another heavy-Docker binary to the group means adding it to both `filter` expressions.
@@ -283,12 +283,12 @@ The **default** bundle is `mimalloc`, `service`, `wasm`, `windows`, `parquet-che
 every transformer,
 so `cargo install saci-service` yields a runnable binary with no flags. A connector ships by
 default only when nothing has to be installed or already running for it to work; every connector
-that needs a specific broker, database or object store first is opt-in instead:
+that needs a specific broker, database, object store or OTLP endpoint first is opt-in instead:
 `connector-postgresql`, `connector-nats`, `connector-s3`, `connector-kafka`,
-`connector-turso` and `connector-clickhouse`. `connector-kafka` also needs `cmake` and a C toolchain for vendored
-librdkafka; `connector-turso`'s synced mode pulls hyper and rustls. `distributed-raft` and
+`connector-turso`, `connector-clickhouse` and `connector-opentelemetry`. `connector-kafka` also
+needs `cmake` and a C toolchain for vendored librdkafka; `connector-turso`'s synced mode pulls hyper and rustls. `distributed-raft` and
 `service-cluster` are opt-in too, because a cluster node is a deliberate deployment choice. `all`
-turns on every capability the crate carries, including all six opt-in connectors, the native
+turns on every capability the crate carries, including all seven opt-in connectors, the native
 plugin host and a Raft cluster node, but excludes `conformance`, the corpus generator's own
 switch. The full table, `connector-*`, `transformer-*`, `wasm`, `plugin`, `distributed`,
 `distributed-raft`, `service`, `service-cluster`, `metrics`, `inspector`, `parquet-checkpoint`,
@@ -308,8 +308,8 @@ The **default** bundle is `engine` alone.
 - `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
   `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector crate that
   needs nothing installed or already running. Deliberately excludes `saci-connector-kafka`,
-  `-nats`, `-postgresql`, `-s3`, `-turso` and `-clickhouse`, each of which requires a specific broker, database or
-  object store installed and running first.
+  `-nats`, `-postgresql`, `-s3`, `-turso`, `-clickhouse` and `-opentelemetry`, each of which requires a
+  specific broker, database, object store or OTLP endpoint installed and running first.
 - `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`, `transformer-ndjson`,
   `transformer-parquet` (`transformers` enables all five): one per byte-format crate.
 - `processor`: `Pipeline`, `System`, `Component` (the trait, not the derive), `Config`, `Error`,

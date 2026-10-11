@@ -105,7 +105,7 @@ A processor is a `cdylib`, not a binary. `crate-type = ["cdylib"]` is what makes
 name = "polyglot-settle-wasm"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95.0"
+rust-version = "1.99.0"
 publish = false
 
 [lib]

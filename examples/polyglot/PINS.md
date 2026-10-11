@@ -10,7 +10,7 @@ file covers everything the five non-Rust stages need.
 
 | Tool | Version | Language runtime | Install |
 | ---- | ------- | ---------------- | ------- |
-| `cargo` (Rust stage) | n/a | Rust 1.95.0 | none: `cargo build --target wasm32-wasip2` links a component itself |
+| `cargo` (Rust stage) | n/a | Rust 1.99.0 | none: `cargo build --target wasm32-wasip2` links a component itself |
 | `wasm-tools`       | 1.246.2 | n/a                       | `cargo install wasm-tools --locked --version 1.246.2` |
 | Rust target        | `wasm32-wasip2` | n/a               | `rustup target add wasm32-wasip2` |
 | `componentize-go`  | 0.4.1  | Go 1.25.5+ (verified on 1.26.3) | `go install github.com/bytecodealliance/componentize-go@v0.4.1` |

@@ -13,7 +13,7 @@ All toolchain versions below are pinned in `PINS.md` in this directory; the
 platform caveats live there too. `cargo xtask polyglot` checks every tool the
 requested stages need before building anything.
 
-- Rust 1.95.0 with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
+- Rust 1.99.0 with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
 - `wasm-tools` 1.246.2
 - Go 1.25.5+ with `componentize-go` 0.4.1
 - Python 3.10+ with `componentize-py` 0.25.0

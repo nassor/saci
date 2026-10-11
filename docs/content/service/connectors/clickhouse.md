@@ -148,8 +148,10 @@ saci-service serve --config examples/configs/clickhouse.kdl
 
 The source supports three read strategies chosen by `mode kind`:
 
-- `polling`: queries an incremental range ordered by `cursor_column`.
-- `dump`: scans the table with `LIMIT` and `OFFSET`.
+- `polling`: queries an incremental range ordered by `cursor_column`, comparing a date/time
+  cursor as a ClickHouse datetime literal.
+- `dump`: scans the table with `LIMIT` and `OFFSET`. The order is whatever the server returns, so
+  a table written to during a scan can repeat or skip a row.
 - `query`: executes a custom `SELECT` statement.
 
 ## Every key
@@ -163,14 +165,13 @@ The source supports three read strategies chosen by `mode kind`:
 | `connection.user` | string | none | Authentication user |
 | `connection.password` | string | none | Authentication password |
 | `connection.database` | string | `default` | Target database |
-| `connection.connect_timeout_ms` | integer | `5000` | Connection timeout in milliseconds |
 | `connection.query_timeout_ms` | integer | `30000` | Query execution timeout in milliseconds |
 | `connection.compression` | string | `lz4` | Compression codec (`lz4` or `none`) |
 | `mode.kind` | string | required | Read strategy (`polling`, `dump`, `query`) |
 | `mode.table` | string | required for polling and dump | Table name to read |
 | `mode.cursor_column` | string | required for polling | Column name used as progress cursor |
 | `mode.initial_cursor` | string | none | Starting cursor value |
-| `mode.tiebreak_column` | string | none | Optional secondary sort column |
+| `mode.tiebreak_column` | string | none | Optional secondary sort column; resumes inside a repeated cursor value |
 | `mode.query` | string | required for query | Custom SQL query |
 | `batch_rows` | integer | `8192` | Maximum rows per emitted batch |
 | `max_batches_per_cycle` | integer | `0` | Batch limit per pass (0 is unconstrained) |
@@ -185,7 +186,7 @@ The source supports three read strategies chosen by `mode kind`:
 | `connection.database` | string | `default` | Target database |
 | `table` | string | required | Destination table name |
 | `write_mode` | string | `append` | Write strategy (`append`) |
-| `chunk_rows` | integer | `65536` | Maximum rows per chunk |
+| `chunk_rows` | integer | `65536` | Maximum rows per chunk (0 = no limit) |
 | `flush_rows` | integer | `0` | Buffer threshold before flush (0 flushes every batch) |
 | `truncate_before_first_write` | boolean | `#false` | Executes TRUNCATE TABLE before the first write |
 | `schema_fields` | list | required | Declared Arrow schema fields |

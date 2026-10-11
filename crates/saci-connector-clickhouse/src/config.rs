@@ -24,10 +24,6 @@ fn default_chunk_rows() -> usize {
     65_536
 }
 
-fn default_connect_timeout_ms() -> u64 {
-    5_000
-}
-
 fn default_query_timeout_ms() -> u64 {
     30_000
 }
@@ -62,9 +58,6 @@ pub struct ClickhouseConnectionConfig {
     /// Target database name.
     #[serde(default = "default_database")]
     pub database: String,
-    /// Connection handshake timeout in milliseconds.
-    #[serde(default = "default_connect_timeout_ms")]
-    pub connect_timeout_ms: u64,
     /// Query execution timeout in milliseconds.
     #[serde(default = "default_query_timeout_ms")]
     pub query_timeout_ms: u64,
@@ -295,7 +288,9 @@ pub struct PollingMode {
     /// Optional starting cursor value.
     #[serde(default)]
     pub initial_cursor: Option<String>,
-    /// Optional secondary column for stable ordering.
+    /// Optional secondary column for stable ordering. Once a batch has fixed a
+    /// position inside a repeated cursor value, polling resumes from its last
+    /// row's tiebreak value rather than from the cursor alone.
     #[serde(default)]
     pub tiebreak_column: Option<String>,
 }
@@ -480,7 +475,7 @@ pub struct ClickhouseSinkConfig {
     /// Write mode (defaults to `append`).
     #[serde(default)]
     pub write_mode: WriteMode,
-    /// Maximum rows per chunk.
+    /// Maximum rows per chunk (0 = no limit).
     #[serde(default = "default_chunk_rows")]
     pub chunk_rows: usize,
     /// Rows to buffer before sending an insert request (0 = flush every write).
@@ -631,7 +626,6 @@ mod tests {
             user: None,
             password: None,
             database: "default".to_string(),
-            connect_timeout_ms: 5000,
             query_timeout_ms: 30000,
             compression: CompressionConfig::Lz4,
             settings: HashMap::new(),
@@ -666,7 +660,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: CompressionConfig::None,
                 settings: HashMap::new(),
@@ -728,7 +721,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: CompressionConfig::None,
                 settings: HashMap::new(),
@@ -861,7 +853,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: CompressionConfig::Lz4,
                 settings: HashMap::new(),

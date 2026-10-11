@@ -73,9 +73,9 @@ A workflow drains one topic, processes the rows, and produces the result to anot
 
 ## What you need
 
-- A binary built with `--features connector-kafka`; Kafka is one of five connectors that need a
+- A binary built with `--features connector-kafka`; Kafka is one of seven connectors that need a
   specific service installed and running, so it sits outside the default build, alongside NATS,
-  PostgreSQL, S3 and Turso.
+  PostgreSQL, S3, Turso, ClickHouse and OpenTelemetry.
 - A reachable broker. One in a container is enough:
 
 Runs the same on Linux, macOS and Windows (PowerShell):

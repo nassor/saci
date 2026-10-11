@@ -29,7 +29,7 @@ heal rebuilds with the same identity; `builder.rs`'s `build_source_node`/`build_
 `saci-core`'s `io` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
 connector moves bytes and a transformer turns bytes into `RecordBatch`es and back, so transport and
 format are separate crates. Connectors: `saci-connector-channel`, `-clickhouse`, `-file`, `-http`, `-kafka`,
-`-nats`, `-postgresql`, `-redb`, `-s3`, `-saci`, `-tcp`, `-turso`, `-udp`. Transformers:
+`-nats`, `-opentelemetry`, `-postgresql`, `-redb`, `-s3`, `-saci`, `-tcp`, `-turso`, `-udp`. Transformers:
 `saci-transformer-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet`, each registered under its own
 `format` name. A byte-carrying source or sink node names a declared `transformer` node's id;
 `ServiceBuilder` resolves that node's `format` against the `TransformerRegistry` in
@@ -151,6 +151,50 @@ workflow holding one as `restartable: false`.
 - `saci-connector-kafka`: `KafkaSource`, `KafkaSink`, librdkafka-backed, one topic or several.
 - `saci-connector-nats`: `NatsSource`, `NatsSink`, core subject pub/sub or JetStream, chosen by a
   mode node's `kind` key.
+- `saci-connector-opentelemetry`: `OpenTelemetryMetricsSource`,
+  `OpenTelemetryMetricsSink`, OTLP/HTTP metrics in and out, Protobuf or JSON, and no `transformer`:
+  an OTLP request is the wire format, so the connector decodes and encodes it itself the way `saci`
+  owns Arrow IPC.
+  - Rows are the connector's Arrow view of OTLP, documented in its `schema` module.
+    `schema::metrics_schema` is the ten-column canonical schema a source with no `schema_fields`
+    emits, one row per data point (name, value, timestamp, kind, unit, description, attributes,
+    resource_attributes, count, start_timestamp). `schema_fields` replaces it: each declared column
+    is filled from the canonical column of the same name, and otherwise from the attribute of that
+    name, and the metric value goes to `value` or to the first declared numeric column no canonical
+    name claims. A request that leaves a `nullable=#false` column without a value is a 400.
+  - Four reserved keys inside the `attributes` object carry what has no column, and a sink consumes
+    each: `otel.scope`, `otel.aggregation_temporality`, `otel.monotonic`, `otel.distribution` (a
+    histogram's bounds and counts, an exponential histogram's scale, zero count and both bucket
+    sets, or a summary's quantiles). A `bytesValue` attribute is `{"otel.bytes": "<base64>"}`, and
+    a non-finite double is the string `"NaN"`, `"Infinity"` or `"-Infinity"`. Exemplars,
+    `Metric.metadata`, both `schema_url` fields and every `dropped_attributes_count` are not
+    carried at all.
+  - Source modes: `push` (the default, and what the top-level `bind`/`path`/`auth`/`buffer`/
+    `max_body_bytes` shorthand builds) binds `127.0.0.1:4318` and `/v1/metrics` and never reaches
+    EOF, so it is live and only the stream runner drives it; `pull` reads `mode.url` once with
+    `stop_at_end`, or every `mode.interval_ms`. A shorthand key beside a `mode` block is refused.
+    `path` must be absolute, `auth.bearer` must not be empty and `interval_ms` must be at least 1
+    unless `stop_at_end` is set; `buffer` is the one lenient key, clamped to at least 1.
+  - The listener answers `200` with an `ExportMetricsServiceResponse` for a body it took, and a
+    body it took in part carries `partial_success` naming the data points no column holds.
+    `401` a missing or wrong bearer token, `404` another path, `405` another method with
+    `allow: POST`, `413` over `max_body_bytes`, `415` a `content-type` that is neither
+    `application/x-protobuf` nor `application/json` (an empty one means protobuf), and `400` a body
+    that is not an OTLP request in its own encoding. A `400` is also sent down the ingest channel,
+    so the runner counts it. One body queues every row it converted in one send, so a retry of a
+    refused request duplicates no row.
+  - Sink keys: `url` (a base url gains `/v1/metrics`), `encoding` `protobuf` or `json`,
+    `headers`, `timeout_ms`, `service_name` (the `service.name` resource attribute, unless a row's
+    own resource attributes name one), `metric_name` (the fallback name, `saci_metric`),
+    `batch_rows`, which splits a larger batch into several exports, and `schema_fields`, which both
+    a source and a sink parse into the schema they report to the workflow graph check; the
+    conversion itself reads a batch's own columns by name, so a declaration changes no row. Rows are
+    grouped into one resource, scope and metric per distinct resource attributes, scope, and metric name, kind,
+    unit, description, temporality and monotonic flag; a `sum` row defaults to a cumulative sum
+    that may decrease. A non-finite double is refused, and a `u64` beyond `i64::MAX` goes as a
+    double. Any status outside 2xx is a `SaciError::Store` naming the collector's own reason.
+  - `Source::finish`, `request_batch_rows` and the metrics feature are not used: an export is
+    awaited inside `write_batch`, so `Sink::pending_rows` answers `Some(0)`.
 - `saci-connector-postgresql`: `PostgresSource`, `PostgresSink`, native (non-JDBC) client, TLS, and
   `polling` / `cdc_trigger` / `cdc_logical` read modes. Every PostgreSQL type is read/write through
   `ROWS` in `src/types.rs`; an unmatched type is canonical text. `schema_fields`'s `pg_type` forces
@@ -166,9 +210,15 @@ workflow holding one as `restartable: false`.
   install a second global allocator.
 - `saci-connector-clickhouse`: `ClickhouseSource`, `ClickhouseSink`, ClickHouse HTTP client with
   native `ArrowStream` format. Source modes `polling` (cursor column, optional initial cursor and
-  tiebreak column), `dump` (paginated full table scan), and `query` (arbitrary SQL statement);
-  sink write mode `append` with optional `truncate_before_first_write`. No transformer needed:
-  ClickHouse sends and accepts Arrow IPC streams directly.
+  tiebreak column, which resumes inside a repeated cursor value), `dump` (paginated full table
+  scan), and `query` (arbitrary SQL statement); sink write mode `append` with optional
+  `truncate_before_first_write`, one INSERT per `chunk_rows` rows. No transformer needed:
+  ClickHouse sends and accepts Arrow IPC streams directly. A date/time cursor goes out as a
+  ClickHouse datetime literal, and a `Date` column is widened from the `UInt16` ArrowStream sends
+  to the declared `date32`. The client sets `output_format_arrow_compression_method = none`,
+  because ClickHouse compresses an `ArrowStream` result with LZ4 by default and `arrow-ipc/lz4` is
+  enabled only under the `conformance` feature, so a normal build refuses a compressed batch by
+  design.
 - `saci-connector-redb`: `RedbSource`, `RedbSink`, an embedded redb key/value file as a
   transport, `directory`/`file`/`table` naming it. One entry per non-empty batch, keyed
   `{key_prefix}{seq:020}{key_suffix}` so lexicographic key order is insertion order; the sink
@@ -279,9 +329,9 @@ workflow holding one as `restartable: false`.
 
 `saci-service`:
 
-- `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`, `connector-nats`,
-  `connector-postgresql`, `connector-redb`, `connector-s3`, `connector-saci`, `connector-tcp`,
-  `connector-turso`, `connector-udp`:
+- `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
+  `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
+  `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
   one per connector
   crate. Each pulls the crate in and registers its factories in `register_builtin_factories`
   (each implies `service`). `connector-channel`, `connector-file`, `connector-http`,
@@ -293,9 +343,11 @@ workflow holding one as `restartable: false`.
   them, and none needs an extra build toolchain. HTTP, TCP, UDP and the peer link speak the
   network,
   and they qualify because they are generic primitives tied to no server product. `connector-kafka`,
-  `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso` and `connector-clickhouse` each need a
-  specific broker, database or object store running first, so each is opt-in instead. `all` turns
-  on every one of the thirteen. `connector-kafka`, `connector-nats` and `connector-udp` imply
+  `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso`, `connector-clickhouse` and
+  `connector-opentelemetry` each need a
+  specific broker, database, object store or OTLP endpoint running first, so each is opt-in
+  instead. `all` turns
+  on every one of the fourteen. `connector-kafka`, `connector-nats` and `connector-udp` imply
   `transformer-ndjson` and
   `connector-tcp` implies `transformer-arrow-ipc`, so the connector feature alone is runnable. No
   connector resolves a format implicitly: a byte-carrying node names a declared `transformer`
@@ -310,8 +362,8 @@ workflow holding one as `restartable: false`.
 - `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
   `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector crate that
   needs nothing installed or already running. Deliberately excludes `saci-connector-kafka`,
-  `-nats`, `-postgresql`, `-s3`, `-turso` and `-clickhouse`, each of which requires a specific broker, database or
-  object store installed and running first.
+  `-nats`, `-postgresql`, `-s3`, `-turso`, `-clickhouse` and `-opentelemetry`, each of which
+  requires a specific broker, database, object store or OTLP endpoint installed and running first.
 
 ## Build prerequisites
 
@@ -346,18 +398,18 @@ Docker-backed tests soft-skip when no daemon is reachable; the `try_start` conve
 `AGENTS.md`'s Testing section.
 
 `crates/saci-service/tests/connector_matrix.rs` (the `heavy-docker` test group, `ci.yml`'s
-`connector_matrix` job) covers 2808 cases, one per `{source connector, sink connector, byte
-format, processor runtime}` tuple over 13 source connectors and 12 sink connectors
+`connector_matrix` job) covers 3780 cases, one per `{source connector, sink connector, byte
+format, processor runtime}` tuple over 15 source connectors and 14 sink connectors
 (`HttpPushSource` registers a source and no sink, so the two dimensions are no longer one list),
 6 formats (the five
-transformers plus the absence of one, for the four connectors that carry `RecordBatch`es
+transformers plus the absence of one, for the six connectors that carry `RecordBatch`es
 natively) and 3 processor runtimes (native pipeline, WASM component, native plugin), plus one
 maximal workflow declaring every node kind at once. One format applies to both the source and
-the sink of a case; the independent source-format x sink-format cross product (16848 cases) is
+the sink of a case; the independent source-format x sink-format cross product (22680 cases) is
 deliberately not taken, because a mixed pair adds no connector or transformer coverage over the
 two paired cases that already cover each half. `full_matrix` is the one test here that starts a
 container: nextest gives each test *binary*, not each test, its own process, so it alone starts
-exactly one container per external resource (Kafka, NATS, PostgreSQL, MinIO/S3) for its whole
+exactly one container per external resource (Kafka, NATS, PostgreSQL, S3, ClickHouse) for its whole
 run, isolating every case by a unique topic, subject, table, object prefix, file path or
 OS-assigned port and running them all concurrently in-process. A rejected case asserts both the
 refusal and where it lands: `build` (`ServiceConfig::load` or `ServiceBuilder::build_all`

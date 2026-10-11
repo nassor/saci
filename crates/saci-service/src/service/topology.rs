@@ -109,6 +109,14 @@ const DETAIL_ALLOWLIST: &[(&str, &[&str])] = &[
     ),
     ("saci", &["bind", "connect"]),
     ("HttpPushSource", &["bind", "path", "quic_bind"]),
+    (
+        "OpenTelemetryMetricsSource",
+        &["bind", "path", "mode.kind", "mode.url"],
+    ),
+    (
+        "OpenTelemetryMetricsSink",
+        &["url", "encoding", "service_name"],
+    ),
     ("ChannelSource", &["name"]),
     ("ChannelSink", &["name"]),
 ];

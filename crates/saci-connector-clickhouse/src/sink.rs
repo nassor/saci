@@ -77,37 +77,83 @@ impl ClickhouseSink {
             self.first_write_done = true;
         }
 
-        let merged = concat_batches(&self.schema, &self.buffer).map_err(|e| {
-            SaciError::generic(format!("clickhouse sink: batch concatenation error: {e}"))
-        })?;
+        // One INSERT per chunk, so a large buffer becomes several requests of at
+        // most `chunk_rows` rows rather than one unbounded stream.
+        for chunk in split_chunks(&self.schema, &self.buffer, self.config.chunk_rows)? {
+            let mut buf = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut buf, &self.schema).map_err(|e| {
+                    SaciError::generic(format!("clickhouse sink: stream writer init error: {e}"))
+                })?;
+                writer.write(&chunk).map_err(|e| {
+                    SaciError::generic(format!("clickhouse sink: stream encode error: {e}"))
+                })?;
+                writer.finish().map_err(|e| {
+                    SaciError::generic(format!("clickhouse sink: stream finish error: {e}"))
+                })?;
+            }
 
-        let mut buf = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut buf, &self.schema).map_err(|e| {
-                SaciError::generic(format!("clickhouse sink: stream writer init error: {e}"))
+            let insert_sql = format!("INSERT INTO {quoted_table} FORMAT ArrowStream");
+            let mut insert = self.client.insert_formatted_with(insert_sql);
+            insert.send(bytes::Bytes::from(buf)).await.map_err(|e| {
+                SaciError::generic(format!("clickhouse sink: stream send error: {e}"))
             })?;
-            writer.write(&merged).map_err(|e| {
-                SaciError::generic(format!("clickhouse sink: stream encode error: {e}"))
-            })?;
-            writer.finish().map_err(|e| {
-                SaciError::generic(format!("clickhouse sink: stream finish error: {e}"))
+            insert.end().await.map_err(|e| {
+                SaciError::generic(format!("clickhouse sink: stream commit error: {e}"))
             })?;
         }
-
-        let insert_sql = format!("INSERT INTO {quoted_table} FORMAT ArrowStream");
-        let mut insert = self.client.insert_formatted_with(insert_sql);
-        insert
-            .send(bytes::Bytes::from(buf))
-            .await
-            .map_err(|e| SaciError::generic(format!("clickhouse sink: stream send error: {e}")))?;
-        insert.end().await.map_err(|e| {
-            SaciError::generic(format!("clickhouse sink: stream commit error: {e}"))
-        })?;
 
         self.buffer.clear();
         self.buffered_rows = 0;
         Ok(())
     }
+}
+
+/// Splits `batches` into chunks of at most `limit` rows, `0` meaning no limit.
+///
+/// `RecordBatch::slice` shares its arrays with the batch it came from, so a
+/// chunk copies no column data; only the final concatenation into one batch per
+/// chunk allocates. Every chunk carries `schema`'s row order, so the row order
+/// across chunks is the order of `batches`.
+fn split_chunks(
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+    limit: usize,
+) -> Result<Vec<RecordBatch>, SaciError> {
+    let mut chunks = Vec::new();
+    let mut pending: Vec<RecordBatch> = Vec::new();
+    let mut pending_rows = 0usize;
+
+    for batch in batches {
+        let mut offset = 0;
+        while offset < batch.num_rows() {
+            let room = if limit == 0 {
+                batch.num_rows() - offset
+            } else {
+                limit - pending_rows
+            };
+            let take = room.min(batch.num_rows() - offset);
+            pending.push(batch.slice(offset, take));
+            pending_rows += take;
+            offset += take;
+
+            if limit != 0 && pending_rows == limit {
+                chunks.push(concat_batches(schema, &pending).map_err(|e| {
+                    SaciError::generic(format!("clickhouse sink: batch concatenation error: {e}"))
+                })?);
+                pending.clear();
+                pending_rows = 0;
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        chunks.push(concat_batches(schema, &pending).map_err(|e| {
+            SaciError::generic(format!("clickhouse sink: batch concatenation error: {e}"))
+        })?);
+    }
+
+    Ok(chunks)
 }
 
 #[async_trait]
@@ -156,7 +202,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: crate::config::CompressionConfig::Lz4,
                 settings: HashMap::new(),
@@ -199,7 +244,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: crate::config::CompressionConfig::None,
                 settings: HashMap::new(),
@@ -250,7 +294,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: crate::config::CompressionConfig::None,
                 settings: HashMap::new(),
@@ -295,7 +338,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: crate::config::CompressionConfig::None,
                 settings: HashMap::new(),
@@ -326,5 +368,52 @@ mod tests {
                 .expect("bad batch");
 
         assert!(sink.write_batch(&batch).await.is_err());
+    }
+
+    #[test]
+    fn split_chunks_caps_rows_per_chunk() {
+        use arrow_array::Int64Array;
+        use arrow_schema::{DataType, Field};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from((0_i64..10).collect::<Vec<_>>()))],
+        )
+        .expect("batch");
+
+        // Ten rows, three per chunk: 3 + 3 + 3 + 1, in row order.
+        let chunks = split_chunks(&schema, std::slice::from_ref(&batch), 3).expect("split");
+        assert_eq!(
+            chunks.iter().map(RecordBatch::num_rows).collect::<Vec<_>>(),
+            vec![3, 3, 3, 1]
+        );
+        let ids: Vec<i64> = chunks
+            .iter()
+            .flat_map(|chunk| {
+                let col = chunk
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("int64 column");
+                (0..chunk.num_rows())
+                    .map(|i| col.value(i))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(ids, (0_i64..10).collect::<Vec<_>>());
+
+        // `0` means no limit: one chunk.
+        let chunks = split_chunks(&schema, std::slice::from_ref(&batch), 0).expect("split");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].num_rows(), 10);
+
+        // A chunk spans a batch boundary.
+        let chunks =
+            split_chunks(&schema, &[batch.slice(0, 4), batch.slice(4, 6)], 3).expect("split");
+        assert_eq!(
+            chunks.iter().map(RecordBatch::num_rows).collect::<Vec<_>>(),
+            vec![3, 3, 3, 1]
+        );
     }
 }

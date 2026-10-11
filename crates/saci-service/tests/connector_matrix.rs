@@ -8,8 +8,8 @@
 //!
 //! There is exactly one test function because nextest gives every test its own
 //! process: a second one would start a second Kafka broker, NATS server,
-//! PostgreSQL server and S3 endpoint. All four are started once here, behind a
-//! `OnceCell`, and shared by every case.
+//! PostgreSQL server, S3 endpoint and ClickHouse server. All five are started
+//! once here, behind a `OnceCell`, and shared by every case.
 //!
 //! ```bash
 //! rustup target add wasm32-wasip2
@@ -19,7 +19,7 @@
 //!     --run-ignored ignored-only
 //! ```
 //!
-//! `#[ignore]`d: it is a whole-matrix sweep against four containers, not a
+//! `#[ignore]`d: it is a whole-matrix sweep against five containers, not a
 //! per-edit check.
 
 #![cfg(all(
@@ -32,6 +32,7 @@
     feature = "connector-clickhouse",
     feature = "connector-kafka",
     feature = "connector-nats",
+    feature = "connector-opentelemetry",
     feature = "connector-postgresql",
     feature = "connector-redb",
     feature = "connector-s3",
@@ -71,11 +72,11 @@ use matrix::{
 ///
 /// Each case owns its own temp directory, channel, topic, stream, table and
 /// object prefix, and every listener binds `127.0.0.1:0`, so the only shared
-/// state is the four containers.
+/// state is the five containers.
 const CONCURRENCY: usize = 16;
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "whole connector matrix against four containers; run explicitly"]
+#[ignore = "whole connector matrix against five containers; run explicitly"]
 async fn full_matrix() {
     let started = Instant::now();
     let fixtures = Fixtures::resolve(smoketest::smoketest_wasm_path()).expect("processor fixtures");

@@ -74,7 +74,7 @@ table.
 
 ## What you need
 
-- A binary built with `--features connector-postgresql`; PostgreSQL is one of five connectors
+- A binary built with `--features connector-postgresql`; PostgreSQL is one of seven connectors
   that need a specific service installed and running, so it sits outside the default build.
 - A reachable server. One in a container is enough, and this command starts it with the settings
   logical decoding needs:

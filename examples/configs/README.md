@@ -34,6 +34,7 @@ run with:
 | `tcp.kdl` | `connector-tcp,wasm` |
 | `udp.kdl` | `connector-udp,wasm` |
 | `saci.kdl` | `connector-saci,wasm` |
+| `opentelemetry_metrics.kdl` | `connector-opentelemetry`; it declares no processor node |
 | `http.kdl` | `connector-http,transformer-csv,wasm` |
 | `http_push.kdl` | `connector-http,transformer-ndjson,wasm` |
 | `redb.kdl` | `connector-file,transformer-csv` |
@@ -146,6 +147,7 @@ explicitly, there is no implicit default format.
 | `tcp` | Live framed messages off a listener, stream mode only | `bind`, `schema_fields` | `saci-connector-tcp` | `connector-tcp` |
 | `udp` | Live datagrams off a bound socket, one message each, stream mode only | `bind`, `schema_fields` | `saci-connector-udp` | `connector-udp` |
 | `saci` | Batches pushed by a `saci` sink in another service, stream mode only | `bind`, `schema_fields` | `saci-connector-saci` | `connector-saci` |
+| `OpenTelemetryMetricsSource` | Listens for OTLP/HTTP metrics, or reads a url, in Protobuf or JSON; listening is stream mode only | `bind`, `schema_fields` for a projection other than the canonical ten columns | `saci-connector-opentelemetry` | `connector-opentelemetry` |
 | `ChannelSource` | In-process channel (testing/internal) | `schema_fields` | `saci-connector-channel` | `connector-channel` |
 
 ### Sinks
@@ -163,6 +165,7 @@ explicitly, there is no implicit default format.
 | `tcp` | Dials a peer and writes one length-prefixed frame per message | `connect`, `schema_fields` | `saci-connector-tcp` | `connector-tcp` |
 | `udp` | Sends one datagram per message to every `connect` peer, fire and forget | `connect`, `schema_fields` | `saci-connector-udp` | `connector-udp` |
 | `saci` | Dials a `saci` source in another service, first reachable of `connect` wins | `connect`, `schema_fields` | `saci-connector-saci` | `connector-saci` |
+| `OpenTelemetryMetricsSink` | One OTLP/HTTP export per batch, in Protobuf or JSON | `url`, `schema_fields` for a projection other than the canonical ten columns | `saci-connector-opentelemetry` | `connector-opentelemetry` |
 | `ChannelSink` | In-process channel (testing/internal) | `schema_fields` | `saci-connector-channel` | `connector-channel` |
 
 ### Retry
@@ -355,6 +358,7 @@ errors in strict mode.
 | `tcp.kdl` | runnable config driving TCP at both ends, listens and dials |
 | `udp.kdl` | runnable config driving UDP at both ends, fire and forget with a liveness probe |
 | `saci.kdl` | runnable config linking two SACI services, listens and dials |
+| `opentelemetry_metrics.kdl` | runnable config receiving OTLP/HTTP metrics and forwarding them, listens and dials |
 | `http.kdl` | runnable config driving HTTP at both ends, needs an endpoint |
 | `http_push.kdl` | runnable config accepting pushed HTTP documents, listens and dials |
 | `redb.kdl` | standalone config backed by a local redb store |

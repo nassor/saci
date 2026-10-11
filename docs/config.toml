@@ -107,6 +107,9 @@ path = "@/service/connectors/udp.md"
 title = "SACI"
 path = "@/service/connectors/saci.md"
 [[extra.areas.nav.items.children]]
+title = "OpenTelemetry"
+path = "@/service/connectors/opentelemetry.md"
+[[extra.areas.nav.items.children]]
 title = "Channel"
 path = "@/service/connectors/channel.md"
 [[extra.areas.nav.items]]

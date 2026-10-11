@@ -241,7 +241,7 @@ Get-Item C:\saci\state.redb | Select-Object Length, LastWriteTime
 
 | Message | What to change |
 |---|---|
-| `source type 'tcp' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | Set `run_mode kind="stream"`, or give that source a config that ends (`stop_at_end #true` on NATS and Kafka). |
+| `source type 'tcp' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | Set `run_mode kind="stream"`, or give that source a config that ends (`stop_at_end #true` on NATS and Kafka, and on an `OpenTelemetryMetricsSource` in its pull mode). |
 | `stream run mode requires at least one 'source' node (0) declared` | Declare a `source` in the workflow, or pick another `kind`. |
 | ``mode "cluster" does not take a `store` block: cluster state lives in node.data_dir`` | Delete the `store` block; a cluster node persists under `node.data_dir`. |
 | `store redb: path must not be empty` | Give `path` a real file path. |

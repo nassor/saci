@@ -1,69 +1,75 @@
 +++
 title = "Sources and sinks"
-description = "Twelve transports a workflow can read from and write to, one page each, with the config node they accept."
+description = "Fourteen transports a workflow can read from and write to, one page each, with the config node they accept."
 template = "section.html"
 sort_by = "weight"
 weight = 4
 aliases = ["/connectors/"]
 +++
 
-A workflow reads rows through a `source` node and writes them through a `sink` node. Twelve
+A workflow reads rows through a `source` node and writes them through a `sink` node. Fourteen
 transports ship with `saci-service`, and the pages below walk each one from an empty config file to a
 running pipeline.
 
 <div class="dgm animate-in">
-    <div class="dgm-scroll"><svg viewBox="0 0 876 168" role="img" aria-labelledby="cx-t cx-d">
-        <title id="cx-t">The twelve transports a workflow can name on a source or a sink node</title>
-        <desc id="cx-d">Twelve boxes across the top name the transports: file, http, kafka, nats, postgres, turso, redb, s3, tcp, udp, saci and channel. Each one drops into a shared line, and that line feeds a single workflow box below. One workflow may name any mix of them, one node per source or sink.</desc>
+    <div class="dgm-scroll"><svg viewBox="0 0 1465 168" role="img" aria-labelledby="cx-t cx-d">
+        <title id="cx-t">The fourteen transports a workflow can name on a source or a sink node</title>
+        <desc id="cx-d">Fourteen boxes across the top name the transports: file, http, kafka, nats, postgres, turso, clickhouse, redb, s3, tcp, udp, saci, opentelemetry and channel. Each one drops into a shared line, and that line feeds a single workflow box below. One workflow may name any mix of them, one node per source or sink.</desc>
         <g class="anim anim-1">
-            <rect class="blk blk-data" x="0" y="8" width="68" height="40" rx="8"/>
+            <rect class="blk blk-data" x="0" y="8" width="100" height="40" rx="8"/>
             <text class="t-lbl" x="6" y="33">file</text>
-            <rect class="blk blk-data" x="73" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="79" y="33">http</text>
-            <rect class="blk blk-data" x="146" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="152" y="33">kafka</text>
-            <rect class="blk blk-data" x="219" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="225" y="33">nats</text>
-            <rect class="blk blk-data" x="292" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="298" y="33">postgres</text>
-            <rect class="blk blk-data" x="365" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="371" y="33">turso</text>
-            <rect class="blk blk-data" x="438" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="444" y="33">redb</text>
-            <rect class="blk blk-data" x="511" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="517" y="33">s3</text>
-            <rect class="blk blk-data" x="584" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="590" y="33">tcp</text>
-            <rect class="blk blk-data" x="657" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="663" y="33">udp</text>
-            <rect class="blk blk-data" x="730" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="736" y="33">saci</text>
-            <rect class="blk blk-data" x="803" y="8" width="68" height="40" rx="8"/>
-            <text class="t-lbl" x="809" y="33">channel</text>
+            <rect class="blk blk-data" x="105" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="111" y="33">http</text>
+            <rect class="blk blk-data" x="210" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="216" y="33">kafka</text>
+            <rect class="blk blk-data" x="315" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="321" y="33">nats</text>
+            <rect class="blk blk-data" x="420" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="426" y="33">postgres</text>
+            <rect class="blk blk-data" x="525" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="531" y="33">turso</text>
+            <rect class="blk blk-data" x="630" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="636" y="33">clickhouse</text>
+            <rect class="blk blk-data" x="735" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="741" y="33">redb</text>
+            <rect class="blk blk-data" x="840" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="846" y="33">s3</text>
+            <rect class="blk blk-data" x="945" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="951" y="33">tcp</text>
+            <rect class="blk blk-data" x="1050" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="1056" y="33">udp</text>
+            <rect class="blk blk-data" x="1155" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="1161" y="33">saci</text>
+            <rect class="blk blk-data" x="1260" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="1266" y="33">opentelemetry</text>
+            <rect class="blk blk-data" x="1365" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="1371" y="33">channel</text>
         </g>
         <g class="anim anim-2">
-            <path class="arw arw-data" d="M34 48 V72"/>
-            <path class="arw arw-data" d="M107 48 V72"/>
-            <path class="arw arw-data" d="M180 48 V72"/>
-            <path class="arw arw-data" d="M253 48 V72"/>
-            <path class="arw arw-data" d="M326 48 V72"/>
-            <path class="arw arw-data" d="M399 48 V72"/>
-            <path class="arw arw-data" d="M472 48 V72"/>
-            <path class="arw arw-data" d="M545 48 V72"/>
-            <path class="arw arw-data" d="M618 48 V72"/>
-            <path class="arw arw-data" d="M691 48 V72"/>
-            <path class="arw arw-data" d="M764 48 V72"/>
-            <path class="arw arw-data" d="M837 48 V72"/>
-            <path class="ln" d="M34 72 H837"/>
-            <text class="t-sm t-data" x="42" y="88">rows in, rows out</text>
+            <path class="arw arw-data" d="M50 48 V72"/>
+            <path class="arw arw-data" d="M155 48 V72"/>
+            <path class="arw arw-data" d="M260 48 V72"/>
+            <path class="arw arw-data" d="M365 48 V72"/>
+            <path class="arw arw-data" d="M470 48 V72"/>
+            <path class="arw arw-data" d="M575 48 V72"/>
+            <path class="arw arw-data" d="M680 48 V72"/>
+            <path class="arw arw-data" d="M785 48 V72"/>
+            <path class="arw arw-data" d="M890 48 V72"/>
+            <path class="arw arw-data" d="M995 48 V72"/>
+            <path class="arw arw-data" d="M1100 48 V72"/>
+            <path class="arw arw-data" d="M1205 48 V72"/>
+            <path class="arw arw-data" d="M1310 48 V72"/>
+            <path class="arw arw-data" d="M1415 48 V72"/>
+            <path class="ln" d="M50 72 H1415"/>
+            <text class="t-sm t-data" x="58" y="88">rows in, rows out</text>
         </g>
         <g class="anim anim-3">
-            <path class="arw arw-data" d="M435 72 V104" marker-end="url(#cx-d1)"/>
-            <rect class="blk blk-ctl" x="345" y="108" width="180" height="52" rx="8"/>
-            <rect class="hd hd-ctl" x="345" y="108" width="180" height="20" rx="8"/>
-            <rect class="hd hd-ctl" x="345" y="120" width="180" height="8"/>
-            <text class="t-lbl" x="357" y="123">workflow</text>
-            <text class="t-sm" x="357" y="146">source, sink, link</text>
+            <path class="arw arw-data" d="M732 72 V104" marker-end="url(#cx-d1)"/>
+            <rect class="blk blk-ctl" x="642" y="108" width="180" height="52" rx="8"/>
+            <rect class="hd hd-ctl" x="642" y="108" width="180" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="642" y="120" width="180" height="8"/>
+            <text class="t-lbl" x="654" y="123">workflow</text>
+            <text class="t-sm" x="654" y="146">source, sink, link</text>
         </g>
         <defs>
             <marker id="cx-d1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -81,7 +87,7 @@ running pipeline.
 ## Pick a connector
 
 Every row is a source and a sink, so one transport serves both ends of a workflow. `Needs a format`
-means the node names a declared [transformer](@/service/formats/_index.md); the four row-carrying
+means the node names a declared [transformer](@/service/formats/_index.md); the six row-carrying
 connectors take none.
 
 | Connector | Source | Sink | Needs a format | Run modes | In the default build |
@@ -92,18 +98,21 @@ connectors take none.
 | [NATS](@/service/connectors/nats.md) | yes | yes | yes | stream, or any run mode with `stop_at_end` | no: build with `--features connector-nats` |
 | [PostgreSQL](@/service/connectors/postgresql.md) | yes | yes | no | any | no: build with `--features connector-postgresql` |
 | [Turso](@/service/connectors/turso.md) | yes | yes | no | any | no: build with `--features connector-turso` |
+| [ClickHouse](@/service/connectors/clickhouse.md) | yes | yes | no | any | no: build with `--features connector-clickhouse` |
 | [redb](@/service/connectors/redb.md) | yes | yes | yes | any | yes |
 | [S3](@/service/connectors/s3.md) | yes | yes | yes | any | no: build with `--features connector-s3` |
 | [TCP](@/service/connectors/tcp.md) | yes | yes | yes | stream for the source, any for the sink | yes |
 | [UDP](@/service/connectors/udp.md) | yes | yes | yes | stream for the source, any for the sink | yes |
 | [SACI](@/service/connectors/saci.md) | yes | yes | no | stream for the source, any for the sink | yes |
+| [OpenTelemetry](@/service/connectors/opentelemetry.md) | yes | yes | no | stream for the source, any for the sink | no: build with `--features connector-opentelemetry` |
 | [Channel](@/service/connectors/channel.md) | yes | yes | no | any | yes |
 
 A node picks its transport with a `type` string: `FileSource` and `FileSink`, `HttpSource` and
 `HttpSink`, `KafkaSource` and `KafkaSink`, `NatsSource` and `NatsSink`, `PostgresSource` and
-`PostgresSink`, `TursoSource` and `TursoSink`, `RedbSource` and `RedbSink`, `S3Source` and
-`S3Sink`, `ChannelSource` and `ChannelSink`, `tcp` in lower case for both halves of TCP, `udp` for
-both halves of UDP, and `saci` for both halves of a service-to-service link.
+`PostgresSink`, `TursoSource` and `TursoSink`, `ClickhouseSource` and `ClickhouseSink`,
+`RedbSource` and `RedbSink`, `S3Source` and `S3Sink`, `OpenTelemetryMetricsSource` and
+`OpenTelemetryMetricsSink`, `ChannelSource` and `ChannelSink`, `tcp` in lower case for both halves
+of TCP, `udp` for both halves of UDP, and `saci` for both halves of a service-to-service link.
 
 ## The shape every node shares
 

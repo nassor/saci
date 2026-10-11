@@ -9,6 +9,7 @@ members = [
     "crates/saci-connector-http",
     "crates/saci-connector-kafka",
     "crates/saci-connector-nats",
+    "crates/saci-connector-opentelemetry",
     "crates/saci-connector-postgresql",
     "crates/saci-connector-turso",
     "crates/saci-connector-redb",
@@ -56,7 +57,7 @@ resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-rust-version = "1.95.0"
+rust-version = "1.99.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 # Flipped from the historical `false`: every crate below is meant to publish
@@ -94,6 +95,7 @@ saci-connector-file        = { path = "crates/saci-connector-file", version = "0
 saci-connector-http        = { path = "crates/saci-connector-http", version = "0.1.0" }
 saci-connector-kafka       = { path = "crates/saci-connector-kafka", version = "0.1.0" }
 saci-connector-nats        = { path = "crates/saci-connector-nats", version = "0.1.0" }
+saci-connector-opentelemetry = { path = "crates/saci-connector-opentelemetry", version = "0.1.0" }
 saci-connector-postgresql  = { path = "crates/saci-connector-postgresql", version = "0.1.0" }
 saci-connector-turso       = { path = "crates/saci-connector-turso", version = "0.1.0" }
 saci-connector-redb        = { path = "crates/saci-connector-redb", version = "0.1.0" }
@@ -173,6 +175,21 @@ turso         = { version = "=0.8.2", default-features = false, features = ["syn
 
 # The ClickHouse client used by the `clickhouse` connector.
 clickhouse    = { version = "0.15.2", default-features = false, features = ["lz4"] }
+
+# The OTLP message definitions the `opentelemetry` connector carries, and the
+# prost runtime its generated types are built on. `saci-service` already reaches
+# this same release through `opentelemetry-otlp`, so the two share one tree.
+#
+# `default-features = false` is what keeps `tonic` out: the crate's `full`
+# default turns on `gen-tonic`, whose gRPC transport this workspace has no use
+# for. `gen-tonic-messages` is the prost-only half of that pair. `metrics`
+# generates the metric signal's types and nothing else (no trace, no logs), and
+# `with-serde` derives the JSON encoding the OTLP/HTTP half speaks, with the
+# spec's own conversions for 64-bit integers, `bytesValue` and trace ids.
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["metrics", "gen-tonic-messages", "with-serde"] }
+# `prost` is named here rather than reached through `opentelemetry-proto` so the
+# connector can encode and decode the request type itself.
+prost         = { version = "0.14" }
 
 # The embedded key/value store. saci-service's `distributed` feature keeps its
 # local state file and its raft log in one, and saci-connector-redb uses one as

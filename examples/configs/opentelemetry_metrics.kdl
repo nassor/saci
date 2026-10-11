@@ -1,0 +1,129 @@
+// SACI standalone service configuration receiving and forwarding OpenTelemetry
+// metrics over OTLP/HTTP.
+//
+// Run:
+//   cargo run --features connector-opentelemetry --bin saci-service -- validate \
+//     --config examples/configs/opentelemetry_metrics.kdl
+//   cargo run --features connector-opentelemetry --bin saci-service -- serve \
+//     --config examples/configs/opentelemetry_metrics.kdl
+//
+// The source listens where an OpenTelemetry SDK or collector exports to, and
+// the sink posts every batch on to another OTLP/HTTP endpoint, so this config
+// is a bridge: point an exporter at port 4318 and a collector at 4319 and the
+// rows pass through field for field.
+//
+// Neither node declares a `transformer`: an OTLP request is the wire format,
+// and the connector encodes and decodes it itself. Neither declares
+// `schema_fields` either, so both ends use the connector's canonical schema of
+// ten columns, one row per data point. Declaring `schema_fields` on the source
+// projects each data point onto those columns instead, which is how a pipeline
+// reads only the part of a metric it acts on.
+//
+// One listener serves HTTP/1.1 and HTTP/2 on that port: the HTTP/2 connection
+// preface is sniffed, so a client with prior knowledge and an HTTP/1.1 client
+// share it.
+//
+// A request is answered 200 once it is taken, 404 on another path, 405 on
+// another method, 401 on a missing or wrong bearer token, 413 on a body over
+// max_body_bytes, 415 on a content-type that is neither `application/x-protobuf`
+// nor `application/json`, and 400 on a body neither encoding could read. A
+// body the connector takes in part is answered 200 with `partial_success`
+// naming what it dropped, which is how OTLP reports data a receiver cannot
+// represent without refusing the rest.
+//
+// `validate` binds the source's listener, because that is where a busy port
+// surfaces, and the port must be free. It opens no outbound connection: the
+// sink sends its first request on the first batch, so an endpoint that is down
+// surfaces during `serve`, not here.
+
+mode "standalone"
+
+node id=1 name="saci-opentelemetry" data_dir="${SACI_DATA_DIR:-/tmp/saci-opentelemetry}"
+
+// The source never reaches EOF: it blocks until the next request arrives. Only
+// the stream runner can drive that, so config validation rejects
+// `type="OpenTelemetryMetricsSource"` in its push mode under any other run
+// mode. A `mode kind="pull"` source with `stop_at_end` is the one shape that
+// runs under `one_shot`.
+run_mode kind="stream"
+
+workflow "metrics" {
+    // ---------------------------------------------------------------- source
+
+    source "metrics_in" type="OpenTelemetryMetricsSource" component="Metric" {
+        config {
+            // Listen address. Port 4318 is the standard OTLP/HTTP port, so an
+            // exporter needs no configuration of its own to reach this.
+            bind "${SACI_OTLP_BIND:-127.0.0.1:4318}"
+
+            // The one path that accepts a request. `/v1/metrics` is what an
+            // exporter posts to; every other path is a 404.
+            path "/v1/metrics"
+
+            // The token every request must present as
+            // `authorization: Bearer <token>`. Substitution runs over the
+            // whole file before the parser, so a real deployment keeps the
+            // token in an env var and the default here is only for a local
+            // run.
+            auth {
+                bearer "${SACI_OTLP_TOKEN:-dev-token}"
+            }
+
+            // Largest body accepted, 16 MiB, which is also the default. A
+            // sender that announces or sends more gets a 413 and the listener
+            // stays up.
+            max_body_bytes 16777216
+
+            // Requests queued before one in flight waits for its response,
+            // which is how backpressure reaches the sender.
+            buffer 64
+
+            // Reading a url instead of listening is the other mode:
+            //   mode kind="pull" url="http://127.0.0.1:8888/metrics"
+            // A repeating read stays live, so it needs the stream runner; add
+            // `stop_at_end=#true` to read once and finish under `one_shot`.
+        }
+    }
+
+    // ------------------------------------------------------------------ sink
+
+    sink "metrics_out" type="OpenTelemetryMetricsSink" component="Metric" {
+        config {
+            // Endpoint every batch is posted to. A base url gains the standard
+            // `/v1/metrics` path, so naming it in full works too.
+            url "${SACI_OTLP_ENDPOINT:-http://127.0.0.1:4319}"
+
+            // `"json"` sends `application/json` instead, which is what a
+            // collector behind a proxy that rewrites content types may need.
+            encoding "protobuf"
+
+            // The `service.name` resource attribute every export carries. A
+            // row whose resource attributes already name one keeps its own.
+            service_name "saci"
+
+            // Rows one export carries at most; a larger batch is posted as
+            // several requests.
+            batch_rows 8192
+
+            timeout_ms 10000
+
+            // Headers every export carries, for a collector behind an
+            // authenticating gateway:
+            //   headers {
+            //       authorization "Bearer ${SACI_OTLP_ENDPOINT_TOKEN:-}"
+            //   }
+        }
+    }
+
+    link from="metrics_in" to="metrics_out"
+}
+
+// HTTP control plane, on an ephemeral port. The OpenTelemetry connector emits
+// no series of its own: what reaches a dashboard is the service's `saci_*`
+// series, one workflow pass and one sink write at a time.
+http bind="127.0.0.1:0" disabled=#false
+
+// One workflow.batch span opens per accepted request, so a live exporter at
+// any real rate needs sampling well below full to keep stdout and the
+// inspector buffers readable. error_sample_ratio stays at 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.15 error_sample_ratio=1.0

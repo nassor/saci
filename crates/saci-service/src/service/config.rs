@@ -2506,10 +2506,23 @@ impl ServiceConfig {
 /// its default `mode kind="document"` reads one document and reaches EOF. A
 /// compacted `KafkaSource` is one-shot regardless of `stop_at_end`: it always
 /// reaches EOF once its snapshot is read.
+///
+/// An `OpenTelemetryMetricsSource` is live in its push mode, a listener with no
+/// last request, and in a pull mode that repeats; a pull mode with `stop_at_end`
+/// reads one body and reaches EOF.
 fn is_live_source(spec: &SourceSpec) -> bool {
     let config_flag = |key: &str| {
         spec.config
             .get(key)
+            .and_then(ConfigValue::as_bool)
+            .unwrap_or(false)
+    };
+    // The keys of a `mode` block, which the shorthand keys at the top level
+    // stand in for when no block is declared.
+    let mode_flag = |key: &str| {
+        spec.config
+            .get("mode")
+            .and_then(|mode| mode.get(key))
             .and_then(ConfigValue::as_bool)
             .unwrap_or(false)
     };
@@ -2523,6 +2536,15 @@ fn is_live_source(spec: &SourceSpec) -> bool {
                 .and_then(ConfigValue::as_str),
             Some("lines" | "events")
         ),
+        "OpenTelemetryMetricsSource" => {
+            !matches!(
+                spec.config
+                    .get("mode")
+                    .and_then(|mode| mode.get("kind"))
+                    .and_then(ConfigValue::as_str),
+                Some("pull")
+            ) || !mode_flag("stop_at_end")
+        }
         "KafkaSource" => !(config_flag("stop_at_end") || config_flag("compacted")),
         "NatsSource" => !config_flag("stop_at_end"),
         _ => false,

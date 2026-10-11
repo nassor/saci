@@ -38,15 +38,17 @@ out), `connector-tcp` and `connector-udp` are raw sockets, and `connector-saci`'
 another `saci-service`.
 HTTP, TCP, UDP and the peer link speak the network, and they qualify
 because they are generic primitives tied to no server product. Every connector that needs a
-specific broker, database or object store running first is opt-in instead: `connector-postgresql`,
-`connector-nats`, `connector-s3`, `connector-kafka` and `connector-turso`. `connector-kafka` stays
+specific broker, database, object store or OTLP endpoint running first is opt-in instead:
+`connector-postgresql`,
+`connector-nats`, `connector-s3`, `connector-kafka`, `connector-turso`, `connector-clickhouse` and
+`connector-opentelemetry`. `connector-kafka` stays
 opt-in because `librdkafka-sys` builds vendored C and needs `cmake` plus a C toolchain;
 `connector-turso` stays opt-in because its synced mode pulls hyper and rustls; `distributed-raft`
 and `service-cluster` stay opt-in because a cluster node is a deliberate deployment choice.
 
-- `connector-channel`, `connector-file`, `connector-http`, `connector-kafka`, `connector-nats`,
-  `connector-postgresql`, `connector-redb`, `connector-s3`, `connector-saci`, `connector-tcp`,
-  `connector-turso`, `connector-udp`:
+- `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
+  `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
+  `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
   one per connector
   crate. Each pulls
   the crate in and registers its factories in `register_builtin_factories` (each implies
@@ -99,9 +101,10 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
 - `service-cluster`: cluster/Raft mode on top of `service` (implies `service`, `distributed-raft`).
   A cluster node keeps its state under `node.data_dir`, so a cluster binary needs no other
   feature: `--features service-cluster`.
-- `all`: every capability this crate carries, including all five opt-in connectors, the native
+- `all`: every capability this crate carries, including all seven opt-in connectors, the native
   plugin host and a Raft cluster node (`connector-postgresql`, `connector-nats`, `connector-s3`,
-  `connector-kafka`, `connector-turso`, `plugin`, `service-cluster`, on top of the default
+  `connector-kafka`, `connector-turso`, `connector-clickhouse`, `connector-opentelemetry`, `plugin`,
+  `service-cluster`, on top of the default
   bundle). Excludes `conformance`: that feature turns on `arrow-ipc/lz4` so the corpus generator
   can write a compressed record batch, which the wire format otherwise rejects, so it is the
   corpus generator's own switch rather than a capability of the service.

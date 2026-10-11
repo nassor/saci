@@ -41,7 +41,6 @@ workflow "analytics" {
             connection {
                 url "${SACI_CLICKHOUSE_URL:-http://localhost:8123}"
                 database "default"
-                connect_timeout_ms 5000
                 query_timeout_ms 30000
                 compression "lz4"
             }
@@ -70,7 +69,6 @@ workflow "analytics" {
             connection {
                 url "${SACI_CLICKHOUSE_URL:-http://localhost:8123}"
                 database "default"
-                connect_timeout_ms 5000
                 query_timeout_ms 30000
                 compression "lz4"
             }

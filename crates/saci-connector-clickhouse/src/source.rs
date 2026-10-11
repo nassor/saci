@@ -3,9 +3,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use arrow_array::temporal_conversions::{
+    date32_to_datetime, date64_to_datetime, timestamp_ms_to_datetime, timestamp_us_to_datetime,
+};
 use arrow_array::*;
 use arrow_cast::CastOptions;
-use arrow_schema::{DataType, Schema, TimeUnit};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use async_trait::async_trait;
 use saci_core::error::SaciError;
 use saci_core::io::cast_batch;
@@ -19,6 +22,10 @@ use crate::connection::{build_client, format_cursor_value, quote_identifier, quo
 enum SourceState {
     Polling {
         current_cursor: Option<String>,
+        /// The tiebreak value of the last row the previous batch delivered,
+        /// `None` until one has. It resumes polling inside a cursor value that
+        /// a batch boundary fell through.
+        current_tiebreak: Option<String>,
         exhausted: bool,
     },
     Dump {
@@ -64,6 +71,7 @@ impl ClickhouseSource {
         let state = match &config.mode {
             SourceMode::Polling(poll) => SourceState::Polling {
                 current_cursor: poll.initial_cursor.clone(),
+                current_tiebreak: None,
                 exhausted: false,
             },
             SourceMode::Dump(_) => SourceState::Dump {
@@ -89,6 +97,7 @@ impl ClickhouseSource {
         match &mut self.state {
             SourceState::Polling {
                 current_cursor,
+                current_tiebreak,
                 exhausted,
             } => {
                 if *exhausted {
@@ -126,13 +135,30 @@ impl ClickhouseSource {
                     let quoted_col = quote_identifier(&poll.cursor_column);
                     let formatted_val = format_cursor_value(cursor, cursor_ty);
 
-                    if let Some(tie) = &poll.tiebreak_column {
-                        let quoted_tie = quote_identifier(tie);
-                        sql.push_str(&format!(
-                            " WHERE ({quoted_col} > {formatted_val} OR ({quoted_col} = {formatted_val} AND {quoted_tie} > 0))"
-                        ));
-                    } else {
-                        sql.push_str(&format!(" WHERE {quoted_col} > {formatted_val}"));
+                    // The tiebreak widens the filter to the cursor's own value
+                    // only once a previous batch fixed its position there. With
+                    // just a starting cursor there is no tiebreak to resume
+                    // from, so rows at the cursor value stay behind.
+                    match (&poll.tiebreak_column, current_tiebreak.as_deref()) {
+                        (Some(tie), Some(tie_val)) => {
+                            let tie_ty = self
+                                .config
+                                .schema_fields
+                                .iter()
+                                .find(|f| f.name == *tie)
+                                .map(|f| f.ty)
+                                .ok_or_else(|| {
+                                    SaciError::configuration(format!(
+                                        "tiebreak column '{tie}' missing from schema"
+                                    ))
+                                })?;
+                            let quoted_tie = quote_identifier(tie);
+                            let formatted_tie = format_cursor_value(tie_val, tie_ty);
+                            sql.push_str(&format!(
+                                " WHERE ({quoted_col} > {formatted_val} OR ({quoted_col} = {formatted_val} AND {quoted_tie} > {formatted_tie}))"
+                            ));
+                        }
+                        _ => sql.push_str(&format!(" WHERE {quoted_col} > {formatted_val}")),
                     }
                 }
 
@@ -174,8 +200,16 @@ impl ClickhouseSource {
                                     poll.cursor_column
                                 ))
                             })?;
-                    let last_val = scalar_to_string(cursor_col, last_batch.num_rows() - 1)?;
+                    let last_row = last_batch.num_rows() - 1;
+                    let last_val = scalar_to_string(cursor_col, last_row)?;
                     *current_cursor = Some(last_val);
+
+                    if let Some(tie) = &poll.tiebreak_column {
+                        let tie_col = last_batch.column_by_name(tie).ok_or_else(|| {
+                            SaciError::generic(format!("batch missing tiebreak column '{tie}'"))
+                        })?;
+                        *current_tiebreak = Some(scalar_to_string(tie_col, last_row)?);
+                    }
                 }
 
                 if total_rows < self.batch_rows {
@@ -321,10 +355,71 @@ fn decode_arrow_stream(bytes: &[u8], schema: &Arc<Schema>) -> Result<Vec<RecordB
         let batch = batch_res.map_err(|e| {
             SaciError::generic(format!("clickhouse source: stream decode error: {e}"))
         })?;
-        let casted = cast_batch(&batch, schema, &CastOptions::default())?;
+        let widened = widen_dates(&batch, schema)?;
+        let source = widened.as_ref().unwrap_or(&batch);
+        let casted = cast_batch(source, schema, &CastOptions::default())?;
         batches.push(casted);
     }
     Ok(batches)
+}
+
+/// Widens a ClickHouse `Date` column from the `UInt16` day count ArrowStream
+/// sends to `Int32`, which is what the cast to a declared `Date32`/`Date64`
+/// takes; `UInt16` to a date type is not a cast `arrow-cast` offers.
+///
+/// `None` when no column needs it, so a batch whose server types already match
+/// the declared date types is handed on untouched.
+fn widen_dates(batch: &RecordBatch, target: &Schema) -> Result<Option<RecordBatch>, SaciError> {
+    if batch.num_columns() != target.fields().len() {
+        return Ok(None);
+    }
+
+    let needs_widening =
+        batch
+            .columns()
+            .iter()
+            .zip(target.fields())
+            .any(|(column, destination)| {
+                matches!(destination.data_type(), DataType::Date32 | DataType::Date64)
+                    && column.data_type() == &DataType::UInt16
+            });
+    if !needs_widening {
+        return Ok(None);
+    }
+
+    let mut fields = Vec::with_capacity(batch.num_columns());
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
+
+    for ((column, source), destination) in batch
+        .columns()
+        .iter()
+        .zip(batch.schema().fields())
+        .zip(target.fields())
+    {
+        let declared_date = matches!(destination.data_type(), DataType::Date32 | DataType::Date64);
+        if declared_date && column.data_type() == &DataType::UInt16 {
+            let cast = arrow_cast::cast(column, &DataType::Int32).map_err(|e| {
+                SaciError::generic(format!("clickhouse source: date widening error: {e}"))
+            })?;
+            columns.push(cast);
+            fields.push(Field::new(
+                source.name(),
+                DataType::Int32,
+                source.is_nullable(),
+            ));
+        } else {
+            columns.push(Arc::clone(column));
+            fields.push(source.as_ref().clone());
+        }
+    }
+
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+        .map(Some)
+        .map_err(|e| {
+            SaciError::generic(format!(
+                "clickhouse source: date widening rebuild error: {e}"
+            ))
+        })
 }
 
 /// Extracts a scalar value at index `row` as a string for cursor comparison.
@@ -406,30 +501,50 @@ fn scalar_to_string(array: &ArrayRef, row: usize) -> Result<String, SaciError> {
             .expect("downcast LargeStringArray")
             .value(row)
             .to_string(),
-        DataType::Date32 => array
-            .as_any()
-            .downcast_ref::<Date32Array>()
-            .expect("downcast Date32Array")
-            .value(row)
-            .to_string(),
-        DataType::Date64 => array
-            .as_any()
-            .downcast_ref::<Date64Array>()
-            .expect("downcast Date64Array")
-            .value(row)
-            .to_string(),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("downcast TimestampMicrosecondArray")
-            .value(row)
-            .to_string(),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("downcast TimestampMillisecondArray")
-            .value(row)
-            .to_string(),
+        // A temporal cursor is compared as a ClickHouse `Date`/`DateTime64`
+        // literal, which parses `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` and refuses
+        // the raw integer (`Cannot parse date`), so the value goes out as the
+        // datetime ClickHouse reads back.
+        DataType::Date32 => date32_to_datetime(
+            array
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .expect("downcast Date32Array")
+                .value(row),
+        )
+        .ok_or_else(|| SaciError::generic("cursor date is outside the representable range"))?
+        .format("%Y-%m-%d")
+        .to_string(),
+        DataType::Date64 => date64_to_datetime(
+            array
+                .as_any()
+                .downcast_ref::<Date64Array>()
+                .expect("downcast Date64Array")
+                .value(row),
+        )
+        .ok_or_else(|| SaciError::generic("cursor date is outside the representable range"))?
+        .format("%Y-%m-%d")
+        .to_string(),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => timestamp_us_to_datetime(
+            array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("downcast TimestampMicrosecondArray")
+                .value(row),
+        )
+        .ok_or_else(|| SaciError::generic("cursor timestamp is outside the representable range"))?
+        .format("%Y-%m-%d %H:%M:%S%.6f")
+        .to_string(),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => timestamp_ms_to_datetime(
+            array
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("downcast TimestampMillisecondArray")
+                .value(row),
+        )
+        .ok_or_else(|| SaciError::generic("cursor timestamp is outside the representable range"))?
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string(),
         DataType::Decimal128(_, scale) => {
             let v = array
                 .as_any()
@@ -553,17 +668,25 @@ mod tests {
         let large_str_arr: ArrayRef = Arc::new(LargeStringArray::from(vec!["hello"]));
         assert_eq!(scalar_to_string(&large_str_arr, 0).unwrap(), "hello");
 
+        // Temporal values are the ClickHouse datetime literal, not the raw
+        // epoch integer: `Date > '18000'` is a parse error server-side.
         let d32_arr: ArrayRef = Arc::new(Date32Array::from(vec![18000]));
-        assert_eq!(scalar_to_string(&d32_arr, 0).unwrap(), "18000");
+        assert_eq!(scalar_to_string(&d32_arr, 0).unwrap(), "2019-04-14");
 
         let d64_arr: ArrayRef = Arc::new(Date64Array::from(vec![1500000000000]));
-        assert_eq!(scalar_to_string(&d64_arr, 0).unwrap(), "1500000000000");
+        assert_eq!(scalar_to_string(&d64_arr, 0).unwrap(), "2017-07-14");
 
         let ts_micros: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![1600000000000000]));
-        assert_eq!(scalar_to_string(&ts_micros, 0).unwrap(), "1600000000000000");
+        assert_eq!(
+            scalar_to_string(&ts_micros, 0).unwrap(),
+            "2020-09-13 12:26:40.000000"
+        );
 
         let ts_millis: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1600000000000]));
-        assert_eq!(scalar_to_string(&ts_millis, 0).unwrap(), "1600000000000");
+        assert_eq!(
+            scalar_to_string(&ts_millis, 0).unwrap(),
+            "2020-09-13 12:26:40.000"
+        );
 
         let dec_arr: ArrayRef = Arc::new(
             Decimal128Array::from(vec![12345])
@@ -604,7 +727,6 @@ mod tests {
                 user: None,
                 password: None,
                 database: "default".to_string(),
-                connect_timeout_ms: 5000,
                 query_timeout_ms: 30000,
                 compression: crate::config::CompressionConfig::None,
                 settings: HashMap::new(),
@@ -640,5 +762,52 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let result = decode_arrow_stream(b"not an arrow ipc stream", &schema);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn widen_dates_bridges_a_uint16_date_column() {
+        let batch_schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::UInt16, false),
+            Field::new("id", DataType::UInt64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&batch_schema),
+            vec![
+                Arc::new(UInt16Array::from(vec![18262, 18263])),
+                Arc::new(UInt64Array::from(vec![1, 2])),
+            ],
+        )
+        .expect("batch");
+
+        let target = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Date32, false),
+            Field::new("id", DataType::UInt64, false),
+        ]));
+
+        let widened = widen_dates(&batch, &target)
+            .expect("widening succeeds")
+            .expect("a UInt16 date column is widened");
+        assert_eq!(widened.column(0).data_type(), &DataType::Int32);
+
+        let casted =
+            cast_batch(&widened, &target, &CastOptions::default()).expect("casts to Date32");
+        assert_eq!(casted.column(0).data_type(), &DataType::Date32);
+        let dates = casted
+            .column(0)
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .expect("date32 column");
+        assert_eq!(dates.value(0), 18262);
+
+        // No bare `Date` column: the batch is handed on untouched.
+        let undated = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::UInt16, false),
+            Field::new("id", DataType::UInt64, false),
+        ]));
+        assert!(
+            widen_dates(&batch, &undated)
+                .expect("no widening needed")
+                .is_none()
+        );
     }
 }

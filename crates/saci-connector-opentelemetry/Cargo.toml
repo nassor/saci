@@ -1,0 +1,63 @@
+[package]
+name = "saci-connector-opentelemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "OpenTelemetry metrics Source and Sink for SACI: OTLP/HTTP metric ingestion (push and pull) and export, Protobuf or JSON, flattened to Arrow RecordBatches."
+
+[features]
+tracing = ["dep:tracing", "saci-core/tracing"]
+
+[dependencies]
+saci-core      = { workspace = true, features = ["io"] }
+saci-connector = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+# A `bytesValue` attribute is base64 inside the JSON form of `attributes`, at
+# the version `saci-service` already pins, and the same audited decoder the
+# plugin host reads a manifest's schema bytes with.
+base64        = { version = "0.23.1" }
+bytes         = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+# `net` carries the listener the push mode binds and the pull mode's client
+# sockets; `sync` the ingest channel; `time` the pull interval.
+tokio         = { workspace = true, features = ["net"] }
+
+# OTLP messages and their prost/JSON encodings. See the workspace entry for
+# why the feature set is what it is.
+opentelemetry-proto = { workspace = true }
+prost               = { workspace = true }
+
+# The push listener: `serde_json` above decodes the JSON encoding, `prost` the
+# protobuf one, and these four carry the HTTP request itself. `server-auto`
+# sniffs the HTTP/2 connection preface, so h2c prior knowledge and HTTP/1.1
+# share one listener, which is what an OTLP/HTTP exporter picks between.
+http             = { version = "1" }
+http-body-util   = { version = "0.1" }
+hyper            = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util       = { version = "0.1", features = ["server-auto", "tokio"] }
+
+# The pull mode's client and the sink's exporter, at the version `saci-service`
+# already pins so the two share one tree.
+#
+# `rustls-no-provider` is the only TLS feature in that release which does not
+# pull `aws-lc-rs`, so the provider is installed from `rustls` below before any
+# client is built. `gzip`, `brotli`, `zstd` and `deflate` make the request's
+# `accept-encoding` and the response's transparent decoding automatic: an
+# OTLP/HTTP collector is free to compress its answer, and the source reads one
+# either way.
+reqwest       = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "http2", "gzip", "brotli", "zstd", "deflate"] }
+# `ring` is the backend the rest of the workspace links (saci-connector-http,
+# saci-connector-postgresql, saci-service's own client).
+rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Constant-time comparison for the push mode's bearer token.
+subtle        = { version = "2" }
+
+tracing       = { workspace = true, optional = true }

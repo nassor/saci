@@ -46,7 +46,6 @@ async fn clickhouse_roundtrip_sink_and_source() {
         user: None,
         password: None,
         database: "default".to_string(),
-        connect_timeout_ms: 5000,
         query_timeout_ms: 30000,
         compression: CompressionConfig::Lz4,
         settings: HashMap::new(),
@@ -224,7 +223,6 @@ async fn clickhouse_types_roundtrip() {
         user: None,
         password: None,
         database: "default".to_string(),
-        connect_timeout_ms: 5000,
         query_timeout_ms: 30000,
         compression: CompressionConfig::None,
         settings: HashMap::new(),
@@ -457,7 +455,6 @@ async fn clickhouse_polling_with_tiebreak_and_initial_cursor() {
         user: None,
         password: None,
         database: "default".to_string(),
-        connect_timeout_ms: 5000,
         query_timeout_ms: 30000,
         compression: CompressionConfig::None,
         settings: HashMap::new(),
@@ -554,7 +551,6 @@ async fn clickhouse_sink_buffering_and_truncate() {
         user: None,
         password: None,
         database: "default".to_string(),
-        connect_timeout_ms: 5000,
         query_timeout_ms: 30000,
         compression: CompressionConfig::None,
         settings: HashMap::new(),
@@ -665,7 +661,6 @@ async fn clickhouse_source_batch_size_and_limits() {
         user: None,
         password: None,
         database: "default".to_string(),
-        connect_timeout_ms: 5000,
         query_timeout_ms: 30000,
         compression: CompressionConfig::None,
         settings: HashMap::new(),
@@ -705,4 +700,396 @@ async fn clickhouse_source_batch_size_and_limits() {
     assert_eq!(b3.num_rows(), 5);
     let cycle2_end = source.next_batch().await.expect("cycle2 end");
     assert!(cycle2_end.is_none(), "table exhausted, returns None");
+}
+
+#[tokio::test]
+async fn clickhouse_sink_chunks_a_write_larger_than_chunk_rows() {
+    let Some(ch) = common::try_start().await else {
+        return;
+    };
+
+    let client = ch.client();
+    let table = "test_sink_chunk_rows";
+
+    client
+        .query(&format!(
+            "CREATE TABLE IF NOT EXISTS {table} (
+                id UInt64,
+                val String
+            ) ENGINE = MergeTree ORDER BY id"
+        ))
+        .execute()
+        .await
+        .expect("table created");
+
+    let conn_cfg = ClickhouseConnectionConfig {
+        url: ch.url.clone(),
+        user: None,
+        password: None,
+        database: "default".to_string(),
+        query_timeout_ms: 30000,
+        compression: CompressionConfig::None,
+        settings: HashMap::new(),
+    };
+
+    let schema_fields = vec![
+        FieldSpec {
+            name: "id".into(),
+            ty: ClickhouseFieldType::UInt64,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+        FieldSpec {
+            name: "val".into(),
+            ty: ClickhouseFieldType::Utf8,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+    ];
+
+    let arrow_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::UInt64, false),
+        Field::new("val", DataType::Utf8, false),
+    ]));
+
+    // `flush_rows 0` flushes on the first write, so the single 10-row batch is
+    // split by `chunk_rows 3` into 3 + 3 + 3 + 1 INSERTs before it lands.
+    let sink_cfg = ClickhouseSinkConfig {
+        name: "chunked_sink".into(),
+        connection: conn_cfg.clone(),
+        table: table.into(),
+        schema_fields: schema_fields.clone(),
+        write_mode: WriteMode::Append,
+        chunk_rows: 3,
+        flush_rows: 0,
+        truncate_before_first_write: true,
+    };
+
+    let mut sink = ClickhouseSink::new(sink_cfg).expect("creates sink");
+    let batch = RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            Arc::new(UInt64Array::from((1..=10).collect::<Vec<u64>>())),
+            Arc::new(StringArray::from(
+                (1..=10).map(|i| format!("v{i}")).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .expect("batch");
+
+    sink.write_batch(&batch).await.expect("writes batch");
+    sink.finish().await.expect("finishes");
+
+    let source_cfg = ClickhouseSourceConfig {
+        name: "chunk_verify".into(),
+        connection: conn_cfg,
+        mode: SourceMode::Dump(DumpMode {
+            table: table.into(),
+        }),
+        schema_fields,
+        batch_rows: 100,
+        max_batches_per_cycle: 0,
+    };
+
+    let mut source = ClickhouseSource::new(source_cfg).expect("creates source");
+    let mut total = 0usize;
+    while let Some(batch) = source.next_batch().await.expect("reads batch") {
+        total += batch.num_rows();
+    }
+    assert_eq!(
+        total, 10,
+        "every row lands exactly once across the chunked inserts"
+    );
+}
+
+#[tokio::test]
+async fn clickhouse_polling_resumes_a_timestamp_cursor_across_batches() {
+    let Some(ch) = common::try_start().await else {
+        return;
+    };
+
+    let client = ch.client();
+    let table = "test_polling_timestamp_cursor";
+
+    client
+        .query(&format!(
+            "CREATE TABLE IF NOT EXISTS {table} (
+                ts DateTime64(3),
+                id UInt64
+            ) ENGINE = MergeTree ORDER BY (ts, id)"
+        ))
+        .execute()
+        .await
+        .expect("table created");
+
+    client
+        .query(&format!(
+            "INSERT INTO {table} (ts, id) VALUES
+                ('2020-01-01 00:00:00', 1),
+                ('2020-01-02 00:00:00', 2),
+                ('2020-01-03 00:00:00', 3),
+                ('2020-01-04 00:00:00', 4)"
+        ))
+        .execute()
+        .await
+        .expect("seed data");
+
+    let conn_cfg = ClickhouseConnectionConfig {
+        url: ch.url.clone(),
+        user: None,
+        password: None,
+        database: "default".to_string(),
+        query_timeout_ms: 30000,
+        compression: CompressionConfig::None,
+        settings: HashMap::new(),
+    };
+
+    let schema_fields = vec![
+        FieldSpec {
+            name: "ts".into(),
+            ty: ClickhouseFieldType::TimestampMillis,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+        FieldSpec {
+            name: "id".into(),
+            ty: ClickhouseFieldType::UInt64,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+    ];
+
+    // `batch_rows 2` over three matching rows forces a second poll whose cursor
+    // comes from the first batch rather than the config. A raw epoch integer
+    // there is read by ClickHouse as micros, so a millisecond cursor re-reads
+    // from 1970: this is the regression the datetime literal pins.
+    let source_cfg = ClickhouseSourceConfig {
+        name: "timestamp_cursor_source".into(),
+        connection: conn_cfg,
+        mode: SourceMode::Polling(PollingMode {
+            table: table.into(),
+            cursor_column: "ts".into(),
+            initial_cursor: Some("2020-01-01 00:00:00".into()),
+            tiebreak_column: None,
+        }),
+        schema_fields,
+        batch_rows: 2,
+        max_batches_per_cycle: 0,
+    };
+
+    let mut source = ClickhouseSource::new(source_cfg).expect("creates source");
+    let mut ids: Vec<u64> = Vec::new();
+    while let Some(batch) = source.next_batch().await.expect("reads batch") {
+        let id_col = batch
+            .column_by_name("id")
+            .expect("id column")
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("uint64 id");
+        ids.extend((0..batch.num_rows()).map(|i| id_col.value(i)));
+    }
+    assert_eq!(
+        ids,
+        vec![2, 3, 4],
+        "every poll resumes from the datetime cursor, not the raw epoch integer"
+    );
+}
+
+#[tokio::test]
+async fn clickhouse_polling_resumes_a_date_cursor_across_batches() {
+    let Some(ch) = common::try_start().await else {
+        return;
+    };
+
+    let client = ch.client();
+    let table = "test_polling_date_cursor";
+
+    client
+        .query(&format!(
+            "CREATE TABLE IF NOT EXISTS {table} (
+                d Date,
+                id UInt64
+            ) ENGINE = MergeTree ORDER BY (d, id)"
+        ))
+        .execute()
+        .await
+        .expect("table created");
+
+    client
+        .query(&format!(
+            "INSERT INTO {table} (d, id) VALUES
+                ('2020-01-01', 1),
+                ('2020-01-02', 2),
+                ('2020-01-03', 3)"
+        ))
+        .execute()
+        .await
+        .expect("seed data");
+
+    let conn_cfg = ClickhouseConnectionConfig {
+        url: ch.url.clone(),
+        user: None,
+        password: None,
+        database: "default".to_string(),
+        query_timeout_ms: 30000,
+        compression: CompressionConfig::None,
+        settings: HashMap::new(),
+    };
+
+    let schema_fields = vec![
+        FieldSpec {
+            name: "d".into(),
+            ty: ClickhouseFieldType::Date32,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+        FieldSpec {
+            name: "id".into(),
+            ty: ClickhouseFieldType::UInt64,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+    ];
+
+    // A `Date` cursor as a raw day count (`'18262'`) is a server-side parse
+    // error, so every poll after the first needs the date literal.
+    let source_cfg = ClickhouseSourceConfig {
+        name: "date_cursor_source".into(),
+        connection: conn_cfg,
+        mode: SourceMode::Polling(PollingMode {
+            table: table.into(),
+            cursor_column: "d".into(),
+            initial_cursor: Some("2020-01-01".into()),
+            tiebreak_column: None,
+        }),
+        schema_fields,
+        batch_rows: 1,
+        max_batches_per_cycle: 0,
+    };
+
+    let mut source = ClickhouseSource::new(source_cfg).expect("creates source");
+    let mut ids: Vec<u64> = Vec::new();
+    while let Some(batch) = source.next_batch().await.expect("reads batch") {
+        let id_col = batch
+            .column_by_name("id")
+            .expect("id column")
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("uint64 id");
+        ids.extend((0..batch.num_rows()).map(|i| id_col.value(i)));
+    }
+    assert_eq!(ids, vec![2, 3], "every poll resumes from the date literal");
+}
+
+#[tokio::test]
+async fn clickhouse_date_column_round_trips() {
+    let Some(ch) = common::try_start().await else {
+        return;
+    };
+
+    let client = ch.client();
+    let table = "test_date_column";
+
+    client
+        .query(&format!(
+            "CREATE TABLE IF NOT EXISTS {table} (
+                d Date,
+                id UInt64
+            ) ENGINE = MergeTree ORDER BY id"
+        ))
+        .execute()
+        .await
+        .expect("table created");
+
+    let conn_cfg = ClickhouseConnectionConfig {
+        url: ch.url.clone(),
+        user: None,
+        password: None,
+        database: "default".to_string(),
+        query_timeout_ms: 30000,
+        compression: CompressionConfig::None,
+        settings: HashMap::new(),
+    };
+
+    let schema_fields = vec![
+        FieldSpec {
+            name: "d".into(),
+            ty: ClickhouseFieldType::Date32,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+        FieldSpec {
+            name: "id".into(),
+            ty: ClickhouseFieldType::UInt64,
+            nullable: false,
+            precision: None,
+            scale: None,
+        },
+    ];
+
+    let arrow_schema = Arc::new(Schema::new(vec![
+        Field::new("d", DataType::Date32, false),
+        Field::new("id", DataType::UInt64, false),
+    ]));
+
+    let sink_cfg = ClickhouseSinkConfig {
+        name: "date_sink".into(),
+        connection: conn_cfg.clone(),
+        table: table.into(),
+        schema_fields: schema_fields.clone(),
+        write_mode: WriteMode::Append,
+        chunk_rows: 1000,
+        flush_rows: 0,
+        truncate_before_first_write: true,
+    };
+
+    let mut sink = ClickhouseSink::new(sink_cfg).expect("creates sink");
+    let batch = RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            Arc::new(Date32Array::from(vec![18262, 18263])),
+            Arc::new(UInt64Array::from(vec![1, 2])),
+        ],
+    )
+    .expect("batch");
+
+    sink.write_batch(&batch)
+        .await
+        .expect("writes a Date column");
+    sink.finish().await.expect("finishes");
+
+    // ArrowStream sends the column back as `UInt16`; the source widens it to the
+    // declared `date32`.
+    let source_cfg = ClickhouseSourceConfig {
+        name: "date_source".into(),
+        connection: conn_cfg,
+        mode: SourceMode::Dump(DumpMode {
+            table: table.into(),
+        }),
+        schema_fields,
+        batch_rows: 100,
+        max_batches_per_cycle: 0,
+    };
+
+    let mut source = ClickhouseSource::new(source_cfg).expect("creates source");
+    let read_batch = source
+        .next_batch()
+        .await
+        .expect("reads batch")
+        .expect("has batch");
+    assert_eq!(read_batch.num_rows(), 2);
+    let dates = read_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Date32Array>()
+        .expect("date32 column");
+    assert_eq!(dates.value(0), 18262);
+    assert_eq!(dates.value(1), 18263);
 }

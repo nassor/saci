@@ -31,6 +31,14 @@ pub fn build_client(config: &ClickhouseConnectionConfig) -> Result<clickhouse::C
         }
     }
 
+    // ClickHouse compresses an `ArrowStream` result with LZ4 by default
+    // (`output_format_arrow_compression_method = lz4_frame`), which this crate's
+    // `arrow-ipc` dependency cannot decode: `arrow-ipc/lz4` is enabled only
+    // under the `conformance` feature, so a normal build refuses a compressed
+    // batch by design. Ask for the uncompressed stream instead. A user setting
+    // of the same name still wins, because it is applied after.
+    client = client.with_setting("output_format_arrow_compression_method", "none");
+
     for (k, v) in &config.settings {
         client = client.with_setting(k, v);
     }
@@ -145,7 +153,6 @@ mod tests {
             user: Some("admin".to_string()),
             password: Some("s3cret".to_string()),
             database: "analytics".to_string(),
-            connect_timeout_ms: 10_000,
             query_timeout_ms: 60_000,
             compression: CompressionConfig::None,
             settings,
@@ -162,7 +169,6 @@ mod tests {
             user: None,
             password: None,
             database: "default".to_string(),
-            connect_timeout_ms: 5000,
             query_timeout_ms: 30000,
             compression: CompressionConfig::Lz4,
             settings: HashMap::new(),

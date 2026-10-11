@@ -12,9 +12,9 @@
 
 use std::time::{Duration, Instant};
 
-use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage};
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 /// A running ClickHouse container plus its HTTP URL.
 pub struct ChContainer {
@@ -42,16 +42,28 @@ pub async fn try_start() -> Option<ChContainer> {
 }
 
 async fn start() -> anyhow::Result<ChContainer> {
+    // The image pins the `default` user to `127.0.0.1`/`::1` unless a
+    // user/password or access management is configured, and a published port
+    // reaches the container from the gateway, so the connection below would be
+    // refused with `AUTHENTICATION_FAILED`. Setting access management opens
+    // `<ip>::/0</ip>` and needs no password.
+    //
+    // No log wait either: ClickHouse writes `Ready for connections` to a file
+    // inside the container, not to its stdout or stderr, so a log-wait strategy
+    // here would time out with the server already up. The `SELECT 1` loop below
+    // is the readiness gate instead.
     let image = GenericImage::new("clickhouse/clickhouse-server", "24.8-alpine")
         .with_exposed_port(8123_u16.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Ready for connections"));
+        .with_env_var("CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", "1");
 
     let container = image.start().await?;
     let port = container.get_host_port_ipv4(8123_u16.tcp()).await?;
     let url = format!("http://127.0.0.1:{port}");
 
     let client = clickhouse::Client::default().with_url(&url);
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // Wider than a light container's: ClickHouse is the largest of the images
+    // and the slowest to answer a query on a cold, loaded runner.
+    let deadline = Instant::now() + Duration::from_secs(120);
     let mut last_err = None;
 
     while Instant::now() < deadline {
