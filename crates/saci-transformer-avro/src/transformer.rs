@@ -239,6 +239,14 @@ impl BatchWriter for AvroBatchWriter {
             .map_err(|e| SaciError::generic(format!("avro: write error: {e}")))
     }
 
+    fn flush(&mut self) -> Result<(), SaciError> {
+        // `finish` here is only `BufWriter::flush`; the container has no
+        // trailer.
+        self.writer
+            .finish()
+            .map_err(|e| SaciError::generic(format!("avro: flush error: {e}")))
+    }
+
     fn finish(mut self: Box<Self>) -> Result<(), SaciError> {
         // The container header went out at open; `finish` only flushes, and
         // `BufWriter::flush` carries the last block down to the handle.

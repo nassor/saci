@@ -83,6 +83,17 @@ workflow holding one as `restartable: false`.
   `ChannelRegistry` is the name-keyed `ChannelBridge` pairing a sink in one workflow with a source
   in another.
 - `saci-connector-file`: `FileSource`, `FileSink`, local-file IO, format from a transformer.
+  `FileSink` makes `write_batch` exactly-once under `RetryingSink` and cancellation: it records
+  the file length before each batch (`pending`), flushes (`BatchWriter::flush`) and syncs, and on
+  any failure, or at the top of the next call after a dropped future, drops the writer and cuts
+  the file back (`recover`). It reopens a writer when no batch has landed (cut to the batch's
+  start; `plan` refuses instead if the writer wrote through the handle at open, `writer_base`) or
+  the writer is `restartable()` (ndjson, csv without a header); otherwise
+  (csv with a header, avro, arrow-ipc, parquet) it refuses every later call. The writer's handle
+  stays `append`; the cut uses a second `write(true)` handle (Windows denies `set_len` on an
+  append-only one). Writers write through `Counting`, and `recover` cuts only when the file length
+  equals the pre-batch length plus the bytes counted, else another process appended: it leaves the
+  file and refuses later calls. A failed `finish` also refuses later calls.
 - `saci-connector-http`: `HttpSource`, `HttpSink`, `HttpPushSource`: two halves that dial and one
   that listens, each decoded and encoded by a transformer. `http_version` picks `"auto"`, `"1.1"`,
   `"2"` or `"3"` per node. reqwest carries HTTP/1.1 and HTTP/2, a direct `h3`/`h3-quinn`/`quinn`

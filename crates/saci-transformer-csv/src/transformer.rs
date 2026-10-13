@@ -78,7 +78,10 @@ impl Transformer for CsvTransformer {
         let writer = WriterBuilder::new()
             .with_header(self.has_headers)
             .build(BufWriter::new(output));
-        Ok(Box::new(CsvBatchWriter { writer }))
+        Ok(Box::new(CsvBatchWriter {
+            writer,
+            has_headers: self.has_headers,
+        }))
     }
 
     /// Open a decoder for discrete payloads, one record apiece.
@@ -177,6 +180,9 @@ impl BatchReader for CsvBatchReader {
 
 struct CsvBatchWriter {
     writer: arrow_csv::Writer<BufWriter<Box<dyn Write + Send>>>,
+    /// The header line goes out with the first batch only, so a writer
+    /// reopened after that would not repeat it but a restarted one would.
+    has_headers: bool,
 }
 
 impl BatchWriter for CsvBatchWriter {
@@ -184,6 +190,15 @@ impl BatchWriter for CsvBatchWriter {
         self.writer
             .write(batch)
             .map_err(|e| SaciError::generic(format!("csv: write error: {e}")))
+    }
+
+    // `arrow_csv::Writer::write` flushes the buffer under it after every
+    // batch, so `flush` keeps its default.
+
+    /// A header line is written once per stream; without one, a CSV record
+    /// does not depend on what came before it.
+    fn restartable(&self) -> bool {
+        !self.has_headers
     }
 
     fn finish(self: Box<Self>) -> Result<(), SaciError> {

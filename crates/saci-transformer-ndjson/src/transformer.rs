@@ -171,6 +171,18 @@ impl BatchWriter for NdjsonBatchWriter {
             .map_err(|e| SaciError::generic(format!("ndjson: write error: {e}")))
     }
 
+    fn flush(&mut self) -> Result<(), SaciError> {
+        self.writer
+            .get_mut()
+            .flush()
+            .map_err(|e| SaciError::generic(format!("ndjson: flush error: {e}")))
+    }
+
+    /// Every line stands alone, so a new writer continues the file.
+    fn restartable(&self) -> bool {
+        true
+    }
+
     fn finish(mut self: Box<Self>) -> Result<(), SaciError> {
         self.writer
             .finish()

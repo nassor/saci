@@ -208,6 +208,32 @@ The output file is opened when the config is built, `validate` included. That is
 parent directory or a read-only path surfaces, rather than on the first batch. It also means
 `truncate #true` empties the file during `validate`, not only during `serve`.
 
+A batch that fails is taken back out of the file, so a retry writes it once. The sink records the
+file's length before each batch, flushes and syncs after it, and when the write, the flush or the
+sync fails it cuts the file back to that length, removing a whole batch that was written but not
+synced and any half-written record. A call dropped part way (a cancelled run) is undone the same
+way by the next call. What happens next depends on the format:
+
+| State when the batch fails | What the sink does |
+|---|---|
+| No batch has landed yet, any format | cuts the file back to where the batch started and opens a fresh writer, so the header, schema message or footer state is written once. No built-in format writes its header or magic number before the first batch, which is what makes this safe; a writer that did would be refused like the last row |
+| Earlier batches landed, `ndjson` or `csv` without headers | cuts back to the last whole batch and carries on |
+| Earlier batches landed, `csv` with headers, `avro`, `arrow-ipc` or `parquet` | cuts back to the last whole batch, then refuses every later `write_batch` and `finish` with an error saying the batch cannot be retried |
+
+The last row is a refusal rather than a retry because a new writer would repeat the header or the
+stream preamble, and the old one still holds the failed batch in its state. The file stays a valid
+prefix. If the cut itself fails, the call returns both errors and the next call tries the cut
+again before writing. A `finish` that fails also leaves the sink refusing, as the footer is
+incomplete.
+
+The writer's handle stays in append mode, so another process may append to the same file and its
+bytes land intact between your batches. The cut-back goes through a second handle opened for
+writing without append, because Windows will not shorten a file through an append-only handle. A
+cut would also remove bytes another process appended after the sink's own, so the sink counts the
+bytes it wrote and cuts only when the file is exactly as long as that count says. Otherwise it
+leaves the file alone, returns the batch's error, and refuses every later call with an error
+naming the other writer.
+
 ## Every key
 
 Source:

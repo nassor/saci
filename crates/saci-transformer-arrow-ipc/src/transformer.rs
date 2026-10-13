@@ -178,6 +178,12 @@ impl BatchWriter for ArrowIpcBatchWriter {
             .map_err(|e| SaciError::generic(format!("arrow-ipc: write error: {e}")))
     }
 
+    fn flush(&mut self) -> Result<(), SaciError> {
+        self.writer
+            .flush()
+            .map_err(|e| SaciError::generic(format!("arrow-ipc: flush error: {e}")))
+    }
+
     fn finish(mut self: Box<Self>) -> Result<(), SaciError> {
         // Writes the end-of-stream marker, then flushes the `BufWriter` down
         // to the handle. The flush is what makes this load-bearing: a

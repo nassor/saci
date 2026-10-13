@@ -10,6 +10,12 @@ description: Use when adding, changing, configuring, testing or documenting a SA
 `saci-transformer` holds the byte-format contract: `Transformer`, `BatchReader`, `BatchWriter`,
 `MessageDecoder`, `TransformerFactory`, `TransformerRegistry`.
 
+`BatchWriter` has two provided methods `FileSink` recovers a failed batch with: `flush` pushes the
+writer's buffers to the handle (ndjson, avro, arrow-ipc implement it; csv already flushes per
+batch; parquet keeps its row group until `finish`), and `restartable` says a fresh writer can
+continue a file that already holds batches (`true` for ndjson and csv without a header, `false`
+otherwise). A new writer implementation sets both.
+
 A connector moves bytes and a transformer turns bytes into `RecordBatch`es and back, so transport
 and format are separate crates. A byte-carrying source or sink node names a declared `transformer`
 node's id; `ServiceBuilder` resolves that node's `format` against the `TransformerRegistry` in
