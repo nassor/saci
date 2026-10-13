@@ -86,6 +86,9 @@ path = "@/service/connectors/nats.md"
 title = "PostgreSQL"
 path = "@/service/connectors/postgresql.md"
 [[extra.areas.nav.items.children]]
+title = "MariaDB"
+path = "@/service/connectors/mariadb.md"
+[[extra.areas.nav.items.children]]
 title = "Turso"
 path = "@/service/connectors/turso.md"
 [[extra.areas.nav.items.children]]

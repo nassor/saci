@@ -9,8 +9,8 @@
 //! named `live::<source>::<processor>::<format>`, each running its source
 //! against every sink, plus `live::maximal::workflow`. nextest runs every test
 //! in its own process, so the slices run in parallel; none of them starts a
-//! container. They read the Kafka, NATS, PostgreSQL, S3 and ClickHouse
-//! endpoints from the `SACI_MATRIX_*` variables `cargo xtask matrix` sets
+//! container. They read the Kafka, NATS, PostgreSQL, MariaDB and MySQL, S3 and
+//! ClickHouse endpoints from the `SACI_MATRIX_*` variables `cargo xtask matrix` sets
 //! after starting one container per resource for the whole run, and skip the
 //! cases that need a resource whose variable is unset.
 //!
@@ -35,6 +35,7 @@
     feature = "connector-nats",
     feature = "connector-opentelemetry",
     feature = "connector-postgresql",
+    feature = "connector-mariadb",
     feature = "connector-redb",
     feature = "connector-s3",
     feature = "connector-saci",
@@ -162,6 +163,7 @@ mod live {
             kafka => Kafka,
             nats => Nats,
             postgresql => Postgresql,
+            mariadb => Mariadb,
             clickhouse => Clickhouse,
             s3 => S3,
             turso => Turso,

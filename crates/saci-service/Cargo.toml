@@ -24,12 +24,13 @@ homepage.workspace = true
 # `--no-default-features` plus the features you want.
 #
 # HTTP, TCP and UDP speak the network, and they qualify because they are generic
-# primitives tied to no server product. `connector-kafka`, `connector-nats`,
-# `connector-postgresql`, `connector-s3` and `connector-turso` each need a
-# specific broker, database or object store installed and running first, and
-# `connector-kafka` also needs `cmake` and a C toolchain for vendored
-# librdkafka, so all five are opt-in. `distributed-raft` and `service-cluster`
-# stay opt-in too, because a cluster node is a deliberate deployment choice.
+# primitives tied to no server product. `connector-kafka`, `connector-mariadb`,
+# `connector-nats`, `connector-postgresql`, `connector-s3` and `connector-turso`
+# each need a specific broker, database or object store installed and running
+# first, and `connector-kafka` also needs `cmake` and a C toolchain for
+# vendored librdkafka, so all six are opt-in. `distributed-raft` and
+# `service-cluster` stay opt-in too, because a cluster node is a deliberate
+# deployment choice.
 default = [
     "mimalloc",
     "service",
@@ -80,6 +81,7 @@ all = [
     "connector-file",
     "connector-http",
     "connector-kafka",
+    "connector-mariadb",
     "connector-nats",
     "connector-opentelemetry",
     "connector-postgresql",
@@ -200,6 +202,14 @@ connector-postgresql = [
     "saci-connector-postgresql/metrics",
     "saci-connector-postgresql/tls",
 ]
+# MariaDB and MySQL servers share one connector crate.
+connector-mariadb = [
+    "service",
+    "dep:saci-connector-mariadb",
+    "saci-connector-mariadb/tracing",
+    "saci-connector-mariadb/metrics",
+    "saci-connector-mariadb/tls",
+]
 # ClickHouse speaks native ArrowStream over HTTP.
 connector-clickhouse = [
     "service",
@@ -271,6 +281,7 @@ saci-connector-clickhouse = { workspace = true, optional = true }
 saci-connector-file = { workspace = true, optional = true }
 saci-connector-http = { workspace = true, optional = true }
 saci-connector-kafka = { workspace = true, optional = true }
+saci-connector-mariadb = { workspace = true, optional = true }
 saci-connector-nats = { workspace = true, optional = true }
 saci-connector-opentelemetry = { workspace = true, optional = true }
 saci-connector-postgresql = { workspace = true, optional = true }
@@ -526,6 +537,8 @@ reqwest       = { version = "0.13.4", default-features = false, features = ["jso
 testcontainers = "0.28"
 # Only the postgres integration tests use this, to seed and read back fixtures.
 tokio-postgres = "0.7.18"
+# Only the MariaDB integration tests and the connector matrix use this, to seed and read back fixtures.
+mysql_async = { workspace = true }
 # Only tests/kafka_service.rs uses this directly, to poll broker readiness.
 rdkafka        = { version = "0.39", features = ["cmake-build"] }
 # Only tests/nats_service.rs uses this directly, to poll server readiness.

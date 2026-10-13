@@ -1,20 +1,20 @@
 +++
 title = "Sources and sinks"
-description = "Fourteen transports a workflow can read from and write to, one page each, with the config node they accept."
+description = "Fifteen transports a workflow can read from and write to, one page each, with the config node they accept."
 template = "section.html"
 sort_by = "weight"
 weight = 4
 aliases = ["/connectors/"]
 +++
 
-A workflow reads rows through a `source` node and writes them through a `sink` node. Fourteen
+A workflow reads rows through a `source` node and writes them through a `sink` node. Fifteen
 transports ship with `saci-service`, and the pages below walk each one from an empty config file to a
 running pipeline.
 
 <div class="dgm animate-in">
-    <div class="dgm-scroll"><svg viewBox="0 0 1465 168" role="img" aria-labelledby="cx-t cx-d">
-        <title id="cx-t">The fourteen transports a workflow can name on a source or a sink node</title>
-        <desc id="cx-d">Fourteen boxes across the top name the transports: file, http, kafka, nats, postgres, turso, clickhouse, redb, s3, tcp, udp, saci, opentelemetry and channel. Each one drops into a shared line, and that line feeds a single workflow box below. One workflow may name any mix of them, one node per source or sink.</desc>
+    <div class="dgm-scroll"><svg viewBox="0 0 1570 168" role="img" aria-labelledby="cx-t cx-d">
+        <title id="cx-t">The fifteen transports a workflow can name on a source or a sink node</title>
+        <desc id="cx-d">Fifteen boxes across the top name the transports: file, http, kafka, nats, postgres, turso, clickhouse, redb, s3, tcp, udp, saci, opentelemetry, channel and mariadb. Each one drops into a shared line, and that line feeds a single workflow box below. One workflow may name any mix of them, one node per source or sink.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="8" width="100" height="40" rx="8"/>
             <text class="t-lbl" x="6" y="33">file</text>
@@ -44,6 +44,8 @@ running pipeline.
             <text class="t-lbl" x="1266" y="33">opentelemetry</text>
             <rect class="blk blk-data" x="1365" y="8" width="100" height="40" rx="8"/>
             <text class="t-lbl" x="1371" y="33">channel</text>
+            <rect class="blk blk-data" x="1470" y="8" width="100" height="40" rx="8"/>
+            <text class="t-lbl" x="1476" y="33">mariadb</text>
         </g>
         <g class="anim anim-2">
             <path class="arw arw-data" d="M50 48 V72"/>
@@ -60,16 +62,17 @@ running pipeline.
             <path class="arw arw-data" d="M1205 48 V72"/>
             <path class="arw arw-data" d="M1310 48 V72"/>
             <path class="arw arw-data" d="M1415 48 V72"/>
-            <path class="ln" d="M50 72 H1415"/>
+            <path class="arw arw-data" d="M1520 48 V72"/>
+            <path class="ln" d="M50 72 H1520"/>
             <text class="t-sm t-data" x="58" y="88">rows in, rows out</text>
         </g>
         <g class="anim anim-3">
-            <path class="arw arw-data" d="M732 72 V104" marker-end="url(#cx-d1)"/>
-            <rect class="blk blk-ctl" x="642" y="108" width="180" height="52" rx="8"/>
-            <rect class="hd hd-ctl" x="642" y="108" width="180" height="20" rx="8"/>
-            <rect class="hd hd-ctl" x="642" y="120" width="180" height="8"/>
-            <text class="t-lbl" x="654" y="123">workflow</text>
-            <text class="t-sm" x="654" y="146">source, sink, link</text>
+            <path class="arw arw-data" d="M784 72 V104" marker-end="url(#cx-d1)"/>
+            <rect class="blk blk-ctl" x="694" y="108" width="180" height="52" rx="8"/>
+            <rect class="hd hd-ctl" x="694" y="108" width="180" height="20" rx="8"/>
+            <rect class="hd hd-ctl" x="694" y="120" width="180" height="8"/>
+            <text class="t-lbl" x="706" y="123">workflow</text>
+            <text class="t-sm" x="706" y="146">source, sink, link</text>
         </g>
         <defs>
             <marker id="cx-d1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -87,7 +90,7 @@ running pipeline.
 ## Pick a connector
 
 Every row is a source and a sink, so one transport serves both ends of a workflow. `Needs a format`
-means the node names a declared [transformer](@/service/formats/_index.md); the six row-carrying
+means the node names a declared [transformer](@/service/formats/_index.md); the seven row-carrying
 connectors take none.
 
 | Connector | Source | Sink | Needs a format | Run modes | In the default build |
@@ -97,6 +100,7 @@ connectors take none.
 | [Kafka](@/service/connectors/kafka.md) | yes | yes | yes | stream, or any run mode with `stop_at_end` or `compacted` | no: build with `--features connector-kafka` |
 | [NATS](@/service/connectors/nats.md) | yes | yes | yes | stream, or any run mode with `stop_at_end` | no: build with `--features connector-nats` |
 | [PostgreSQL](@/service/connectors/postgresql.md) | yes | yes | no | any | no: build with `--features connector-postgresql` |
+| [MariaDB](@/service/connectors/mariadb.md) | yes | yes | no | any | no: build with `--features connector-mariadb` |
 | [Turso](@/service/connectors/turso.md) | yes | yes | no | any | no: build with `--features connector-turso` |
 | [ClickHouse](@/service/connectors/clickhouse.md) | yes | yes | no | any | no: build with `--features connector-clickhouse` |
 | [redb](@/service/connectors/redb.md) | yes | yes | yes | any | yes |
@@ -109,10 +113,11 @@ connectors take none.
 
 A node picks its transport with a `type` string: `FileSource` and `FileSink`, `HttpSource` and
 `HttpSink`, `KafkaSource` and `KafkaSink`, `NatsSource` and `NatsSink`, `PostgresSource` and
-`PostgresSink`, `TursoSource` and `TursoSink`, `ClickhouseSource` and `ClickhouseSink`,
-`RedbSource` and `RedbSink`, `S3Source` and `S3Sink`, `OpenTelemetryMetricsSource` and
-`OpenTelemetryMetricsSink`, `ChannelSource` and `ChannelSink`, `tcp` in lower case for both halves
-of TCP, `udp` for both halves of UDP, and `saci` for both halves of a service-to-service link.
+`PostgresSink`, `MariadbSource` and `MariadbSink`, `TursoSource` and `TursoSink`,
+`ClickhouseSource` and `ClickhouseSink`, `RedbSource` and `RedbSink`, `S3Source` and `S3Sink`,
+`OpenTelemetryMetricsSource` and `OpenTelemetryMetricsSink`, `ChannelSource` and `ChannelSink`,
+`tcp` in lower case for both halves of TCP, `udp` for both halves of UDP, and `saci` for both
+halves of a service-to-service link.
 
 ## The shape every node shares
 
@@ -135,9 +140,9 @@ required, optional, or a projection target for the self-describing formats, whic
 columns. Each connector page states which of the two ends needs it. An entry takes the column name
 as its leading argument, then `type` and `nullable`, which defaults to `#true`.
 
-The `type` names every connector but PostgreSQL and Turso accepts are `Boolean`, `Int8`, `Int16`,
+The `type` names every connector but PostgreSQL, MariaDB and Turso accepts are `Boolean`, `Int8`, `Int16`,
 `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `Float32`, `Float64`, `Utf8`, `LargeUtf8`,
-`Binary`, `Date32` and `Date64`, in any case. PostgreSQL and Turso each read their own narrower
+`Binary`, `Date32` and `Date64`, in any case. PostgreSQL, MariaDB and Turso each read their own
 vocabulary, listed on their pages.
 
 A failed write retries with exponential backoff before the error reaches the runner: four attempts,

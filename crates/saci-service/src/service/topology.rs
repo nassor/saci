@@ -65,6 +65,17 @@ const DETAIL_ALLOWLIST: &[(&str, &[&str])] = &[
     ("PostgresSource", &["mode.kind", "mode.table"]),
     ("PostgresSink", &["table", "write_mode"]),
     (
+        "MariadbSource",
+        &[
+            "mode.kind",
+            "mode.table",
+            "mode.position",
+            "mode.snapshot",
+            "mode.install_triggers",
+        ],
+    ),
+    ("MariadbSink", &["table", "write_mode"]),
+    (
         "ClickhouseSource",
         &["mode.kind", "mode.table", "mode.query"],
     ),

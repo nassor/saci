@@ -42,9 +42,10 @@
 //!
 //! Files are discovered by listing `examples/configs/`, not from a
 //! hand-maintained list, so a new file there is covered the day it lands.
-//! `--only` narrows pass 1 only; pass 2 always covers every file. The two
-//! files that declare a `${VAR}` placeholder with no default
-//! (`CONFIG_ONLY_VARIABLES` below) get the same `variables`-injection
+//! `--only` narrows pass 1 only; pass 2 always covers every file. The five
+//! files that declare a `${VAR}` placeholder with no default (`cluster.kdl`,
+//! `postgresql.kdl`, `mariadb.kdl`, `mariadb_trigger.kdl` and `turso.kdl`; the
+//! `CONFIG_ONLY_VARIABLES` table below) get the same `variables`-injection
 //! treatment as the registry above; every other file's own
 //! `${NAME:-default}` fallback needs nothing injected.
 //!
@@ -99,6 +100,20 @@ const CONFIG_ONLY_VARIABLES: &[(&str, &[(&str, &str)])] = &[
     (
         "postgresql.kdl",
         &[("SACI_PG_DSN", "postgres://saci@localhost:5432/app")],
+    ),
+    (
+        "mariadb.kdl",
+        &[
+            ("SACI_MARIADB_DSN", "mysql://saci@localhost:3306/shop"),
+            ("SACI_MARIADB_SINK_DSN", "mysql://saci@localhost:3307/shop"),
+        ],
+    ),
+    (
+        "mariadb_trigger.kdl",
+        &[
+            ("SACI_MARIADB_DSN", "mysql://saci@localhost:3306/shop"),
+            ("SACI_MARIADB_SINK_DSN", "mysql://saci@localhost:3307/shop"),
+        ],
     ),
     // The synced-remote and encryption snippets in turso.kdl are comments, but
     // `${VAR}` substitution runs over the whole file text.

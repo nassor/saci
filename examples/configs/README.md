@@ -25,6 +25,8 @@ run with:
 | `extension_example.kdl` | a custom binary: no feature registers `MongoSource` or `ClickHouseSink`, and `wasm` is all `validate` needs to show the warning |
 | `standalone_plugin.kdl` | `connector-file,transformer-csv,plugin` |
 | `postgresql.kdl` | `connector-postgresql,wasm` |
+| `mariadb.kdl` | `connector-mariadb,wasm` |
+| `mariadb_trigger.kdl` | `connector-mariadb,wasm` |
 | `turso.kdl` | `connector-turso,wasm` |
 | `clickhouse.kdl` | `connector-clickhouse,wasm` |
 | `s3.kdl` | `connector-s3,transformer-csv,wasm` |
@@ -53,7 +55,7 @@ cargo build -p saci-service --features connector-file,transformer-csv,wasm --bin
 Runs the same on Linux, macOS and Windows (PowerShell).
 
 `--features all` covers every config here the stock binary can run, in one
-build: all five opt-in connectors, the plugin host and cluster mode, so it needs
+build: all eight opt-in connectors, the plugin host and cluster mode, so it needs
 `cmake` and a C toolchain on `PATH` for Kafka's vendored librdkafka.
 
 ## How to run the standalone example
@@ -140,6 +142,7 @@ explicitly, there is no implicit default format.
 | `HttpSource` | One GET, or a body that never ends, decoded in whatever format its `transformer` names | `url`, plus `schema_fields` where the format needs it | `saci-connector-http` | `connector-http` |
 | `HttpPushSource` | Documents a client pushes in, one whole document per request, stream mode only | `bind`, `schema_fields` | `saci-connector-http` | `connector-http` |
 | `PostgresSource` | Polling, outbox or `pgoutput` reads | `name`, `connection`, `mode`, `schema_fields` (optionally `pg_type` per field) | `saci-connector-postgresql` | `connector-postgresql` |
+| `MariadbSource` | Polling, a trigger changelog (an operator outbox or installed triggers) or row-binlog reads on MariaDB and MySQL, with an optional initial snapshot | `name`, `connection`, `mode`, `schema_fields` | `saci-connector-mariadb` | `connector-mariadb` |
 | `TursoSource` | Embedded or synced reads: cursor polling, full dump, or the change table | `name`, `connection`, `mode`, `schema_fields` | `saci-connector-turso` | `connector-turso` |
 | `ClickhouseSource` | Polling, dump or custom SELECT query | `name`, `connection`, `mode`, `schema_fields` | `saci-connector-clickhouse` | `connector-clickhouse` |
 | `KafkaSource` | Consumes a Kafka topic | `brokers`, `topic`, `schema_fields` | `saci-connector-kafka` | `connector-kafka` |
@@ -158,6 +161,7 @@ explicitly, there is no implicit default format.
 | `RedbSink` | Stores one redb entry per batch, in whatever format its `transformer` names | `directory`, `schema_fields` | `saci-connector-redb` | `connector-redb` |
 | `HttpSink` | One request per batch, body written by its `transformer` | `url`, `schema_fields`, optional `method` | `saci-connector-http` | `connector-http` |
 | `PostgresSink` | `COPY FORMAT binary`, optional upsert | `name`, `connection`, `table`, `schema_fields` (optionally `pg_type` per field) | `saci-connector-postgresql` | `connector-postgresql` |
+| `MariadbSink` | Batched `INSERT` with `append`, `upsert`, `ignore_conflicts` or `apply_changes` | `name`, `connection`, `table`, `schema_fields` | `saci-connector-mariadb` | `connector-mariadb` |
 | `TursoSink` | Prepared `INSERT` with optional `ON CONFLICT` upsert, `deferred`/`immediate`/`concurrent` transactions, change capture and encryption | `name`, `connection`, `table`, `write_mode`, `schema_fields` | `saci-connector-turso` | `connector-turso` |
 | `ClickhouseSink` | Bulk load via Arrow IPC streaming over HTTP, optional truncate | `name`, `connection`, `table`, `schema_fields` | `saci-connector-clickhouse` | `connector-clickhouse` |
 | `KafkaSink` | Produces to a Kafka topic | `brokers`, `topic`, `schema_fields` | `saci-connector-kafka` | `connector-kafka` |
@@ -270,11 +274,17 @@ silently dropped section.
 `Boolean`, `Int8`, `Int16`, `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`,
 `UInt64`, `Float32`, `Float64`, `Utf8`, `LargeUtf8`, `Binary`, `Date32`,
 `Date64`. All names are case-insensitive. That is the set every connector but
-PostgreSQL and Turso accepts; `PostgresSource`/`PostgresSink` parse `schema_fields`
+PostgreSQL, MariaDB and Turso accepts; `PostgresSource`/`PostgresSink` parse `schema_fields`
 through their own wider vocabulary (`timestamp_micros`, `timestamp_micros_utc`,
 `uuid`, `json`, `decimal128` with `precision`/`scale`, `interval_month_day_nano`,
 `list` with `item`, plus an optional `pg_type` to pin the exact server column
 type), documented in `crates/saci-connector-postgresql/src/lib.rs`;
+`MariadbSource`/`MariadbSink` read their own vocabulary (`boolean`,
+`int8` to `int64`, `uint8` to `uint64`, `float32`, `float64`, `decimal128` with
+`precision`/`scale`, `utf8`, `binary`, `date32`, `time64_micros`,
+`timestamp_micros`, `timestamp_micros_utc`, `json`, plus an optional
+`mariadb_type` that asserts the server column's type), documented in
+`crates/saci-connector-mariadb/src/lib.rs`;
 `TursoSource`/`TursoSink` use a narrower vocabulary (`utf8`, `int64`, `float64`,
 `bool`, `binary`, `decimal128` with `precision`/`scale`), documented in
 `crates/saci-connector-turso/src/lib.rs`.
@@ -352,6 +362,8 @@ errors in strict mode.
 | `standalone_polyglot.kdl` | runs the Python processor from `examples/polyglot/` |
 | `standalone_plugin.kdl` | runs the native plugin fixture |
 | `postgresql.kdl` | runnable config driving PostgreSQL at both ends |
+| `mariadb.kdl` | runnable config replicating a MariaDB or MySQL table through the binlog with an initial snapshot, needs a server |
+| `mariadb_trigger.kdl` | runnable config capturing table changes with installed triggers, needs a server |
 | `kafka.kdl` | runnable config driving Kafka at both ends, needs a broker |
 | `nats.kdl` | runnable config driving NATS at both ends, needs a server |
 | `s3.kdl` | runnable config driving S3 at both ends, needs a bucket |

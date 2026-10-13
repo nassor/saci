@@ -10,25 +10,25 @@
 //! # Dimensions
 //!
 //! - **Connectors**: `channel`, `file`, `http`, `http-push`, `tcp`, `udp`,
-//!   `saci`, `kafka`, `nats`, `postgresql`, `clickhouse`, `redb`, `s3`,
-//!   `turso`, `opentelemetry`. All of them drive both ends except `http-push`,
+//!   `saci`, `kafka`, `nats`, `postgresql`, `mariadb`, `clickhouse`, `redb`,
+//!   `s3`, `turso`, `opentelemetry`. All of them drive both ends except `http-push`,
 //!   which registers a source and no sink, so the source dimension is one
 //!   longer than the sink dimension.
 //! - **Byte formats**: `arrow-ipc`, `avro`, `csv`, `ndjson`, `parquet`, plus
-//!   [`Format::None`] for the six connectors that carry `RecordBatch`es
-//!   natively (`channel`, `postgresql`, `turso`, `saci`, `clickhouse`,
-//!   `opentelemetry`).
+//!   [`Format::None`] for the seven connectors that carry `RecordBatch`es
+//!   natively (`channel`, `postgresql`, `mariadb`, `turso`, `saci`,
+//!   `clickhouse`, `opentelemetry`).
 //! - **Processor runtimes**: a native [`Pipeline`] registered through
 //!   [`ServiceBuilder::with_runtime`], the `saci-processor-smoketest`
 //!   WebAssembly component loaded from `module`, and the
 //!   `saci-plugin-smoketest` cdylib loaded from `library`.
 //!
 //! One format per case, applied to every byte-carrying end. The independent
-//! source-format x sink-format cross product is not taken: it is 22680 cases
-//! against 3780, and a mixed pair adds no connector or transformer coverage
+//! source-format x sink-format cross product is not taken: it is 25920 cases
+//! against 4320, and a mixed pair adds no connector or transformer coverage
 //! over the two paired cases that already cover both halves.
 //!
-//! The transformer dimension is not reduced either: every one of the 3780
+//! The transformer dimension is not reduced either: every one of the 4320
 //! cases runs, so nothing is traded away to fit a time budget.
 //!
 //! # Row schema per processor
@@ -63,7 +63,7 @@
 //!
 //! | Connector | Surface | Evidence |
 //! |---|---|---|
-//! | `channel`, `postgresql`, `turso`, `saci`, `clickhouse`, `opentelemetry` | rows | none of their crates resolves a transformer |
+//! | `channel`, `postgresql`, `mariadb`, `turso`, `saci`, `clickhouse`, `opentelemetry` | rows | none of their crates resolves a transformer |
 //! | `file` | stream | `saci-connector-file/src/{source,sink}.rs` call `open_reader`/`open_writer` |
 //! | `redb` | stream | `saci-connector-redb/src/{source,sink}.rs` spool one entry |
 //! | `http` | stream | `saci-connector-http/src/{source,sink}.rs` spool a whole document |
@@ -185,7 +185,7 @@
 //! the frame, datagram or document count and gives the last item a settle
 //! window. That window is wall clock, and every case future of a slice is
 //! polled by one task (`PipelineRuntime` is `?Send`, so no case can be
-//! spawned). A slice has one source, so the at most 14 cases sharing that task
+//! spawned). A slice has one source, so the at most 15 cases sharing that task
 //! all run in the same mode, and a stream-mode case never waits on a poll loop
 //! busy with one-shot cases. See [`Case::slice`].
 //!
@@ -196,7 +196,7 @@
 //! and names through `SACI_MATRIX_*` variables (see [`Resources`]). Cases run
 //! concurrently and isolate themselves inside the shared resource: a
 //! nanosecond timestamp, the process id and an atomic counter name a unique
-//! Kafka topic, NATS stream and subject, PostgreSQL and ClickHouse table, S3
+//! Kafka topic, NATS stream and subject, PostgreSQL, MariaDB, MySQL and ClickHouse table, S3
 //! object prefix (one bucket for the run), channel name and temp directory.
 //! A socket the harness holds binds `127.0.0.1:0`; a source the config names
 //! a port for gets one from [`next_port`]'s per-slot block instead.
@@ -228,7 +228,7 @@
 //! - **The bytes a format writes.** [`read_back`] decodes a `file`, `http`,
 //!   `tcp` or `udp` sink through the same [`Transformer`] the sink wrote with,
 //!   and reads a `kafka`, `nats` or `s3` sink back through the sibling source
-//!   connector. Only the `postgresql` readback goes around the connector, in
+//!   connector. Only the `postgresql` and `mariadb` readbacks go around the connector, in
 //!   SQL. A change that corrupts a format symmetrically therefore cancels out:
 //!   every case round-trips its rows while the file on disk, the object, the
 //!   message and the frame are all in the wrong format. What a transformer
@@ -337,6 +337,7 @@ pub enum Connector {
     Kafka,
     Nats,
     Postgresql,
+    Mariadb,
     Clickhouse,
     S3,
     Turso,
@@ -345,7 +346,7 @@ pub enum Connector {
 }
 
 /// Every connector this matrix covers, in report order.
-pub const CONNECTORS: [Connector; 15] = [
+pub const CONNECTORS: [Connector; 16] = [
     Connector::Channel,
     Connector::File,
     Connector::Http,
@@ -356,6 +357,7 @@ pub const CONNECTORS: [Connector; 15] = [
     Connector::Kafka,
     Connector::Nats,
     Connector::Postgresql,
+    Connector::Mariadb,
     Connector::Clickhouse,
     Connector::S3,
     Connector::Turso,
@@ -387,6 +389,7 @@ impl Connector {
             Self::Kafka => "kafka",
             Self::Nats => "nats",
             Self::Postgresql => "postgresql",
+            Self::Mariadb => "mariadb",
             Self::Clickhouse => "clickhouse",
             Self::S3 => "s3",
             Self::Turso => "turso",
@@ -399,6 +402,7 @@ impl Connector {
         match self {
             Self::Channel
             | Self::Postgresql
+            | Self::Mariadb
             | Self::Turso
             | Self::Saci
             | Self::Clickhouse
@@ -424,6 +428,7 @@ impl Connector {
             Self::Kafka => Some(Resource::Kafka),
             Self::Nats => Some(Resource::Nats),
             Self::Postgresql => Some(Resource::Postgres),
+            Self::Mariadb => Some(Resource::Mariadb),
             Self::S3 => Some(Resource::S3),
             Self::Clickhouse => Some(Resource::Clickhouse),
         }
@@ -451,6 +456,7 @@ impl Connector {
             Self::Kafka => "KafkaSource",
             Self::Nats => "NatsSource",
             Self::Postgresql => "PostgresSource",
+            Self::Mariadb => "MariadbSource",
             Self::Clickhouse => "ClickhouseSource",
             Self::S3 => "S3Source",
             Self::Turso => "TursoSource",
@@ -476,6 +482,7 @@ impl Connector {
             Self::Kafka => Some("KafkaSink"),
             Self::Nats => Some("NatsSink"),
             Self::Postgresql => Some("PostgresSink"),
+            Self::Mariadb => Some("MariadbSink"),
             Self::Clickhouse => Some("ClickhouseSink"),
             Self::S3 => Some("S3Sink"),
             Self::Turso => Some("TursoSink"),
@@ -848,6 +855,15 @@ impl RowKind {
         match self {
             Self::Order | Self::Counter => "id",
             Self::Ping => "seq",
+        }
+    }
+
+    /// `CREATE TABLE` column list for a MariaDB or MySQL end.
+    fn mariadb_columns(self) -> &'static str {
+        match self {
+            Self::Order => "id BIGINT PRIMARY KEY, label TEXT NOT NULL, total DOUBLE NOT NULL",
+            Self::Ping => "seq BIGINT UNSIGNED PRIMARY KEY",
+            Self::Counter => "id BIGINT PRIMARY KEY, seen BIGINT NOT NULL",
         }
     }
 
@@ -1391,15 +1407,17 @@ pub enum Resource {
     Kafka,
     Nats,
     Postgres,
+    Mariadb,
     S3,
     Clickhouse,
 }
 
 /// Every resource, in report order.
-const RESOURCES: [Resource; 5] = [
+const RESOURCES: [Resource; 6] = [
     Resource::Kafka,
     Resource::Nats,
     Resource::Postgres,
+    Resource::Mariadb,
     Resource::S3,
     Resource::Clickhouse,
 ];
@@ -1410,6 +1428,7 @@ impl Resource {
             Self::Kafka => "kafka",
             Self::Nats => "nats",
             Self::Postgres => "postgres",
+            Self::Mariadb => "mariadb",
             Self::S3 => "s3",
             Self::Clickhouse => "clickhouse",
         }
@@ -1421,6 +1440,7 @@ impl Resource {
             Self::Kafka => KAFKA_BROKERS,
             Self::Nats => NATS_URL,
             Self::Postgres => POSTGRES_DSN,
+            Self::Mariadb => MARIADB_DSN,
             Self::S3 => S3_ENDPOINT,
             Self::Clickhouse => CLICKHOUSE_URL,
         }
@@ -1436,6 +1456,10 @@ const KAFKA_BROKERS: &str = "SACI_MATRIX_KAFKA_BROKERS";
 const NATS_URL: &str = "SACI_MATRIX_NATS_URL";
 /// A `postgres://` DSN.
 const POSTGRES_DSN: &str = "SACI_MATRIX_POSTGRES_DSN";
+/// A `mysql://` DSN of a MariaDB server.
+const MARIADB_DSN: &str = "SACI_MATRIX_MARIADB_DSN";
+/// A `mysql://` DSN of a MySQL server.
+const MYSQL_DSN: &str = "SACI_MATRIX_MYSQL_DSN";
 /// `http://host:port` of an S3-compatible endpoint. The three variables after
 /// it name the run's one bucket, which already exists, and its credentials.
 const S3_ENDPOINT: &str = "SACI_MATRIX_S3_ENDPOINT";
@@ -1449,7 +1473,7 @@ const CLICKHOUSE_URL: &str = "SACI_MATRIX_CLICKHOUSE_URL";
 ///
 /// Counted from the slice's own start, which can be moments after the
 /// containers': the first slices of a run wait out the servers' startup, and
-/// ClickHouse is the slowest of the five to answer on a cold runner.
+/// ClickHouse is the slowest of the six to answer on a cold runner.
 const READY_BUDGET: Duration = Duration::from_secs(180);
 
 /// A live Kafka broker.
@@ -1467,6 +1491,14 @@ pub struct PostgresResource {
     pub dsn: String,
 }
 
+/// A live MariaDB server and a live MySQL server. Sources read from the
+/// MariaDB one and sinks write into the MySQL one, so every case crosses the
+/// two.
+pub struct MariadbResource {
+    pub mariadb_dsn: String,
+    pub mysql_dsn: String,
+}
+
 /// A live S3-compatible endpoint with the run's one bucket created.
 pub struct S3Resource {
     pub connection: saci_connector_s3::S3ConnectionConfig,
@@ -1477,7 +1509,7 @@ pub struct ClickhouseResource {
     pub url: String,
 }
 
-/// The five resources, each live or absent for the whole slice.
+/// The six resources, each live or absent for the whole slice.
 ///
 /// Every endpoint comes from its variable rather than from a container
 /// started here: nextest runs each slice in a process of its own, so a
@@ -1489,6 +1521,7 @@ pub struct Resources {
     kafka: Option<KafkaResource>,
     nats: Option<NatsResource>,
     postgres: Option<PostgresResource>,
+    mariadb: Option<MariadbResource>,
     s3: Option<S3Resource>,
     clickhouse: Option<ClickhouseResource>,
 }
@@ -1499,16 +1532,18 @@ impl Resources {
     /// Every wait ends before any case starts, so a readiness poll never
     /// shares the poll loop with the slice's case futures.
     pub async fn connect() -> Self {
-        let (kafka, nats, postgres, clickhouse) = tokio::join!(
+        let (kafka, nats, postgres, mariadb, clickhouse) = tokio::join!(
             await_kafka(),
             await_nats(),
             await_postgres(),
+            await_mariadb(),
             await_clickhouse()
         );
         Self {
             kafka,
             nats,
             postgres,
+            mariadb,
             s3: s3_from_env(),
             clickhouse,
         }
@@ -1524,6 +1559,10 @@ impl Resources {
 
     pub fn postgres(&self) -> Option<&PostgresResource> {
         self.postgres.as_ref()
+    }
+
+    pub fn mariadb(&self) -> Option<&MariadbResource> {
+        self.mariadb.as_ref()
     }
 
     pub fn s3(&self) -> Option<&S3Resource> {
@@ -1555,6 +1594,7 @@ impl Resources {
             Resource::Kafka => self.kafka.is_some(),
             Resource::Nats => self.nats.is_some(),
             Resource::Postgres => self.postgres.is_some(),
+            Resource::Mariadb => self.mariadb.is_some(),
             Resource::S3 => self.s3.is_some(),
             Resource::Clickhouse => self.clickhouse.is_some(),
         }
@@ -1646,6 +1686,29 @@ async fn await_postgres() -> Option<PostgresResource> {
     })
     .await;
     Some(PostgresResource { dsn })
+}
+
+/// Both servers are required: a MariaDB source feeds a MySQL sink in every
+/// case, so one alone leaves the resource absent.
+async fn await_mariadb() -> Option<MariadbResource> {
+    let (Some(mariadb_dsn), Some(mysql_dsn)) = (variable(MARIADB_DSN), variable(MYSQL_DSN)) else {
+        return None;
+    };
+    for (name, dsn) in [(MARIADB_DSN, &mariadb_dsn), (MYSQL_DSN, &mysql_dsn)] {
+        let probe = dsn.as_str();
+        await_ready(name, dsn, move || async move {
+            use mysql_async::prelude::Queryable;
+            let Ok(mut conn) = mysql_async::Conn::from_url(probe).await else {
+                return false;
+            };
+            conn.query_drop("SELECT 1").await.is_ok()
+        })
+        .await;
+    }
+    Some(MariadbResource {
+        mariadb_dsn,
+        mysql_dsn,
+    })
 }
 
 async fn await_clickhouse() -> Option<ClickhouseResource> {
@@ -2629,6 +2692,10 @@ enum Readback {
         dsn: String,
         table: String,
     },
+    Mariadb {
+        dsn: String,
+        table: String,
+    },
     Turso {
         path: PathBuf,
         table: String,
@@ -2650,12 +2717,17 @@ enum Readback {
     },
 }
 
+/// The endpoint a build-refused case dials for a MariaDB or MySQL node.
+const PLACEHOLDER_MYSQL_DSN: &str = "mysql://root:saci@127.0.0.1:1/saci";
+
 /// The endpoint a config names: the live container's, or an unreachable
 /// placeholder for a case that is refused before anything connects.
 struct Endpoints {
     brokers: String,
     nats_url: String,
     dsn: String,
+    mariadb_dsn: String,
+    mysql_dsn: String,
     clickhouse_url: String,
     s3: saci_connector_s3::S3ConnectionConfig,
 }
@@ -2665,6 +2737,7 @@ impl Endpoints {
         let kafka = if live { resources.kafka() } else { None };
         let nats = if live { resources.nats() } else { None };
         let postgres = if live { resources.postgres() } else { None };
+        let mariadb = if live { resources.mariadb() } else { None };
         let s3 = if live { resources.s3() } else { None };
         let clickhouse = if live { resources.clickhouse() } else { None };
         Self {
@@ -2673,6 +2746,14 @@ impl Endpoints {
             dsn: postgres.map_or_else(
                 || "postgres://postgres:saci@127.0.0.1:1/postgres".to_string(),
                 |p| p.dsn.clone(),
+            ),
+            mariadb_dsn: mariadb.map_or_else(
+                || PLACEHOLDER_MYSQL_DSN.to_string(),
+                |m| m.mariadb_dsn.clone(),
+            ),
+            mysql_dsn: mariadb.map_or_else(
+                || PLACEHOLDER_MYSQL_DSN.to_string(),
+                |m| m.mysql_dsn.clone(),
             ),
             clickhouse_url: clickhouse
                 .map_or_else(|| "http://127.0.0.1:1".to_string(), |c| c.url.clone()),
@@ -2700,6 +2781,13 @@ async fn pg_client(dsn: &str) -> Result<tokio_postgres::Client, String> {
         let _ = connection.await;
     });
     Ok(client)
+}
+
+/// Open a MariaDB or MySQL connection for seeding and reading back fixtures.
+async fn mysql_conn(dsn: &str) -> Result<mysql_async::Conn, String> {
+    mysql_async::Conn::from_url(dsn)
+        .await
+        .map_err(|e| format!("mariadb connect: {e}"))
 }
 
 fn s3_connection_kdl(connection: &saci_connector_s3::S3ConnectionConfig, indent: &str) -> String {
@@ -3054,6 +3142,27 @@ async fn prepare_source(
                 row.postgres_cursor()
             );
         }
+        Connector::Mariadb => {
+            let table = unique("matrix_in").to_lowercase();
+            if live {
+                use mysql_async::prelude::Queryable;
+                let mut conn = mysql_conn(&endpoints.mariadb_dsn).await?;
+                conn.query_drop(format!("CREATE TABLE {table} ({})", row.mariadb_columns()))
+                    .await
+                    .map_err(|e| format!("mariadb seed table: {e}"))?;
+                conn.query_drop(row.postgres_seed(&table, index))
+                    .await
+                    .map_err(|e| format!("mariadb seed rows: {e}"))?;
+            }
+            side.kdl = format!(
+                "    source \"in\" type=\"MariadbSource\" component=\"{component}\" {{\n\
+                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
+                 \x20           connection {{\n                dsn \"{}\"\n                ssl_mode \"disabled\"\n            }}\n\
+                 \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
+                endpoints.mariadb_dsn,
+                row.postgres_cursor()
+            );
+        }
         Connector::Clickhouse => {
             let table = unique("matrix_in").to_lowercase();
             if live {
@@ -3361,6 +3470,30 @@ async fn prepare_sink(
                 ),
                 Readback::Postgres {
                     dsn: endpoints.dsn.clone(),
+                    table,
+                },
+            )
+        }
+        Connector::Mariadb => {
+            let table = unique("matrix_out").to_lowercase();
+            if read_back {
+                use mysql_async::prelude::Queryable;
+                let mut conn = mysql_conn(&endpoints.mysql_dsn).await?;
+                conn.query_drop(format!("CREATE TABLE {table} ({})", row.mariadb_columns()))
+                    .await
+                    .map_err(|e| format!("mariadb sink table: {e}"))?;
+            }
+            (
+                format!(
+                    "    sink \"out\" type=\"MariadbSink\" component=\"{component}\" {{\n\
+                     \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
+                     \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n\
+                     \x20           connection {{\n                dsn \"{}\"\n                ssl_mode \"disabled\"\n            }}\n{fields}\n        }}\n    }}",
+                    row.postgres_cursor(),
+                    endpoints.mysql_dsn
+                ),
+                Readback::Mariadb {
+                    dsn: endpoints.mysql_dsn.clone(),
                     table,
                 },
             )
@@ -3840,6 +3973,46 @@ async fn read_back(
                     }
                 })
                 .collect());
+        }
+        Readback::Mariadb { dsn, table } => {
+            use mysql_async::prelude::Queryable;
+            let mut conn = mysql_conn(&dsn).await?;
+            let columns = row
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect::<Vec<_>>();
+            let query = format!(
+                "SELECT {} FROM {table} ORDER BY {}",
+                columns.join(", "),
+                row.postgres_cursor()
+            );
+            // Read straight out of SQL rather than through the connector: the
+            // sink is what is under test, so the readback must not reuse it.
+            return Ok(match row {
+                RowKind::Order => conn
+                    .query::<(i64, String, f64), _>(&query)
+                    .await
+                    .map_err(|e| format!("mariadb readback: {e}"))?
+                    .into_iter()
+                    .map(|(id, label, total)| format!("{id}|{label}|{total:.4}"))
+                    .collect(),
+                RowKind::Ping => conn
+                    .query::<u64, _>(&query)
+                    .await
+                    .map_err(|e| format!("mariadb readback: {e}"))?
+                    .into_iter()
+                    .map(|seq| seq.to_string())
+                    .collect(),
+                RowKind::Counter => conn
+                    .query::<(i64, i64), _>(&query)
+                    .await
+                    .map_err(|e| format!("mariadb readback: {e}"))?
+                    .into_iter()
+                    .map(|(id, seen)| format!("{id}|{seen}"))
+                    .collect(),
+            });
         }
         Readback::Clickhouse { url, table } => {
             let client = clickhouse::Client::default().with_url(&url);
@@ -4759,6 +4932,7 @@ pub async fn run_maximal(
                 Connector::File,
                 Connector::Redb,
                 Connector::Postgresql,
+                Connector::Mariadb,
                 Connector::Clickhouse,
                 Connector::Turso,
                 Connector::Saci,
@@ -4769,6 +4943,7 @@ pub async fn run_maximal(
                 Connector::File,
                 Connector::Redb,
                 Connector::Postgresql,
+                Connector::Mariadb,
                 Connector::Clickhouse,
                 Connector::Turso,
                 Connector::Saci,

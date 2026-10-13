@@ -154,6 +154,7 @@ pass, and a hinted fetch size would be a measurement choosing a pass boundary. I
 | `KafkaSource` | Yes | `batch_size`: the poll window's collection target |
 | `NatsSource` | Yes | `batch_size`: the same, for a core subscription or a JetStream pull |
 | `PostgresSource` | Yes | `batch_rows`: the cursor query's `LIMIT`, or the logical-decode chunk size |
+| `MariadbSource` | Yes | `batch_rows`: the cursor query's `LIMIT`, or the binlog chunk size |
 | `FileSource`, `HttpSource`, `S3Source`, `TcpIngestSource`, `TursoSource`, `ChannelSource` | No (trait default) | Nothing; each is still governed on an ordinary path, because the runner reshapes its output |
 
 ## The decision record

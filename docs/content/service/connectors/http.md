@@ -523,6 +523,6 @@ Two more wait for the first batch rather than the config check:
 ## Next
 
 - [csv](@/service/formats/csv.md), the format this page declares.
-- [Sources and sinks](@/service/connectors/_index.md), the other seven transports.
+- [Sources and sinks](@/service/connectors/_index.md), the other fourteen transports.
 - [Run modes and persistence](@/service/config/run-modes.md), for the stream mode a listening or
   streaming source needs.

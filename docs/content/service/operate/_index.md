@@ -140,6 +140,8 @@ system, so copy the one nearest your own and edit its `config` blocks.
 | `standalone_polyglot.kdl` | a processor built from another language: [Build your own processor](@/service/processors/build/_index.md) | yes, once the component is built |
 | `nats.kdl` | JetStream at both ends: [NATS](@/service/connectors/nats.md) | no: `--features connector-nats` |
 | `postgresql.kdl` | logical replication into a sink table: [PostgreSQL](@/service/connectors/postgresql.md) | no: `--features connector-postgresql` |
+| `mariadb.kdl` | binlog replication with an initial snapshot into a sink table: [MariaDB](@/service/connectors/mariadb.md) | no: `--features connector-mariadb` |
+| `mariadb_trigger.kdl` | installed-trigger change capture into an upsert sink: [MariaDB](@/service/connectors/mariadb.md) | no: `--features connector-mariadb` |
 | `kafka.kdl` | a Kafka source and sink: [Kafka](@/service/connectors/kafka.md) | no: `--features connector-kafka` |
 | `tcp.kdl` | a live socket ingest stream: [TCP](@/service/connectors/tcp.md) | yes |
 | `udp.kdl` | fire-and-forget datagrams at both ends: [UDP](@/service/connectors/udp.md) | yes |
@@ -180,7 +182,7 @@ ERROR: no source factory registered for type 'PostgresSource' (required by sourc
 ```
 
 [Install saci-service](@/service/install.md) lists the flag for each of the
-five opt-in connectors.
+eight opt-in connectors.
 
 `cluster join` and `cluster leave` change nothing in a binary built with
 `--features service-cluster`: both print the manual procedure for a membership

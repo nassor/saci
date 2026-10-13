@@ -14,7 +14,7 @@
 //!   an embedded redb key/value file, an HTTP client and a listening HTTP
 //!   source, two raw sockets, and a peer SACI service; HTTP, TCP, UDP and the
 //!   peer link speak the network and depend on no particular server product.
-//!   `saci-connector-kafka`, `-nats`, `-postgresql`, `-s3` and `-turso` each
+//!   `saci-connector-kafka`, `-mariadb`, `-nats`, `-postgresql`, `-s3` and `-turso` each
 //!   require a specific broker, database or object store installed and
 //!   running first, and this crate carries none of them.
 //! - `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`,

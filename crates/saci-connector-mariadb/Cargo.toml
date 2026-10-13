@@ -1,0 +1,62 @@
+[package]
+name = "saci-connector-mariadb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "MariaDB and MySQL Source and Sink for SACI. Reads by incremental polling, a trigger changelog (an operator outbox or connector-installed triggers), or the row binlog by file position or GTID with an optional consistent snapshot; writes by batched INSERT with upsert and change application."
+
+[features]
+# TLS is on by default: an unencrypted database connection is the unusual case.
+# rustls on `ring`, the workspace's one crypto backend; never mysql_async's
+# `default-rustls`, which pulls aws-lc-rs.
+default = ["tls"]
+tls = ["dep:rustls", "mysql_async/rustls-tls", "mysql_async/ring", "mysql_async/tls12"]
+tracing = ["dep:tracing", "saci-core/tracing"]
+# Emits into the process-global OpenTelemetry meter the saci-service binary
+# installs. Off by default because a library consumer may have no provider.
+metrics = ["dep:opentelemetry"]
+
+[dependencies]
+saci-core      = { workspace = true, features = ["io"] }
+saci-connector = { workspace = true }
+
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+async-trait   = { workspace = true }
+# `net` and `io-util` are not in the workspace tokio feature set; this crate
+# opens sockets so it declares them.
+tokio         = { workspace = true, features = ["net", "io-util"] }
+futures-util  = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+rand          = { workspace = true }
+tracing       = { workspace = true, optional = true }
+
+mysql_async   = { workspace = true }
+mysql_common  = { workspace = true }
+# mysql_async builds its rustls configuration with `ClientConfig::builder()`,
+# which needs a process-level crypto provider; `ring` is installed from here so
+# the connector never reaches rustls' "no process-level CryptoProvider" panic.
+rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+
+opentelemetry = { version = "0.32", optional = true }
+
+[dev-dependencies]
+tokio          = { workspace = true }
+anyhow         = { workspace = true }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+tempfile       = { workspace = true }
+# Matching saci-connector-postgresql: the core crate, because the modules crate
+# pins an older testcontainers than the workspace's 0.28.
+testcontainers = "0.28"
+# The TLS tests mint a self-signed certificate per run, so no fixture is committed.
+rcgen          = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+
+[[example]]
+name = "mariadb_roundtrip"
+path = "../../examples/connectors/mariadb_roundtrip.rs"

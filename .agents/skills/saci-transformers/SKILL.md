@@ -48,7 +48,7 @@ own `format` key is what the registry resolves. `saci-service` owns the `Registr
 `transformer-arrow-ipc`, so the connector feature alone is runnable. `connector-file`,
 `connector-http` and `connector-s3` imply no transformer, so the config picks which formats the
 binary carries. `connector-saci` implies none either, and like `connector-channel`,
-`connector-postgresql` and `connector-turso` it resolves none: a `saci` node carries
+`connector-postgresql`, `connector-mariadb` and `connector-turso` it resolves none: a `saci` node carries
 `RecordBatch`es over Arrow IPC natively and takes no `transformer` key, so
 `ConnectorContext::transformer` is never called on it.
 

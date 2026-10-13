@@ -29,7 +29,7 @@ heal rebuilds with the same identity; `builder.rs`'s `build_source_node`/`build_
 `saci-core`'s `io` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
 connector moves bytes and a transformer turns bytes into `RecordBatch`es and back, so transport and
 format are separate crates. Connectors: `saci-connector-channel`, `-clickhouse`, `-file`, `-http`, `-kafka`,
-`-nats`, `-opentelemetry`, `-postgresql`, `-redb`, `-s3`, `-saci`, `-tcp`, `-turso`, `-udp`. Transformers:
+`-mariadb`, `-nats`, `-opentelemetry`, `-postgresql`, `-redb`, `-s3`, `-saci`, `-tcp`, `-turso`, `-udp`. Transformers:
 `saci-transformer-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet`, each registered under its own
 `format` name. A byte-carrying source or sink node names a declared `transformer` node's id;
 `ServiceBuilder` resolves that node's `format` against the `TransformerRegistry` in
@@ -38,8 +38,8 @@ format are separate crates. Connectors: `saci-connector-channel`, `-clickhouse`,
 and `register_builtin_factories`, extended through `register_source`, `register_sink`, and
 `register_transformer`. Pipelines integrate via `drain_into_dataset` and `drain_dataset`.
 
-- `Source::request_batch_rows` is the advisory counterpart `KafkaSource`, `NatsSource` and
-  `PostgresSource` act on; every other source is still governed, reshaped with a zero-copy
+- `Source::request_batch_rows` is the advisory counterpart `KafkaSource`, `NatsSource`,
+  `PostgresSource` and `MariadbSource` act on; every other source is still governed, reshaped with a zero-copy
   `RecordBatch::slice`. The admission policy itself, including the windowed-path exception that
   withholds the hint, is in skill `saci-service`.
 - `saci_sink_pending_rows` is the same number the adaptive flow controller reads as congestion,
@@ -200,6 +200,90 @@ workflow holding one as `restartable: false`.
   `ROWS` in `src/types.rs`; an unmatched type is canonical text. `schema_fields`'s `pg_type` forces
   and asserts the type; `list` plus `item` cover one-dimensional arrays. `tests/all_types.rs` is
   the Docker round-trip per type family.
+- `saci-connector-mariadb`: `MariadbSource`, `MariadbSink`, one native client (`mysql_async`, rustls on
+  ring) for both MariaDB and MySQL servers; `Flavor::{Mariadb, Mysql}` is detected per connection from
+  `SELECT VERSION()` and only the SQL spelling differs (statement timeout, upsert tail). No transformer:
+  rows arrive typed. Source modes: `polling` (cursor column, optional tiebreak); `cdc_trigger`, either an
+  operator outbox or `install_triggers #true`, where the connector creates the three row triggers and
+  the changelog table `saci_cdc_<name>` and reads it by `__seq`, defaulting to `delete_acked`
+  retention; `cdc_binlog`, the row binlog by file and position on both servers or by GTID on MySQL
+  only, with an optional `snapshot "initial"` that reads existing rows as `R` and pins its own
+  position. Reserved `__` columns (`__op`, `__seq`, `__table`, `__binlog_file`, `__binlog_pos`,
+  `__gtid`, `__commit_ts`) are filled by `cdc_binlog` and installed `cdc_trigger` only, and
+  `validate` refuses them elsewhere; an outbox may carry its own `__op`. Sink `write_mode`:
+  `append`, `upsert`, `ignore_conflicts` and `apply_changes` (applies the declared `__op`, deletes
+  included, in row order); sink sessions run a strict `sql_mode`. A sink flush is one transaction; a
+  failed `write_batch` does not keep its own batch (`RetryingSink` re-drives the same one, so keeping
+  it would write it twice), while rows an earlier call accepted under `flush_rows` and a failed
+  `finish` stay buffered. A statement holds at most `min(chunk_rows, 65535 / columns)` rows and, by
+  `Chunker`, the session's `max_allowed_packet` in estimated bytes. `ssl_mode "verify_ca"` checks the
+  host name too while `mysql_async`'s skip matches a rustls error text rustls 0.23 no longer emits
+  (`tests/tls.rs` pins it). A dropped (cancelled) call leaves `in_flight` set and the next call discards the session (`recover`), so a connection mid-statement is never reused; the saci service itself only drops the processor future, but a library caller may drop a sink one. Cursor and binlog positions persist
+  in the offset table `saci_source_offsets` (`INSERT ... ON DUPLICATE KEY UPDATE`, shaped per flavour).
+  A cursor over an `AUTO_INCREMENT` integer column (polling, an outbox id, `__seq`; found per session
+  in `information_schema.COLUMNS.EXTRA`) is numbered at write, not at commit, so `Holes` in
+  `src/source/sequence.rs` holds back the rows behind a gap wider than
+  `@@GLOBAL.auto_increment_increment` until a row fills it or the gap is passed. With `PROCESS`
+  (probed once per session, `SELECT COUNT(*) FROM information_schema.INNODB_TRX`, error 1227 on
+  both servers without it) the reader records, after the read that first shows a hole, the ids
+  of running transactions with `trx_rows_modified > 0` or `trx_state = 'LOCK WAIT'` (an insert holds
+  its number while it waits on a lock; own session excluded). That list must be newer than the read,
+  and the server rebuilds `INNODB_TRX` only after 0.1 s without a read of it (so a fast monitor keeps
+  it stale; the gate is the last read, not the last rebuild): `fresh_writers` reads the table inside
+  its own transaction with a nonce in the statement (`/* saci-canary-N */`) and accepts the list only
+  when a row of its own thread shows that statement in `trx_query` (a thread-id match alone is wrong:
+  an older read of the same thread sits in a stale list), up to `TRX_TRIES` times `TRX_RETRY` apart,
+  else the hole stays unattached and waits `gap_timeout_ms`. Later probes only trim the set (a
+  stale list is safe there) before each read, and a hole whose set is empty is passed at once
+  (`settled`); a set that never empties ends at `mode.gap_max_wait_ms` (default 300000, `0`
+  unbounded, not below `gap_timeout_ms`; `cap`), because the list cannot say which tables a
+  transaction touches. Without
+  `PROCESS` (one `warn` when it falls back) a hole is passed after `mode.gap_timeout_ms` (default
+  10000, `0` off, at most an hour; `timeout`). Both keys are refused on a non-integer cursor. Each
+  hole has its own clock on the reader's `Instant` and its own transaction set, in memory: a restart
+  starts them again, and the stored offset never passes a hole.
+  `saci_mariadb_source_sequence_gaps_total{outcome}` counts passed holes and
+  `_sequence_held_rows` gauges the rows held. A `where_clause` is read around: `read_filtered`
+  reads the unfiltered cursor window first (`ids_sql`, `batch_rows * 4`, at least 256; `>=` the
+  offset when a tiebreak is set, so the rest of a tie run is still read with no higher number),
+  judges holes on it, bounds the filtered `SELECT` by the last number before the first open hole, and
+  moves the offset to the bound when the filter drained it. `delete_acked` is a `COUNT(*)` then
+  `DELETE ... ORDER BY ... LIMIT <count>`, never a bare range: a range delete locks the record past
+  its end, which can be an open writer's uncommitted insert. A writer still open below the offset
+  (a hole passed at a limit) holds a record inside the range: the session runs with
+  `innodb_lock_wait_timeout = 2`, and a prune that loses the wait (1205, 1213) is left pending and
+  retried 5 seconds later (`prune_after`), not failed.
+  `MariadbSource::request_batch_rows` resizes the cursor `LIMIT` or the binlog chunk. A cycle of
+  `cdc_binlog` never ends inside a transaction (`max_batches_per_cycle` finishes the open one),
+  MariaDB's `log_bin_compress` is refused (preflight, and an error on a compressed row event of the
+  table, never a skip), and a `next_batch` the host drops mid-flight makes the reader replace the
+  connections it used, because a connection left mid-statement answers the next statement with the
+  previous reply. `cdc_binlog` decodes a row with the table definition in force when it was written:
+  `src/source/history.rs` records each `Definition` (the `information_schema` columns and primary key,
+  as JSON) in `<offset_table>_schema`, keyed by source `name` and table and tagged with the position it
+  holds from (a file by log number and offset, a GTID set by containment). `binlog.rs` resolves one
+  `Plan` per definition and every queued `Change` keeps its own, so a batch ends where the plan
+  changes. A stream starts on the definition in force at its start position and switches at each
+  recorded tag it reaches (`Timeline`); while one is ahead the catalog is never read, because it may
+  be newer than the replayed DDL. Past the last one a DDL marks the definition stale and the catalog
+  is read at the next row event of the table or at the end of the stream: a definition that differs
+  must fit that row event's table map, is recorded at the last DDL's position and put in use. A
+  position with no entry (`schema_history #false`, rows deleted, or two ALTERs made while the source
+  was stopped) falls back to the table map check, which refuses with `changed shape` or `changed
+  under the binlog`. A declared column a definition lacks reads NULL when nullable (`Slot::Absent`)
+  and is refused otherwise; only a start with nothing recorded checks strictly. A start with no stored
+  position always records the catalog as it is. Entries before the one in force at the stored position
+  are pruned (`DELETE` privilege; a failed delete is counted as `kind="schema"`, not raised), and the
+  history table's own writes are skipped like the offset table's. `mode.schema_history` (default
+  `#true`) and `mode.schema_history_table` configure it. `src/types.rs`
+  holds the sorted `TYPES` table keyed by `DATA_TYPE`; `schema_fields`'s `mariadb_type` asserts the
+  server column's type. Tests: `tests/common/mod.rs` is a two-flavour harness, `try_start(Flavor)`
+  with images from `SACI_MARIADB_TEST_MARIADB_IMAGE` (default `mariadb:11.8`) and
+  `SACI_MARIADB_TEST_MYSQL_IMAGE` (default `mysql:8.4`), and `SACI_MARIADB_TEST_ONLY=mariadb|mysql`
+  skipping the other flavour (CI's `mariadb_servers` job sweeps older and newer servers). Each shared
+  case is an `async fn case(server: &Server)` listed once in the file's `on_every_server!`, so it runs
+  as `mariadb::case` and `mysql::case`. Binaries: `sink`, `source_polling`, `source_trigger`,
+  `source_binlog`, `all_types`, `tls`.
 - `saci-connector-turso`: `TursoSource`, `TursoSink`, the in-process, SQLite-compatible `turso`
   engine, embedded (`connection.path`) or as a synced replica of Turso Cloud / sqld
   (`connection.remote`, pulled and pushed through `turso::sync`). Source modes `polling` (durable
@@ -330,7 +414,7 @@ workflow holding one as `restartable: false`.
 `saci-service`:
 
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
-  `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
+  `connector-mariadb`, `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
   `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
   one per connector
   crate. Each pulls the crate in and registers its factories in `register_builtin_factories`
@@ -343,11 +427,11 @@ workflow holding one as `restartable: false`.
   them, and none needs an extra build toolchain. HTTP, TCP, UDP and the peer link speak the
   network,
   and they qualify because they are generic primitives tied to no server product. `connector-kafka`,
-  `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso`, `connector-clickhouse` and
+  `connector-mariadb`, `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso`, `connector-clickhouse` and
   `connector-opentelemetry` each need a
   specific broker, database, object store or OTLP endpoint running first, so each is opt-in
   instead. `all` turns
-  on every one of the fourteen. `connector-kafka`, `connector-nats` and `connector-udp` imply
+  on every one of the fifteen. `connector-kafka`, `connector-nats` and `connector-udp` imply
   `transformer-ndjson` and
   `connector-tcp` implies `transformer-arrow-ipc`, so the connector feature alone is runnable. No
   connector resolves a format implicitly: a byte-carrying node names a declared `transformer`
@@ -362,7 +446,7 @@ workflow holding one as `restartable: false`.
 - `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
   `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector crate that
   needs nothing installed or already running. Deliberately excludes `saci-connector-kafka`,
-  `-nats`, `-postgresql`, `-s3`, `-turso`, `-clickhouse` and `-opentelemetry`, each of which
+  `-mariadb`, `-nats`, `-postgresql`, `-s3`, `-turso`, `-clickhouse` and `-opentelemetry`, each of which
   requires a specific broker, database, object store or OTLP endpoint installed and running first.
 
 ## Build prerequisites
@@ -381,8 +465,8 @@ any of these.
 
 ## Examples and configs
 
-- `examples/connectors/`: one-off connector-crate examples, `postgres_roundtrip.rs` and
-  `scheduler_parquet_etl.rs`.
+- `examples/connectors/`: one-off connector-crate examples, `postgres_roundtrip.rs`,
+  `mariadb_roundtrip.rs` and `scheduler_parquet_etl.rs`.
 - `examples/configs/`: runnable KDL configs for the `saci-service` binary itself (not
   `[[example]]` targets), one per connector plus standalone and cluster templates. See its own
   `README.md` for the feature-to-config table.
@@ -398,24 +482,26 @@ Docker-backed tests soft-skip when no daemon is reachable; the `try_start` conve
 `AGENTS.md`'s Testing section.
 
 `crates/saci-service/tests/connector_matrix.rs` (`cargo xtask matrix`, the `matrix` nextest
-profile, `ci.yml`'s `connector_matrix_build` and `connector_matrix` jobs) covers 3780 cases, one
-per `{source connector, sink connector, byte format, processor runtime}` tuple over 15 source
-connectors and 14 sink connectors (`HttpPushSource` registers a source and no sink, so the two
+profile, `ci.yml`'s `connector_matrix_build` and `connector_matrix` jobs) covers 4320 cases, one
+per `{source connector, sink connector, byte format, processor runtime}` tuple over 16 source
+connectors and 15 sink connectors (`HttpPushSource` registers a source and no sink, so the two
 dimensions are not one list), 6 formats (the five transformers plus the absence of one, for the
-six connectors that carry `RecordBatch`es natively) and 3 processor runtimes (native pipeline,
+seven connectors that carry `RecordBatch`es natively) and 3 processor runtimes (native pipeline,
 WASM component, native plugin), plus one maximal workflow declaring every node kind at once. One
 format applies to both the source and the sink of a case; the independent source-format x
-sink-format cross product (22680 cases) is deliberately not taken, because a mixed pair adds no
+sink-format cross product (25920 cases) is deliberately not taken, because a mixed pair adds no
 connector or transformer coverage over the two paired cases that already cover each half.
 
-The cases are split into 270 `#[ignore]`d tests, one per `{source, processor, format}` slice,
-named `live::<source>::<processor>::<format>` and each running its source against all 14 sinks,
+The cases are split into 288 `#[ignore]`d tests, one per `{source, processor, format}` slice,
+named `live::<source>::<processor>::<format>` and each running its source against all 15 sinks,
 plus `live::maximal::workflow`. The `live_slices!` macro generates them from three hand-written
 lists. nextest runs every test in its own process, so the slices run in parallel and a slice
 starts no container: `cargo xtask matrix` (`xtask/src/matrix.rs`) starts one apiece for Kafka,
-NATS, PostgreSQL, RustFS and ClickHouse with `docker run`, creates the run's S3 bucket, and runs
+NATS, PostgreSQL, RustFS, ClickHouse, MariaDB and MySQL with `docker run`, creates the run's S3 bucket, and runs
 `cargo nextest run --profile matrix --run-ignored all` with the endpoints in `SACI_MATRIX_*`
 variables, passing any further argument through (`-E 'test(/^live::kafka::/)'` runs one source).
+The MariaDB source reads from the MariaDB container and the MariaDB sink writes into the MySQL one,
+so every MariaDB case crosses both servers.
 Without `--archive-file` it builds both processor fixtures first. `Resources::connect` reads the
 variables: an unset one skips every case needing that resource, and a set one that does not
 answer within 180 s fails the slice. Cases isolate themselves inside the shared containers by a

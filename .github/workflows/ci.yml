@@ -128,11 +128,12 @@ jobs:
       run: cargo nextest run -p saci-service --no-default-features --features service,wasm,plugin --lib
 
     # The default bundle, which is what `cargo install saci-service` produces
-    # and what a contributor running bare `cargo test` gets. It registers 7 of
-    # the 17 connector type names in `BUILTIN_CONNECTOR_FEATURES`, a partial
+    # and what a contributor running bare `cargo test` gets. It registers 12 of
+    # the 28 connector type names in `BUILTIN_CONNECTOR_FEATURES` (the
+    # channel, file, HTTP, TCP, UDP, saci and redb connectors), a partial
     # set neither neighbouring step reaches: the reduced build above registers
-    # none of the 17, the `--all-features` suite below all of them. A premise
-    # that holds at zero connectors and again at seventeen can still be false
+    # none of the 28, the `--all-features` suite below all of them. A premise
+    # that holds at zero connectors and again at twenty-eight can still be false
     # in between, and this is the only step in between.
     # `service::topology::tests::every_allowlist_key_is_a_connector_type_this_crate_ships`
     # is the allowlist check that meets the partial registry here. The feature
@@ -242,6 +243,64 @@ jobs:
     - name: Full-stack distributed chaos test
       run: cargo nextest run -p saci-service --features distributed-raft --test distributed_integration_chaos --run-ignored ignored-only
 
+  # The `test` job's `--profile ci` run already drives every
+  # saci-connector-mariadb suite against the harness defaults (mariadb:11.8
+  # and mysql:8.4). This job runs the same suites once per older or newer
+  # server release: `SACI_MARIADB_TEST_ONLY` skips the other flavour's cases,
+  # and the image variable of the flavour under test names the release. It
+  # builds only the connector crate, so it needs no librdkafka prerequisite.
+  mariadb_servers:
+    name: MariaDB servers (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - only: mariadb
+          image: "mariadb:10.11"
+        - only: mariadb
+          image: "mariadb:11.4"
+        - only: mysql
+          image: "mysql:9"
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.99.0  # Rust minimum version
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v5
+      with:
+        path: target
+        key: ${{ runner.os }}-mariadb-servers-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest@0.9.143
+
+    # Only the flavour under test gets an image variable: the harness reads
+    # an empty one as a value, not as unset.
+    - name: MariaDB connector suites, ${{ matrix.image }}
+      env:
+        SACI_MARIADB_TEST_ONLY: ${{ matrix.only }}
+        SERVER_IMAGE: ${{ matrix.image }}
+      run: |
+        if [ "$SACI_MARIADB_TEST_ONLY" = mariadb ]; then
+          export SACI_MARIADB_TEST_MARIADB_IMAGE="$SERVER_IMAGE"
+        else
+          export SACI_MARIADB_TEST_MYSQL_IMAGE="$SERVER_IMAGE"
+        fi
+        cargo nextest run -p saci-connector-mariadb --profile ci
+
   # The connector matrix is one test per {source, processor, format} slice
   # (`crates/saci-service/tests/connector_matrix.rs`). This job compiles them
   # once into a nextest archive, which also carries both processor fixtures
@@ -313,8 +372,9 @@ jobs:
         retention-days: 1
 
   # One job per group, all from the same archive, so nothing here compiles
-  # but the xtask runner. `cargo xtask matrix` starts the five containers
-  # (Kafka, NATS, PostgreSQL, RustFS, ClickHouse) the group's slices share,
+  # but the xtask runner. `cargo xtask matrix` starts the seven containers
+  # (Kafka, NATS, PostgreSQL, RustFS, ClickHouse, MariaDB, MySQL) the
+  # group's slices share,
   # and nextest runs those slices in parallel against them.
   connector_matrix:
     name: Connector Matrix (${{ matrix.group }})

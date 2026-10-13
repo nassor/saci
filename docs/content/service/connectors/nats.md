@@ -74,7 +74,7 @@ another stream.
 
 ## What you need
 
-- A binary built with `--features connector-nats`; NATS is one of seven connectors that need a
+- A binary built with `--features connector-nats`; NATS is one of eight connectors that need a
   specific service installed and running, so it sits outside the default build.
 - A reachable NATS server with JetStream enabled. One in a container is enough:
 

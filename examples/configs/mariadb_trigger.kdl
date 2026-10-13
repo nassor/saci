@@ -1,0 +1,226 @@
+// SACI standalone service configuration capturing changes on a MariaDB or
+// MySQL table with connector-installed triggers, and upserting the pipeline's
+// output into another server.
+//
+// Run:
+//   export SACI_MARIADB_DSN='mysql://saci@localhost:3306/shop'
+//   export SACI_MARIADB_SINK_DSN='mysql://saci@localhost:3307/shop'
+//   cargo run --features connector-mariadb,wasm --bin saci-service -- validate \
+//     --config examples/configs/mariadb_trigger.kdl
+//   cargo run --features connector-mariadb,wasm --bin saci-service -- serve \
+//     --config examples/configs/mariadb_trigger.kdl
+//
+// With `install_triggers #true` the source creates three triggers on
+// shop.orders and a changelog table, `saci_cdc_maria_orders`, on its first
+// connect. The triggers write one changelog row per INSERT, UPDATE and DELETE,
+// and the source reads that table by its `__seq` cursor. Nothing about the
+// server needs configuring: no binlog, no replication privilege. A primary-key
+// change arrives as a delete followed by an insert. With `install_triggers
+// #false` the `table` is instead an outbox table the application fills itself.
+//
+// `validate` opens no database connection: both factories parse and validate
+// their config, build their TLS setup, and stop there. The first drain cycle is
+// where an unreachable server, a missing table or a mistyped column surfaces.
+//
+// Grants for the source user:
+//   GRANT SELECT, TRIGGER, CREATE, INSERT, DELETE ON shop.* TO 'saci'@'%';
+//   Creating a trigger on a server with binary logging on also needs SUPER,
+//   unless log_bin_trust_function_creators = 1.
+//
+// Grants for the sink user:
+//   GRANT SELECT, INSERT, UPDATE ON shop.* TO 'saci'@'%';
+//
+// Acknowledged changelog rows are deleted after each committed cycle
+// (`retention "delete_acked"`, the default with installed triggers). A DELETE
+// changelog row carries the old row, so every non-key field is nullable. The
+// `upsert` sink below cannot delete rows from the target; use cdc_binlog with
+// `apply_changes` (examples/configs/mariadb.kdl) to replicate deletes.
+
+mode "standalone"
+
+node id=1 name="saci-mariadb-trigger" data_dir="${SACI_DATA_DIR:-/tmp/saci-mariadb-trigger}"
+
+// Re-drain every 2 s. Each MariaDB mode returns EOF once it is caught up, so
+// the interval runner drives it without the stream runner.
+run_mode kind="interval" interval_ms=2000
+
+// Adaptive flow control: how many rows the runner admits from a source per
+// pass, and how large the Arrow chunk handed downstream is. On by default
+// for every source; declared here only to shorten the adjustment epoch.
+// Adjustment decisions land at the close of one epoch (adjust_interval_ms),
+// never per pass: this workflow redrains every 2 s, so the 60 s default
+// would take thirty iterations to run one experiment. 10 s reacts sooner,
+// at the cost of noisier per-epoch throughput measurements. Every other
+// key below is the hard default, target_latency_ms included: it defaults
+// to 0 in every batch mode (continuous and interval), because neither
+// carries a per-item latency contract the way stream mode does.
+flow_control {
+    min_rows 1024
+    max_rows 65536
+    start_rows 4096
+    max_chunk_bytes 8388608
+    adjust_interval_ms 10000
+}
+
+// One workflow declares the whole DAG: the source, the processor, the sink,
+// and the explicit links between them.
+workflow "orders" {
+    // ---------------------------------------------------------------- source
+
+    // The processor's `describe()` supplies the component list, so `component`
+    // on this source and the sink below must name components it declares.
+    source "maria_orders" type="MariadbSource" component="OrderChange" {
+        // Every source retries a failed operation with exponential backoff
+        // before the error reaches the runner. The `retry` child sits beside
+        // `config`; the connector's own `connection.reconnect` inside config
+        // composes beneath it: reconnect re-establishes the session, and the
+        // wrapper still retries the drained operation if it fails.
+        retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=30000 jitter=0.1
+
+        // batch_rows below sizes each changelog page; rows pins the runner's
+        // admission credit to match it exactly, so every pass admits one whole
+        // page and the adaptive search never touches this source.
+        flow_control {
+            rows 8192
+        }
+
+        // The `source` node's own id is what the service logs; the `name` inside
+        // `config` is what the connector sees, because the factory is handed only
+        // that table. It keys the metric labels, names the changelog table and
+        // prefixes every error, so keep the two equal.
+        config {
+            name "maria_orders"
+            // Rows per emitted RecordBatch.
+            batch_rows 8192
+            // 0 drains until caught up; a positive value caps batches per iteration.
+            max_batches_per_cycle 0
+
+            connection {
+                // Env-var placeholders are substituted before the file is parsed,
+                // so no credential needs to live here. Nothing in the connector
+                // ever logs the DSN, the user or the password: errors name the
+                // target as host:port/database. A `mariadb://` scheme works too.
+                dsn "${SACI_MARIADB_DSN}"
+                // Optional override: `password_file` wins over `password`, for
+                // secret mounts.
+                // password_file "/run/secrets/saci-mariadb-password"
+                connect_timeout_ms 5000
+                statement_timeout_ms 30000
+                // disabled, required (encrypted, certificate unchecked),
+                // verify_ca or verify_identity (the default). Anything but
+                // `disabled` needs the connector's `tls` feature, which the
+                // saci-service `connector-mariadb` feature turns on.
+                ssl_mode "required"
+                // PEM bundle of trusted roots. Absent means the built-in roots.
+                // ssl_ca "/etc/ssl/certs/mariadb-ca.pem"
+
+                reconnect max_attempts=3 base_delay_ms=100 multiplier=2.0 \
+                    max_delay_ms=30000 jitter=0.1
+            }
+
+            // polling, cdc_trigger or cdc_binlog.
+            mode kind="cdc_trigger" {
+                // The watched table. With install_triggers #false this would be
+                // the operator's own outbox table instead.
+                table "shop.orders"
+                install_triggers #true
+                // Defaults to saci_cdc_<name> with `-` written as `_`.
+                // changelog_table "saci_cdc_maria_orders"
+                // `delete_acked` (the default here) removes acknowledged
+                // changelog rows; `keep` leaves them.
+                retention "delete_acked"
+                // `__seq` is numbered when a row is written, not when its
+                // transaction commits, so a gap in the numbers is held back
+                // until a late commit fills it. With the PROCESS privilege the
+                // source reads INNODB_TRX: a gap no running transaction can
+                // fill is passed at once, and a slow transaction is waited for
+                // up to `gap_max_wait_ms` (`0` for no limit). Without PROCESS
+                // a gap is passed after `gap_timeout_ms`, which should exceed
+                // the longest transaction that writes shop.orders. `0` reads
+                // past gaps at once.
+                gap_timeout_ms 10000
+                gap_max_wait_ms 300000
+                // Where the connector stores its changelog cursor.
+                offset_table "saci_source_offsets"
+                offset_table_autocreate #true
+            }
+
+            // `__`-prefixed fields are the reserved columns an installed
+            // changelog fills: __op (utf8), __seq (uint64), __commit_ts
+            // (timestamp_micros_utc) and __table (utf8). Declare only the ones
+            // the pipeline needs.
+            schema_fields "__op" type="utf8" nullable=#false
+            schema_fields "__seq" type="uint64" nullable=#false
+            schema_fields "__commit_ts" type="timestamp_micros_utc" nullable=#true
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            // DECIMAL maps to decimal128 and needs the column's own precision and
+            // scale; a mismatch is refused at the first connect.
+            schema_fields "amount" type="decimal128" precision=18 scale=4 nullable=#true
+        }
+    }
+
+    // ------------------------------------------------------------ processor
+
+    wasm "process_orders" module="pipelines/orders.wasm"
+
+    // ------------------------------------------------------------------ sink
+    //
+    // A different component than the source's: the processor declares both,
+    // reads OrderChange and writes EnrichedOrder. A sink's schema_fields must
+    // match the component's RecordBatch field for field, in order, so pointing
+    // a sink at the source's component would mean repeating the source's
+    // schema verbatim.
+
+    sink "maria_enriched" type="MariadbSink" component="EnrichedOrder" {
+        // A failed write or finish retries the same way, so a dropped session
+        // mid-write re-queues the rows instead of failing the cycle.
+        retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=30000 jitter=0.1
+
+        config {
+            name "maria_enriched"
+            table "shop.enriched_orders"
+            // append, upsert, ignore_conflicts or apply_changes. upsert makes a
+            // replayed drain cycle idempotent, which is what makes the
+            // at-least-once source safe end to end.
+            write_mode "upsert"
+            conflict_columns "id"
+            // An omitted update_columns means every written column except the
+            // conflict columns.
+            //
+            // dedupe_order_column is optional: when one batch repeats a conflict
+            // key, the row with the highest value of this column wins. Without it
+            // the rows apply in batch order and the last one wins.
+            dedupe_order_column "source_seq"
+            // Rows per INSERT statement inside one transaction.
+            chunk_rows 1000
+            // 0 flushes on every write_batch, which is one transaction per
+            // iteration.
+            flush_rows 0
+            truncate_before_first_write #false
+
+            connection dsn="${SACI_MARIADB_SINK_DSN}" ssl_mode="required"
+
+            schema_fields "id" type="int64" nullable=#false
+            schema_fields "source_seq" type="uint64" nullable=#false
+            schema_fields "status" type="utf8" nullable=#true
+            // The declared precision and scale must be no wider than the
+            // target column's.
+            schema_fields "total" type="decimal128" precision=18 scale=4 nullable=#true
+        }
+    }
+
+    link from="maria_orders" to="process_orders"
+    link from="process_orders" to="maria_enriched"
+}
+
+// HTTP control plane. /metrics carries the connector's counters:
+// saci_mariadb_source_rows_total, saci_mariadb_source_batches_total,
+// saci_mariadb_sink_flushes_total and the rest.
+http bind="127.0.0.1:0" disabled=#false
+
+// Use log_format="json" in production log aggregators. Kept at a 30%
+// grade: a changelog source redraining every 2 s produces a steady
+// stream of per-item spans, so 30% keeps enough of them to see the shape
+// of a run without the full volume. error_sample_ratio stays at 1.0.
+observability log_format="pretty" log_level="info" sample_ratio=0.3 error_sample_ratio=1.0

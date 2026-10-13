@@ -28,6 +28,7 @@ them by path inside a clone, or by git outside one.
 | `saci-connector-nats` | `NatsSource`, `NatsSink`: core subject pub/sub or JetStream, chosen by a mode node's `kind` key. |
 | `saci-connector-opentelemetry` | `OpenTelemetryMetricsSource`, `OpenTelemetryMetricsSink`: OTLP/HTTP metrics in and out, Protobuf or JSON, one row per data point under the ten-column canonical schema. No transformer: an OTLP request is the wire format, so the connector decodes and encodes it itself. |
 | `saci-connector-postgresql` | `PostgresSource`, `PostgresSink`: native client, TLS, and `polling` / `cdc_trigger` / `cdc_logical` read modes. |
+| `saci-connector-mariadb` | `MariadbSource`, `MariadbSink`: one native client for MariaDB and MySQL servers, TLS, and `polling` / `cdc_trigger` / `cdc_binlog` read modes (binlog by file position, or by GTID on MySQL, with an optional initial snapshot); writes through `append`, `upsert`, `ignore_conflicts` or `apply_changes`. |
 | `saci-connector-turso` | `TursoSource`, `TursoSink`: the in-process, SQLite-compatible `turso` engine, embedded in the service's own process or a synced replica of Turso Cloud or sqld. Reads through `polling`, `dump` or `cdc`; writes through `append`, `upsert` or `ignore_conflicts` over a `deferred`, `immediate` or `concurrent` (MVCC) transaction, with optional change capture and page-level encryption. Pins `turso = "=0.7.2"`. |
 | `saci-connector-redb` | `RedbSource`, `RedbSink`: an embedded redb key/value file as a transport. One entry per batch, keyed `{key_prefix}{seq:020}{key_suffix}` so key order is insertion order, in the byte format a declared transformer names. |
 | `saci-connector-s3` | `S3Source`, `S3Sink`: any S3-compatible endpoint, timestamped object keys, row, byte and age flush thresholds. |
@@ -57,7 +58,7 @@ authoring SDK pulled in.
   `processor` or `plugin` is enabled.
 - `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
   `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector that needs
-  nothing installed or already running. Never `saci-connector-kafka`, `-nats`, `-postgresql`, `-s3`,
+  nothing installed or already running. Never `saci-connector-kafka`, `-mariadb`, `-nats`, `-postgresql`, `-s3`,
   `-turso`, `-clickhouse` or `-opentelemetry`. Each needs a specific broker, database, object store or
   OTLP endpoint installed and running first, so this crate does not carry them.
 - `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`, `transformer-ndjson`,
@@ -116,7 +117,7 @@ reads the local filesystem, `connector-redb` reads and writes one embedded file 
 and `connector-saci`'s peer is another `saci-service`. HTTP, TCP, UDP and the peer link speak
 the network, and they qualify because none depends on a specific
 server product; every connector that needs a database, broker, object store or OTLP endpoint
-running first is opt-in instead: `connector-postgresql`, `connector-nats`, `connector-s3`, `connector-kafka`,
+running first is opt-in instead: `connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`, `connector-kafka`,
 `connector-turso`, `connector-clickhouse` and `connector-opentelemetry`. `connector-kafka` stays
 opt-in because `librdkafka-sys` builds vendored C and needs `cmake` plus a C toolchain;
 `connector-turso` stays opt-in because its synced mode pulls
@@ -124,7 +125,7 @@ hyper and rustls; `distributed-raft` and `service-cluster` stay opt-in because a
 a deliberate deployment choice.
 
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
-  `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`, `connector-s3`,
+  `connector-mariadb`, `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`, `connector-s3`,
   `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`: one
   per connector crate. Each pulls the crate in and registers its factories in
   `register_builtin_factories` (each implies `service`). `connector-kafka`,
@@ -168,8 +169,8 @@ a deliberate deployment choice.
 - `service-cluster`: cluster and raft mode on top of `service` (implies `service`
   and `distributed-raft`). A cluster node keeps its state under `node.data_dir`,
   so a cluster binary needs no other feature.
-- `all`: every capability this crate carries, including all seven opt-in connectors, the native
-  plugin host and a Raft cluster node (`connector-postgresql`, `connector-nats`, `connector-s3`,
+- `all`: every capability this crate carries, including all eight opt-in connectors, the native
+  plugin host and a Raft cluster node (`connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`,
   `connector-kafka`, `connector-turso`, `connector-clickhouse`, `connector-opentelemetry`, `plugin`
   and `service-cluster`, on top of the default
   bundle). Excludes `conformance`: it turns on `arrow-ipc/lz4` so the corpus generator can write a

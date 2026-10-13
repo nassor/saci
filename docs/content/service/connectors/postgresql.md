@@ -74,7 +74,7 @@ table.
 
 ## What you need
 
-- A binary built with `--features connector-postgresql`; PostgreSQL is one of seven connectors
+- A binary built with `--features connector-postgresql`; PostgreSQL is one of eight connectors
   that need a specific service installed and running, so it sits outside the default build.
 - A reachable server. One in a container is enough, and this command starts it with the settings
   logical decoding needs:
@@ -503,5 +503,5 @@ Each message is prefixed with the half it came from, `PostgresSource:` or `Postg
 
 ## Next
 
-- [Sources and sinks](@/service/connectors/_index.md), the other seven transports.
+- [Sources and sinks](@/service/connectors/_index.md), the other fourteen transports.
 - [Workflows and links](@/service/config/workflows.md), the nodes these two sit in.

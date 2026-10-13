@@ -39,7 +39,7 @@ another `saci-service`.
 HTTP, TCP, UDP and the peer link speak the network, and they qualify
 because they are generic primitives tied to no server product. Every connector that needs a
 specific broker, database, object store or OTLP endpoint running first is opt-in instead:
-`connector-postgresql`,
+`connector-postgresql`, `connector-mariadb`,
 `connector-nats`, `connector-s3`, `connector-kafka`, `connector-turso`, `connector-clickhouse` and
 `connector-opentelemetry`. `connector-kafka` stays
 opt-in because `librdkafka-sys` builds vendored C and needs `cmake` plus a C toolchain;
@@ -47,7 +47,7 @@ opt-in because `librdkafka-sys` builds vendored C and needs `cmake` plus a C too
 and `service-cluster` stay opt-in because a cluster node is a deliberate deployment choice.
 
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
-  `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
+  `connector-mariadb`, `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
   `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
   one per connector
   crate. Each pulls
@@ -101,8 +101,8 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
 - `service-cluster`: cluster/Raft mode on top of `service` (implies `service`, `distributed-raft`).
   A cluster node keeps its state under `node.data_dir`, so a cluster binary needs no other
   feature: `--features service-cluster`.
-- `all`: every capability this crate carries, including all seven opt-in connectors, the native
-  plugin host and a Raft cluster node (`connector-postgresql`, `connector-nats`, `connector-s3`,
+- `all`: every capability this crate carries, including all eight opt-in connectors, the native
+  plugin host and a Raft cluster node (`connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`,
   `connector-kafka`, `connector-turso`, `connector-clickhouse`, `connector-opentelemetry`, `plugin`,
   `service-cluster`, on top of the default
   bundle). Excludes `conformance`: that feature turns on `arrow-ipc/lz4` so the corpus generator
@@ -413,7 +413,7 @@ Key types:
   engages no controller, because a single pass must drain every source by definition.
   `flow_control { enabled #false }` restores drain-to-EOF iterations; `flow_control { rows N }`
   pins a fixed size and disables the search entirely. `Source::request_batch_rows` is the
-  advisory counterpart `KafkaSource`, `NatsSource` and `PostgresSource` act on; every other
+  advisory counterpart `KafkaSource`, `NatsSource`, `PostgresSource` and `MariadbSource` act on; every other
   source is still governed, reshaped with a zero-copy `RecordBatch::slice`. The one exception
   is a source on a path to a windowed node (`windowing::reaches_windowed_node`, a reverse pass
   over `BuiltNode::window` and `downstream`): the credit stops the runner pulling the next
@@ -901,7 +901,8 @@ section. Service suites under `crates/saci-service/tests/`: the in-memory store 
 `distributed_integration_chaos` are the Raft chaos binaries; `kafka_service` and `nats_service`
 each hold two Docker-backed tests, a source to sink round trip and the dead letter store's
 record, replay and consume cycle, while
-`postgres_service` and `s3_service` each hold one; `metrics_series.rs` holds one
+`postgres_service` and `s3_service` each hold one and `mariadb_service` holds two (the polling round
+trip and the binlog snapshot into MySQL, both servers started inline); `metrics_series.rs` holds one
 test because a meter provider is a process-global one-shot; `windowed_fetch_hint.rs` covers the
 withheld `request_batch_rows` hint in both runners; `feature_bundles.rs` parses this crate's own
 `Cargo.toml` and holds the three bundle invariants, that `all` lists every feature the crate

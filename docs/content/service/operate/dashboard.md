@@ -195,7 +195,7 @@ history.
 Nothing else in either table plots history. That is the job of the node boxes'
 sparklines and the chart below. A node that has recorded nothing shows a dash,
 and so does a sink whose connector reports no backlog. `ChannelSink`,
-`PostgresSink` and `S3Sink` report one, while `FileSink`, `HttpSink`, Kafka,
+`PostgresSink`, `MariadbSink` and `S3Sink` report one, while `FileSink`, `HttpSink`, Kafka,
 NATS and TCP do not. Clicking a row opens the same detail sheet the box does.
 
 <img src="../../../dashboard/pipelines.png" alt="The Pipelines tab draws the multi-workflow example as one card per workflow, with a channel-bridges card below them.">
@@ -374,6 +374,8 @@ no detail at all.
 | `NatsSource`, `NatsSink` | `mode.kind`, `mode.stream`, `mode.subject` |
 | `PostgresSource` | `mode.kind`, `mode.table` |
 | `PostgresSink` | `table`, `write_mode` |
+| `MariadbSource` | `mode.kind`, `mode.table`, `mode.position`, `mode.snapshot`, `mode.install_triggers` |
+| `MariadbSink` | `table`, `write_mode` |
 | `TursoSource` | `mode.kind`, `mode.table` |
 | `TursoSink` | `table`, `write_mode` |
 | `S3Source`, `S3Sink` | `connection.bucket`, `prefix` |

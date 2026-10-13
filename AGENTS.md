@@ -95,12 +95,12 @@ alone; which to reach for depends on why you're running tests:
 - `cargo nextest run --workspace --all-features` (the `default` profile): the everyday command.
   It compiles the same `--all-features` closure as always, but skips every test that needs a
   Docker daemon: the testcontainers-backed connector suites
-  (`saci-connector-kafka`/`-nats`/`-postgresql`/`-s3`'s `tests/`), the two whole Raft chaos
+  (`saci-connector-kafka`/`-mariadb`/`-nats`/`-postgresql`/`-s3`'s `tests/`), the two whole Raft chaos
   binaries (`transport_chaos`, `distributed_harness_smoke`), the Docker-gated cluster tests in
   `raft_consensus_chaos` (its `unit` and `idempotency` modules are Docker-free and stay), the two
   Docker-backed tests each in `saci-service`'s `kafka_service` and `nats_service` (a source to
-  sink round trip and the dead letter store's record, replay and consume cycle) and one apiece in
-  its `postgres_service` and `s3_service`. The one non-Docker exclusion is
+  sink round trip and the dead letter store's record, replay and consume cycle), one apiece in
+  its `postgres_service` and `s3_service`, and two in its `mariadb_service`. The one non-Docker exclusion is
   `saci-connector-turso::synced_roundtrip`, which drives a synced replica against whatever remote
   endpoint `SACI_TURSO_URL`/`SACI_TURSO_TOKEN` name and clears a fixed table there. Run this
   constantly; it should stay fast regardless of how large the Docker-backed suites grow. The
@@ -132,7 +132,7 @@ alone; which to reach for depends on why you're running tests:
   test per {source, processor, format} slice, `live::<source>::<processor>::<format>`, each
   running that source against every sink, plus `live::maximal::workflow`. nextest runs each in its
   own process, so the slices run in parallel; the task builds both processor fixtures, starts one
-  container apiece for Kafka, NATS, PostgreSQL, RustFS and ClickHouse, names them in
+  container apiece for Kafka, NATS, PostgreSQL, RustFS, ClickHouse, MariaDB and MySQL, names them in
   `SACI_MATRIX_*` variables every slice reads, runs `cargo nextest run --profile matrix
   --run-ignored all` plus any argument given (`-E 'test(/^live::kafka::/)'` for one source), and
   removes the containers. CI compiles the binary once into a nextest archive and runs one job per
@@ -160,8 +160,8 @@ one resolve is cheaper than a per-package one: `-p` resolves features for one cr
 `--workspace` resolve takes the union every member asks for and reuses most of the
 `--all-features` artifacts. The timings compare the resolve strategies, measured as compile time
 on top of identical cold `--all-features` bases: `--workspace --lib` 24.7s, `--workspace` over
-all targets 35.0s, `-p saci-service --lib` 56.2s. Current scale at those three rungs is 2014,
-2347 and 557 tests. Every count here is what nextest runs under the `default` profile, which
+all targets 35.0s, `-p saci-service --lib` 56.2s. Current scale at those three rungs is 2363,
+2655 and 557 tests. Every count here is what nextest runs under the `default` profile, which
 `cargo nextest list` reports too; the profile's excluded tests are in neither.
 
 Docker-backed tests soft-skip rather than fail when no daemon is reachable: each crate's
@@ -170,6 +170,9 @@ Docker-backed tests soft-skip rather than fail when no daemon is reachable: each
 `None`; every such `#[tokio::test]` opens with `let Some(x) = common::try_start().await else {
 return; };`. This is what lets the `ci` profile run unconditionally on a runner that may or may not
 have Docker, and it needs no nextest-side accommodation.
+The MariaDB connector's suites run every case against a MariaDB and a MySQL server: `SACI_MARIADB_TEST_MARIADB_IMAGE`
+(default `mariadb:11.8`) and `SACI_MARIADB_TEST_MYSQL_IMAGE` (default `mysql:8.4`) pick the server images, and
+`SACI_MARIADB_TEST_ONLY=mariadb` or `mysql` runs one flavour only (CI's `mariadb_servers` job sweeps older and newer servers).
 The Raft chaos harness sharpens that rule: only the container step soft-skips.
 `RaftClusterHarness::try_start` returns `None` when the Docker daemon cannot supply the Toxiproxy
 container, and every step after it panics: host-port resolution, per-edge proxy creation, node
@@ -221,7 +224,7 @@ crates/
 │                             # substitution names the variables inserted, never a value.
 ├── saci-connector/           # SourceFactory, SinkFactory, ConnectorContext, NodeIdentity,
 │                             # ChannelBridge, rebuildable. skill saci-connectors
-├── saci-connector-{channel,clickhouse,file,http,kafka,nats,postgresql,redb,s3,saci,tcp,turso,udp}/
+├── saci-connector-{channel,clickhouse,file,http,kafka,mariadb,nats,postgresql,redb,s3,saci,tcp,turso,udp}/
 │                             # One crate per connector. skill saci-connectors
 ├── saci-transformer/         # Transformer, BatchReader, BatchWriter, MessageDecoder,
 │                             # TransformerFactory, TransformerRegistry. skill saci-transformers
@@ -288,11 +291,11 @@ every transformer,
 so `cargo install saci-service` yields a runnable binary with no flags. A connector ships by
 default only when nothing has to be installed or already running for it to work; every connector
 that needs a specific broker, database, object store or OTLP endpoint first is opt-in instead:
-`connector-postgresql`, `connector-nats`, `connector-s3`, `connector-kafka`,
+`connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`, `connector-kafka`,
 `connector-turso`, `connector-clickhouse` and `connector-opentelemetry`. `connector-kafka` also
 needs `cmake` and a C toolchain for vendored librdkafka; `connector-turso`'s synced mode pulls hyper and rustls. `distributed-raft` and
 `service-cluster` are opt-in too, because a cluster node is a deliberate deployment choice. `all`
-turns on every capability the crate carries, including all seven opt-in connectors, the native
+turns on every capability the crate carries, including all eight opt-in connectors, the native
 plugin host and a Raft cluster node, but excludes `conformance`, the corpus generator's own
 switch. The full table, `connector-*`, `transformer-*`, `wasm`, `plugin`, `distributed`,
 `distributed-raft`, `service`, `service-cluster`, `metrics`, `inspector`, `parquet-checkpoint`,
@@ -312,7 +315,7 @@ The **default** bundle is `engine` alone.
 - `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
   `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector crate that
   needs nothing installed or already running. Deliberately excludes `saci-connector-kafka`,
-  `-nats`, `-postgresql`, `-s3`, `-turso`, `-clickhouse` and `-opentelemetry`, each of which requires a
+  `-mariadb`, `-nats`, `-postgresql`, `-s3`, `-turso`, `-clickhouse` and `-opentelemetry`, each of which requires a
   specific broker, database, object store or OTLP endpoint installed and running first.
 - `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`, `transformer-ndjson`,
   `transformer-parquet` (`transformers` enables all five): one per byte-format crate.

@@ -244,6 +244,7 @@ pub trait Sink: Send {
     repository calls it. Four built-in sinks implement it:
     <code>ChannelSink</code> (the row backlog of every batch still queued),
     <code>PostgresSink</code> (rows buffered but not yet copied),
+    <code>MariadbSink</code> (rows buffered but not yet flushed),
     <code>TursoSink</code> (rows buffered but not yet flushed) and <code>S3Sink</code>
     (rows in the open object). A file sink has no meaningful queue depth.
 </p>
@@ -253,8 +254,8 @@ pub trait Sink: Send {
     direction. A host tells the source what size it wants next, and a source may return
     fewer rows, more rows, or ignore the call entirely and stay correct, because the
     caller reshapes whatever comes back. Implementing it buys efficiency, never
-    correctness. <code>KafkaSource</code>, <code>NatsSource</code>
-    and <code>PostgresSource</code> act on it to size their own fetch. <code>FileSource</code>,
+    correctness. <code>KafkaSource</code>, <code>NatsSource</code>,
+    <code>PostgresSource</code> and <code>MariadbSource</code> act on it to size their own fetch. <code>FileSource</code>,
     <code>HttpSource</code>, <code>S3Source</code>, <code>TcpIngestSource</code>,
     <code>SaciSource</code>, <code>TursoSource</code> and <code>ChannelSource</code> keep the
     trait's no-op default and are still governed by whatever calls it.
@@ -654,6 +655,12 @@ let src = CastingSource::new(file, target, CastOptions::default());</code></pre>
             <td><code>PostgresSource</code></td>
             <td><code>PostgresSink</code></td>
             <td><code>saci-connector-postgresql</code></td>
+        </tr>
+        <tr>
+            <td><strong>MariaDB</strong></td>
+            <td><code>MariadbSource</code></td>
+            <td><code>MariadbSink</code></td>
+            <td><code>saci-connector-mariadb</code></td>
         </tr>
         <tr>
             <td><strong>Turso</strong></td>

@@ -209,4 +209,4 @@ An unrecognised key inside `config` is ignored rather than rejected on this conn
 ## Next
 
 - [Several workflows in one process](@/service/processors/multiple-workflows.md), the pattern this connector exists for.
-- [Sources and sinks](@/service/connectors/_index.md), the other seven transports.
+- [Sources and sinks](@/service/connectors/_index.md), the other fourteen transports.

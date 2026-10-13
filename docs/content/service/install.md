@@ -93,6 +93,7 @@ aggregation.
 | Formats | csv, ndjson, parquet, avro and arrow-ipc |
 | Processors | the WebAssembly component runtime, windowing included |
 | PostgreSQL | no: opt in with `--features connector-postgresql` |
+| MariaDB | no: opt in with `--features connector-mariadb` |
 | NATS | no: opt in with `--features connector-nats` |
 | S3 | no: opt in with `--features connector-s3` |
 | Kafka | no: opt in with `--features connector-kafka` |
@@ -140,12 +141,13 @@ A `command not found` here means the cargo bin directory is not on your PATH.
 ## What stays opt-in
 
 A connector ships by default only when nothing has to be installed or already running for it to
-work. PostgreSQL, NATS, S3, Kafka, Turso, ClickHouse and OpenTelemetry each need their own database,
+work. PostgreSQL, MariaDB, NATS, S3, Kafka, Turso, ClickHouse and OpenTelemetry each need their own database,
 broker, object store or OTLP endpoint running before the connector does anything, so each sits
 outside the default build alongside native plugins and cluster mode. Add one by reinstalling with
 its flag, from the same checkout:
 
 - PostgreSQL: `--features connector-postgresql`.
+- MariaDB and MySQL: `--features connector-mariadb`.
 - NATS: `--features connector-nats`.
 - S3: `--features connector-s3`.
 - Kafka needs `cmake` and a C toolchain too, because its client library builds
@@ -164,7 +166,7 @@ its flag, from the same checkout:
   deliberate deployment choice. Install with `--features service-cluster`, then
   follow [Running a cluster](@/service/operate/cluster.md).
 
-`--features all` turns on every capability at once: all seven connectors above, native plugins and
+`--features all` turns on every capability at once: all eight connectors above, native plugins and
 cluster mode. It excludes only `conformance`, the Arrow IPC conformance corpus generator's own
 switch, not a capability a running service needs.
 

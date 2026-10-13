@@ -56,7 +56,7 @@ transformer-contract = ["dep:saci-transformer"]
 # the process, local disk, an embedded redb key/value file, an HTTP client, two
 # raw sockets, and a peer SACI service. HTTP, TCP, UDP and the peer link speak
 # the network and depend on no particular server product. Excluded are
-# saci-connector-kafka, -nats, -postgresql, -s3 and -turso, each of which
+# saci-connector-kafka, -mariadb, -nats, -postgresql, -s3 and -turso, each of which
 # requires a specific broker, database or object store installed and running
 # first.
 connector-channel = ["engine", "dep:saci-connector-channel"]

@@ -25,15 +25,17 @@
 [profile.default]
 # Excluded whole binaries are entirely testcontainers-driven: every test in
 # the file starts a container (see docs/content/service/connectors/kafka.md and
-# nats.md, and crates/saci-connector-postgresql/tests/common/mod.rs), or, for
+# nats.md, crates/saci-connector-postgresql/tests/common/mod.rs and
+# crates/saci-connector-mariadb/tests/common/mod.rs), or, for
 # the three Raft suites, a Toxiproxy container plus an N-node cluster.
 # Excluded test() clauses pick out the container-driven tests inside an
 # otherwise-fast file:
 # kafka_service.rs and nats_service.rs each pair two real-container tests
 # (the source-to-sink round trip and the dead letter store's record, replay
-# and consume cycle) with their pure-config tests, and postgres_service.rs
-# and s3_service.rs
-# each pair one real-container test with a pure-config test; raft_consensus_chaos.rs
+# and consume cycle) with their pure-config tests, postgres_service.rs
+# and s3_service.rs each pair one real-container test with a pure-config
+# test, and mariadb_service.rs pairs its two (the polling round trip and the
+# binlog snapshot into MySQL) with Docker-free ones; raft_consensus_chaos.rs
 # pairs its Docker-gated cluster tests with two Docker-free modules, `unit`
 # over the state machine and its redb storage and `idempotency` over a
 # single-node store, both of which stay in the fast profile; and
@@ -66,6 +68,12 @@ not (
     or binary_id(=saci-connector-postgresql::source_cursor)
     or binary_id(=saci-connector-postgresql::source_logical)
     or binary_id(=saci-connector-postgresql::all_types)
+    or binary_id(=saci-connector-mariadb::sink)
+    or binary_id(=saci-connector-mariadb::source_polling)
+    or binary_id(=saci-connector-mariadb::source_trigger)
+    or binary_id(=saci-connector-mariadb::source_binlog)
+    or binary_id(=saci-connector-mariadb::all_types)
+    or binary_id(=saci-connector-mariadb::tls)
     or binary_id(=saci-connector-s3::round_trip)
     or binary_id(=saci-connector-turso::synced_roundtrip)
     or binary_id(=saci-connector-clickhouse::roundtrip)
@@ -78,6 +86,7 @@ not (
     or (binary_id(=saci-service::postgres_service) and test(=a_postgres_source_and_sink_move_rows_through_the_standalone_runner))
     or (binary_id(=saci-service::s3_service) and test(=an_s3_source_and_sink_move_rows_through_the_standalone_runner))
     or (binary_id(=saci-service::clickhouse_service) and test(=a_clickhouse_source_and_sink_move_rows_through_the_standalone_runner))
+    or (binary_id(=saci-service::mariadb_service) and (test(=a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes)))
 )
 '''
 

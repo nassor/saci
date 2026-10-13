@@ -12,6 +12,7 @@
 //! - `connector-http`: [`HttpSourceFactory`], [`HttpSinkFactory`],
 //!   [`HttpPushSourceFactory`]
 //! - `connector-kafka`: [`KafkaSourceFactory`], [`KafkaSinkFactory`]
+//! - `connector-mariadb`: [`MariadbSourceFactory`], [`MariadbSinkFactory`]
 //! - `connector-nats`: [`NatsSourceFactory`], [`NatsSinkFactory`]
 //! - `connector-opentelemetry`: [`OpenTelemetryMetricsSourceFactory`],
 //!   [`OpenTelemetryMetricsSinkFactory`]
@@ -52,6 +53,8 @@ pub use saci_connector_file::{FileSinkFactory, FileSourceFactory};
 pub use saci_connector_http::{HttpPushSourceFactory, HttpSinkFactory, HttpSourceFactory};
 #[cfg(feature = "connector-kafka")]
 pub use saci_connector_kafka::{KafkaSinkFactory, KafkaSourceFactory};
+#[cfg(feature = "connector-mariadb")]
+pub use saci_connector_mariadb::{MariadbSinkFactory, MariadbSourceFactory};
 #[cfg(feature = "connector-nats")]
 pub use saci_connector_nats::{NatsSinkFactory, NatsSourceFactory};
 #[cfg(feature = "connector-opentelemetry")]
@@ -114,6 +117,8 @@ pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
     ("HttpPushSource", "connector-http"),
     ("KafkaSource", "connector-kafka"),
     ("KafkaSink", "connector-kafka"),
+    ("MariadbSource", "connector-mariadb"),
+    ("MariadbSink", "connector-mariadb"),
     ("NatsSource", "connector-nats"),
     ("NatsSink", "connector-nats"),
     ("OpenTelemetryMetricsSource", "connector-opentelemetry"),
@@ -408,6 +413,11 @@ pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
     let builder = builder
         .register_source(PostgresSourceFactory)
         .register_sink(PostgresSinkFactory);
+
+    #[cfg(feature = "connector-mariadb")]
+    let builder = builder
+        .register_source(MariadbSourceFactory)
+        .register_sink(MariadbSinkFactory);
 
     #[cfg(feature = "connector-clickhouse")]
     let builder = builder

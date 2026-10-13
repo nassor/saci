@@ -13,10 +13,11 @@
 //! 1. Without `--archive-file`, build the two processor fixtures: the
 //!    `saci-processor-smoketest` component and the `saci-plugin-smoketest`
 //!    cdylib. An archive built with `--profile matrix` carries both.
-//! 2. Start Kafka, NATS, PostgreSQL, RustFS and ClickHouse with `docker run`,
-//!    all at once, each published on a loopback port, then create the run's
-//!    S3 bucket through RustFS's own curl, which also waits out its startup.
-//!    Every other server is waited for by the slices themselves.
+//! 2. Start Kafka, NATS, PostgreSQL, RustFS, ClickHouse, MariaDB and MySQL
+//!    with `docker run`, all at once, each published on a loopback port, then
+//!    create the run's S3 bucket through RustFS's own curl, which also waits
+//!    out its startup. Every other server is waited for by the slices
+//!    themselves.
 //! 3. Run `cargo nextest run --profile matrix --run-ignored all` with the
 //!    variables set, followed by every argument given here, so `-E`,
 //!    `--partition`, `--archive-file` and the rest pass straight through.
@@ -52,6 +53,8 @@ Examples
 const LABEL: &str = "saci.matrix";
 
 const POSTGRES_PASSWORD: &str = "saci";
+/// The root password of both the MariaDB and the MySQL container.
+const MARIADB_PASSWORD: &str = "saci";
 const S3_ACCESS_KEY_ID: &str = "saciaccesskey";
 const S3_SECRET_ACCESS_KEY: &str = "sacisecretkey";
 
@@ -144,10 +147,10 @@ struct Service {
     args: Vec<String>,
 }
 
-/// The five servers, in the order [`Containers::start`] destructures them,
+/// The seven servers, in the order [`Containers::start`] destructures them,
 /// with the images and settings the harness's readiness checks and cases
 /// expect.
-fn services() -> Result<[Service; 5], std::io::Error> {
+fn services() -> Result<[Service; 7], std::io::Error> {
     // Kafka advertises the address clients reconnect to after bootstrap, so
     // the host port has to be known before the broker starts.
     let kafka_port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
@@ -242,6 +245,32 @@ fn services() -> Result<[Service; 5], std::io::Error> {
                 &["clickhouse/clickhouse-server:24.8-alpine"],
             ),
         },
+        Service {
+            name: "mariadb",
+            port: 3306,
+            host_port: None,
+            // Sources read from this server and sinks write into the MySQL one
+            // below, so every case holds a connection to each.
+            args: with(
+                env(&[
+                    ("MARIADB_ROOT_PASSWORD", MARIADB_PASSWORD),
+                    ("MARIADB_DATABASE", "saci"),
+                ]),
+                &["mariadb:11.8", "--max-connections=1000"],
+            ),
+        },
+        Service {
+            name: "mysql",
+            port: 3306,
+            host_port: None,
+            args: with(
+                env(&[
+                    ("MYSQL_ROOT_PASSWORD", MARIADB_PASSWORD),
+                    ("MYSQL_DATABASE", "saci"),
+                ]),
+                &["mysql:8.4", "--max-connections=1000"],
+            ),
+        },
     ])
 }
 
@@ -262,10 +291,10 @@ impl Containers<'_> {
                 .error(11, &[&format!("reserving the kafka port: {e}")])
         })?;
         self.ctx
-            .log("starting kafka, nats, postgres, s3 and clickhouse...");
+            .log("starting kafka, nats, postgres, s3, clickhouse, mariadb and mysql...");
 
         // Concurrently, because the first `docker run` of an image pulls it.
-        let started: [Result<(String, u16)>; 5] = thread::scope(|scope| {
+        let started: [Result<(String, u16)>; 7] = thread::scope(|scope| {
             services
                 .each_ref()
                 .map(|service| scope.spawn(move || self.start_one(service)))
@@ -275,9 +304,16 @@ impl Containers<'_> {
                     })
                 })
         });
-        let [kafka, nats, postgres, s3, clickhouse] = started;
-        let (kafka, nats, postgres, (s3_id, s3), clickhouse) =
-            (kafka?.1, nats?.1, postgres?.1, s3?, clickhouse?.1);
+        let [kafka, nats, postgres, s3, clickhouse, mariadb, mysql] = started;
+        let (kafka, nats, postgres, (s3_id, s3), clickhouse, mariadb, mysql) = (
+            kafka?.1,
+            nats?.1,
+            postgres?.1,
+            s3?,
+            clickhouse?.1,
+            mariadb?.1,
+            mysql?.1,
+        );
 
         let bucket = format!("saci-matrix-{}", nanos());
         self.create_bucket(&s3_id, &bucket)?;
@@ -299,6 +335,14 @@ impl Containers<'_> {
             (
                 "SACI_MATRIX_CLICKHOUSE_URL",
                 format!("http://127.0.0.1:{clickhouse}"),
+            ),
+            (
+                "SACI_MATRIX_MARIADB_DSN",
+                format!("mysql://root:{MARIADB_PASSWORD}@127.0.0.1:{mariadb}/saci"),
+            ),
+            (
+                "SACI_MATRIX_MYSQL_DSN",
+                format!("mysql://root:{MARIADB_PASSWORD}@127.0.0.1:{mysql}/saci"),
             ),
         ];
         for (key, value) in &env {
