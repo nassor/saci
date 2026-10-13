@@ -481,7 +481,8 @@ pub struct ClickhouseSinkConfig {
     /// Rows to buffer before sending an insert request (0 = flush every write).
     #[serde(default)]
     pub flush_rows: usize,
-    /// Executes `TRUNCATE TABLE` before the first write.
+    /// Runs `TRUNCATE TABLE` at the start of the first flush, and again on a
+    /// retry until a flush completes. The truncate is not transactional.
     #[serde(default)]
     pub truncate_before_first_write: bool,
 }

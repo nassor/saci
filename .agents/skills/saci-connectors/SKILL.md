@@ -309,6 +309,29 @@ workflow holding one as `restartable: false`.
   because ClickHouse compresses an `ArrowStream` result with LZ4 by default and `arrow-ipc/lz4` is
   enabled only under the `conformance` feature, so a normal build refuses a compressed batch by
   design.
+  A flush is one INSERT per chunk and each commits alone, so it is not atomic. A failed
+  `write_batch` does not keep its own batch (`RetryingSink` re-drives the same one, so keeping it
+  would write it twice), while rows an earlier call accepted under `flush_rows` and a failed `finish`
+  stay buffered; the buffer is cleared only after the last chunk. A retry rebuilds the same chunks:
+  `landed` holds the fingerprints of the chunks the server confirmed and the retry skips them, and
+  every INSERT carries `insert_deduplication_token` (`saci-<run>-<scope>-<chunk>-<content hash>`,
+  server 22.2 or later, set per INSERT so it replaces one in `connection.settings`), which a
+  deduplicating table (a replicated `MergeTree`, or one with `non_replicated_deduplication_window`
+  above zero) uses to drop a chunk whose outcome was unknown. `scope` advances when a flush
+  completes and at each truncate, so two identical flushes are both kept and a retry after a
+  truncate never meets the token of a chunk the truncate removed. `TRUNCATE` is not transactional: it
+  runs at the start of every attempt of the first flush until one completes (`first_write_done` is set
+  only after the last chunk), so a retry clears what a failed first flush left. Every request runs
+  in a task the sink owns (`InFlight`), because the `clickhouse` client's `InsertFormatted::end`
+  hands the request to its own task and a request already sent commits whether or not its future is
+  awaited. A dropped (cancelled) call leaves `own_rows` set and the request in `in_flight`; the next
+  call takes the batch back out and waits for that request (`recover`, bounded by
+  `query_timeout_ms`), so a landed chunk is recorded and a `TRUNCATE` never runs after the retry's
+  rows. Only a request given up on at the bound, or one that failed on the wire, has an unknown
+  outcome, which the token covers on a deduplicating table. Tests: the Docker cases at the end of
+  `tests/roundtrip.rs` fail an INSERT with a `CHECK` constraint (`DROP CONSTRAINT` lets the retry
+  through) and slow one with a `sleepEachRow` column default; the unit tests in `src/sink.rs` use a
+  TCP listener that hangs up or stays silent.
 - `saci-connector-redb`: `RedbSource`, `RedbSink`, an embedded redb key/value file as a
   transport, `directory`/`file`/`table` naming it. One entry per non-empty batch, keyed
   `{key_prefix}{seq:020}{key_suffix}` so lexicographic key order is insertion order; the sink

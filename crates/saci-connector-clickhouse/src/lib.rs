@@ -28,12 +28,20 @@
 //! `ClickhouseSink` streams Arrow IPC batches via HTTP `INSERT INTO table FORMAT ArrowStream`.
 //!
 //! - `write_mode="append"`: appends batches directly into the target table.
-//! - `truncate_before_first_write=#true`: executes `TRUNCATE TABLE` on the first write.
+//! - `truncate_before_first_write=#true`: runs `TRUNCATE TABLE` at the start of
+//!   the first flush, and again on each retry until a flush completes.
 //!
 //! # Delivery semantics
 //!
-//! At-least-once delivery: queries resume from the last known cursor, and writes
-//! stream batches progressively.
+//! At-least-once delivery: queries resume from the last known cursor.
+//!
+//! A sink flush is one `INSERT` per chunk, and ClickHouse commits each on its
+//! own, so a flush is not atomic. A failed `write_batch` does not keep its own
+//! batch, because the service's retry wrapper hands the same one back; rows an
+//! earlier call accepted under `flush_rows`, and a failed `finish`, stay
+//! buffered. A retry skips the chunks the server confirmed and sends the rest
+//! under an `insert_deduplication_token`, which a deduplicating table uses to
+//! drop a chunk that had already landed. [`sink`] has the exact rules.
 //!
 //! # Cargo features
 //!
