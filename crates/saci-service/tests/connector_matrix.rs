@@ -63,8 +63,8 @@ use saci_transformer::{ConfigMap, ConfigValue, unsupported};
 mod matrix;
 
 use matrix::{
-    CONNECTORS, Case, Connector, FORMATS, Fixtures, Format, PROCESSORS, ProcessorKind, Report,
-    Resources, run_case, run_maximal,
+    CONNECTORS, Case, Connector, FORMATS, Fixtures, Format, PROCESSORS, PrivateTemp, ProcessorKind,
+    Report, Resources, run_case, run_maximal,
 };
 
 /// Run one slice and fail on any case that missed its expectation.
@@ -73,6 +73,7 @@ use matrix::{
 /// `join_all` polls them all on this one task, and a slice has at most one
 /// case per sink.
 async fn run_slice(source: Connector, processor: ProcessorKind, format: Format) {
+    let _temp = PrivateTemp::install();
     let started = Instant::now();
     let fixtures = Fixtures::resolve().expect("processor fixtures");
     if processor == ProcessorKind::Wasm {
@@ -189,6 +190,7 @@ mod live {
         #[tokio::test(flavor = "multi_thread")]
         #[ignore = "needs the containers `cargo xtask matrix` starts"]
         async fn workflow() {
+            let _temp = PrivateTemp::install();
             let fixtures = Fixtures::resolve().expect("processor fixtures");
             fixtures
                 .compile_wasm()
@@ -201,6 +203,30 @@ mod live {
             report.print();
         }
     }
+}
+
+/// Temporary files land in a directory named for the process, and it is gone
+/// once the last guard drops.
+///
+/// The slices run in parallel processes, and `tempfile` seeds its name
+/// generator from the clock and the thread id alone, so processes released
+/// together draw the same names; see [`PrivateTemp`].
+#[test]
+fn temp_files_stay_out_of_the_shared_temp_directory() {
+    let private = std::env::temp_dir().join(format!("saci-matrix-{}", std::process::id()));
+    {
+        let _temp = PrivateTemp::install();
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(file.path().parent(), Some(private.as_path()));
+        assert_eq!(dir.path().parent(), Some(private.as_path()));
+        tempfile::tempfile().expect("unnamed temp file");
+    }
+    assert!(
+        !private.exists(),
+        "{} outlived its last guard",
+        private.display()
+    );
 }
 
 /// Every `{source, processor, format}` slice of the matrix has a live test.

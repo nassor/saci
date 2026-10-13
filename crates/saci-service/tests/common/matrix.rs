@@ -300,7 +300,7 @@ use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array};
@@ -1850,6 +1850,68 @@ fn unique(stem: &str) -> String {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+/// A temporary directory no other process shares, installed as the default
+/// of the `tempfile` crate while a guard is alive.
+///
+/// `tempfile` names a file from `fastrand`, whose per-thread seed is a hash
+/// of the clock and the thread id with no per-process entropy. nextest runs
+/// one slice per process, and slices released together draw the same
+/// `.tmpXXXXXX` names. When two of them race to create one, Windows can
+/// answer one with `ERROR_ACCESS_DENIED` (os error 5) instead of
+/// `ERROR_FILE_EXISTS`, and `tempfile` retries only the second, so the error
+/// reaches the caller of `NamedTempFile::new` or `tempfile::tempfile`, the
+/// S3 source's spool among them. A directory named for the process id keeps
+/// those names apart. It goes when the last guard drops, if it is empty.
+pub struct PrivateTemp;
+
+/// Live [`PrivateTemp`] guards. The lock is held while the directory is
+/// created or removed, so a guard made as the last one drops finds the
+/// directory in place.
+static PRIVATE_TEMP_HOLDERS: Mutex<usize> = Mutex::new(0);
+
+impl PrivateTemp {
+    fn dir() -> PathBuf {
+        std::env::temp_dir().join(format!("saci-matrix-{}", std::process::id()))
+    }
+
+    /// Create the directory and make it `tempfile`'s default.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the directory cannot be created, or when `tempfile`'s
+    /// default was already overridden to another path.
+    pub fn install() -> Self {
+        let mut holders = PRIVATE_TEMP_HOLDERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = Self::dir();
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("private temp directory {}: {e}", dir.display()));
+        if let Err(set) = tempfile::env::override_temp_dir(&dir) {
+            assert_eq!(
+                set, dir,
+                "tempfile's default directory was overridden elsewhere"
+            );
+        }
+        *holders += 1;
+        Self
+    }
+}
+
+impl Drop for PrivateTemp {
+    fn drop(&mut self) {
+        let mut holders = PRIVATE_TEMP_HOLDERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *holders -= 1;
+        if *holders == 0 {
+            // `remove_dir` refuses a directory that still holds a file, and
+            // that file stays.
+            let _ = std::fs::remove_dir(Self::dir());
+        }
+    }
 }
 
 /// A quoted KDL string reads backslashes as escapes, so a Windows path goes in

@@ -563,10 +563,13 @@ Without `--archive-file` it builds both processor fixtures first. `Resources::co
 variables: an unset one skips every case needing that resource, and a set one that does not
 answer within 180 s fails the slice. Cases isolate themselves inside the shared containers by a
 topic, subject, table, object prefix or file path named from the process start time, the process
-id and a counter, and by OS-assigned ports. `Fixtures::resolve` finds both fixtures from the test
-binary's own target directory, which is what lets an archived binary find the copies the
-`matrix` profile's `archive.include` packed. CI's build job compiles the binary once into a
-nextest archive and lists the groups (the second segment of each test name); one
+id and a counter, and by OS-assigned ports. Each slice also makes `<temp>/saci-matrix-<pid>` the
+`tempfile` default (`PrivateTemp`): `tempfile` seeds its name generator from the clock and the
+thread id alone, so slices released together draw the same `.tmpXXXXXX` names, and on Windows the
+loser of that race gets os error 5, which `tempfile` does not retry. `Fixtures::resolve` finds both
+fixtures from the test binary's own target directory, which is what lets an archived binary find
+the copies the `matrix` profile's `archive.include` packed. CI's build job compiles the binary once
+into a nextest archive and lists the groups (the second segment of each test name); one
 `connector_matrix` job per group runs `cargo xtask matrix --archive-file ... -E
 'test(/^live::<group>::/)'`, so a new connector gets a job with no workflow edit. The `default`
 and `ci` profiles both exclude `live::`, and `matrix` selects only it, with `fail-fast = false`,
