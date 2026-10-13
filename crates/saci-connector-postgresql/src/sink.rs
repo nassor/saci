@@ -34,6 +34,29 @@
 //! reachable from its own text form, so the only refusals left are
 //! declaration errors. It also makes a staged write out of an `append` that
 //! carries one such column, inside the same single transaction.
+//!
+//! # Failure
+//!
+//! A failed flush rolls back whole. The batch whose `write_batch` call failed is
+//! dropped from the buffer, because the caller was told it failed and re-drives
+//! it (`RetryingSink` does); keeping it too would write its rows twice. Rows an
+//! earlier call accepted under `flush_rows`, and everything a failed `finish`
+//! held, stay buffered for the next flush.
+//!
+//! # Cancellation
+//!
+//! A call can be dropped before it returns (a runner `select!`s on a cancel
+//! token, a caller wraps it in `timeout`). The buffer is only cleared once the
+//! commit returns, so a dropped flush loses no row, and `recover`, run first
+//! thing in every call, takes a dropped `write_batch`'s own batch back out as
+//! if it had failed. A dropped `finish` keeps what it held. The session is
+//! reused: `tokio-postgres` queues a `ROLLBACK` when a live transaction is
+//! dropped and fails a dropped `COPY`, both ahead of the next request. No flush
+//! has returned, so `truncate_before_first_write` runs again, in the same
+//! transaction as the rows. If the dropped flush did commit, the re-drive
+//! writes its rows a second time: harmless for `upsert` and `ignore_conflicts`,
+//! and the same duplicate an `append` retry after a lost `COMMIT` makes.
+//! `pending_rows` still counts a dropped call's rows until the next call.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -106,6 +129,11 @@ pub struct PostgresSink {
 
     buffer: Vec<RecordBatch>,
     buffered_rows: usize,
+    /// Rows of the batch the running `write_batch` pushed, set only while its
+    /// flush runs. Still set at the next call means that call was dropped.
+    own_rows: usize,
+    /// Set once a flush committed. It never resets: a reconnect that truncated
+    /// again would delete rows an earlier flush of the same run wrote.
     first_write_done: bool,
     /// One write plan per declared column, in declared order, resolved against
     /// the catalog on the first flush.
@@ -172,6 +200,7 @@ impl PostgresSink {
             truncate_before_first_write: cfg.truncate_before_first_write,
             buffer: Vec::new(),
             buffered_rows: 0,
+            own_rows: 0,
             first_write_done: false,
             plans: Vec::new(),
             instruments: Instruments::sink(&cfg.name),
@@ -196,9 +225,9 @@ impl PostgresSink {
         }
 
         if self.connection.is_some() {
-            // A new session may be a different server, so the catalog check and
-            // the one-shot TRUNCATE both apply again.
-            self.first_write_done = false;
+            // A new session may be a different server, so the catalog check
+            // applies again. `first_write_done` stays: the one-shot TRUNCATE
+            // belongs to the run, not to the session.
             self.plans.clear();
         }
 
@@ -258,6 +287,29 @@ impl PostgresSink {
         Ok(())
     }
 
+    /// Take back what a call dropped before it returned left behind.
+    ///
+    /// A dropped `write_batch` never told its caller whether the batch landed;
+    /// like a failed one it is taken out of the buffer, because the caller is
+    /// expected to re-drive it. A dropped `finish`, and the rows earlier calls
+    /// accepted, stay buffered. Nothing marks `first_write_done` for a flush
+    /// that did not return, so `truncate_before_first_write` clears the target
+    /// again, which is right whether or not the dropped flush committed: the
+    /// `TRUNCATE` and the rows share one transaction.
+    ///
+    /// The connection needs no repair. `tokio-postgres` queues a `ROLLBACK`
+    /// when a live [`Transaction`](tokio_postgres::Transaction) is dropped and
+    /// fails a dropped `COPY`, and both run before the next request on the
+    /// same session.
+    fn recover(&mut self) {
+        if self.own_rows > 0 {
+            self.buffer.pop();
+            self.buffered_rows -= self.own_rows;
+            self.own_rows = 0;
+            self.instruments.gauge(self.buffered_rows as u64);
+        }
+    }
+
     /// Write everything buffered in one transaction.
     async fn flush(&mut self) -> Result<(), SaciError> {
         if self.buffer.is_empty() {
@@ -271,12 +323,17 @@ impl PostgresSink {
 
         // Everything below runs against `transaction`, which rolls back on drop,
         // so an error anywhere leaves the target untouched.
-        let batches = std::mem::take(&mut self.buffer);
+        //
+        // A copy, not a `take`: the buffer is the only record of these rows, and
+        // a call dropped inside the write must leave them in it. A batch is a
+        // handful of `Arc`s, so the copy is cheap.
+        let batches = self.buffer.clone();
         let rows = self.buffered_rows;
         let result = self.flush_in_transaction(&batches, staged, truncate).await;
 
         match result {
             Ok(()) => {
+                self.buffer.clear();
                 self.buffered_rows = 0;
                 self.first_write_done = true;
                 self.instruments.batch(rows as u64);
@@ -293,9 +350,7 @@ impl PostgresSink {
                 Ok(())
             }
             Err(e) => {
-                // Put the batches back so `finish` can retry after a reconnect
-                // rather than silently dropping rows.
-                self.buffer = batches;
+                // The rows stay in the buffer for `finish` or the next write.
                 self.instruments.error("copy");
                 Err(e)
             }
@@ -760,22 +815,39 @@ fn merge_error(table: &str, e: tokio_postgres::Error) -> SaciError {
 #[async_trait]
 impl Sink for PostgresSink {
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
+        self.recover();
         self.check_schema(batch)?;
         if batch.num_rows() == 0 {
             return Ok(());
         }
 
-        self.buffered_rows += batch.num_rows();
+        let rows = batch.num_rows();
+        self.buffered_rows += rows;
         self.buffer.push(batch.clone());
         self.instruments.gauge(self.buffered_rows as u64);
 
         if self.flush_rows == 0 || self.buffered_rows >= self.flush_rows {
-            self.flush().await?;
+            // Dropped inside the flush, this call leaves `own_rows` set, and the
+            // next call takes the batch back out (`recover`).
+            self.own_rows = rows;
+            let flushed = self.flush().await;
+            self.own_rows = 0;
+            if let Err(e) = flushed {
+                // The caller is told this batch failed and re-drives it (the
+                // service's retry wrapper does), so it is not kept: holding it
+                // too would write its rows twice. Rows an earlier call accepted
+                // stay buffered for the next write or `finish`.
+                self.buffer.pop();
+                self.buffered_rows -= rows;
+                self.instruments.gauge(self.buffered_rows as u64);
+                return Err(e);
+            }
         }
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<(), SaciError> {
+        self.recover();
         self.flush().await
     }
 
@@ -1408,5 +1480,83 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
         assert_eq!(schema.field(2).data_type(), &DataType::Int64);
         // Same Arc every call: the trait requires a stable schema.
         assert!(Arc::ptr_eq(&schema, &sink.schema()));
+    }
+
+    /// A sink whose server is nothing: port 1 refuses, so a flush parks in
+    /// connect and backoff and a `timeout` drops it there.
+    fn unreachable(flush_rows: usize) -> PostgresSink {
+        let text = format!(
+            "name \"out\"\ntable \"orders\"\nflush_rows {flush_rows}\n\n\
+             connection dsn=\"postgres://127.0.0.1:1/d\" sslmode=\"disable\"\n{FIELDS}"
+        );
+        let cfg = PostgresSinkConfig::deserialize(from_kdl_str(&text).expect("parse kdl"))
+            .expect("parse");
+        PostgresSink::new(cfg).expect("sink")
+    }
+
+    fn one_row(sink: &PostgresSink, id: i64) -> RecordBatch {
+        RecordBatch::try_new(
+            sink.schema(),
+            vec![
+                Arc::new(Int64Array::from(vec![id])),
+                Arc::new(StringArray::from(vec!["v"])),
+                Arc::new(Int64Array::from(vec![id])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_failed_flush_does_not_keep_the_batch_that_triggered_it() {
+        let mut sink = unreachable(2);
+        let accepted = one_row(&sink, 1);
+        sink.write_batch(&accepted).await.expect("buffered");
+
+        let own = one_row(&sink, 2);
+        sink.write_batch(&own)
+            .await
+            .expect_err("nothing listens on port 1");
+        assert_eq!(sink.own_rows, 0);
+        assert_eq!(sink.buffer.len(), 1, "the caller's batch is not kept");
+        assert_eq!(sink.pending_rows(), Some(1), "the accepted row stays");
+    }
+
+    #[tokio::test]
+    async fn a_write_dropped_inside_its_flush_is_taken_back_by_the_next_call() {
+        let mut sink = unreachable(2);
+        let accepted = one_row(&sink, 1);
+        sink.write_batch(&accepted).await.expect("buffered");
+
+        let own = one_row(&sink, 2);
+        let dropped =
+            tokio::time::timeout(std::time::Duration::from_millis(1), sink.write_batch(&own)).await;
+        assert!(dropped.is_err(), "the flush was still connecting");
+        assert_eq!(sink.own_rows, 1);
+        assert_eq!(sink.buffer.len(), 2, "both batches are still buffered");
+
+        sink.recover();
+        assert_eq!(sink.own_rows, 0);
+        assert_eq!(sink.buffer.len(), 1, "the dropped call's batch is gone");
+        assert_eq!(sink.pending_rows(), Some(1), "the accepted row stays");
+    }
+
+    #[tokio::test]
+    async fn a_finish_dropped_inside_its_flush_keeps_every_row() {
+        let mut sink = unreachable(10);
+        let rows = one_row(&sink, 1);
+        sink.write_batch(&rows).await.expect("buffered");
+        let dropped =
+            tokio::time::timeout(std::time::Duration::from_millis(1), sink.finish()).await;
+        assert!(dropped.is_err(), "the flush was still connecting");
+        sink.recover();
+        assert_eq!(sink.pending_rows(), Some(1));
+        assert_eq!(sink.buffer.len(), 1);
+    }
+
+    #[test]
+    fn recovering_a_sink_that_nothing_interrupted_changes_nothing() {
+        let mut sink = sink("table \"orders\"");
+        sink.recover();
+        assert_eq!(sink.pending_rows(), Some(0));
     }
 }

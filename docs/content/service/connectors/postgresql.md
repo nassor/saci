@@ -245,9 +245,29 @@ cycle `max_batches_per_cycle` cuts short leaves the rest behind the slot and dec
 The connection is opened lazily, so `validate` parses the DSN and stops there. An unreachable
 server, a missing table and a mistyped column all surface on the first drain cycle.
 
-One flush is one transaction, so a write that fails leaves the target as it was. `flush_rows 0`,
-the default, makes that one transaction per batch; a higher value holds rows in memory until it is
-reached, and a process killed before the flush loses them.
+One flush is one transaction, so a write that fails leaves the target as it was. The batch whose
+`write_batch` call failed is not kept: that call returned the error, and the service's retry wrapper
+hands the same batch back, so keeping it too would write its rows twice. Rows that earlier calls
+accepted under `flush_rows` stay buffered for the next write or `finish`, and a failed `finish`
+keeps what it held. `flush_rows 0`, the default, makes that one transaction per batch; a higher
+value holds rows in memory until it is reached, and a process killed before the flush loses them.
+
+If the connection is lost while `COMMIT` is in flight, the outcome is unknown: the server may have
+committed. The sink reports the error and the caller re-drives the batch, so the rows can be written
+twice. `upsert` and `ignore_conflicts` absorb that; `append` into a table with a unique key fails on
+the repeat, and without one it duplicates the rows.
+
+A call that is dropped before it returns (a runner that cancels it, a `timeout` around it) is handled
+the same way. The server rolls the unfinished transaction back, buffered rows are kept, a dropped
+`write_batch` is treated like a failed one (its batch is taken out, the caller re-drives it), and
+`truncate_before_first_write` clears the target again because no flush has returned. If the dropped
+flush had already committed, the re-drive writes its rows a second time, which only `append` shows.
+`saci_postgres_sink_pending_rows` and `pending_rows` still count a dropped call's rows until the next
+call.
+
+`truncate_before_first_write` runs `TRUNCATE` on the target inside the first flush's transaction, so
+a failed first flush leaves the old rows in place. It runs once per sink and never again after a
+reconnect.
 
 The sink bulk loads in binary form. A column that needs a cast, and every `upsert` or
 `ignore_conflicts` write, is staged through a temporary table first, so the server applies the

@@ -707,3 +707,448 @@ async fn a_table_name_with_a_quote_is_written_not_injected() {
         .get(0);
     assert_eq!(count, 1);
 }
+
+// ------------------------------------------------- retry, drop and reconnect
+
+async fn ids(client: &tokio_postgres::Client, table: &str) -> Vec<i64> {
+    client
+        .query(&format!("SELECT id FROM {table} ORDER BY id"), &[])
+        .await
+        .expect("read back")
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+async fn create_keyless(client: &tokio_postgres::Client, table: &str) {
+    client
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (id bigint NOT NULL, label text, seq bigint NOT NULL)"
+        ))
+        .await
+        .expect("fixture");
+}
+
+async fn create_keyed(client: &tokio_postgres::Client, table: &str) {
+    client
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (id bigint PRIMARY KEY, label text, seq bigint NOT NULL)"
+        ))
+        .await
+        .expect("fixture");
+}
+
+/// A sink over `SMALL_FIELDS` writing `table`, with `extra` config lines.
+fn small_sink(pg: &common::PgContainer, table: &str, mode: &str, extra: &str) -> PostgresSink {
+    let keys = if mode == "append" {
+        ""
+    } else {
+        "conflict_columns \"id\"\n"
+    };
+    sink(
+        &pg.dsn(),
+        &format!(
+            "name \"s\"\ntable \"{table}\"\nwrite_mode \"{mode}\"\n{keys}{extra}{SMALL_FIELDS}"
+        ),
+    )
+}
+
+fn one(schema: &Arc<Schema>, id: i64) -> RecordBatch {
+    small_batch(Arc::clone(schema), &[(id, "v", id)])
+}
+
+/// The service's `RetryingSink` re-drives the batch whose `write_batch` failed.
+/// A flush that failed must not leave that batch buffered, or the retry
+/// buffers it a second time and a table without a key gets every row twice.
+#[tokio::test]
+async fn a_batch_the_caller_retries_is_written_once() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    let mut sink = small_sink(&pg, "retried_once", "append", "");
+    let schema = sink.schema();
+    let batch = small_batch(Arc::clone(&schema), &[(1, "a", 1), (2, "b", 2)]);
+
+    sink.write_batch(&batch)
+        .await
+        .expect_err("the table does not exist yet");
+    assert_eq!(sink.pending_rows(), Some(0), "a refused batch is not held");
+
+    create_keyless(&client, "retried_once").await;
+    sink.write_batch(&batch).await.expect("the retry");
+    sink.finish().await.expect("nothing left to write");
+    assert_eq!(
+        ids(&client, "retried_once").await,
+        vec![1, 2],
+        "each row is written once"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_flush_keeps_the_rows_an_earlier_call_accepted() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    create_keyed(&client, "retried").await;
+    client
+        .batch_execute("INSERT INTO retried VALUES (1, 'x', 1)")
+        .await
+        .expect("seed");
+    let mut sink = small_sink(&pg, "retried", "append", "flush_rows 3\n");
+    let schema = sink.schema();
+
+    sink.write_batch(&one(&schema, 2)).await.expect("buffered");
+    let refused = small_batch(Arc::clone(&schema), &[(1, "a", 1), (3, "c", 3)]);
+    sink.write_batch(&refused)
+        .await
+        .expect_err("append collides on 1");
+    assert_eq!(
+        sink.pending_rows(),
+        Some(1),
+        "the accepted row stays; the refused batch is the caller's to re-drive"
+    );
+    assert_eq!(ids(&client, "retried").await, vec![1], "rolled back whole");
+
+    client
+        .batch_execute("DELETE FROM retried")
+        .await
+        .expect("clear");
+    sink.write_batch(&refused)
+        .await
+        .expect("the re-driven batch");
+    assert_eq!(sink.pending_rows(), Some(0));
+    assert_eq!(ids(&client, "retried").await, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn a_failed_finish_keeps_its_rows_for_the_next_attempt() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    create_keyed(&client, "finished").await;
+    client
+        .batch_execute("INSERT INTO finished VALUES (1, 'x', 1)")
+        .await
+        .expect("seed");
+    let mut sink = small_sink(&pg, "finished", "append", "flush_rows 100\n");
+    let schema = sink.schema();
+
+    sink.write_batch(&small_batch(
+        Arc::clone(&schema),
+        &[(2, "b", 2), (1, "a", 1)],
+    ))
+    .await
+    .expect("buffered");
+    sink.finish().await.expect_err("append collides on 1");
+    assert_eq!(sink.pending_rows(), Some(2));
+    assert_eq!(ids(&client, "finished").await, vec![1], "rolled back whole");
+
+    client
+        .batch_execute("DELETE FROM finished")
+        .await
+        .expect("clear");
+    sink.finish().await.expect("the buffered rows are retried");
+    assert_eq!(sink.pending_rows(), Some(0));
+    assert_eq!(ids(&client, "finished").await, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn a_failed_truncating_flush_rolls_the_truncate_back() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    create_keyed(&client, "guarded").await;
+    client
+        .batch_execute("INSERT INTO guarded VALUES (1, 'old', 1), (2, 'old', 2)")
+        .await
+        .expect("seed");
+    let mut sink = small_sink(
+        &pg,
+        "guarded",
+        "append",
+        "truncate_before_first_write #true\n",
+    );
+    let schema = sink.schema();
+
+    let duplicated = small_batch(Arc::clone(&schema), &[(7, "a", 1), (7, "b", 2)]);
+    sink.write_batch(&duplicated)
+        .await
+        .expect_err("a duplicate inside the batch");
+    assert_eq!(
+        ids(&client, "guarded").await,
+        vec![1, 2],
+        "the truncate is part of the failed transaction"
+    );
+    sink.write_batch(&small_batch(
+        Arc::clone(&schema),
+        &[(7, "a", 1), (8, "b", 2)],
+    ))
+    .await
+    .expect("the first write that lands still truncates");
+    assert_eq!(ids(&client, "guarded").await, vec![7, 8]);
+}
+
+/// A reconnect starts a session, not a run: rows an earlier flush committed
+/// must survive it.
+#[tokio::test]
+async fn first_write_truncates_only_once_across_a_reconnect() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    create_keyed(&client, "reconnected").await;
+    client
+        .batch_execute("INSERT INTO reconnected VALUES (100, 'old', 100)")
+        .await
+        .expect("seed");
+    let mut sink = small_sink(
+        &pg,
+        "reconnected",
+        "append",
+        "truncate_before_first_write #true\n",
+    );
+    let schema = sink.schema();
+    sink.write_batch(&one(&schema, 1)).await.expect("first");
+
+    // Terminate every other backend, the sink's included.
+    client
+        .batch_execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE pid <> pg_backend_pid() AND backend_type = 'client backend'",
+        )
+        .await
+        .expect("terminate");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    sink.write_batch(&one(&schema, 2))
+        .await
+        .expect("the sink reconnects");
+    assert_eq!(
+        ids(&client, "reconnected").await,
+        vec![1, 2],
+        "a reconnect must not truncate the rows the first flush wrote"
+    );
+}
+
+/// How long a dropped call runs first, in microseconds: from not at all to long
+/// enough to finish, so the drop lands in the connect, the catalog read, the
+/// transaction and the commit in turn.
+const DROP_AFTER_MICROS: [u64; 15] = [
+    0, 100, 200, 300, 500, 800, 1_200, 2_000, 3_000, 5_000, 8_000, 13_000, 21_000, 40_000, 100_000,
+];
+
+/// A runner that `select!`s against a cancel token drops the call it was
+/// awaiting. Dropped while its `COPY` waits on a table lock, the transaction is
+/// open on the server; the next call must neither reuse its state nor commit
+/// it.
+#[tokio::test]
+async fn a_write_dropped_mid_copy_is_redriven_once() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    let admin = pg.connect().await;
+    create_keyless(&client, "dropped").await;
+    let mut sink = small_sink(&pg, "dropped", "append", "");
+    let schema = sink.schema();
+    sink.write_batch(&one(&schema, 1))
+        .await
+        .expect("opens the session");
+
+    client
+        .batch_execute("BEGIN; LOCK TABLE dropped IN ACCESS EXCLUSIVE MODE")
+        .await
+        .expect("lock");
+    let batch = small_batch(Arc::clone(&schema), &[(2, "b", 2), (3, "c", 3)]);
+    {
+        let write = sink.write_batch(&batch);
+        tokio::pin!(write);
+        let parked = async {
+            loop {
+                let waiting: i64 = admin
+                    .query_one(
+                        "SELECT count(*) FROM pg_stat_activity \
+                         WHERE wait_event_type = 'Lock' AND query LIKE 'COPY%dropped%'",
+                        &[],
+                    )
+                    .await
+                    .expect("activity")
+                    .get(0);
+                if waiting > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        tokio::select! {
+            outcome = &mut write => panic!("the COPY cannot finish under the lock: {outcome:?}"),
+            () = parked => {}
+        }
+        // `write` is dropped here, with its transaction open on the server.
+    }
+    client.batch_execute("COMMIT").await.expect("unlock");
+
+    sink.write_batch(&batch).await.expect("the re-drive");
+    sink.finish().await.expect("nothing left to write");
+    assert_eq!(sink.pending_rows(), Some(0));
+    assert_eq!(
+        ids(&client, "dropped").await,
+        vec![1, 2, 3],
+        "each row once: the dropped call's transaction is not committed by the next one"
+    );
+}
+
+/// Drop `write_batch` after each interval in turn, the sink warm and cold, with
+/// rows an earlier call accepted waiting in its buffer. The caller re-drives
+/// the batch it dropped, so the table must end with every row exactly once,
+/// the accepted ones included, and no call may fail or panic on the way.
+#[tokio::test]
+async fn a_dropped_flush_at_any_point_loses_nothing_and_repeats_nothing() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    let mut n = 0;
+    for primed in [false, true] {
+        for micros in DROP_AFTER_MICROS {
+            n += 1;
+            let table = format!("sweep_flush_{n}");
+            let at = format!("primed={primed} after {micros} us");
+            create_keyed(&client, &table).await;
+            // `upsert`, because a drop that lands after the `COMMIT` went out
+            // writes the accepted rows a second time, as any retry of a lost
+            // commit does.
+            let mut sink = small_sink(&pg, &table, "upsert", "flush_rows 5\nchunk_rows 2\n");
+            let schema = sink.schema();
+            let mut want: Vec<i64> = vec![1, 2, 3, 4, 5];
+            if primed {
+                let warm = small_batch(
+                    Arc::clone(&schema),
+                    &[
+                        (100, "w", 1),
+                        (101, "w", 1),
+                        (102, "w", 1),
+                        (103, "w", 1),
+                        (104, "w", 1),
+                    ],
+                );
+                sink.write_batch(&warm).await.expect("warms the session");
+                want.extend(100..105);
+            }
+            sink.write_batch(&small_batch(
+                Arc::clone(&schema),
+                &[(1, "a", 1), (2, "b", 2)],
+            ))
+            .await
+            .expect("buffered");
+            let own = small_batch(
+                Arc::clone(&schema),
+                &[(3, "c", 3), (4, "d", 4), (5, "e", 5)],
+            );
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_micros(micros),
+                sink.write_batch(&own),
+            )
+            .await;
+            match outcome {
+                Ok(result) => result.unwrap_or_else(|e| panic!("{at}: {e}")),
+                Err(_elapsed) => sink
+                    .write_batch(&own)
+                    .await
+                    .unwrap_or_else(|e| panic!("{at}: the re-drive failed: {e}")),
+            }
+            sink.finish()
+                .await
+                .unwrap_or_else(|e| panic!("{at}: finish: {e}"));
+            assert_eq!(sink.pending_rows(), Some(0), "{at}");
+            assert_eq!(ids(&client, &table).await, want, "{at}");
+        }
+    }
+}
+
+/// The same sweep over `finish`: a dropped one keeps what it held, and a second
+/// `finish` writes it.
+#[tokio::test]
+async fn a_dropped_finish_at_any_point_loses_nothing() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    let mut n = 0;
+    for primed in [false, true] {
+        for micros in DROP_AFTER_MICROS {
+            n += 1;
+            let table = format!("sweep_finish_{n}");
+            let at = format!("primed={primed} after {micros} us");
+            create_keyed(&client, &table).await;
+            let mut sink = small_sink(&pg, &table, "upsert", "flush_rows 100\nchunk_rows 1\n");
+            let schema = sink.schema();
+            let mut want: Vec<i64> = vec![1, 2, 3];
+            if primed {
+                sink.write_batch(&one(&schema, 100))
+                    .await
+                    .expect("buffered");
+                sink.finish().await.expect("warms the session");
+                want.push(100);
+            }
+            sink.write_batch(&small_batch(
+                Arc::clone(&schema),
+                &[(1, "a", 1), (2, "b", 2), (3, "c", 3)],
+            ))
+            .await
+            .expect("buffered");
+            let outcome =
+                tokio::time::timeout(std::time::Duration::from_micros(micros), sink.finish()).await;
+            if let Ok(result) = outcome {
+                result.unwrap_or_else(|e| panic!("{at}: {e}"));
+            }
+            sink.finish()
+                .await
+                .unwrap_or_else(|e| panic!("{at}: the second finish: {e}"));
+            assert_eq!(sink.pending_rows(), Some(0), "{at}");
+            assert_eq!(ids(&client, &table).await, want, "{at}");
+        }
+    }
+}
+
+/// A dropped first flush may or may not have committed its `TRUNCATE`, so the
+/// sink cannot know the target was cleared: the re-driven write clears it again
+/// and the table ends with the new rows once and none of the old.
+#[tokio::test]
+async fn a_dropped_truncating_flush_still_truncates_once() {
+    let Some(pg) = common::try_start().await else {
+        return;
+    };
+    let client = pg.connect().await;
+    for (n, micros) in DROP_AFTER_MICROS.into_iter().enumerate() {
+        let table = format!("sweep_truncate_{n}");
+        let at = format!("after {micros} us");
+        create_keyless(&client, &table).await;
+        client
+            .batch_execute(&format!(
+                "INSERT INTO {table} VALUES (900, 'old', 1), (901, 'old', 1)"
+            ))
+            .await
+            .expect("seed");
+        let mut sink = small_sink(&pg, &table, "append", "truncate_before_first_write #true\n");
+        let schema = sink.schema();
+        let own = small_batch(Arc::clone(&schema), &[(1, "a", 1), (2, "b", 2)]);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_micros(micros),
+            sink.write_batch(&own),
+        )
+        .await;
+        match outcome {
+            Ok(result) => result.unwrap_or_else(|e| panic!("{at}: {e}")),
+            Err(_elapsed) => sink
+                .write_batch(&own)
+                .await
+                .unwrap_or_else(|e| panic!("{at}: the re-drive failed: {e}")),
+        }
+        assert_eq!(ids(&client, &table).await, vec![1, 2], "{at}");
+    }
+}

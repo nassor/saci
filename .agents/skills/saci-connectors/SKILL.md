@@ -199,7 +199,13 @@ workflow holding one as `restartable: false`.
   `polling` / `cdc_trigger` / `cdc_logical` read modes. Every PostgreSQL type is read/write through
   `ROWS` in `src/types.rs`; an unmatched type is canonical text. `schema_fields`'s `pg_type` forces
   and asserts the type; `list` plus `item` cover one-dimensional arrays. `tests/all_types.rs` is
-  the Docker round-trip per type family.
+  the Docker round-trip per type family. A sink flush is one transaction; a failed `write_batch`
+  does not keep its own batch (`RetryingSink` re-drives the same one, so keeping it would write it
+  twice), while rows an earlier call accepted under `flush_rows` and a failed `finish` stay
+  buffered. The buffer is cloned, not taken, for the write, and `first_write_done` is set only after
+  a commit and never reset by a reconnect. A dropped (cancelled) call leaves `own_rows` set and the
+  next call takes that batch back out (`recover`); the session is reused, because tokio-postgres
+  queues a `ROLLBACK` for a dropped transaction and fails a dropped `COPY` ahead of the next request.
 - `saci-connector-mariadb`: `MariadbSource`, `MariadbSink`, one native client (`mysql_async`, rustls on
   ring) for both MariaDB and MySQL servers; `Flavor::{Mariadb, Mysql}` is detected per connection from
   `SELECT VERSION()` and only the SQL spelling differs (statement timeout, upsert tail). No transformer:
