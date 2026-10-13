@@ -21,7 +21,7 @@ A workflow reads rows out of a Turso database and writes rows back into one, whe
 a single local file or a replica kept in sync with a remote endpoint.
 
 The connector is built on the [`turso`](https://crates.io/crates/turso) engine, an in-process,
-SQLite-compatible database. This page pins the engine at `0.7.2`.
+SQLite-compatible database. This page pins the engine at `0.8.2`.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 156" role="img" aria-labelledby="tu-t tu-d">
@@ -247,6 +247,23 @@ work on the local replica; the engine's own sync protocol carries the rows to th
 Nothing is retried inside the connector: a failed operation reaches the node's `retry` policy, and
 then the runner.
 
+One flush is one transaction, so a write that fails leaves the target as it was. The batch whose
+`write_batch` call failed is not kept: that call returned the error, and the service's retry wrapper
+hands the same batch back, so keeping it too would write its rows twice. Rows that earlier calls
+accepted under `chunk_rows` stay buffered for the next write or `finish`, and a failed `finish` keeps
+what it held. A process killed before the flush loses the buffered rows.
+
+A call that is dropped before it returns (a runner that cancels it, a `timeout` around it) is handled
+the same way. A transaction it left open is rolled back, buffered rows are kept, a dropped
+`write_batch` is treated like a failed one, and `truncate_before_first_write` deletes again because
+no flush has returned. If the dropped flush had already committed, the re-drive writes its rows a
+second time, which only `append` shows. `pending_rows` still counts a dropped call's rows until the
+next call.
+
+`truncate_before_first_write` deletes every row as the first statement of the first flush's
+transaction, so a failed first flush leaves the old rows in place. A run that writes no row never
+flushes and leaves the table untouched.
+
 ## Declared types
 
 SQLite is dynamically typed, so every value is coerced to the `type` you declare. A value that does
@@ -296,7 +313,7 @@ Sink keys:
 | `write_mode` | string | `append` | `append`, `upsert` or `ignore_conflicts` |
 | `conflict_columns` | list of strings | none | the conflict target; required by `upsert` and `ignore_conflicts` |
 | `chunk_rows` | integer | `65536` | rows buffered before a transaction commits |
-| `truncate_before_first_write` | boolean | `#false` | delete every existing row before the first write |
+| `truncate_before_first_write` | boolean | `#false` | delete every existing row in the first flush's transaction |
 | `transaction` | string | `deferred` | `deferred`, `immediate` or `concurrent` |
 | `conflict_retries` | integer | `8` | retries after a write-write conflict; `concurrent` only |
 | `connection` | table | required | `path`, plus an optional `encryption` block and an optional `remote` block |

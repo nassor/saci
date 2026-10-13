@@ -14,11 +14,16 @@ fn sink(path: &str, mode: &str, conflict: Option<&str>) -> TursoSink {
         Some(column) => format!("conflict_columns \"{column}\"\n"),
         None => String::new(),
     };
+    sink_with(path, mode, &conflict)
+}
+
+/// A sink over `enriched` with `extra` config lines.
+fn sink_with(path: &str, mode: &str, extra: &str) -> TursoSink {
     let body = format!(
         "name \"enriched\"\n\
          table \"enriched\"\n\
          write_mode \"{mode}\"\n\
-         {conflict}\
+         {extra}\
          connection path=\"{}\"\n\
          schema_fields \"id\" type=\"int64\" nullable=#false\n\
          schema_fields \"total\" type=\"float64\" nullable=#true\n",
@@ -175,4 +180,154 @@ async fn upsert_without_a_unique_index_is_refused() {
         "error should name the missing constraint, got: {}",
         error.message()
     );
+}
+
+// ------------------------------------------------------ retry and re-drive
+
+async fn create_keyless(path: &std::path::Path) {
+    let conn = common::connect(path).await;
+    common::exec(&conn, "CREATE TABLE enriched (id INTEGER, total REAL)").await;
+}
+
+/// Another connection holding the database's write lock, so a sink's
+/// transaction fails with a busy error until it is released.
+struct WriteLock {
+    conn: turso::Connection,
+}
+
+impl WriteLock {
+    async fn take(path: &std::path::Path) -> Self {
+        let conn = common::connect(path).await;
+        common::exec(&conn, "BEGIN IMMEDIATE").await;
+        common::exec(&conn, "INSERT INTO enriched VALUES (-1, -1.0)").await;
+        Self { conn }
+    }
+
+    async fn release(self) {
+        common::exec(&self.conn, "ROLLBACK").await;
+    }
+}
+
+/// The service's `RetryingSink` re-drives the batch whose `write_batch` failed.
+/// A flush that failed must not leave that batch buffered, or the retry
+/// buffers it a second time and a table without a key gets every row twice.
+#[tokio::test]
+async fn a_batch_the_caller_retries_is_written_once() {
+    let db = common::temp_db();
+    create_keyless(&db.path).await;
+    let mut sink = sink_with(&db.path_str(), "append", "chunk_rows 2\n");
+    // An empty batch opens the database before the lock goes on.
+    sink.write_batch(&batch(&[])).await.expect("opens");
+    let own = batch(&[(1, 1.0), (2, 2.0)]);
+
+    let lock = WriteLock::take(&db.path).await;
+    sink.write_batch(&own)
+        .await
+        .expect_err("the database is locked");
+    assert_eq!(sink.pending_rows(), Some(0), "a refused batch is not held");
+    lock.release().await;
+
+    sink.write_batch(&own).await.expect("the retry");
+    sink.finish().await.expect("nothing left to write");
+    assert_eq!(
+        totals(&db.path).await,
+        vec![(1, 1.0), (2, 2.0)],
+        "each row is written once"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_flush_keeps_the_rows_an_earlier_call_accepted() {
+    let db = common::temp_db();
+    create_keyless(&db.path).await;
+    let mut sink = sink_with(&db.path_str(), "append", "chunk_rows 3\n");
+    sink.write_batch(&batch(&[(10, 10.0)]))
+        .await
+        .expect("buffered");
+
+    let own = batch(&[(1, 1.0), (2, 2.0)]);
+    let lock = WriteLock::take(&db.path).await;
+    sink.write_batch(&own)
+        .await
+        .expect_err("the database is locked");
+    assert_eq!(
+        sink.pending_rows(),
+        Some(1),
+        "the accepted row stays; the refused batch is the caller's to re-drive"
+    );
+    lock.release().await;
+
+    sink.write_batch(&own).await.expect("the re-driven batch");
+    assert_eq!(sink.pending_rows(), Some(0));
+    assert_eq!(totals(&db.path).await, vec![(1, 1.0), (2, 2.0), (10, 10.0)]);
+}
+
+#[tokio::test]
+async fn a_failed_finish_keeps_its_rows_for_the_next_attempt() {
+    let db = common::temp_db();
+    create_keyless(&db.path).await;
+    let mut sink = sink_with(&db.path_str(), "append", "chunk_rows 100\n");
+    sink.write_batch(&batch(&[(1, 1.0), (2, 2.0)]))
+        .await
+        .expect("buffered");
+
+    let lock = WriteLock::take(&db.path).await;
+    sink.finish().await.expect_err("the database is locked");
+    assert_eq!(sink.pending_rows(), Some(2));
+    lock.release().await;
+
+    sink.finish().await.expect("the buffered rows are retried");
+    assert_eq!(sink.pending_rows(), Some(0));
+    assert_eq!(totals(&db.path).await, vec![(1, 1.0), (2, 2.0)]);
+}
+
+/// The `DELETE` is part of the first flush's transaction, so a flush that fails
+/// leaves the old rows where they were, and the first one that lands still
+/// clears them.
+#[tokio::test]
+async fn a_failed_truncating_flush_leaves_the_old_rows_in_place() {
+    let db = common::temp_db();
+    create(&db.path).await;
+    let seed = common::connect(&db.path).await;
+    common::exec(&seed, "INSERT INTO enriched VALUES (900, 1.0), (901, 1.0)").await;
+    drop(seed);
+    let mut sink = sink_with(
+        &db.path_str(),
+        "append",
+        "chunk_rows 2\ntruncate_before_first_write #true\n",
+    );
+
+    sink.write_batch(&batch(&[(7, 1.0), (7, 2.0)]))
+        .await
+        .expect_err("a duplicate key inside the batch");
+    assert_eq!(
+        totals(&db.path).await,
+        vec![(900, 1.0), (901, 1.0)],
+        "the delete is rolled back with the rows"
+    );
+
+    sink.write_batch(&batch(&[(7, 1.0), (8, 2.0)]))
+        .await
+        .expect("the first write that lands still truncates");
+    assert_eq!(totals(&db.path).await, vec![(7, 1.0), (8, 2.0)]);
+}
+
+/// Once a flush has committed the table is the run's own, and a later flush
+/// must not clear it.
+#[tokio::test]
+async fn first_write_truncates_only_once() {
+    let db = common::temp_db();
+    create(&db.path).await;
+    let seed = common::connect(&db.path).await;
+    common::exec(&seed, "INSERT INTO enriched VALUES (900, 1.0)").await;
+    drop(seed);
+    let mut sink = sink_with(
+        &db.path_str(),
+        "append",
+        "chunk_rows 1\ntruncate_before_first_write #true\n",
+    );
+
+    sink.write_batch(&batch(&[(1, 1.0)])).await.expect("first");
+    sink.write_batch(&batch(&[(2, 2.0)])).await.expect("second");
+    assert_eq!(totals(&db.path).await, vec![(1, 1.0), (2, 2.0)]);
 }

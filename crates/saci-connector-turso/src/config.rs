@@ -635,7 +635,8 @@ pub struct TursoSinkConfig {
     /// Rows per transaction.
     #[serde(default = "default_chunk_rows")]
     pub chunk_rows: usize,
-    /// Delete every existing row before the first write.
+    /// Deletes every existing row in the transaction of the first flush, so a
+    /// flush that fails leaves them in place.
     #[serde(default)]
     pub truncate_before_first_write: bool,
     /// How each flush's transaction begins. `concurrent` turns on MVCC.

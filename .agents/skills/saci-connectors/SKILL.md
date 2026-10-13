@@ -295,9 +295,19 @@ workflow holding one as `restartable: false`.
   (`connection.remote`, pulled and pushed through `turso::sync`). Source modes `polling` (durable
   cursor), `dump`, and `cdc` (the change table a capture-enabled connection writes); sink write
   modes `append` / `upsert` / `ignore_conflicts` over a `transaction` of `deferred` / `immediate` /
-  `concurrent` (MVCC), plus `capture` and page-level `encryption`. Pins `turso = "=0.7.2"` with
+  `concurrent` (MVCC), plus `capture` and page-level `encryption`. Pins `turso = "=0.8.2"` with
   `default-features = false, features = ["sync"]`: the crate's default `mimalloc` feature would
   install a second global allocator.
+  A sink flush is one transaction; a failed `write_batch` does not keep its own batch
+  (`RetryingSink` re-drives the same one, so keeping it would write it twice), while rows an earlier
+  call accepted under `chunk_rows` and a failed `finish` stay buffered. `truncate_before_first_write`
+  is the first statement of the first flush's transaction and `first_write_done` is set only by a
+  commit, so a failed first flush leaves the old rows. A dropped (cancelled) call leaves `own_rows`
+  set and the next call takes that batch back out and rolls back a transaction the flush left open
+  on the connection (`recover`, async, found through `is_autocommit`). The embedded engine's futures
+  return `Pending` only while it waits on IO, so a local-file test cannot drop one mid-flush: the
+  unit tests in `src/sink.rs` build the open-transaction state by hand, and `tests/sink.rs` makes
+  flushes fail by holding the write lock on a second connection.
 - `saci-connector-clickhouse`: `ClickhouseSource`, `ClickhouseSink`, ClickHouse HTTP client with
   native `ArrowStream` format. Source modes `polling` (cursor column, optional initial cursor and
   tiebreak column, which resumes inside a repeated cursor value), `dump` (paginated full table

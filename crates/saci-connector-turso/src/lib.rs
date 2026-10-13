@@ -129,6 +129,14 @@
 //! Configure the sink `write_mode="upsert"` or `"ignore_conflicts"` to make
 //! replays idempotent.
 //!
+//! A sink flush is one transaction, so a failed flush leaves the target as it
+//! was. A failed `write_batch` does not keep its own batch, because the
+//! service's retry wrapper hands the same one back; rows an earlier call
+//! accepted under `chunk_rows`, and a failed `finish`, stay buffered. A call
+//! dropped before it returns leaves no open transaction behind.
+//! `truncate_before_first_write` deletes inside the first flush's transaction.
+//! [`sink`] has the exact rules.
+//!
 //! # Configuration
 //!
 //! ```kdl
