@@ -7,9 +7,9 @@ use object_store::path::Path;
 ///
 /// The timestamp is UTC and fixed-width, so key order is upload order, which is
 /// what [`crate::source::S3Source`]'s sorted listing relies on to replay
-/// objects in the order they were written. `seq` is the sink's own flush
-/// counter, zero-padded to six digits, which keeps two objects opened inside
-/// one millisecond distinct.
+/// objects in the order they were written. `seq` is the number of objects the
+/// sink has uploaded so far, zero-padded to six digits, which keeps two objects
+/// opened inside one millisecond distinct.
 pub(crate) fn object_key(prefix: &str, suffix: &str, opened_at: DateTime<Utc>, seq: u64) -> Path {
     let stem = format!(
         "{}-{seq:06}{suffix}",

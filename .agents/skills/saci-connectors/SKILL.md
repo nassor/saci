@@ -341,7 +341,14 @@ workflow holding one as `restartable: false`.
     there would reset the sequence and collide on the next write. `collect_keys` scans forward,
     where `break` on the first non-matching key is both correct and the early exit.
 - `saci-connector-s3`: `S3Source`, `S3Sink`, any S3-compatible endpoint, timestamped object keys,
-  row/byte/age flush thresholds.
+  row/byte/age flush thresholds. The sink's open object (`Pending`) keeps its accepted batches and
+  treats the encoder as a cache of them: a failed `write_batch` does not keep its own batch
+  (`RetryingSink` re-drives the same one), rows an earlier call accepted and a failed `finish` stay
+  until a `put` answers `Ok`, and `seq` moves only then. `opened_at` is fixed once a `put` was
+  sent (`attempted`), so a retried object computes the same key and overwrites an upload that
+  landed but reported failure. A dropped call leaves `own_rows` set and the next call, or the
+  `max_age_ms` ticker, takes that batch back out (`take_back`). Tests drive an in-memory store
+  with scripted `put` failures (`FlakyStore` in `src/sink.rs`).
 - `saci-connector-tcp`: `TcpIngestSource`, `TcpSink`, live length-prefixed frames, decoded and
   encoded by a transformer. The source listens, the sink dials, both register as `"tcp"`. Framing
   is transport, decoding is format.
