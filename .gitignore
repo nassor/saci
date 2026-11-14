@@ -16,8 +16,12 @@
 
 # Local Benchmarks
 performance-improvement.md
-.agents/skills/rust-*
 **/__pycache__/
+
+# Skills installed locally; only the committed saci-* ones are shared. The generic ones live at
+# user level in ~/.agents/skills.
+.agents/skills/*
+!.agents/skills/saci-*/
 
 # Local secrets (cloud-service credentials; never commit)
 .env

@@ -16,7 +16,9 @@ that names a target needs `-p <crate>`, almost always `-p saci`.
 
 `.agents/skills/<name>/SKILL.md` holds the reference for one area. Read the matching skill
 before working in that area; this file keeps the workspace map, the commands, the testing
-profiles and the engine reference. "skill `X`" below means that path.
+profiles and the engine reference. "skill `X`" below means that path. `technical-writer`,
+`rust-best-practices`, `rust-performance` and `ponytail` are not in this repository: they are
+user-level skills under `~/.agents/skills/`, shared by every project.
 
 | Skill | Read before |
 |---|---|
@@ -25,7 +27,7 @@ profiles and the engine reference. "skill `X`" below means that path.
 | `saci-processors` | touching `crates/saci/src/processor.rs` or `processor/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/`, or `examples/{wasm,polyglot,quickstart,conformance}/` |
 | `saci-plugins` | touching `crates/saci/src/{plugin.rs,plugin/,plugin_abi.rs}`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
 | `saci-service` | touching `crates/saci/src/{service,distributed,inspector,bin}/`, `src/metrics.rs`, `src/inspector_wire.rs`, `crates/saci-service-ui`, or `examples/{native,branching,windowing,multi_workflow,integrity,distributed_fulfillment}/` |
-| `saci-docs` | writing or editing any `//`, `///` or `//!` comment, anything under `docs/`, `README.md`, a skill, or any other prose |
+| `technical-writer`, then `saci-docs` | writing or editing any `//`, `///` or `//!` comment, anything under `docs/`, `README.md`, a skill, or any other prose: the first holds the writing rules, the second the SACI surfaces, site layout, diagram classes and docs build commands |
 | `rust-best-practices` | the finishing review of every changed `.rs` file |
 | `rust-performance` | a change on a hot path or to a build profile, allocator or dependency setting |
 | `ponytail` | designing or writing any change: the smallest change that fully solves the task |
@@ -495,7 +497,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   re-measures a stale build. Published figures are taken unpinned; `--affinity` is for A/B
   comparison only.
 - Code quality is a finishing check, not optional: at the end of every task that touches
-  `**/*.rs`, walk `.agents/skills/rust-best-practices/SKILL.md`'s review checklist against every
+  `**/*.rs`, walk skill `rust-best-practices`'s review checklist against every
   changed file (ownership/error-handling intent, no unproven `unwrap`/`expect`/`panic!`,
   Clippy-clean, public-item docs, and test coverage of the new behavior and its error paths), in
   addition to the `cargo fmt`/`cargo clippy`/`cargo test` gates already required above.
@@ -504,7 +506,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   touches a hot path (`Dataset`/`System`/`Pipeline` execution in the engine, Arrow IPC ser/de at
   the wasm host/processor boundary, or the `distributed` checkpoint and redb store paths)
   or a build profile/allocator/dependency setting also needs
-  `.agents/skills/rust-performance/SKILL.md`'s triage workflow, validated with
+  skill `rust-performance`'s triage workflow, validated with
   `cargo xtask bench <name>` before/after. The wasm host/processor boundary's instrument is
   `cargo xtask bench wasm_roundtrip` (`crates/saci/benches/wasm_roundtrip.rs`), which
   reports store lifecycle, host IPC encode, host IPC decode and the full `run_on_with_state`
@@ -521,7 +523,8 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   in the workspace entry and a member asks for the feature it needs, `features = ["processor"]`
   or `features = ["plugin"]`. `crates/saci-service-ui` is excluded from the workspace,
   so it inherits nothing and repeats every field itself.
-- Documentation, comments and prose: read `.agents/skills/saci-docs/SKILL.md` before writing or
-  editing any `//`, `///` or `//!` comment, anything under `docs/`, `README.md`, or a skill, and
-  walk its "Before you finish" list over the diff. Current state only, no optimization history or
-  task references; no mermaid, ASCII art or tables as diagrams, use SVG; no AI writing patterns.
+- Documentation, comments and prose: read skill `technical-writer`, then skill `saci-docs`, before
+  writing or editing any `//`, `///` or `//!` comment, anything under `docs/`, `README.md`, or a
+  skill, and walk both "Before you finish" lists over the diff. Current state only, no
+  optimization history or task references; no mermaid, ASCII art or tables as diagrams, use SVG;
+  no AI writing patterns.

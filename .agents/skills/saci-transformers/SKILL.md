@@ -81,7 +81,7 @@ connector pair; that skill owns the exact format count and the `FORMATS` list.
 `dimensions_cover_the_registry` in `crates/saci/tests/connector_matrix.rs` asserts the
 registered transformer formats equal that file's `FORMATS` list.
 
-`arrow-ipc = "=59.3.0"` is exact-pinned workspace-wide (`AGENTS.md` Conventions); the arrow-ipc
+`arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide (`AGENTS.md` Conventions); the arrow-ipc
 transformer shares that pin with the processor wire format, see skill `saci-processors`.
 
 ## Adding a transformer

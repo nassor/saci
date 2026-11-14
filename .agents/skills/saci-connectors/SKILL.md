@@ -308,7 +308,7 @@ workflow holding one as `restartable: false`.
   (`connection.remote`, pulled and pushed through `turso::sync`). Source modes `polling` (durable
   cursor), `dump`, and `cdc` (the change table a capture-enabled connection writes); sink write
   modes `append` / `upsert` / `ignore_conflicts` over a `transaction` of `deferred` / `immediate` /
-  `concurrent` (MVCC), plus `capture` and page-level `encryption`. Pins `turso = "=0.8.2"` with
+  `concurrent` (MVCC), plus `capture` and page-level `encryption`. Pins `turso = "=0.8.3"` with
   `default-features = false, features = ["sync"]`: the crate's default `mimalloc` feature would
   install a second global allocator.
   A sink flush is one transaction; a failed `write_batch` does not keep its own batch

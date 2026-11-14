@@ -145,8 +145,12 @@ cargo run -p saci --features conformance --example conformance_vectors -- emit
 The `conformance` feature exists to enable `arrow-ipc/lz4` for the generator alone, so a normal
 build still cannot write a compressed record batch and must reject one.
 
-`arrow-ipc = "=59.3.0"` is exact-pinned workspace-wide. It is the host to processor wire format and
-the on-disk checkpoint format. See `crates/saci/PINS.md` before touching it.
+`arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide. It is the host to processor wire format and
+the on-disk checkpoint format. See `crates/saci/PINS.md` before touching it. A bump of that pin
+regenerates the corpus above and reruns all five SDK suites: arrow-rs writes a zero-length validity
+buffer for a column with no nulls, and each SDK writer matches arrow-rs's buffer lengths slot for
+slot (Python's `ArrowRsLayoutTest` compares them against an arrow-rs fixture), so a layout change
+in arrow-rs is a change in all five writers.
 
 The wasm host/processor boundary's instrument is `cargo xtask bench wasm_roundtrip`
 (`crates/saci/benches/wasm_roundtrip.rs`), which reports store lifecycle, host IPC encode,

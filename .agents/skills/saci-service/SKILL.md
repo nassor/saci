@@ -191,7 +191,9 @@ replicates:
 - `transport/`: length-prefixed request/response TCP with a `serde_json` body,
   `MAX_FRAME_BYTES` 16 MiB. `TcpNetworkFactory`/`TcpNetwork` implement `RaftNetworkV2` over a
   peer pool with a circuit breaker; `RaftTcpServer` answers `AppendEntries`, `Vote`, snapshot
-  chunks and `ProposalForward`
+  chunks and `ProposalForward`. The wire carries openraft's `AppendEntriesResponse`, which names no
+  log ids, so the server converts its `AppendResult` into one and `TcpNetwork::append_entries`
+  rebuilds the `AppendResult` from the request's `prev_log_id` and `last_log_id()`
 - `RedbSharedStore` (`consensus/store.rs`): `SingleNode` applies commands to the local redb file,
   `MultiNode` proposes through the driver and reads from the state machine's own database. Claim
   leases default to `DEFAULT_LEASE_TTL_MILLIS` (90 s), which only a library caller sees: a cluster
@@ -855,7 +857,7 @@ toolchain. Regenerating it does:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.127 --locked   # must equal the resolved crate version
+cargo install wasm-bindgen-cli --version 0.2.130 --locked   # must equal the resolved crate version
 cargo xtask ui
 ```
 
