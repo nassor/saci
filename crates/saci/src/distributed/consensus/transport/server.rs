@@ -206,7 +206,7 @@ async fn handle_envelope(
 
     match envelope {
         RpcEnvelope::AppendEntries(req) => match raft.append_entries(req).await {
-            Ok(resp) => RpcResponse::AppendEntries(resp),
+            Ok(result) => RpcResponse::AppendEntries(result.into()),
             Err(e) => RpcResponse::Error(e.to_string()),
         },
 

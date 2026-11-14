@@ -481,13 +481,35 @@ fn q6_sql() -> String {
     )
 }
 
+/// The record batch type of the arrow release DataFusion links.
+type DfBatch = datafusion::arrow::record_batch::RecordBatch;
+
+/// Copy `batch` into DataFusion's own arrow types through an IPC stream.
+///
+/// shortcut: DataFusion may link an older arrow release than `saci`, so the two
+/// `RecordBatch` types differ; this one-off copy happens before any timing and
+/// can go once both link the same arrow.
+fn to_datafusion(batch: &RecordBatch) -> DfBatch {
+    let mut buf = Vec::new();
+    let mut writer =
+        arrow_ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema()).expect("IPC writer");
+    writer.write(batch).expect("IPC write");
+    writer.finish().expect("IPC finish");
+    drop(writer);
+    datafusion::arrow::ipc::reader::StreamReader::try_new(buf.as_slice(), None)
+        .expect("IPC reader")
+        .next()
+        .expect("one batch")
+        .expect("IPC read")
+}
+
 /// A fresh `SessionContext` with `batch` registered as the `lineitem` table.
 ///
 /// This is DataFusion's *deployment* setup: `SessionContext::new` builds a
 /// session state and registers every built-in scalar, aggregate and window
 /// function, and `register_table` publishes the `MemTable` in the default
 /// catalog. A server does this once at start-up, not once per query.
-fn q6_context(batch: RecordBatch) -> SessionContext {
+fn q6_context(batch: DfBatch) -> SessionContext {
     let ctx = SessionContext::new();
 
     let schema = batch.schema();
@@ -498,19 +520,19 @@ fn q6_context(batch: RecordBatch) -> SessionContext {
 }
 
 /// Extract the single `SUM` cell from a Q6 result set.
-fn q6_revenue(results: &[RecordBatch]) -> f64 {
+fn q6_revenue(results: &[DfBatch]) -> f64 {
     if results.is_empty() || results[0].num_rows() == 0 {
         return 0.0;
     }
     let col = results[0]
         .column(0)
         .as_any()
-        .downcast_ref::<Float64Array>()
+        .downcast_ref::<datafusion::arrow::array::Float64Array>()
         .expect("DataFusion revenue column is not Float64");
     col.value(0)
 }
 
-async fn datafusion_q6(batch: RecordBatch) -> f64 {
+async fn datafusion_q6(batch: DfBatch) -> f64 {
     let ctx = q6_context(batch);
     let df = ctx.sql(&q6_sql()).await.expect("sql parse failed");
     let results = df.collect().await.expect("datafusion execute failed");
@@ -531,6 +553,7 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
         .unwrap();
 
     let batch = generate_lineitem_batch(N, SEED);
+    let df_batch = to_datafusion(&batch);
 
     println!("\n[vs_datafusion_q6] {} rows, {} CPUs", N, num_cpus::get());
 
@@ -549,7 +572,7 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
                 .unwrap_or(0.0)
         };
 
-        let df_revenue = rt.block_on(datafusion_q6(batch.clone()));
+        let df_revenue = rt.block_on(datafusion_q6(df_batch.clone()));
 
         let eps = saci_revenue.abs() * 1e-9 + 1.0;
         assert!(
@@ -566,7 +589,7 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
         // a few ULP between executions. Assert to the precision this comparison
         // publishes.
         let split_revenue = {
-            let ctx = q6_context(batch.clone());
+            let ctx = q6_context(df_batch.clone());
             rt.block_on(async {
                 let df = ctx.sql(&q6_sql()).await.expect("sql parse failed");
                 let plan = df
@@ -638,7 +661,7 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
 
     group.bench_function("datafusion_sql", |b| {
         b.iter(|| {
-            let r = rt.block_on(datafusion_q6(std::hint::black_box(batch.clone())));
+            let r = rt.block_on(datafusion_q6(std::hint::black_box(df_batch.clone())));
             std::hint::black_box(r)
         })
     });
@@ -662,14 +685,14 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
     // Once-per-deployment: session state (every built-in UDF) + `MemTable` +
     // catalog registration.
     group.bench_function("datafusion_sql_setup_only", |b| {
-        b.iter(|| q6_context(std::hint::black_box(batch.clone())))
+        b.iter(|| q6_context(std::hint::black_box(df_batch.clone())))
     });
 
     // Once-per-query-shape: parse, logical plan, logical optimisation and
     // physical planning, against a context that already exists and already has
     // the table. The SQL string is formatted once outside, so this is planning
     // and nothing else.
-    let plan_ctx = q6_context(batch.clone());
+    let plan_ctx = q6_context(df_batch.clone());
     let plan_sql = q6_sql();
     group.bench_function("datafusion_sql_plan_only", |b| {
         b.iter(|| {
@@ -699,7 +722,7 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
     //
     // Re-executing a memory source is supported: the generator is reset so each
     // `execute()` call produces an independent stream from the beginning.
-    let exec_ctx = q6_context(batch.clone());
+    let exec_ctx = q6_context(df_batch.clone());
     let exec_df = rt
         .block_on(exec_ctx.sql(&q6_sql()))
         .expect("sql parse failed");

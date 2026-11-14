@@ -127,7 +127,7 @@ pub use error::{Error, Result};
 pub use saci_macros::{Component, fold, processor, transform};
 
 // Arrow sub-crates processor authors need to define `Component` schemas,
-// re-surfaced at the workspace-pinned `=59.3.0` version so user crates do not
+// re-surfaced at the workspace-pinned `=60.1.0` version so user crates do not
 // depend on them directly. `serde` is not re-exported: `#[derive(Serialize)]`
 // expansions reference the literal `::serde` path at the call site, so processor
 // authors add `serde` as a direct dep of their own crate.

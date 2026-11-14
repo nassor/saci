@@ -279,7 +279,7 @@ seventh stage needs no host changes.
 
 ## Load-bearing crate pin
 
-`arrow-ipc = "=59.3.0"` in the workspace `Cargo.toml` is the host's Arrow IPC
+`arrow-ipc = "=60.1.0"` in the workspace `Cargo.toml` is the host's Arrow IPC
 implementation, and the byte layout the five `saci-sdk` packages' codecs target.
 A patch bump there can change the buffer layout the Go, Python, TypeScript,
 Kotlin and C# stages walk. The `polyglot_chain` integration test is the

@@ -137,10 +137,10 @@ by type.
 | `Bool` | 2 | validity, values |
 | `Utf8` | 3 | validity, i32 offsets, values |
 
-**arrow-rs emits the validity slot even when the field is non-nullable and the
-null count is zero**, with a real, non-zero length (`ceil(n/8)` bytes, all bits
-set). The slot count is therefore fixed by `type_type`, never inferred from
-lengths. The twelve-field `Order` schema,
+The validity slot is always present, even when the field is non-nullable and the
+null count is zero. arrow-rs writes it with length 0 in that case, so a reader
+must not rely on its length or its contents. The slot count is fixed by
+`type_type`, never inferred from lengths. The twelve-field `Order` schema,
 `Int, Utf8, Utf8, Float, Bool, Float, Utf8, Float, Bool, Float, Int, Utf8`,
 consumes exactly 28 buffer slots; after the walk, the accumulated index must
 equal the `buffers` vector length, or the batch is malformed.

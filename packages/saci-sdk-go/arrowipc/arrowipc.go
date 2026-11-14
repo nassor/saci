@@ -422,9 +422,9 @@ type span struct {
 
 // field is a schema field paired with the buffers the RecordBatch assigned it.
 // The validity span is resolved and then never read: every `Order` field is
-// non-nullable, arrow-rs still emits an all-ones validity bitmap, and an
+// non-nullable, arrow-rs writes its validity slot with length 0, and an
 // in-place value write therefore never has to touch it. Resolving it anyway is
-// the point, because a validity buffer that leaves the body is a malformed
+// the point, because a validity span that leaves the body is a malformed
 // batch whether or not this codec would have looked at those bytes.
 type field struct {
 	name     string

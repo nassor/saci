@@ -168,9 +168,9 @@ internal val EMPTY_SPAN = Span(0, 0)
 /**
  * A schema field paired with the buffers the RecordBatch assigned it.
  *
- * The validity span is resolved but unused: arrow-rs emits an all-ones validity
- * bitmap for a non-nullable field, and an in-place value write therefore never
- * has to touch it.
+ * The validity span is resolved but unused: arrow-rs writes a zero-length
+ * validity slot for a non-nullable field, and an in-place value write therefore
+ * never has to touch it.
  */
 internal class Field(val name: String, val type: Int) {
     var validity: Span = EMPTY_SPAN

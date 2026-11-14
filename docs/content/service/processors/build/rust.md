@@ -122,7 +122,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 # wasm32 because that expansion is: the host build of this crate is an empty
 # cdylib and has no use for the generator or its proc-macro dependency tree.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = "0.62.0"
+wit-bindgen = "0.63.0"
 ```
 
 The in-repo stage points `saci` at `../../../../crates/saci` by path through the workspace

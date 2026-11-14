@@ -29,9 +29,7 @@ use openraft::{
     BasicNode, RaftNetworkFactory, RaftNetworkV2,
     error::{NetworkError, RPCError, ReplicationClosed, StreamingError},
     network::{Backoff, RPCOption},
-    raft::{
-        AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
-    },
+    raft::{AppendEntriesRequest, AppendResult, SnapshotResponse, VoteRequest, VoteResponse},
     type_config::alias::{SnapshotOf, VoteOf},
 };
 
@@ -411,14 +409,18 @@ impl RaftNetworkV2<SaciTypeConfig> for TcpNetwork {
         &mut self,
         rpc: AppendEntriesRequest<SaciTypeConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<SaciTypeConfig>, RPCError<SaciTypeConfig>> {
+    ) -> Result<AppendResult<SaciTypeConfig>, RPCError<SaciTypeConfig>> {
+        // The wire carries `AppendEntriesResponse`, which names no log ids; the
+        // leader's result is rebuilt from the request it sent.
+        let prev_log_id = rpc.prev_log_id;
+        let last_log_id = rpc.last_log_id();
         let envelope = RpcEnvelope::AppendEntries(rpc);
         let resp = Self::send_envelope(&self.pool, &envelope)
             .await
             .map_err(|e| e.into_rpc_error())?;
 
         match resp {
-            RpcResponse::AppendEntries(r) => Ok(r),
+            RpcResponse::AppendEntries(r) => Ok(r.into_append_result(prev_log_id, last_log_id)),
             RpcResponse::Error(msg) => Err(RPCError::Network(NetworkError::new(
                 &io::Error::other(format!("append_entries error: {msg}")),
             ))),

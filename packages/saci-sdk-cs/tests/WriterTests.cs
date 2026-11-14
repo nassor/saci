@@ -69,8 +69,8 @@ public class WriterTests
         Assert.Empty(batch.Strings("region"));
     }
 
-    /// <summary>Boolean bitmaps and validity bitmaps both have a partial trailing
-    /// byte at any row count that is not a multiple of eight.</summary>
+    /// <summary>Boolean bitmaps have a partial trailing byte at any row count that
+    /// is not a multiple of eight.</summary>
     [Theory]
     [InlineData(1)]
     [InlineData(7)]

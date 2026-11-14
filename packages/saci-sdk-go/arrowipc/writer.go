@@ -133,7 +133,7 @@ func (c Int64Column) Field() SchemaField { return SchemaField{Name: c.Name, Type
 func (c Int64Column) Rows() int          { return len(c.Values) }
 
 func (c Int64Column) encode(b *bodyBuilder) {
-	b.validity(len(c.Values))
+	b.validity()
 	dst := b.buf[b.reserve(len(c.Values)*8):]
 	for i, v := range c.Values {
 		binary.LittleEndian.PutUint64(dst[i*8:], uint64(v))
@@ -150,7 +150,7 @@ func (c Float64Column) Field() SchemaField { return SchemaField{Name: c.Name, Ty
 func (c Float64Column) Rows() int          { return len(c.Values) }
 
 func (c Float64Column) encode(b *bodyBuilder) {
-	b.validity(len(c.Values))
+	b.validity()
 	dst := b.buf[b.reserve(len(c.Values)*8):]
 	for i, v := range c.Values {
 		binary.LittleEndian.PutUint64(dst[i*8:], math.Float64bits(v))
@@ -167,7 +167,7 @@ func (c BoolColumn) Field() SchemaField { return SchemaField{Name: c.Name, Type:
 func (c BoolColumn) Rows() int          { return len(c.Values) }
 
 func (c BoolColumn) encode(b *bodyBuilder) {
-	b.validity(len(c.Values))
+	b.validity()
 	dst := b.buf[b.reserve(bitmapBytes(len(c.Values))):]
 	for i, v := range c.Values {
 		if v {
@@ -187,7 +187,7 @@ func (c Utf8Column) Rows() int          { return len(c.Values) }
 
 func (c Utf8Column) encode(b *bodyBuilder) {
 	rows := len(c.Values)
-	b.validity(rows)
+	b.validity()
 	// Both spans are claimed before either is written: a reserve can move the
 	// body, so a slice taken across one would be a write into the old array.
 	offsets := b.reserve((rows + 1) * 4)
@@ -250,8 +250,8 @@ func NewWriter() *Writer { return &Writer{aliveRows: -1} }
 // the component name and version, and a RecordBatch message holding the columns.
 //
 // Every column is non-nullable and must hold the same number of values, because
-// a RecordBatch has one row count and this codec writes no null bitmaps beyond
-// the all-ones one Arrow requires in the validity slot.
+// a RecordBatch has one row count and this codec writes no null bitmaps: the
+// validity slot of every column is a zero-length buffer.
 func (w *Writer) WriteComponent(name string, version uint32, columns ...Column) error {
 	if name == "" {
 		return errf("component name is empty")
@@ -556,20 +556,14 @@ func (b *bodyBuilder) reserve(n int) int {
 	return off
 }
 
-// validity fills the all-ones bitmap Arrow expects in every field's first
-// buffer slot.
+// validity claims the zero-length buffer that fills every field's first buffer
+// slot.
 //
-// arrow-rs writes this buffer for a non-nullable column with no nulls rather
-// than an empty one, and sets every bit of every byte including the ones past
-// the last row. A reader that trusts the null count never looks, and one that
-// does not now finds every row marked present.
-func (b *bodyBuilder) validity(rows int) {
-	n := bitmapBytes(rows)
-	off := b.reserve(n)
-	dst := b.buf[off : off+n]
-	for i := range dst {
-		dst[i] = 0xFF
-	}
+// The slot is always present and its count is fixed by the column type. arrow-rs
+// writes it with length 0 for a non-nullable column with no nulls, and the
+// FieldNode null count of 0 tells a reader not to look at it.
+func (b *bodyBuilder) validity() {
+	b.reserve(0)
 }
 
 // ---------------------------------------------------------------------------

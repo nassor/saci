@@ -57,6 +57,7 @@ cargo xtask check-wasm-processor                             # saci still builds
 cargo xtask bench tpch_q6                                    # Benchmarks, always via the harness
 cargo check --examples --all-features                        # Verify examples compile; --all-features keeps connector-gated examples compiled
 cargo build -p saci --features server --bin saci-service     # The server binary
+cargo xtask server --connectors=file --transformers=csv --processors=wasm  # A server binary with only the named parts
 cargo run -p saci --example scheduler_etl                    # Run an example
 cargo run -p saci --example first_pipeline                   # The native tutorial's example
 cargo run -p saci --example distributed_scheduler --features distributed  # No external service
@@ -255,7 +256,7 @@ packages/                     # Apache-2.0 subtree: one SDK per language plus th
                               # conformance corpus. skill saci-processors
 docs/                         # Zola site in two areas, service and library. skill saci-docs
 xtask/                        # The task runner behind `cargo xtask <command>`: quickstart,
-                              # polyglot, plugins, ui, bench, pack-sdk, validate, demo, matrix,
+                              # polyglot, plugins, ui, bench, pack-sdk, validate, demo, matrix, server,
                               # check-wasm-processor, processor-ipc-roundtrip. One module per
                               # command, zero dependencies, so it drives Go, .NET, npm, Gradle
                               # and wasm-tools identically on Windows, Linux and macOS. Exit
@@ -509,7 +510,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   reports store lifecycle, host IPC encode, host IPC decode and the full `run_on_with_state`
   round trip as separate groups, since a change there routinely moves cost between phases while
   leaving the total flat.
-- `arrow-ipc = "=59.3.0"` is exact-pinned workspace-wide. It is the host to processor wire format and the
+- `arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide. It is the host to processor wire format and the
   on-disk checkpoint format. See `crates/saci/PINS.md` before touching it.
 - Every workspace member takes `version.workspace = true`, and every dependency on a sibling
   crate is `{ workspace = true }` against the entry in the root `[workspace.dependencies]`. One

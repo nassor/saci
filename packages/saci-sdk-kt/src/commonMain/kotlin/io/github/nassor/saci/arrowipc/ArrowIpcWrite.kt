@@ -358,7 +358,7 @@ private fun body(component: String, columns: Array<out Column>, rows: Int): Body
     val slots = columns.sumOf { slotsOf(it.spec.type) }
     val offsets = LongArray(slots)
     val lengths = LongArray(slots)
-    val validityLen = (rows + 7) / 8
+    val bitmapLen = (rows + 7) / 8
 
     // Kept from the sizing pass: the values buffer length is the encoded byte
     // count, so encoding twice would be the alternative.
@@ -377,10 +377,11 @@ private fun body(component: String, columns: Array<out Column>, rows: Int): Body
     }
 
     for ((index, column) in columns.withIndex()) {
-        place(validityLen.toLong())
+        // The validity slot is counted but holds no bytes.
+        place(0)
         when (column) {
             is Int64Column, is Float64Column -> place(rows.toLong() * 8)
-            is BoolColumn -> place(validityLen.toLong())
+            is BoolColumn -> place(bitmapLen.toLong())
             is Utf8Column -> {
                 val bytes = Array(rows) { column.values[it].encodeToByteArray() }
                 encoded[index] = bytes
@@ -393,10 +394,9 @@ private fun body(component: String, columns: Array<out Column>, rows: Int): Body
     val out = ByteArray(end.toInt())
     slot = 0
     for ((index, column) in columns.withIndex()) {
-        // arrow-rs emits an all-ones validity bitmap even for a non-nullable
-        // field, and the reader's buffer walk counts on the slot being there.
-        val validityAt = offsets[slot++].toInt()
-        for (byte in 0 until validityLen) out[validityAt + byte] = 0xFF.toByte()
+        // arrow-rs writes the validity slot of a non-nullable field with length 0,
+        // and the reader's buffer walk counts on the slot being there.
+        slot++
 
         when (column) {
             is Int64Column -> {
@@ -481,7 +481,7 @@ private fun FbWriter.schemaTable(
  * `Field`.
  *
  * `nullable` is left absent, which FlatBuffers reads as its `false` default:
- * every SACI column is non-nullable, and the all-ones validity bitmap the body
+ * every SACI column is non-nullable, and the zero-length validity slot the body
  * carries says the same thing a second time.
  */
 private fun FbWriter.fieldTable(spec: FieldSpec): Int {
@@ -527,7 +527,7 @@ private fun FbWriter.keyValue(key: String, value: String): Int {
 /**
  * `RecordBatch`, with `compression` absent.
  *
- * Every field is non-nullable with an all-ones validity bitmap, so every
+ * Every field is non-nullable with a zero-length validity slot, so every
  * `FieldNode.null_count` is 0. Struct fields are written last to first, which is
  * how FlatBuffers lays an inline struct out.
  */

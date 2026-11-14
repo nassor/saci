@@ -31,4 +31,4 @@ wit-bindgen = { workspace = true }
 # Drives the pipeline's async `run_on` from the synchronous host tests, the same
 # way the `#[processor]` expansion drives it inside `run-batch`.
 [dev-dependencies]
-pollster = "0.4"
+pollster = "1.0"

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+authors.workspace = true
 publish.workspace = true
 description = "Derive and attribute macros for the SACI processor SDK: #[derive(Component)], #[transform], #[fold] and #[processor]."
 
@@ -19,6 +20,6 @@ proc-macro = true
 # syn's `full` feature is required: the attribute macros parse `ItemFn`, which
 # lives behind it. `extra-traits` is not needed; nothing here compares or
 # hashes syntax nodes.
-syn = { version = "3.0.4", features = ["full"] }
+syn = { version = "3.0.10", features = ["full"] }
 quote = "1.0.47"
 proc-macro2 = "1.0.107"

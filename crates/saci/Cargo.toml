@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+authors.workspace = true
 publish.workspace = true
 description = "SACI: a batch processing engine on Apache Arrow. The columnar engine, connectors, byte formats, the wasm processor and native plugin SDKs, and the service host, each behind its own feature."
 
@@ -203,9 +204,9 @@ base64        = { workspace = true, optional = true }
 bytes         = { workspace = true, optional = true }
 futures-util  = { workspace = true, optional = true }
 tempfile      = { workspace = true, optional = true }
-opentelemetry = { version = "0.32", optional = true }
-# 0.33 is the release that depends on the pinned `opentelemetry 0.32` line.
-tracing-opentelemetry = { version = "0.33", optional = true }
+opentelemetry = { version = "0.33", optional = true }
+# 0.34 is the release that depends on the `opentelemetry 0.33` line.
+tracing-opentelemetry = { version = "0.34", optional = true }
 
 # Byte formats
 arrow-avro    = { workspace = true, optional = true }
@@ -214,10 +215,10 @@ arrow-json    = { workspace = true, optional = true }
 parquet       = { workspace = true, optional = true }
 
 # Connectors
-reqwest       = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"], optional = true }
+reqwest       = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"], optional = true }
 rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rustls-platform-verifier = { version = "0.7", optional = true }
-rustls-pki-types = { version = "1.15", features = ["std"], optional = true }
+rustls-pki-types = { version = "1.16", features = ["std"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 http          = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -227,12 +228,12 @@ tokio-rustls  = { version = "0.26", default-features = false, features = ["ring"
 h3            = { version = "0.0.8", optional = true }
 h3-quinn      = { version = "0.0.10", optional = true }
 quinn         = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
-brotli        = { version = "9.0.0", optional = true }
+brotli        = { version = "9.1.1", optional = true }
 flate2        = { version = "1", optional = true }
-zstd          = { version = "0.14.0", optional = true }
+zstd          = { version = "0.14.4", optional = true }
 subtle        = { version = "2", optional = true }
 rdkafka       = { version = "0.39", features = ["cmake-build"], optional = true }
-async-nats    = { version = "0.50.0", default-features = false, features = [
+async-nats    = { version = "0.52.0", default-features = false, features = [
     "jetstream", "nkeys", "nuid", "ring", "server_2_10", "server_2_12", "server_2_14",
 ], optional = true }
 opentelemetry-proto = { workspace = true, optional = true }
@@ -254,12 +255,7 @@ uuid          = { workspace = true, optional = true }
 serde_bytes   = { workspace = true, optional = true }
 hex           = { version = "0.4.3", optional = true }
 tokio-util    = { workspace = true, optional = true }
-# `version` is required for `cargo package`/`publish` (a bare git dependency
-# is rejected); it is a caret floor, not an exact pin, so it tolerates the
-# `release-0.10` branch moving forward to a newer 0.10.0-alpha.N build while
-# still requiring the git-resolved crate to actually be a 0.10.0 pre-release.
-# Switch to a plain `version` (dropping `git`/`branch`) once 0.10.0 stabilizes.
-openraft      = { git = "https://github.com/databendlabs/openraft", branch = "release-0.10", version = "0.10.0-alpha.34", features = ["serde"], optional = true }
+openraft      = { version = "0.10.0", features = ["serde"], optional = true }
 postcard      = { workspace = true, optional = true }
 wasmtime      = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
@@ -269,15 +265,15 @@ axum          = { version = "0.8", default-features = false, features = ["http1"
 tower         = { version = "0.5", optional = true }
 tower-http    = { version = "0.7", default-features = false, features = ["trace", "timeout", "limit"], optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"], optional = true }
-opentelemetry_sdk = { version = "0.32", features = ["metrics", "trace"], optional = true }
-opentelemetry-prometheus = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.33", features = ["metrics", "trace"], optional = true }
+opentelemetry-prometheus = { version = "0.33", optional = true }
 prometheus    = { version = "0.14", default-features = false, optional = true }
 # `reqwest-blocking-client` is the exporter default and the only client the
 # non-experimental `BatchSpanProcessor` supports: that processor owns an OS
 # thread and drives the exporter with `futures_executor::block_on`, so an async
 # client would have no reactor. It shares the `reqwest 0.13` tree the CLI's own
 # client lives in, the one reqwest generation the crate links.
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
 clap          = { version = "4", features = ["derive", "env"], optional = true }
 # Loads a repo-root `.env` for cloud-service credentials, so `${VAR}`
 # placeholders in a config resolve without a manual export.
@@ -290,7 +286,7 @@ arrow-array   = { workspace = true }
 arrow-buffer  = { workspace = true }
 arrow-ipc     = { workspace = true }
 arrow-schema  = { workspace = true }
-async-nats    = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
+async-nats    = { version = "0.52.0", default-features = false, features = ["jetstream", "ring"] }
 base64        = { workspace = true }
 clickhouse    = { workspace = true }
 criterion     = { workspace = true }
@@ -301,17 +297,17 @@ libc          = { workspace = true }
 mimalloc      = "0.1.52"
 mysql_async   = { workspace = true }
 num_cpus      = { workspace = true }
-openraft      = { git = "https://github.com/databendlabs/openraft", branch = "release-0.10", version = "0.10.0-alpha.34", features = ["serde"] }
-opentelemetry = { version = "0.32" }
-opentelemetry-prometheus = { version = "0.32" }
-opentelemetry_sdk = { version = "0.32", features = ["metrics", "trace"] }
+openraft      = { version = "0.10.0", features = ["serde"] }
+opentelemetry = { version = "0.33" }
+opentelemetry-prometheus = { version = "0.33" }
+opentelemetry_sdk = { version = "0.33", features = ["metrics", "trace"] }
 postcard      = { workspace = true }
 prometheus    = { version = "0.14", default-features = false }
 rayon         = { workspace = true }
 rcgen         = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rdkafka       = { version = "0.39", features = ["cmake-build"] }
 redb          = { workspace = true }
-reqwest       = { version = "0.13.4", default-features = false, features = ["json", "rustls-no-provider", "blocking"] }
+reqwest       = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider", "blocking"] }
 serde         = { workspace = true }
 serde_arrow   = { workspace = true }
 serde_json    = { workspace = true }

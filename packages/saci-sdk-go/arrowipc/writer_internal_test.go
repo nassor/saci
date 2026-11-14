@@ -89,6 +89,8 @@ func TestEncodedSegmentMetadata(t *testing.T) {
 	}
 	// Two buffer slots per fixed-width field, three for the Utf8 one.
 	wantBuffers := 2*3 + 3
+	// Buffer indexes of each field's validity slot: id, region, amount, valid.
+	validitySlots := map[int]bool{0: true, 2: true, 5: true, 7: true}
 
 	w := NewWriter()
 	if err := w.WriteComponent("Order", 7, columns...); err != nil {
@@ -155,6 +157,9 @@ func TestEncodedSegmentMetadata(t *testing.T) {
 		}
 		off, _ := buffers.buf.i64(at)
 		length, _ := buffers.buf.i64(at + 8)
+		if validitySlots[i] && length != 0 {
+			t.Errorf("buffer %d is a validity slot of %d bytes, want a zero-length buffer", i, length)
+		}
 		if off%8 != 0 {
 			t.Errorf("buffer %d starts at %d, want an eight-byte boundary", i, off)
 		}
@@ -166,7 +171,7 @@ func TestEncodedSegmentMetadata(t *testing.T) {
 		}
 		end = int(off + length)
 	}
-	// The validity, offsets and values buffers of the last field must reach the
+	// The offsets and values buffers of the last field must reach the
 	// body's end, or the encoder declared a body longer than it filled.
 	if align8(end) != bodyLen {
 		t.Errorf("buffers end at %d of a %d-byte body", end, bodyLen)

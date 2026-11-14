@@ -102,8 +102,8 @@ the decoder refuses two more:
   both, so the setters take fixed-width fields only. The polyglot chain's two
   `Utf8` outputs, `usd_amount_display` and `settlement`, are written by
   re-encoding a whole segment instead.
-- **No validity writes.** A non-nullable field carries an all-ones validity
-  bitmap from arrow-rs, and an in-place value write never has to touch it, so no
+- **No validity writes.** A non-nullable field carries a zero-length validity
+  slot from arrow-rs, and an in-place value write never has to touch it, so no
   setter reaches it.
 - **No dictionary batches.** A segment holds exactly one Schema message then one
   RecordBatch message. A DictionaryBatch in between is rejected during framing.
@@ -142,7 +142,7 @@ rather than a rule a reader enforces.
 
 ## Compatibility
 
-The five codecs target the byte layout of `arrow-ipc = "=59.3.0"`, which the SACI
+The five codecs target the byte layout of `arrow-ipc = "=60.1.0"`, which the SACI
 workspace exact-pins as the host to processor wire format, and the
 `saci:pipeline@0.3.0` WIT world that carries it. A processor built against these
 packages talks to a host built from the same pin.

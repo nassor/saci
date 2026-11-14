@@ -21,6 +21,7 @@ mod pack;
 mod plugins;
 mod polyglot;
 mod quickstart;
+mod server;
 mod sh;
 mod ui;
 mod validate;
@@ -44,6 +45,7 @@ Commands
   validate [--only=LIST]    Validate every runnable example config
   demo <name>               Build and run an example pipeline
   matrix [nextest args]     Run the connector matrix against shared containers
+  server [options]          Build a saci-service binary with only the named parts
 
 `cargo xtask <command> --help` prints that command's own usage.";
 
@@ -75,6 +77,7 @@ fn main() -> ExitCode {
         "validate" => validate::run(rest),
         "demo" => demo::run(rest),
         "matrix" => matrix::run(rest),
+        "server" => server::run(rest),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(())

@@ -136,6 +136,13 @@ the features it needs (`service`, the `connector-*` and `transformer-*` it carri
 `main.rs` is `fn main() -> std::process::ExitCode { saci::service::cli::main() }`. To add factories of its own it calls
 `saci::service::cli::main_with(|builder| builder.register_source(MyFactory))`.
 
+`cargo xtask server` (`xtask/src/server.rs`) builds a narrowed `saci-service` from the repo:
+`--connectors=`, `--transformers=` and `--processors=` (`wasm`, `plugin`) take short names,
+`--features=` any other feature; `service` is always on, every name is checked against the
+`[features]` table of `crates/saci/Cargo.toml` (a line scan for keys), and the release binary is
+copied to `target/server/saci-service` or `--out=PATH`. `--list` prints the accepted names. A
+new connector or transformer feature is picked up with no change there.
+
 ## Distributed processing (`src/distributed/`)
 
 Multi-instance batch execution with at-least-once semantics. The `distributed` feature

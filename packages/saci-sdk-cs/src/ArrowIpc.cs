@@ -731,8 +731,8 @@ internal readonly struct BufferSpan(int off, int len)
 }
 
 /// <summary>A schema field paired with the buffers the RecordBatch assigned it.</summary>
-/// <remarks>Validity is resolved but unused: arrow-rs emits an all-ones validity
-/// bitmap for a non-nullable field, and an in-place value write therefore never
+/// <remarks>Validity is resolved but unused: arrow-rs writes a zero-length validity
+/// slot for a non-nullable field, and an in-place value write therefore never
 /// has to touch it.</remarks>
 internal struct FieldBuffers
 {

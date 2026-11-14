@@ -95,7 +95,7 @@ pub use crate::{
 };
 
 // Arrow sub-crates plugin authors need to define `Component` schemas,
-// re-surfaced at the workspace-pinned `=59.3.0` version so plugin crates do not
+// re-surfaced at the workspace-pinned `=60.1.0` version so plugin crates do not
 // depend on them directly. `serde` is not re-exported: `#[derive(Serialize)]`
 // expansions reference the literal `::serde` path at the call site, so plugin
 // authors add `serde` as a direct dep of their own crate.

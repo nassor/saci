@@ -183,19 +183,14 @@ pub(crate) fn batch_to_ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>, crate::
     // about twenty amortised doublings whose re-copies sum, by geometric
     // series, to roughly the final size again.
     //
-    // The estimate is biased in two directions:
-    //
-    // * `get_array_memory_size` sums each buffer's *capacity*, not its sliced
-    //   length, so it over-counts an over-allocated or sliced buffer.
-    // * It cannot see the validity bitmap `arrow-ipc` synthesises for a column
-    //   whose `nulls()` is `None`: an all-ones `ceil(rows/8)` buffer. That
-    //   term is added back explicitly below.
+    // `get_array_memory_size` sums each buffer's *capacity*, not its sliced
+    // length, so it over-counts an over-allocated or sliced buffer.
     //
     // Net effect is a small over-estimate, which costs address space and
     // nothing else. `Vec` still grows if the hint turns out short.
     let mut buf = Vec::with_capacity(
         batch.get_array_memory_size()
-            + batch.num_columns() * (batch.num_rows().div_ceil(8) + IPC_ENVELOPE_PER_FIELD)
+            + batch.num_columns() * IPC_ENVELOPE_PER_FIELD
             + IPC_ENVELOPE_FIXED,
     );
     let options = IpcWriteOptions::default();

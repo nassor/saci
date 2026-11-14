@@ -49,8 +49,8 @@ saci = { path = "../crates/saci" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 async-trait = "0.1"
-arrow-array = "59.2"
-arrow-schema = "59.2"
+arrow-array = "60.1"
+arrow-schema = "60.1"
 ```
 
 Add the `service` and `wasm-host` features when you also want the host (wasmtime and the HTTP
@@ -517,7 +517,7 @@ serde = { version = "1", features = ["derive"] }
 
 # The bindings generator, wasm32-only like the `bindings` module in lib.rs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = "0.62.0"
+wit-bindgen = "0.63.0"
 ```
 
 ```rust,name=Export the build function

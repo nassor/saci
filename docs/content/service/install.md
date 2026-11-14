@@ -109,6 +109,11 @@ aggregation.
 `cargo install` writes the binary into the cargo bin directory, which the Rust
 installer already put on your PATH, so `saci-service` answers in any shell.
 
+A checkout can also build a binary with only the parts a deployment uses, for example
+`cargo xtask server --connectors=file,kafka --transformers=ndjson --processors=wasm`.
+[Which feature adds which node](@/library/reference/crates.md#which-feature-adds-which-node) lists
+the options.
+
 ## 2. Add wasm32-wasip2
 
 A processor is a WebAssembly component, and `rustc` builds one only when the

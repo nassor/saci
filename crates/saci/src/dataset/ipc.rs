@@ -71,9 +71,7 @@ impl Dataset {
         let alive_array: ArrayRef = Arc::new(BooleanArray::new(self.alive.finish_cloned(), None));
         let schema = Arc::new(Schema::new_with_metadata(
             vec![Field::new("alive", DataType::Boolean, false)],
-            [(COMPONENT_NAME_KEY.to_string(), ALIVE_BATCH_NAME.to_string())]
-                .into_iter()
-                .collect(),
+            [(COMPONENT_NAME_KEY, ALIVE_BATCH_NAME)],
         ));
         let batch = RecordBatch::try_new(schema, vec![alive_array])
             .map_err(|e| SaciError::generic(format!("IPC alive batch error: {e}")))?;
@@ -412,9 +410,7 @@ mod tests {
                 Field::new("id", DataType::UInt64, false),
                 Field::new("total", DataType::Float64, false),
             ],
-            [(COMPONENT_NAME_KEY.to_string(), "IpcOrder".to_string())]
-                .into_iter()
-                .collect(),
+            [(COMPONENT_NAME_KEY, "IpcOrder")],
         ));
         let batch = RecordBatch::try_new(
             schema,
@@ -432,9 +428,7 @@ mod tests {
             let alive_array: ArrayRef = Arc::new(BooleanArray::from(vec![true; n]));
             let alive_schema = Arc::new(Schema::new_with_metadata(
                 vec![Field::new("alive", DataType::Boolean, false)],
-                [(COMPONENT_NAME_KEY.to_string(), ALIVE_BATCH_NAME.to_string())]
-                    .into_iter()
-                    .collect(),
+                [(COMPONENT_NAME_KEY, ALIVE_BATCH_NAME)],
             ));
             let alive_batch = RecordBatch::try_new(alive_schema, vec![alive_array]).unwrap();
             let seg = batch_to_ipc_bytes(&alive_batch).unwrap();

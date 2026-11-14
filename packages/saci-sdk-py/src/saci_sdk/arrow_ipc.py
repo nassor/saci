@@ -78,8 +78,8 @@ _TYPE_NAMES = {
 }
 
 #: Buffer slots each Arrow type consumes, in schema order. Fixed by the type,
-#: never by nullability: arrow-rs emits the validity slot even when the field is
-#: non-nullable and the batch has no nulls.
+#: never by nullability or by a buffer's length: the validity slot is always
+#: present, and arrow-rs writes it with length 0 when the null count is 0.
 _BUFFER_SLOTS = {
     TYPE_INT: 2,  # validity, values
     TYPE_FLOAT: 2,  # validity, values
@@ -737,10 +737,11 @@ def _encode_body(columns, rows):
     `bodyLength` is exactly the byte count written and the reader's walk to the
     next message lands on its continuation marker.
 
-    Every field is non-nullable with a zero null count, and arrow-rs still emits
-    the validity slot for one, so every column shares one all-ones bitmap.
+    Every field is non-nullable with a zero null count, so the validity slot of
+    every column is a zero-length buffer: it is counted, holds no bytes, and
+    leaves the body offsets of the following buffers unchanged.
     """
-    validity = b"\xff" * ((rows + 7) // 8)
+    validity = b""
     body = bytearray()
     buffers = []
     for column in columns:
@@ -786,7 +787,7 @@ def _schema_message(columns, metadata):
     """One Schema message: the columns in order, then `metadata` in order.
 
     `nullable` is left at its `false` default on every field, which is what the
-    all-ones validity bitmap and the zero null counts in the batch say too.
+    zero null counts in the batch say too.
     """
     builder = _Builder()
     fields = []

@@ -83,8 +83,8 @@ function isArrowType(value: number): value is ArrowType {
 
 // Buffer slots a field consumes in `RecordBatch.buffers`, walked in schema
 // order. Fixed by the Arrow type, never inferred from nullability or from a
-// buffer's length: arrow-rs emits the validity slot with `ceil(n/8)` bytes of
-// set bits even when the field is non-nullable.
+// buffer's length: the validity slot is always present, and arrow-rs writes it
+// with length 0 when the null count is 0.
 const BUFFER_SLOTS = {
   [TYPE_INT]: 2, // validity, values
   [TYPE_FLOAT]: 2, // validity, values
@@ -370,8 +370,8 @@ function checkRow(batch: Batch, name: string, row: number): void {
  * One component's RecordBatch, addressed by field name.
  *
  * Reads copy out of the underlying stream; writes go straight back into it.
- * Validity buffers are not consulted: a non-nullable field has an all-ones
- * bitmap, and an in-place value write never has to touch it.
+ * Validity buffers are not consulted: a non-nullable field declares a null
+ * count of 0, and an in-place value write never has to touch the slot.
  */
 export class Batch {
   readonly view: DataView;
@@ -1195,18 +1195,17 @@ interface Body {
 /**
  * Encode `columns` into one RecordBatch body.
  *
- * Buffer slots follow [`BUFFER_SLOTS`]: a validity bitmap first, then the
+ * Buffer slots follow [`BUFFER_SLOTS`]: a validity slot first, then the
  * values, and for `Utf8` the i32 offsets between them. Each slot starts on an
  * 8-byte boundary and declares its exact unpadded length, which is what
  * arrow-rs emits and what the reader above bounds-checks.
  *
- * The validity bitmap is all ones. It is not strictly needed — every field here
- * is non-nullable and declares `null_count: 0`, so arrow-rs never reads it —
- * but the slot is positional, and a zero-length one would move every buffer
- * after it.
+ * The validity slot is a zero-length buffer, as arrow-rs writes it for a field
+ * with `null_count: 0`, which is every field here. No reader consults it, and
+ * the slot stays in place because the layout is positional.
  */
 function writeBody(rows: number, columns: readonly Column[]): Body {
-  const validityBytes = Math.ceil(rows / 8);
+  const bitmapBytes = Math.ceil(rows / 8);
   const lengths: number[] = [];
   // `Utf8` value bytes are needed twice, to size the body and to fill it, and
   // TextEncoder cannot answer the first question without doing the work.
@@ -1214,14 +1213,14 @@ function writeBody(rows: number, columns: readonly Column[]): Body {
 
   for (let i = 0; i < columns.length; i += 1) {
     const column = columns[i];
-    lengths.push(validityBytes);
+    lengths.push(0);
     switch (column.type) {
       case 'int64':
       case 'float64':
         lengths.push(rows * WIDTH_64);
         break;
       case 'bool':
-        lengths.push(validityBytes);
+        lengths.push(bitmapBytes);
         break;
       case 'utf8': {
         const parts = new Array<Uint8Array>(rows);
@@ -1256,8 +1255,7 @@ function writeBody(rows: number, columns: readonly Column[]): Body {
   let slot = 0;
   for (let i = 0; i < columns.length; i += 1) {
     const column = columns[i];
-    const validity = spans[slot];
-    bytes.fill(0xff, validity.start, validity.start + validity.length);
+    // The validity slot holds no bytes: step past it.
     slot += 1;
     const values = spans[slot];
     slot += 1;

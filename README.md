@@ -171,9 +171,10 @@ languages](./examples/polyglot/PINS.md).
 | `plugin` | The native plugin SDK and its C ABI |
 | `server` | The `saci-service` binary: wasmtime, KDL config, HTTP control plane, distributed runner |
 
-`cargo install saci --features server` installs the binary. `saci-macros` holds the processor
-SDK's derive macros. The workspace map and the build and test commands live in
-[`AGENTS.md`](./AGENTS.md); the per-area reference sits beside it under `.agents/skills/`.
+`cargo install saci --features server` installs the binary, and `cargo xtask server` builds one
+from a checkout with only the connectors, formats and processor hosts you name. `saci-macros`
+holds the processor SDK's derive macros. The workspace map and the build and test commands live
+in [`AGENTS.md`](./AGENTS.md); the per-area reference sits beside it under `.agents/skills/`.
 
 ## Project status
 

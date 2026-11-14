@@ -12,7 +12,7 @@
 //!
 //! - **Arrow IPC byte-exactness.** No system touches `Ping` and the processor keeps
 //!   its state in a resource, so the round-tripped IPC bytes must be identical.
-//!   Host and processor both take the pinned `arrow-ipc = "=59.3.0"` through
+//!   Host and processor both take the pinned `arrow-ipc = "=60.1.0"` through
 //!   `workspace = true`, so differing bytes mean the pin has drifted on one side.
 //! - **Config delivery.** The processor reads the `greeting` key through the
 //!   `host-io` `get-config` import and appends it to the pipeline name, so

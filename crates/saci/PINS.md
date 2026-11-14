@@ -9,7 +9,7 @@ team has validated against the `saci:pipeline@0.3.0` WIT package.
 | Tool              | Version  | Install                                                       |
 | ----------------- | -------- | ------------------------------------------------------------- |
 | `wasmtime`        | 48.0.5   | `cargo install wasmtime-cli --locked --version 48.0.5`        |
-| `wit-bindgen`     | 0.62.0   | workspace dependency; no separate install                     |
+| `wit-bindgen`     | 0.63.0   | workspace dependency; no separate install                     |
 | `wasm-tools`      | 1.246.2  | `cargo install wasm-tools --locked --version 1.246.2`        |
 | Rust target       | `wasm32-wasip2` | `rustup target add wasm32-wasip2`                    |
 
@@ -19,7 +19,7 @@ Non-Rust processors need three more componentization toolchains
 
 ## Load-bearing crate pin
 
-`arrow-ipc = "=59.3.0"` is exact-pinned in the workspace (`Cargo.toml`).
+`arrow-ipc = "=60.1.0"` is exact-pinned in the workspace (`Cargo.toml`).
 Both the host and any processor built against this SDK MUST link against this
 exact version, because Arrow IPC is the wire format across the Component
 Model boundary. A patch-release drift here can silently corrupt `Dataset`

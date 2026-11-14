@@ -21,8 +21,8 @@
 //
 // Every field is written with `nullable` absent, which FlatBuffers reads as false,
 // and every FieldNode carries `null_count: 0`. The validity slot is still emitted
-// with a real all-ones bitmap, because arrow-rs emits one and the slot count per
-// type is fixed rather than inferred.
+// as a zero-length buffer, which is how arrow-rs writes it for a field with no
+// nulls, because the slot count per type is fixed rather than inferred.
 //
 // FlatBuffers by hand
 //
@@ -65,7 +65,7 @@ public abstract class Column
     /// <summary>The `Field.type_type` discriminant.</summary>
     internal abstract byte ArrowType { get; }
 
-    /// <summary>Buffer slots after the validity bitmap: one for a fixed-width
+    /// <summary>Buffer slots after the validity slot: one for a fixed-width
     /// type, two for Utf8.</summary>
     internal abstract int PayloadCount { get; }
 
@@ -77,7 +77,7 @@ public abstract class Column
     internal int Slots => 1 + PayloadCount;
 
     internal int SlotLength(int slot) =>
-        slot == 0 ? (Length + 7) / 8 : PayloadLength(slot - 1);
+        slot == 0 ? 0 : PayloadLength(slot - 1);
 
     internal void WriteSlot(int slot, Span<byte> dest)
     {
@@ -86,14 +86,7 @@ public abstract class Column
             WritePayload(slot - 1, dest);
             return;
         }
-        // All-ones validity, trailing bits of the last byte left clear. Every row
-        // is valid, and `null_count: 0` means no reader consults these bytes.
-        dest.Fill(0xFF);
-        int tail = Length & 7;
-        if (tail != 0)
-        {
-            dest[^1] = (byte)((1 << tail) - 1);
-        }
+        // The validity slot holds no bytes: `null_count: 0` means no reader consults it.
     }
 }
 

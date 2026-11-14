@@ -200,6 +200,18 @@ cargo build --release -p saci --bin saci-service `
   --features mimalloc,service-cluster,connector-file,transformer-csv,wasm-host
 ```
 
+From a checkout, `cargo xtask server` builds the same binary from short names. It always turns
+on `service`, checks every name against the crate's feature table before cargo starts, and copies
+the release binary to `target/server/saci-service` (`--out=PATH` picks another place):
+
+```bash,name=The first build above, through the task runner
+cargo xtask server --connectors=file --transformers=csv --processors=wasm --features=mimalloc
+```
+
+`--processors` takes `wasm` and `plugin`, `--features` takes any other feature such as
+`windows` or `service-cluster`, and `cargo xtask server --list` prints every accepted name.
+The command runs the same on Linux, macOS and Windows (PowerShell).
+
 The full `server` build runs the same on Linux, macOS and Windows (PowerShell):
 
     cargo build --release -p saci --bin saci-service --features server
