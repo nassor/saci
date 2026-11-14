@@ -1,98 +1,133 @@
 # Order Processing: a WASM processor pipeline
 
-This is a realistic processor component for `wasm32-wasip2`. It runs the
-`saci` crate's `processor` feature and the `export_pipeline!` macro end to end, with
-field-granular DAG scheduling inside the sandbox. The host hands the
-processor one Arrow IPC payload per batch and gets one back; everything
-between, meaning the DAG build, stage execution and retry handling, is native
-Rust running inside the component.
+A processor component for `wasm32-wasip2`, written in Rust with the `saci`
+crate's `processor` feature and the `export_pipeline!` macro. The host hands it
+one Arrow IPC payload per batch and takes one back. Inside the component, the
+DAG build, stage execution and retries run as native Rust.
 
-The processor runs a two-stage pipeline over a `Transaction` component:
+The pipeline runs over a `Transaction` component in two stages:
 
-| Stage | Systems | Writes |
-|-------|---------|--------|
-| 0 | `ValidateSystem`, `EnrichSystem` | `valid`; `usd_amount`. Disjoint field writes, so the stage runs them in parallel |
-| 1 | `ReportSystem` | reads `valid`, `usd_amount` and others; must follow stage 0 |
+| Stage | Systems | Reads | Writes |
+|-------|---------|-------|--------|
+| 0 | `ValidateSystem`<br>`EnrichSystem` | `amount`<br>`amount`, `currency` | `valid`<br>`usd_amount` |
+| 1 | `ReportSystem` | `id`, `amount`, `currency`, `valid`, `usd_amount` | nothing, it prints a report |
 
-There is no ingest system: `Transaction` rows arrive in the host's `run-batch`
-Arrow IPC payload from a configured source. FX rates come from the `config`
-child of the host's `wasm` node, read back through the `host-io` `get-config`
-import and parsed with `saci_config_parse`; each missing key falls back to
-`FxRates::DEFAULT`.
+`ValidateSystem` marks a row valid when `amount > 0`. `EnrichSystem` multiplies
+`amount` by the currency's USD rate. The two write different fields, so the
+scheduler runs them in parallel; `ReportSystem` reads both results and waits for
+stage 0.
+
+There is no ingest system. `Transaction` rows arrive in the host's `run-batch`
+payload from whatever source the config names. The FX rates come from the
+`config` of the host's `wasm` node (`fx_eur`, `fx_gbp`, `fx_jpy`, `fx_cad`).
+A missing key falls back to `FxRates::DEFAULT`: EUR 1.08, GBP 1.27, JPY 0.0067,
+CAD 0.74. Any other currency converts at 1.0.
 
 ## Prerequisites
 
 - Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
-- `wasm-tools` for the optional component checks
+- `wasm-tools`, only for the optional checks in step 2
 
-## Build
+Run every command from the repository root. They are the same on Linux, macOS
+and Windows (PowerShell) unless a block says otherwise.
 
-From the workspace root. The commands in this README run the same on Linux,
-macOS and Windows (PowerShell):
+## Build and run
 
-```text
-cargo build --release -p order-processing-wasm --target wasm32-wasip2
-```
+1. Build the component. `rustc` links a `wasm32-wasip2` cdylib into a
+   Component Model component itself, so plain `cargo build` is the whole
+   toolchain:
 
-No componentizer runs: `rustc` links the `wasm32-wasip2` cdylib into a
-Component Model component itself, so plain `cargo build` writes the finished
-component to `target/wasm32-wasip2/release/order_processing_wasm.wasm`.
+   ```text
+   cargo build --release -p order-processing-wasm --target wasm32-wasip2
+   ```
 
-Validate the component (optional):
+   The result is `target/wasm32-wasip2/release/order_processing_wasm.wasm`.
 
-```text
-wasm-tools validate --features component-model target/wasm32-wasip2/release/order_processing_wasm.wasm
-```
+2. Optional: check the component and print its exported world.
 
-Inspect the exported world (optional):
+   ```text
+   wasm-tools validate --features component-model target/wasm32-wasip2/release/order_processing_wasm.wasm
+   wasm-tools component wit target/wasm32-wasip2/release/order_processing_wasm.wasm
+   ```
 
-```text
-wasm-tools component wit target/wasm32-wasip2/release/order_processing_wasm.wasm
-```
+   `validate` exits 0. The exported world is `saci-pipeline`.
 
-## Run through saci-service
+3. Create the output directory. `examples/configs/standalone_wasm.kdl` writes
+   to `/tmp/saci-order-processing-out.csv`.
 
-`examples/configs/standalone_wasm.kdl` runs this component against a five-row
-CSV fixture. Its paths are relative to the repository root.
+   Linux/macOS: `/tmp` exists, nothing to do.
 
-Validate the config:
+   Windows (PowerShell), where the path resolves to `C:\tmp` on the current
+   drive:
 
-```text
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_wasm.kdl --strict
-```
+   ```powershell
+   New-Item -ItemType Directory -Force C:\tmp
+   ```
 
-Run the pipeline:
+4. Validate the config. It runs the component against a five-row CSV fixture,
+   and its paths are relative to the repository root:
 
-```text
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_wasm.kdl
-```
+   ```text
+   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_wasm.kdl --strict
+   ```
 
-`run_mode` is `one_shot`, so `serve` processes
-`examples/configs/fixtures/order_processing_input.csv` once and writes
-`/tmp/saci-order-processing-out.csv` with `valid` and `usd_amount` filled in.
-The fixture seeds both columns with `false` and `0.0`: the CSV transformer
-turns an empty field into a NULL, the `Transaction` schema is non-nullable,
-and one blank cell fails the whole batch.
+   The run ends with `OK: workflow graph validated`, which means the host
+   loaded the component and its `describe()` agrees with the source and sink.
+
+5. Run the pipeline:
+
+   ```text
+   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_wasm.kdl
+   ```
+
+   `run_mode` is `one_shot`, so `serve` processes
+   `examples/configs/fixtures/order_processing_input.csv` once and exits.
+
+6. Read the output.
+
+   Linux/macOS:
+
+   ```bash
+   cat /tmp/saci-order-processing-out.csv
+   ```
+
+   Windows (PowerShell):
+
+   ```powershell
+   Get-Content C:\tmp\saci-order-processing-out.csv
+   ```
+
+   The file has the five fixture rows with `valid` and `usd_amount` filled in.
+   `valid` is `true` for ids 1, 2, 3 and 5 and `false` for id 4, whose amount
+   is `-50.0`. `usd_amount` is `amount` times the rate in the config.
+
+The fixture seeds `valid` with `false` and `usd_amount` with `0.0`. The
+processor cannot add columns, and the CSV transformer turns an empty field into
+a NULL, which the non-nullable `Transaction` schema rejects, so one blank cell
+fails the whole batch.
+
+`cargo xtask demo standalone_wasm` does steps 1, 4 and 5 in one command.
 
 ## How failures surface
 
-The `export_pipeline!` macro converts pipeline failures into the WIT
-`run-error` variant. `retryable` releases the claim so the host retries;
-`permanent` acks the claim and surfaces the error.
+The `export_pipeline!` macro converts a `SaciError` from the pipeline into the
+WIT `run-error` variant:
 
-| `SaciError` from `Pipeline::run_on` | WIT `run-error` | Host action |
-|-------------------------------------|-----------------|-------------|
-| `RetryExhausted`, `SystemExecution` | `retryable(string)` | release claim, retry |
-| `ComponentNotFound`, `ResourceNotFound`, `EntityNotFound`, `Configuration`, `Scheduler`, `Store`, `Generic` | `permanent(string)` | ack claim, surface |
+| `SaciError` | WIT `run-error` |
+|-------------|-----------------|
+| `RetryExhausted`, `SystemExecution` | `retryable(string)` |
+| `ComponentNotFound`, `ResourceNotFound`, `EntityNotFound`, `Configuration`, `Scheduler`, `Store`, `Generic` | `permanent(string)` |
 
-System authors should return `SaciError::SystemExecution(...)` for recoverable
-failures rather than calling `.unwrap()` or `panic!()`. A panic becomes a wasm
-trap, which the host catches as `permanent`, and the operator loses the batch
-instead of getting a retry.
+The wasm host reports both variants as a failed batch with the message. A panic
+becomes a wasm trap, which the host also surfaces as `permanent`, so return
+`SaciError::SystemExecution(...)` for a failure a retry can fix instead of
+calling `.unwrap()` or `panic!()`. The
+[WIT contract](../../../docs/content/service/processors/build/wit-contract.md)
+page has the full variant list.
 
 ## Files
 
 | File | What it is |
 |------|------------|
 | `Cargo.toml` | cdylib, `wit-bindgen` as a wasm32-only dependency |
-| `src/lib.rs` | the `wit_bindgen::generate!` bindings, the `Transaction` component, the three systems, `build()` and `export_pipeline!(build)`, all gated on wasm32 |
+| `src/lib.rs` | the `Transaction` component, the three systems, `build()` and `export_pipeline!(build)`; the bindings and the macro call are gated on wasm32 |

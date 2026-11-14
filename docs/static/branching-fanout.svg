@@ -1,0 +1,171 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 364" role="img" aria-labelledby="branching-fanout-title branching-fanout-desc">
+  <title id="branching-fanout-title">One NATS source fans out to a mirror sink and to two routers, each routing batches to branch-labelled file sinks</title>
+  <desc id="branching-fanout-desc">
+    The source in, a NATS core subscription on branching.orders, has three unlabelled links, so every batch goes to all three targets. The first target is the sink out_mirror, which writes every message verbatim to out-mirror.csv. The second is router_wasm, a WebAssembly processor, and the third is router_plugin, a native plugin. Each router names one branch per batch. router_wasm has a high link to out_wasm_high and a low link to out_wasm_low. router_plugin has a premium link to out_plugin_premium and a standard link to out_plugin_standard. Each sink writes its own CSV file, and a batch reaches only the sink whose branch the router named.
+  </desc>
+
+  <style>
+    text { font-family: 'Fira Code', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace; }
+
+    /* Catppuccin Latte, with Mocha below for a dark viewer. Site CSS does not
+       reach a standalone figure, so both flavours live here. An accent tints
+       an area; the darker ink tone draws lines and sets letters, which is
+       what Latte needs to hold 4.5:1 and 3:1. */
+    .canvas { fill: #eff1f5; stroke: #7c7f93; }
+    .panel  { fill: #e6e9ef; stroke: #acb0be; }
+
+    .blk   { fill: #eff1f5; stroke-width: 1; }
+    .blk-d { stroke: rgb(171 63 0 / 0.7); }
+    .blk-c { stroke: rgb(0 109 115 / 0.7); }
+    .blk-b { stroke: rgb(128 46 229 / 0.7); }
+
+    .hd-d { fill: #f2d2c2; }
+    .hd-c { fill: #bfdce1; }
+    .hd-b { fill: #d8c9f4; }
+
+    /* The badges sit on the panel, not on the canvas, so the wash under the
+       step number is thinner than the one the site uses on the page. */
+    .badge   { stroke-width: 1; }
+    .badge-d { fill: rgb(254 100 11 / 0.12);  stroke: rgb(171 63 0 / 0.8); }
+    .badge-c { fill: rgb(23 146 153 / 0.12);  stroke: rgb(0 109 115 / 0.8); }
+    .badge-b { fill: rgb(136 57 239 / 0.12);  stroke: rgb(128 46 229 / 0.8); }
+
+    .t-ttl  { font-size: 13px;   font-weight: 600; fill: #4c4f69; }
+    .t-sub  { font-size: 11px;   fill: #5c5f77; }
+    .t-lab  { font-size: 11px;   fill: #5c5f77; }
+    .t-step { font-size: 12px;   font-weight: 700; letter-spacing: 1px; }
+    .t-num  { font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+    .t-mid  { text-anchor: middle; }
+
+    .f-n { fill: #5c5f77; }
+    .f-d { fill: #ab3f00; }
+    .f-c { fill: #006d73; }
+    .f-b { fill: #802ee5; }
+
+    .arw  { stroke-width: 1.5; fill: none; }
+    .s-n  { stroke: #5c5f77; }
+    .s-d  { stroke: #ab3f00; }
+    .s-c  { stroke: #006d73; }
+    .s-b  { stroke: #802ee5; }
+    .dash { stroke-dasharray: 5 4; }
+
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #1e1e2e; stroke: #6c7086; }
+      .panel  { fill: #181825; stroke: #45475a; }
+
+      .blk   { fill: #313244; }
+      .blk-d { stroke: rgb(250 179 135 / 0.7); }
+      .blk-c { stroke: rgb(148 226 213 / 0.7); }
+      .blk-b { stroke: rgb(203 166 247 / 0.7); }
+
+      .hd-d { fill: #5d4e53; }
+      .hd-c { fill: #475964; }
+      .hd-b { fill: #534c6b; }
+
+      .badge-d { fill: rgb(250 179 135 / 0.18);  stroke: rgb(250 179 135 / 0.8); }
+      .badge-c { fill: rgb(148 226 213 / 0.18); stroke: rgb(148 226 213 / 0.8); }
+      .badge-b { fill: rgb(203 166 247 / 0.18); stroke: rgb(203 166 247 / 0.8); }
+
+      .t-ttl { fill: #cdd6f4; }
+      .t-sub { fill: #a6adc8; }
+      .t-lab { fill: #a6adc8; }
+
+      .f-n { fill: #a6adc8; }
+      .f-d { fill: #fab387; }
+      .f-c { fill: #94e2d5; }
+      .f-b { fill: #cba6f7; }
+
+      .s-n { stroke: #a6adc8; }
+      .s-d { stroke: #fab387; }
+      .s-c { stroke: #94e2d5; }
+      .s-b { stroke: #cba6f7; }
+    }
+  </style>
+
+  <rect class="canvas" x="0.5" y="0.5" width="659" height="363" rx="14"/>
+
+  <text class="t-lab t-mid f-d" x="300" y="40">every batch, verbatim</text>
+  <path class="arw s-d" d="M144 170 H184 V48 H454" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M144 170 H184 V157 H222" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M144 170 H184 V287 H222" marker-end="url(#m-d)"/>
+  <g>
+    <rect class="blk blk-c" x="16" y="138" width="128" height="64" rx="8"/>
+    <rect class="hd-c" x="16" y="138" width="128" height="22" rx="8"/>
+    <rect class="hd-c" x="16" y="152" width="128" height="8"/>
+    <text class="t-ttl" x="28" y="154">in</text>
+    <text class="t-sub" x="28" y="178">NatsSource</text>
+    <text class="t-sub" x="28" y="194">branching.orders</text>
+  </g>
+  <g>
+    <rect class="blk blk-b" x="224" y="133" width="140" height="48" rx="8"/>
+    <rect class="hd-b" x="224" y="133" width="140" height="22" rx="8"/>
+    <rect class="hd-b" x="224" y="147" width="140" height="8"/>
+    <text class="t-ttl" x="236" y="149">router_wasm</text>
+    <text class="t-sub" x="236" y="173">WASM component</text>
+  </g>
+  <g>
+    <rect class="blk blk-b" x="224" y="263" width="140" height="48" rx="8"/>
+    <rect class="hd-b" x="224" y="263" width="140" height="22" rx="8"/>
+    <rect class="hd-b" x="224" y="277" width="140" height="8"/>
+    <text class="t-ttl" x="236" y="279">router_plugin</text>
+    <text class="t-sub" x="236" y="303">native plugin</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="456" y="24" width="188" height="48" rx="8"/>
+    <rect class="hd-c" x="456" y="24" width="188" height="22" rx="8"/>
+    <rect class="hd-c" x="456" y="38" width="188" height="8"/>
+    <text class="t-ttl" x="468" y="40">out_mirror</text>
+    <text class="t-sub" x="468" y="64">out-mirror.csv</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="456" y="104" width="188" height="48" rx="8"/>
+    <rect class="hd-c" x="456" y="104" width="188" height="22" rx="8"/>
+    <rect class="hd-c" x="456" y="118" width="188" height="8"/>
+    <text class="t-ttl" x="468" y="120">out_wasm_high</text>
+    <text class="t-sub" x="468" y="144">out-wasm-high.csv</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="456" y="162" width="188" height="48" rx="8"/>
+    <rect class="hd-c" x="456" y="162" width="188" height="22" rx="8"/>
+    <rect class="hd-c" x="456" y="176" width="188" height="8"/>
+    <text class="t-ttl" x="468" y="178">out_wasm_low</text>
+    <text class="t-sub" x="468" y="202">out-wasm-low.csv</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="456" y="234" width="188" height="48" rx="8"/>
+    <rect class="hd-c" x="456" y="234" width="188" height="22" rx="8"/>
+    <rect class="hd-c" x="456" y="248" width="188" height="8"/>
+    <text class="t-ttl" x="468" y="250">out_plugin_premium</text>
+    <text class="t-sub" x="468" y="274">out-plugin-premium.csv</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="456" y="292" width="188" height="48" rx="8"/>
+    <rect class="hd-c" x="456" y="292" width="188" height="22" rx="8"/>
+    <rect class="hd-c" x="456" y="306" width="188" height="8"/>
+    <text class="t-ttl" x="468" y="308">out_plugin_standard</text>
+    <text class="t-sub" x="468" y="332">out-plugin-standard.csv</text>
+  </g>
+  <path class="arw s-d" d="M364 157 H388 V128 H454" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid f-d" x="421" y="122">high</text>
+  <path class="arw s-d" d="M364 157 H388 V186 H454" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid f-d" x="421" y="180">low</text>
+  <path class="arw s-d" d="M364 287 H388 V258 H454" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid f-d" x="421" y="252">premium</text>
+  <path class="arw s-d" d="M364 287 H388 V316 H454" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid f-d" x="421" y="310">standard</text>
+
+  <defs>
+    <marker id="m-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-n"/>
+    </marker>
+    <marker id="m-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-d"/>
+    </marker>
+    <marker id="m-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-b"/>
+    </marker>
+    <marker id="m-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-c"/>
+    </marker>
+  </defs>
+</svg>

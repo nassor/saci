@@ -4,15 +4,22 @@
 [![docs.rs](https://img.shields.io/docsrs/saci)](https://docs.rs/saci)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](https://github.com/nassor/saci/blob/main/LICENSE)
 
-A columnar batch processing engine on Apache Arrow. Each transform declares the Arrow fields it
-reads and writes; SACI builds the dependency graph from those declarations, runs transforms that
-cannot conflict in the same stage, and retries what fails.
+A columnar batch processing engine for Rust, built on Apache Arrow. Each transform declares the
+Arrow fields it reads and writes; SACI derives the execution order from those declarations, runs
+transforms that write different fields in the same stage, and retries what fails.
 
-The crate carries the engine, the connectors, the byte formats, the WebAssembly processor and
-native plugin SDKs, and the `saci-service` host. Each part sits behind a feature, so a build
-compiles only what it names.
+The crate is used in two ways:
 
-## Install
+- As a library: your binary depends on `saci`, owns `main` and runs a `Pipeline` in process.
+- As a server: `cargo install saci --features server` builds `saci-service`, which reads a KDL
+  config and runs your pipeline as a WebAssembly component or a native plugin.
+
+<img src="https://raw.githubusercontent.com/nassor/saci/main/docs/static/two-ways.svg" width="660" alt="As a library, cargo add saci puts the engine in your Rust binary, which owns main and runs a Pipeline of your Components and Systems. As a server, cargo install saci --features server gives saci-service, which reads saci.kdl, moves Arrow batches from sources to sinks, and loads your Pipeline at runtime as a WebAssembly component or a native plugin. Both run the same engine.">
+
+Each part sits behind a feature, so a build compiles only what it names. The default, `engine`, is
+the engine alone.
+
+## As a library
 
 ```toml
 [dependencies]
@@ -22,12 +29,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 async-trait = "0.1"
 ```
 
-The default feature, `engine`, is the engine alone. Rust 1.99 or newer.
-
-## Example
-
-One component and one system. `ToUsd` reads `amount` and writes `usd_amount`; that declaration is
-the only scheduling input the pipeline needs.
+Rust 1.99 or newer. One component and one system: `ToUsd` reads `amount` and writes `usd_amount`,
+and that declaration is the only scheduling input the pipeline needs.
 
 ```rust
 use std::sync::Arc;
@@ -108,6 +111,25 @@ The package carries nine runnable examples in `examples/`. From a clone of the r
 cargo run -p saci --example first_pipeline
 ```
 
+## As a server
+
+```bash
+cargo install saci --features server
+saci-service --version
+```
+
+`saci-service` reads a KDL config that names sources, a processor and sinks, moves Arrow batches
+through them, and serves an HTTP control plane with a `/ui` dashboard. The processor is your
+pipeline built for wasm32-wasip2 against the `processor` feature, which leaves tokio out:
+
+```toml
+[dependencies]
+saci = { version = "0.1", default-features = false, features = ["processor"] }
+```
+
+[Your first pipeline](https://nassor.github.io/saci/service/first-pipeline/) writes a config and a
+processor and runs them end to end.
+
 ## Features
 
 | Feature | What it adds |
@@ -121,20 +143,7 @@ cargo run -p saci --example first_pipeline
 | `service`, `wasm-host`, `plugin-host` | The host: KDL config, runners, HTTP control plane, the two processor hosts |
 | `server` | The `saci-service` binary with the self-contained connectors and every format |
 
-A processor crate depends on `saci = { version = "0.1", default-features = false, features =
-["processor"] }`, since tokio cannot target wasm32-wasip2.
 [Crates and features](https://nassor.github.io/saci/library/reference/crates/) lists every feature.
-
-## The service binary
-
-```bash
-cargo install saci --features server
-saci-service --version
-```
-
-`saci-service` loads WebAssembly processor components named in a KDL config and drives Arrow
-batches from sources through them to sinks.
-[Your first pipeline](https://nassor.github.io/saci/service/first-pipeline/) runs one end to end.
 
 ## Links
 

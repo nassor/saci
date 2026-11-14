@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 374" role="img" aria-labelledby="qs-flow-title qs-flow-desc">
+  <title id="qs-flow-title">Quick Start: NATS in, two WebAssembly stages, PostgreSQL out</title>
+  <desc id="qs-flow-desc">
+    The quickstart_publish example sends NDJSON authorisations to the authorizations.raw subject on NATS. A saci-service process running quickstart.kdl reads that subject with a NatsSource, passes the rows to the Go stage validate-go.wasm, which writes valid, then to the C# stage settle-cs.wasm, which writes fee and review_tier, and a PostgresSink upserts them by id into the public.settlements table in PostgreSQL. NATS and PostgreSQL run in docker compose.
+  </desc>
+
+  <style>
+    text { font-family: 'Fira Code', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace; }
+
+    /* Catppuccin Latte, with Mocha below for a dark viewer. Site CSS does not
+       reach a standalone figure, so both flavours live here. An accent tints
+       an area; the darker ink tone draws lines and sets letters, which is
+       what Latte needs to hold 4.5:1 and 3:1. */
+    .canvas { fill: #eff1f5; stroke: #7c7f93; }
+    .panel  { fill: #e6e9ef; stroke: #acb0be; }
+
+    .blk   { fill: #eff1f5; stroke-width: 1; }
+    .blk-d { stroke: rgb(171 63 0 / 0.7); }
+    .blk-c { stroke: rgb(0 109 115 / 0.7); }
+    .blk-b { stroke: rgb(128 46 229 / 0.7); }
+
+    .hd-d { fill: #f2d2c2; }
+    .hd-c { fill: #bfdce1; }
+    .hd-b { fill: #d8c9f4; }
+
+    /* The badges sit on the panel, not on the canvas, so the wash under the
+       step number is thinner than the one the site uses on the page. */
+    .badge   { stroke-width: 1; }
+    .badge-d { fill: rgb(254 100 11 / 0.12);  stroke: rgb(171 63 0 / 0.8); }
+    .badge-c { fill: rgb(23 146 153 / 0.12);  stroke: rgb(0 109 115 / 0.8); }
+    .badge-b { fill: rgb(136 57 239 / 0.12);  stroke: rgb(128 46 229 / 0.8); }
+
+    .t-ttl  { font-size: 13px;   font-weight: 600; fill: #4c4f69; }
+    .t-sub  { font-size: 11px;   fill: #5c5f77; }
+    .t-lab  { font-size: 11px;   fill: #5c5f77; }
+    .t-step { font-size: 12px;   font-weight: 700; letter-spacing: 1px; }
+    .t-num  { font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+    .t-mid  { text-anchor: middle; }
+
+    .f-n { fill: #5c5f77; }
+    .f-d { fill: #ab3f00; }
+    .f-c { fill: #006d73; }
+    .f-b { fill: #802ee5; }
+
+    .arw  { stroke-width: 1.5; fill: none; }
+    .s-n  { stroke: #5c5f77; }
+    .s-d  { stroke: #ab3f00; }
+    .s-c  { stroke: #006d73; }
+    .s-b  { stroke: #802ee5; }
+    .dash { stroke-dasharray: 5 4; }
+
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #1e1e2e; stroke: #6c7086; }
+      .panel  { fill: #181825; stroke: #45475a; }
+
+      .blk   { fill: #313244; }
+      .blk-d { stroke: rgb(250 179 135 / 0.7); }
+      .blk-c { stroke: rgb(148 226 213 / 0.7); }
+      .blk-b { stroke: rgb(203 166 247 / 0.7); }
+
+      .hd-d { fill: #5d4e53; }
+      .hd-c { fill: #475964; }
+      .hd-b { fill: #534c6b; }
+
+      .badge-d { fill: rgb(250 179 135 / 0.18);  stroke: rgb(250 179 135 / 0.8); }
+      .badge-c { fill: rgb(148 226 213 / 0.18); stroke: rgb(148 226 213 / 0.8); }
+      .badge-b { fill: rgb(203 166 247 / 0.18); stroke: rgb(203 166 247 / 0.8); }
+
+      .t-ttl { fill: #cdd6f4; }
+      .t-sub { fill: #a6adc8; }
+      .t-lab { fill: #a6adc8; }
+
+      .f-n { fill: #a6adc8; }
+      .f-d { fill: #fab387; }
+      .f-c { fill: #94e2d5; }
+      .f-b { fill: #cba6f7; }
+
+      .s-n { stroke: #a6adc8; }
+      .s-d { stroke: #fab387; }
+      .s-c { stroke: #94e2d5; }
+      .s-b { stroke: #cba6f7; }
+    }
+  </style>
+
+  <rect class="canvas" x="0.5" y="0.5" width="659" height="373" rx="14"/>
+
+  <g>
+    <rect class="blk blk-d" x="24" y="24" width="180" height="64" rx="8"/>
+    <rect class="hd-d" x="24" y="24" width="180" height="22" rx="8"/>
+    <rect class="hd-d" x="24" y="38" width="180" height="8"/>
+    <text class="t-ttl" x="36" y="40">quickstart_publish</text>
+    <text class="t-sub" x="36" y="64">cargo example, NDJSON</text>
+    <text class="t-sub" x="36" y="80">5000 messages at 500/s</text>
+  </g>
+  <g>
+    <rect class="blk blk-d" x="250" y="24" width="180" height="64" rx="8"/>
+    <rect class="hd-d" x="250" y="24" width="180" height="22" rx="8"/>
+    <rect class="hd-d" x="250" y="38" width="180" height="8"/>
+    <text class="t-ttl" x="262" y="40">NATS</text>
+    <text class="t-sub" x="262" y="64">authorizations.raw</text>
+    <text class="t-sub" x="262" y="80">docker compose :4222</text>
+  </g>
+  <path class="arw s-d" d="M204 56 H248" marker-end="url(#m-d)"/>
+
+  <rect class="panel" x="24" y="116" width="612" height="134" rx="12"/>
+  <text class="t-step f-c t-mid" x="330" y="140">SACI-SERVICE</text>
+
+  <g>
+    <rect class="blk blk-c" x="39" y="154" width="132" height="80" rx="8"/>
+    <rect class="hd-c" x="39" y="154" width="132" height="22" rx="8"/>
+    <rect class="hd-c" x="39" y="168" width="132" height="8"/>
+    <text class="t-ttl" x="51" y="170">NatsSource</text>
+    <text class="t-sub" x="51" y="194">core subject</text>
+    <text class="t-sub" x="51" y="210">decodes NDJSON</text>
+  </g>
+  <g>
+    <rect class="blk blk-b" x="189" y="154" width="132" height="80" rx="8"/>
+    <rect class="hd-b" x="189" y="154" width="132" height="22" rx="8"/>
+    <rect class="hd-b" x="189" y="168" width="132" height="8"/>
+    <text class="t-ttl" x="201" y="170">Go stage</text>
+    <text class="t-sub" x="201" y="194">validate-go.wasm</text>
+    <text class="t-sub" x="201" y="210">writes valid</text>
+  </g>
+  <g>
+    <rect class="blk blk-b" x="339" y="154" width="132" height="80" rx="8"/>
+    <rect class="hd-b" x="339" y="154" width="132" height="22" rx="8"/>
+    <rect class="hd-b" x="339" y="168" width="132" height="8"/>
+    <text class="t-ttl" x="351" y="170">C# stage</text>
+    <text class="t-sub" x="351" y="194">settle-cs.wasm</text>
+    <text class="t-sub" x="351" y="210">writes fee,</text>
+    <text class="t-sub" x="351" y="226">review_tier</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="489" y="154" width="132" height="80" rx="8"/>
+    <rect class="hd-c" x="489" y="154" width="132" height="22" rx="8"/>
+    <rect class="hd-c" x="489" y="168" width="132" height="8"/>
+    <text class="t-ttl" x="501" y="170">PostgresSink</text>
+    <text class="t-sub" x="501" y="194">upsert on id</text>
+  </g>
+  <path class="arw s-d" d="M171 194 H187" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M321 194 H337" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M471 194 H487" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M340 88 V102 H105 V154" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M555 234 V286" marker-end="url(#m-d)"/>
+  <g>
+    <rect class="blk blk-d" x="466" y="286" width="170" height="64" rx="8"/>
+    <rect class="hd-d" x="466" y="286" width="170" height="22" rx="8"/>
+    <rect class="hd-d" x="466" y="300" width="170" height="8"/>
+    <text class="t-ttl" x="478" y="302">PostgreSQL</text>
+    <text class="t-sub" x="478" y="326">public.settlements</text>
+    <text class="t-sub" x="478" y="342">docker compose :5432</text>
+  </g>
+
+  <defs>
+    <marker id="m-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-n"/>
+    </marker>
+    <marker id="m-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-d"/>
+    </marker>
+    <marker id="m-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-b"/>
+    </marker>
+    <marker id="m-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-c"/>
+    </marker>
+  </defs>
+</svg>

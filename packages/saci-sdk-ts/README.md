@@ -38,23 +38,27 @@ const report = transformBatch(Order, (rows, config) => {
 export const pipeline = processor('my-stage', '0.1.0', score, report);
 ```
 
-No decorators: TC39 decorators do not survive the transform `jco componentize`
-runs, and the legacy ones carry only `design:type` metadata, which cannot
-describe a field list. A declaration object is what both a bundler and a type
-checker understand. `InferRow` turns it into the row type, so `row.usdAmount`
-autocompletes and a typo is a compile error, with no code generator and no
-build step in between. `InferRow` is a type, so nothing of it reaches the
-component.
+No decorators: TC39 decorators do not survive the transform `jco componentize` runs, and the
+legacy ones carry only `design:type` metadata, which cannot describe a field list. A declaration
+object is what both a bundler and a type checker understand. `InferRow` turns it into the row
+type, so `row.usdAmount` autocompletes and a typo is a compile error, with no code generator and
+no build step. `InferRow` is a type, so nothing of it reaches the component.
 
 ## Install
 
+Install the tarball from the `sdk-v0.1.0` GitHub release:
+
 ```bash
-npm install @nassor/saci-sdk
+npm install ./nassor-saci-sdk-0.1.0.tgz
 ```
 
-Requires Node 24.12+, the floor `jco` sets. The Arrow IPC codec is internal
-source (`src/arrow_ipc.ts`), compiled into this package and re-exported from its
-entry, so there are no runtime dependencies.
+The release is not cut yet and the package is not on the npm registry. `cargo xtask pack-sdk`
+builds the tarball into `target/arrow-ipc-dist/`. Runs the same on Linux, macOS and Windows
+(PowerShell).
+
+It requires Node 24.12 or later, the floor `jco` sets, and has no runtime dependencies: the
+Arrow IPC codec is internal source (`src/arrow_ipc.ts`), compiled into the package and
+re-exported from its entry.
 
 ## API
 
@@ -77,24 +81,39 @@ entry, so there are no runtime dependencies.
 
 ## What the processor does per batch
 
-The processor decodes the input stream and reads the declared components' rows
-into plain objects. It runs every transform in order, re-encodes the rows, and
-returns the stream. The `__alive` bitmap and every component the processor does
-not declare pass through byte-identically. `describe()` reports the declared
-components' Arrow schemas and the FNV-1a schema fingerprint the host validates
-against its own registry.
+<img src="https://raw.githubusercontent.com/nassor/saci/main/docs/static/sdk-packages-boundary.svg" alt="The saci-service host marshals a batch to Arrow IPC bytes and calls run-batch across the WIT boundary. Inside the WASM processor component the SDK codec decodes the stream, your transforms read and write typed rows, and the component returns run-result with the IPC bytes, the checkpoint and the metrics." width="660">
 
-Every failure leaves `run-batch` as `run-error::permanent`, thrown as the plain
-object `{ tag, val }`: componentize-js re-throws anything `instanceof Error`,
-which traps the component.
+The processor decodes the input stream and reads the declared components' rows into plain
+objects. It runs every transform in order, re-encodes the rows, and returns the stream. The
+`__alive` bitmap and every component the processor does not declare pass through byte-identically.
+`describe()` reports the declared components' Arrow schemas and the FNV-1a schema fingerprint the
+host validates against its own registry.
 
-The processor is stateless. It returns no checkpoint, so `describe()` reports
-`stateful: false` and the host persists nothing for it.
+Every failure leaves `run-batch` as `run-error::permanent`, thrown as the plain object
+`{ tag, val }`: componentize-js re-throws anything `instanceof Error`, which traps the component.
+
+The processor is stateless. It returns no checkpoint, so `describe()` reports `stateful: false`
+and the host persists nothing for it.
 
 ## Tests
 
+The suites read the corpus in `../arrow-ipc-conformance/` and the output of the repository's
+schema emitter, so run the emitter first from the repository root:
+
 ```bash
-npm install && npm run typecheck && npm run build && npm test
+cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit
+```
+
+Then, from `packages/saci-sdk-ts`. Linux/macOS:
+
+```bash
+npm ci && npm run typecheck && npm run build && npm test
+```
+
+Windows (PowerShell):
+
+```powershell
+npm ci; npm run typecheck; npm run build; npm test
 ```
 
 ## License

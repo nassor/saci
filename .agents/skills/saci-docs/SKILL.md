@@ -96,7 +96,15 @@ A page diagram is inline SVG inside the site's diagram frame:
 - Author at `viewBox` width 660; `.dgm-scroll` holds that as a minimum, so a wider drawing scrolls.
 - Wrap each step in `<g class="anim anim-1">` through `anim-4` for the reveal animation.
 - README figures are standalone files in `docs/static/*.svg`, referenced as
-  `<img src="docs/static/NAME.svg" alt="...">`.
+  `<img src="docs/static/NAME.svg" alt="..." width="660">` (relative from the README's directory).
+  Site CSS does not reach them, so each carries the `<style>` block and marker `<defs>` of
+  `docs/static/end-to-end.svg` verbatim (Catppuccin Latte plus a `prefers-color-scheme: dark`
+  Mocha block) and uses only its classes: `canvas`, `panel`, `blk blk-d|blk-c|blk-b` with
+  `hd-d|hd-c|hd-b`, `t-ttl t-sub t-lab t-step`, `f-*`, `arw s-*`, `dash`, markers `#m-n|d|c|b`.
+  The first drawn element is the `canvas` frame. Name a figure after its README
+  (`branching-fanout.svg`); `two-ways.svg` and `stage-plan.svg` belong to the root README, and
+  the docs home page carries an inline `.dgm` copy of `two-ways`. Check a new figure in a
+  headless browser in both colour schemes before committing.
 - A crate README is packaged at the crate root and crates.io resolves its relative links against
   `crates/<crate>/` on GitHub, so a link that leaves the crate directory is an absolute URL.
   `crates/saci/src/lib.rs` compiles the `saci` README's Rust blocks as a doc test

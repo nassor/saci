@@ -1,8 +1,7 @@
 # Arrow IPC conformance corpus
 
-One set of test vectors, five codecs. All five `saci-sdk-*` codecs run this
-corpus, so they agree on which streams are valid and which are refused. A sixth
-implementation has an acceptance suite the day it starts.
+Test vectors that all five `saci-sdk-*` codecs run, so they agree on which Arrow IPC streams are
+valid and which are refused. A sixth implementation has an acceptance suite the day it starts.
 
 The format itself is specified in
 [the wire format reference](https://nassor.github.io/saci/library/reference/wire-format/).
@@ -14,8 +13,8 @@ The format itself is specified in
 | `manifest.json` | the case list, generated and committed |
 | `vectors/*.saci` | one binary stream per parse-level case |
 
-Both are generated. Regenerate after any change to the wire format or the
-canonical `Order` schema:
+Both are generated. After any change to the wire format or the canonical `Order` schema,
+regenerate from the repository root. Runs the same on Linux, macOS and Windows (PowerShell):
 
 ```bash
 cargo run -p saci --features conformance --example conformance_vectors -- emit
@@ -27,10 +26,9 @@ those bytes in place. Nothing here is a hand-forged flatbuffer: a forged stream
 can drift from what arrow-rs emits, and then a codec that rejects it looks
 correct while failing on real traffic.
 
-`compressed_batch` is the one vector that is re-encoded rather than edited. It
-goes back through arrow-rs with LZ4 on, which is what the generator's
-`conformance` feature enables. A normal SACI build cannot write a compressed
-batch and must refuse one.
+`compressed_batch` is the one vector that is re-encoded rather than edited. It goes back through
+arrow-rs with LZ4 on, which the generator's `conformance` feature enables. A normal SACI build
+cannot write a compressed batch and must refuse one.
 
 ## Manifest
 
@@ -46,14 +44,15 @@ batch and must refuse one.
 
 A case is either `"expect": "accept"` or `"expect": "reject"`.
 
-An accept case carries what a codec must read back:
+An accept case carries what a codec must read back. The example below shows one column of
+several:
 
 ```json
 "accept": {
   "components": ["Order", "__alive"],
   "component": "Order",
   "rows": 6,
-  "columns": { "amount": { "type": "float64", "values": [1200.5, "..."] } }
+  "columns": { "amount": { "type": "float64", "values": [100.0, -5.0, "..."] } }
 }
 ```
 

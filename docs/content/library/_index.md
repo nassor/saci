@@ -87,8 +87,8 @@ derives what can run together.
         <desc id="idea-desc">
             Three systems declare reads and writes over the five fields of a Transaction
             component. Validate writes the valid field and Enrich writes usd_amount. Those
-            writes are disjoint, so the two share one parallel stage. Report reads both
-            fields, so it waits for a second stage.
+            writes are disjoint, so the two share one parallel stage. Report reads every
+            field, valid and usd_amount among them, so it waits for a second stage.
         </desc>
         <g class="anim anim-1">
             <text class="t-title" x="0" y="14">Transaction</text>
@@ -131,8 +131,8 @@ derives what can run together.
             <text class="t-sm t-ctl" x="458" y="100">STAGE 2</text>
             <rect class="blk blk-ctl" x="458" y="108" width="196" height="62" rx="8"/>
             <text class="t-lbl" x="472" y="130">ReportSystem</text>
-            <text class="t-sm t-ctl" x="472" y="146">reads  valid, usd_amount</text>
-            <text class="t-sm" x="472" y="160">waits: both are its inputs</text>
+            <text class="t-sm t-ctl" x="472" y="146">reads  every field</text>
+            <text class="t-sm" x="472" y="160">waits for both writers</text>
         </g>
         <g class="anim anim-4">
             <rect class="row-r" x="0" y="230" width="14" height="14" rx="3"/>
@@ -140,7 +140,7 @@ derives what can run together.
             <rect class="row-w" x="216" y="230" width="14" height="14" rx="3"/>
             <text class="t-sm" x="238" y="241">a system writes this column</text>
             <rect class="row-x" x="446" y="230" width="14" height="14" rx="3"/>
-            <text class="t-sm" x="468" y="241">untouched</text>
+            <text class="t-sm" x="468" y="241">no stage 1 system touches it</text>
             <path class="ln" d="M0 262 H654"/>
             <text class="t-sm" x="0" y="282">You wrote three <tspan class="t-ctl">meta()</tspan> methods. SACI wrote the plan.</text>
         </g>

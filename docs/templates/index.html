@@ -14,10 +14,11 @@
 
     <p class="hero-lede">
         SACI is a columnar batch processing engine for Rust, built on Apache Arrow.
-        You write transforms in Rust, Go, Python, TypeScript, Kotlin, or C# and say which
-        columns each one reads and writes. <strong>SACI derives the execution plan</strong>,
-        runs independent work concurrently, and loads the whole pipeline as a
-        WebAssembly component.
+        Each transform says which columns it reads and writes, and
+        <strong>SACI derives the execution plan</strong> and runs independent work
+        concurrently. Link it into your own Rust binary as a library, or run the
+        <code>saci-service</code> server and hand it the pipeline as a WebAssembly component
+        written in Rust, Go, Python, TypeScript, Kotlin or C#.
     </p>
 
     <div class="hero-actions">
@@ -27,7 +28,7 @@
 
     <div class="badges">
         <span class="badge">License <b>AGPL-3.0-only</b></span>
-        <span class="badge">Rust <b>1.95+</b></span>
+        <span class="badge">Rust <b>1.99+</b></span>
         <span class="badge badge-accent">Status <b>experimental</b></span>
     </div>
 </section>
@@ -38,6 +39,72 @@
     The pipeline code is the same either way. The choice is who owns the process: one
     binary you configure, or your own binary that links the engine.
 </p>
+
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 300" role="img" aria-labelledby="tw-t tw-d">
+        <title id="tw-t">Two ways to use SACI: as a library or as a server</title>
+        <desc id="tw-d">
+            As a library, cargo add saci puts the engine in your own Rust binary: you own main,
+            build a Pipeline from your Components and Systems, and call pipeline.run(). As a
+            server, cargo install saci --features server gives the saci-service binary: it
+            reads saci.kdl, moves Arrow batches from sources to sinks, and loads your Pipeline
+            at runtime as a WebAssembly component or a native plugin. Both run the same engine.
+        </desc>
+        <g class="anim anim-1">
+            <rect class="blk" x="0" y="0" width="316" height="226" rx="12"/>
+            <text class="t-lbl t-data" x="16" y="26">AS A LIBRARY</text>
+            <text class="t-sm" x="16" y="44">cargo add saci</text>
+            <rect class="blk blk-ctl" x="16" y="60" width="284" height="60" rx="8"/>
+            <rect class="hd hd-ctl" x="16" y="60" width="284" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="16" y="74" width="284" height="8"/>
+            <text class="t-lbl" x="28" y="76">your Rust binary</text>
+            <text class="t-sm" x="28" y="104">owns main and calls pipeline.run()</text>
+            <path class="arw arw-ctl" d="M158 120 V142" marker-end="url(#tw-c)"/>
+            <rect class="blk blk-data" x="16" y="148" width="284" height="60" rx="8"/>
+            <rect class="hd hd-data" x="16" y="148" width="284" height="22" rx="8"/>
+            <rect class="hd hd-data" x="16" y="162" width="284" height="8"/>
+            <text class="t-lbl" x="28" y="164">Pipeline</text>
+            <text class="t-sm" x="28" y="192">your Components and Systems, compiled in</text>
+        </g>
+        <g class="anim anim-2">
+            <rect class="blk" x="344" y="0" width="316" height="226" rx="12"/>
+            <text class="t-lbl t-ctl" x="360" y="26">AS A SERVER</text>
+            <text class="t-sm" x="360" y="44">cargo install saci --features server</text>
+            <rect class="blk blk-ctl" x="360" y="60" width="284" height="60" rx="8"/>
+            <rect class="hd hd-ctl" x="360" y="60" width="284" height="22" rx="8"/>
+            <rect class="hd hd-ctl" x="360" y="74" width="284" height="8"/>
+            <text class="t-lbl" x="372" y="76">saci-service</text>
+            <text class="t-sm" x="372" y="104">reads saci.kdl, moves Arrow batches</text>
+            <path class="arw arw-bnd" d="M502 120 V142" marker-end="url(#tw-b)"/>
+            <text class="t-sm t-bnd" x="512" y="136">loads at runtime</text>
+            <rect class="blk blk-bnd" x="360" y="148" width="284" height="60" rx="8"/>
+            <rect class="hd hd-bnd" x="360" y="148" width="284" height="22" rx="8"/>
+            <rect class="hd hd-bnd" x="360" y="162" width="284" height="8"/>
+            <text class="t-lbl" x="372" y="164">processor</text>
+            <text class="t-sm" x="372" y="192">your Pipeline as .wasm or a native plugin</text>
+        </g>
+        <g class="anim anim-3">
+            <path class="ln" d="M158 208 V262"/>
+            <path class="ln" d="M502 208 V262"/>
+            <rect class="blk" x="0" y="262" width="660" height="36" rx="10"/>
+            <text class="t-lbl t-mid" x="330" y="285">same engine: Dataset, System, Pipeline, field-derived stage plan</text>
+        </g>
+        <defs>
+            <marker id="tw-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+            <marker id="tw-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--boundary-ink)"/>
+            </marker>
+        </defs>
+    </svg>
+    </div>
+    <div class="dgm-key">
+        <span class="k-control"><i></i> the process you run</span>
+        <span class="k-data"><i></i> code compiled into it</span>
+        <span class="k-boundary"><i></i> code loaded across the WebAssembly or plugin boundary</span>
+    </div>
+</div>
 
 <div class="next-steps-grid">
     <a href="{{ get_url(path='@/service/_index.md') }}" class="next-card">

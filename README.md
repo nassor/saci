@@ -14,96 +14,86 @@
 
 </div>
 
-## What it is
+SACI is a columnar batch processing engine for Rust, built on Apache Arrow. Each transform declares
+the Arrow fields it reads and writes, and SACI derives the execution order from those declarations:
+transforms that write different fields share a stage, the rest wait for their inputs, and a
+transform that fails is retried.
 
-SACI (Self-orchestrated Autonomous Compute Interface) is a columnar batch processing engine built
-on Apache Arrow.
+The `saci` crate is used in two ways:
 
-You write transforms as plain structs. Each one declares which Arrow fields it reads and which it
-writes, and that declaration is the only scheduling input SACI needs. It builds a dependency graph
-from the field overlaps, groups work that cannot conflict into stages it can run concurrently,
-retries what fails, and optionally spreads the work across a cluster.
+- As a library: `cargo add saci` puts the engine in your own binary. You own `main`, build a
+  `Pipeline` and call `pipeline.run()`.
+- As a server: `cargo install saci --features server` installs `saci-service`. It reads a KDL
+  config, moves Arrow batches from sources to sinks, and runs your pipeline as a WebAssembly
+  component or a native plugin that it loads at runtime.
 
-The engine and the host are Rust. The pipeline contract is the `saci:pipeline@0.3.0` WIT world, so
-any language that compiles to a WASI 0.2 component can implement it. The Rust processor SDK is
-optional. See
-[WebAssembly processors](https://nassor.github.io/saci/service/processors/build/).
+<img src="docs/static/two-ways.svg" width="660" alt="As a library, cargo add saci puts the engine in your Rust binary, which owns main and runs a Pipeline of your Components and Systems. As a server, cargo install saci --features server gives saci-service, which reads saci.kdl, moves Arrow batches from sources to sinks, and loads your Pipeline at runtime as a WebAssembly component or a native plugin. Both run the same engine.">
 
-## What it is for
+Each part of the crate sits behind a Cargo feature. The default build is the engine alone; the
+server, its WebAssembly host and each connector compile only when you name them.
 
-Reach for SACI when:
+## How SACI plans the work
 
-- Work arrives as batches of 100k to 100M rows, or as a stream of individual items you want
-  processed one at a time.
-- The transform is imperative code that SQL expresses awkwardly.
-- Schemas are wide, tens to hundreds of columns, of which each step touches a few.
-- Recovery time is a design constraint.
+<img src="docs/static/stage-plan.svg" width="660" alt="Three systems over a Transaction component. ValidateSystem reads amount and writes valid; EnrichSystem reads amount and currency and writes usd_amount. Their writes are disjoint, so both run in stage 1. ReportSystem reads every field, so it runs in stage 2.">
 
-Look elsewhere when you want SQL (use [DataFusion](https://datafusion.apache.org/)), or you have
-fewer than ~10k rows total and a `Vec` would do. For per-item processing, run the same pipeline in
-[stream mode](https://nassor.github.io/saci/service/config/run-modes/), under a millisecond per item in-process.
-Batch mode is the default for throughput.
+A `Component` is a struct stored as Arrow columns. A `System` is a transform plus a `meta()` that
+names the fields it reads and writes. The `Pipeline` builds a dependency graph from those field
+overlaps and groups systems that cannot conflict into stages; you never write a stage list, and
+adding a system re-derives the plan. That is the "self-orchestrated" in SACI's name,
+Self-orchestrated Autonomous Compute Interface. The Component and System vocabulary comes from the
+Entity Component System pattern in game engines.
 
-That field declaration is what "self-orchestrated" in the name refers to. The `Component` and
-`System` vocabulary comes from ECS (Entity Component System) in game development. ECS organises
-game entities as components that systems act on each frame. SACI organises a data `Pipeline`
-as `Component`s that `System`s transform in field-granular DAG order.
+## As a library
 
-## End to end
-
-SACI is service-first. You deploy `saci-service` once and hand it WebAssembly components, so the
-pipeline ships separately from the binary that runs it.
-
-<p align="center">
-  <img src="docs/static/end-to-end.svg" width="880"
-       alt="End to end: you write Component, System, and Pipeline structs; cargo build produces pipeline.wasm, a wasm32-wasip2 component; saci-service loads the component named in saci.kdl and drives Arrow IPC from sources through the host to sinks; optionally the host coordinates a Raft cluster with row-range leases and checkpoints.">
-</p>
-
-The processor component owns the DAG, the stage plan, and retry. The host owns IO, checkpointing,
-distribution, and the HTTP control plane. Data crosses the boundary as Arrow IPC bytes and nothing
-else, so your pipeline never opens a socket or a file.
-
-## Why columns
-
-Storing each field as a contiguous Arrow column, rather than a row per record, changes what the
-machine has to move:
-
-- Arithmetic, at 8 bytes per column: a system reading 3 of 50 columns loads 24 MB per million rows,
-  where a row layout loads all 400 MB.
-- Handing a batch to the next stage is an `Arc` clone: one atomic increment, no copy.
-- Checkpointing is a contiguous buffer write, so recovery decodes 6x faster than a row-oriented
-  equivalent at 1M rows.
-
-Numbers and methodology: [benchmark results](https://nassor.github.io/saci/library/reference/benchmarks/).
-
-## Quick start
-
-You need git and a Rust 1.99 toolchain installed through rustup. About fifteen minutes end to end.
-These commands run the same on Linux, macOS and Windows (PowerShell):
+You need git and a Rust 1.99 toolchain installed through rustup. These commands run the same on
+Linux, macOS and Windows (PowerShell):
 
 ```bash
 git clone https://github.com/nassor/saci
 cd saci
-```
-
-Then run a pipeline without writing any code:
-
-```bash
 cargo run -p saci --example scheduler_etl
 ```
 
-It prints the stage plan SACI derived from the systems' field declarations (ValidateSystem and
-EnrichSystem share stage 1 because they write disjoint fields), then a summary report: 9
-transactions, 7 valid, 2 rejected.
+It prints the stage plan SACI derived (ValidateSystem and EnrichSystem share stage 1 because they
+write disjoint fields), then a summary: `Pipeline complete: 7/9 valid, 2 rejected`.
 
-To write your own component and the config that runs it, follow
-[Build your first pipeline](https://nassor.github.io/saci/library/first-pipeline/).
+In your own project, `cargo add saci` and follow the example in the
+[`saci` crate README](./crates/saci/README.md). The same `Pipeline` also takes sources and sinks
+from the connector features, `Scheduler` runs several pipelines in dependency order, and the
+`distributed` feature spreads one across nodes. The
+[library tutorial](https://nassor.github.io/saci/library/first-pipeline/) builds a pipeline step by
+step.
 
-## Six languages, one pipeline
+## As a server
 
-`examples/polyglot/` implements a single `Order` workload as six separate WebAssembly components,
-chained by a Rust driver through the same host `saci-service` uses. All six export the same WIT
-world.
+<img src="docs/static/end-to-end.svg" width="660" alt="End to end: you write Component, System, and Pipeline structs; cargo build produces pipeline.wasm, a wasm32-wasip2 component; saci-service loads the component named in saci.kdl and drives Arrow IPC from sources through the host to sinks; optionally the host coordinates a Raft cluster with row-range leases and checkpoints.">
+
+The processor owns the stage plan and retry. The host owns IO, checkpointing, distribution, the
+HTTP control plane and a `/ui` dashboard. Data crosses between them as Arrow IPC bytes and nothing
+else, so a processor never opens a socket or a file, and it can be rebuilt without rebuilding the
+host.
+
+From the clone, this builds the order-processing component and `saci-service`, then runs one
+config end to end: a CSV file source, the component, a CSV file sink. You also need the WebAssembly
+target, `rustup target add wasm32-wasip2`. The command runs the same on Linux, macOS and Windows
+(PowerShell):
+
+```bash
+cargo xtask demo standalone_wasm
+```
+
+The log ends with `rows_processed=5 iteration_errors=0` and `[demo] PASS: 'standalone_wasm' ran to
+completion`.
+
+To install the binary on its own, `cargo install saci --features server`; `saci-service --version`
+confirms it. [Your first pipeline](https://nassor.github.io/saci/service/first-pipeline/) writes a
+config and a processor from scratch.
+
+### Processors in six languages
+
+The pipeline contract is the `saci:pipeline@0.3.0` WIT world, so any language that compiles to a
+WASI 0.2 component can implement a processor. `examples/polyglot/` splits one `Order` workload into
+six components, chained through the same host `saci-service` uses:
 
 | # | stage | language | toolchain | writes |
 |---|-------|----------|-----------|--------|
@@ -114,32 +104,55 @@ world.
 | 5 | `tier-cs` | C# | `componentize-dotnet` | `review_tier` |
 | 6 | `settle-rs` | Rust | `cargo build --target wasm32-wasip2` | `settlement` plus a cross-batch ledger |
 
-Building the six stages needs the Rust wasm target and `wasm-tools`, plus five language
-toolchains and curl, which `cargo xtask polyglot` uses once to fetch the WASI preview 1 adapter
-the Kotlin stage needs. [`examples/polyglot/PINS.md`](./examples/polyglot/PINS.md) carries every
-version and the platform caveats:
+Building them needs the five language toolchains, `wasm-tools`, and curl, which
+`cargo xtask polyglot` uses once to fetch the WASI preview 1 adapter the Kotlin stage needs.
+[`examples/polyglot/PINS.md`](./examples/polyglot/PINS.md) carries every version. These commands run
+the same on Linux, macOS and Windows (PowerShell):
 
 ```bash
 rustup target add wasm32-wasip2
-cargo install wasm-tools --locked --version 1.246.2   # pinned in examples/polyglot/PINS.md
-```
-
-Then build every stage and drive the chain:
-
-```bash
+cargo install wasm-tools --locked --version 1.246.2
 cargo xtask polyglot
 cargo run -p saci --features wasm-host,tracing --example polyglot_orders
 ```
 
-Every command in this section runs the same on Linux, macOS and Windows (PowerShell). The processor
-build page has the byte-level contract and a recipe per language, including the
-[six-language example](https://nassor.github.io/saci/service/processors/build/#4-six-languages-one-pipeline).
+[Build a processor](https://nassor.github.io/saci/service/processors/build/) has the byte-level
+contract and a recipe per language. A processor that needs native threads or libraries can be a
+[native plugin](https://nassor.github.io/saci/service/plugins/) instead: a shared library the
+service opens without a sandbox.
+
+## When SACI fits
+
+Reach for SACI when:
+
+- Work arrives as batches of 100k to 100M rows, or as a stream of items processed one at a time.
+  [Stream mode](https://nassor.github.io/saci/service/config/run-modes/) runs the same pipeline
+  under a millisecond per item in-process; batch mode is the default.
+- The transform is imperative code that SQL expresses awkwardly.
+- Schemas are wide, tens to hundreds of columns, and each step touches a few.
+- Recovery time is a design constraint.
+
+Look elsewhere when you want SQL ([DataFusion](https://datafusion.apache.org/) has a query
+planner; SACI has none), when you need exactly-once delivery (recovery is at-least-once, so a sink
+must tolerate a repeated batch), or when you have fewer than about 10k rows and a `Vec` would do.
+
+## Why columns
+
+Storing each field as a contiguous Arrow column, rather than a row per record, changes what the
+machine moves:
+
+- A system reading 3 of 50 eight-byte columns loads 24 MB per million rows, where a row layout
+  loads 400 MB.
+- Handing a batch to the next stage is an `Arc` clone: one atomic increment, no copy.
+- A checkpoint is a contiguous buffer write, so recovery decodes 6x faster than a row-oriented
+  equivalent at 1M rows.
+
+Numbers and method: [benchmark results](https://nassor.github.io/saci/library/reference/benchmarks/).
 
 ## Documentation
 
-| | |
+| Running the server | |
 |---|---|
-| [What SACI is](https://nassor.github.io/saci/) | The one-paragraph pitch and the end-to-end diagram |
 | [Run the service](https://nassor.github.io/saci/service/) | What a config declares, and the vocabulary behind every key |
 | [Your first pipeline](https://nassor.github.io/saci/service/first-pipeline/) | Install the binary, then run a real pipeline in 15 minutes |
 | [The config file](https://nassor.github.io/saci/service/config/) | Every top-level key, variables, and validation |
@@ -148,24 +161,28 @@ build page has the byte-level contract and a recipe per language, including the
 | [Build a processor](https://nassor.github.io/saci/service/processors/build/) | The WIT contract, a recipe per language, and the six-language example |
 | [Plugins](https://nassor.github.io/saci/service/plugins/) | A native shared library instead of a component |
 | [Operating](https://nassor.github.io/saci/service/operate/) | The command line, observability, the dashboard, clusters |
-| [As a Library](https://nassor.github.io/saci/library/) | Link the engine into your own binary: Dataset, System, Pipeline, Scheduler, distribution |
+
+| Using the library | |
+|---|---|
+| [Embedding SACI](https://nassor.github.io/saci/library/) | Dataset, System, Pipeline, Scheduler, distribution |
 | [Build your first pipeline](https://nassor.github.io/saci/library/first-pipeline/) | A native pipeline in nine steps, from the component to the stage plan |
 | [Tracing & metrics](https://nassor.github.io/saci/library/tracing/) | Spans, metrics, and the Prometheus endpoint |
+| [Crates and features](https://nassor.github.io/saci/library/reference/crates/) | Every feature flag and the module behind it |
 | [The SDK packages](https://nassor.github.io/saci/library/reference/sdk-packages/) | One `saci-sdk` per language, the Arrow codec inside each |
 
-Also in this repo: the [WASM processor example](./examples/wasm/), the [polyglot
-example](./examples/polyglot/), Rust-native examples in [`crates/saci/examples`](./crates/saci/examples/)
-and [`examples/native`](./examples/native/), the [branching example](./examples/branching/), the
-Apache-2.0 [SDK packages](./packages/), and toolchain pins for [Rust
-processors](./crates/saci/PINS.md) and [the other
-languages](./examples/polyglot/PINS.md).
+The repository also holds the [WASM processor example](./examples/wasm/), the
+[branching](./examples/branching/), [windowing](./examples/windowing/) and
+[cluster](./examples/distributed_fulfillment/) examples, Rust examples in
+[`crates/saci/examples`](./crates/saci/examples/) and [`examples/native`](./examples/native/), the
+Apache-2.0 [SDK packages](./packages/), and toolchain pins for
+[Rust processors](./crates/saci/PINS.md).
 
 ## Crates
 
 Two crates are on crates.io:
 
 - [`saci`](./crates/saci/): the engine, the connectors, the byte formats, both authoring SDKs and
-  the `saci-service` host, each behind a feature, so a build compiles only what it names.
+  the `saci-service` host.
 - [`saci-macros`](./crates/saci-macros/): the processor SDK's derive and attribute macros, which
   `saci::processor` re-exports.
 
@@ -177,11 +194,10 @@ Two crates are on crates.io:
 | `plugin` | The native plugin SDK and its C ABI |
 | `server` | The `saci-service` binary: wasmtime, KDL config, HTTP control plane, distributed runner |
 
-`cargo add saci` adds the engine to a project, and `cargo install saci --features server` installs
-the binary. `cargo xtask server` builds one from a checkout with only the connectors, formats and
+`cargo xtask server` builds a `saci-service` from a checkout with only the connectors, formats and
 processor hosts you name. Release notes are in [`CHANGELOG.md`](./CHANGELOG.md). The workspace map
-and the build, test and release commands live in [`AGENTS.md`](./AGENTS.md); the per-area
-reference sits beside it under `.agents/skills/`.
+and the build, test and release commands are in [`AGENTS.md`](./AGENTS.md), with per-area
+reference under `.agents/skills/`.
 
 ## Project status
 

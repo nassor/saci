@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 324" role="img" aria-labelledby="windowing-geometry-title windowing-geometry-desc">
+  <title id="windowing-geometry-title">Tumbling, sliding and session windows laid on one event-time axis</title>
+  <desc id="windowing-geometry-desc">
+    A time axis from 0 to 120 seconds with three lanes. Tumbling: four adjacent 30 second windows, 0 to 30, 30 to 60, 60 to 90 and 90 to 120, with no overlap, so each event is in exactly one. Sliding: four 60 second windows that start every 15 seconds, 0 to 60, 15 to 75, 30 to 90 and 45 to 105, stacked so they overlap, so each event is in four windows. Session: two bursts of events for one symbol. The first has events at 4, 10, 14 and 20 seconds, and its session runs to 30 seconds, ten seconds after the last event. The second has events at 62 and 72 seconds, and its session runs to 82 seconds. The silence between the bursts is longer than the 10 second gap, so they are two sessions.
+  </desc>
+
+  <style>
+    text { font-family: 'Fira Code', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace; }
+
+    /* Catppuccin Latte, with Mocha below for a dark viewer. Site CSS does not
+       reach a standalone figure, so both flavours live here. An accent tints
+       an area; the darker ink tone draws lines and sets letters, which is
+       what Latte needs to hold 4.5:1 and 3:1. */
+    .canvas { fill: #eff1f5; stroke: #7c7f93; }
+    .panel  { fill: #e6e9ef; stroke: #acb0be; }
+
+    .blk   { fill: #eff1f5; stroke-width: 1; }
+    .blk-d { stroke: rgb(171 63 0 / 0.7); }
+    .blk-c { stroke: rgb(0 109 115 / 0.7); }
+    .blk-b { stroke: rgb(128 46 229 / 0.7); }
+
+    .hd-d { fill: #f2d2c2; }
+    .hd-c { fill: #bfdce1; }
+    .hd-b { fill: #d8c9f4; }
+
+    /* The badges sit on the panel, not on the canvas, so the wash under the
+       step number is thinner than the one the site uses on the page. */
+    .badge   { stroke-width: 1; }
+    .badge-d { fill: rgb(254 100 11 / 0.12);  stroke: rgb(171 63 0 / 0.8); }
+    .badge-c { fill: rgb(23 146 153 / 0.12);  stroke: rgb(0 109 115 / 0.8); }
+    .badge-b { fill: rgb(136 57 239 / 0.12);  stroke: rgb(128 46 229 / 0.8); }
+
+    .t-ttl  { font-size: 13px;   font-weight: 600; fill: #4c4f69; }
+    .t-sub  { font-size: 11px;   fill: #5c5f77; }
+    .t-lab  { font-size: 11px;   fill: #5c5f77; }
+    .t-step { font-size: 12px;   font-weight: 700; letter-spacing: 1px; }
+    .t-num  { font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+    .t-mid  { text-anchor: middle; }
+
+    .f-n { fill: #5c5f77; }
+    .f-d { fill: #ab3f00; }
+    .f-c { fill: #006d73; }
+    .f-b { fill: #802ee5; }
+
+    .arw  { stroke-width: 1.5; fill: none; }
+    .s-n  { stroke: #5c5f77; }
+    .s-d  { stroke: #ab3f00; }
+    .s-c  { stroke: #006d73; }
+    .s-b  { stroke: #802ee5; }
+    .dash { stroke-dasharray: 5 4; }
+
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #1e1e2e; stroke: #6c7086; }
+      .panel  { fill: #181825; stroke: #45475a; }
+
+      .blk   { fill: #313244; }
+      .blk-d { stroke: rgb(250 179 135 / 0.7); }
+      .blk-c { stroke: rgb(148 226 213 / 0.7); }
+      .blk-b { stroke: rgb(203 166 247 / 0.7); }
+
+      .hd-d { fill: #5d4e53; }
+      .hd-c { fill: #475964; }
+      .hd-b { fill: #534c6b; }
+
+      .badge-d { fill: rgb(250 179 135 / 0.18);  stroke: rgb(250 179 135 / 0.8); }
+      .badge-c { fill: rgb(148 226 213 / 0.18); stroke: rgb(148 226 213 / 0.8); }
+      .badge-b { fill: rgb(203 166 247 / 0.18); stroke: rgb(203 166 247 / 0.8); }
+
+      .t-ttl { fill: #cdd6f4; }
+      .t-sub { fill: #a6adc8; }
+      .t-lab { fill: #a6adc8; }
+
+      .f-n { fill: #a6adc8; }
+      .f-d { fill: #fab387; }
+      .f-c { fill: #94e2d5; }
+      .f-b { fill: #cba6f7; }
+
+      .s-n { stroke: #a6adc8; }
+      .s-d { stroke: #fab387; }
+      .s-c { stroke: #94e2d5; }
+      .s-b { stroke: #cba6f7; }
+    }
+  </style>
+
+  <rect class="canvas" x="0.5" y="0.5" width="659" height="323" rx="14"/>
+
+  <text class="t-ttl" x="16" y="46">Tumbling</text>
+  <text class="t-sub" x="16" y="62">30 s, no overlap</text>
+  <rect class="blk blk-d" x="150" y="32" width="120" height="32" rx="6"/>
+  <text class="t-lab t-mid" x="210.0" y="52.0">0 to 30 s</text>
+  <rect class="blk blk-d" x="270" y="32" width="120" height="32" rx="6"/>
+  <text class="t-lab t-mid" x="330.0" y="52.0">30 to 60 s</text>
+  <rect class="blk blk-d" x="390" y="32" width="120" height="32" rx="6"/>
+  <text class="t-lab t-mid" x="450.0" y="52.0">60 to 90 s</text>
+  <rect class="blk blk-d" x="510" y="32" width="120" height="32" rx="6"/>
+  <text class="t-lab t-mid" x="570.0" y="52.0">90 to 120 s</text>
+  <text class="t-ttl" x="16" y="106">Sliding</text>
+  <text class="t-sub" x="16" y="122">60 s every 15 s</text>
+  <rect class="blk blk-d" x="150" y="90" width="240" height="20" rx="6"/>
+  <text class="t-lab" x="160" y="104.0">0 to 60 s</text>
+  <rect class="blk blk-d" x="210" y="114" width="240" height="20" rx="6"/>
+  <text class="t-lab" x="220" y="128.0">15 to 75 s</text>
+  <rect class="blk blk-d" x="270" y="138" width="240" height="20" rx="6"/>
+  <text class="t-lab" x="280" y="152.0">30 to 90 s</text>
+  <rect class="blk blk-d" x="330" y="162" width="240" height="20" rx="6"/>
+  <text class="t-lab" x="340" y="176.0">45 to 105 s</text>
+  <text class="t-ttl" x="16" y="230">Session</text>
+  <text class="t-sub" x="16" y="246">10 s gap</text>
+  <rect class="blk blk-d" x="166" y="214" width="104" height="30" rx="6"/>
+  <circle class="f-d" cx="166" cy="229" r="3.5"/>
+  <circle class="f-d" cx="190" cy="229" r="3.5"/>
+  <circle class="f-d" cx="206" cy="229" r="3.5"/>
+  <circle class="f-d" cx="230" cy="229" r="3.5"/>
+  <rect class="blk blk-d" x="398" y="214" width="80" height="30" rx="6"/>
+  <circle class="f-d" cx="398" cy="229" r="3.5"/>
+  <circle class="f-d" cx="438" cy="229" r="3.5"/>
+  <text class="t-lab" x="150" y="262">dots are events; a session ends 10 s after its last event</text>
+  <path class="arw s-n" d="M150 282 H636" marker-end="url(#m-n)"/>
+  <path class="arw s-n" d="M150 278 V286"/>
+  <text class="t-lab t-mid" x="150" y="304">0 s</text>
+  <path class="arw s-n" d="M270 278 V286"/>
+  <text class="t-lab t-mid" x="270" y="304">30 s</text>
+  <path class="arw s-n" d="M390 278 V286"/>
+  <text class="t-lab t-mid" x="390" y="304">60 s</text>
+  <path class="arw s-n" d="M510 278 V286"/>
+  <text class="t-lab t-mid" x="510" y="304">90 s</text>
+  <path class="arw s-n" d="M630 278 V286"/>
+  <text class="t-lab t-mid" x="630" y="304">120 s</text>
+  <text class="t-lab" x="16" y="304">event time</text>
+
+  <defs>
+    <marker id="m-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-n"/>
+    </marker>
+    <marker id="m-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-d"/>
+    </marker>
+    <marker id="m-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-b"/>
+    </marker>
+    <marker id="m-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-c"/>
+    </marker>
+  </defs>
+</svg>

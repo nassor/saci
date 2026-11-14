@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 300" role="img" aria-labelledby="sp-title sp-desc">
+  <title id="sp-title">From field declarations to a stage plan</title>
+  <desc id="sp-desc">
+    Three systems declare reads and writes over the five fields of a Transaction component.
+    ValidateSystem reads amount and writes valid. EnrichSystem reads amount and currency and writes
+    usd_amount. Their writes are disjoint, so both go in stage 1. ReportSystem reads every field,
+    including valid and usd_amount, so it runs in stage 2, after both. No stage 1 system touches id.
+  </desc>
+
+  <style>
+    text { font-family: 'Fira Code', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace; }
+
+    /* Catppuccin Latte, with Mocha below for a dark viewer. Site CSS does not
+       reach a standalone figure, so both flavours live here. An accent tints
+       an area; the darker ink tone draws lines and sets letters, which is
+       what Latte needs to hold 4.5:1 and 3:1. */
+    .canvas { fill: #eff1f5; stroke: #7c7f93; }
+    .panel  { fill: #e6e9ef; stroke: #acb0be; }
+
+    .blk   { fill: #eff1f5; stroke-width: 1; }
+    .blk-d { stroke: rgb(171 63 0 / 0.7); }
+    .blk-c { stroke: rgb(0 109 115 / 0.7); }
+    .blk-b { stroke: rgb(128 46 229 / 0.7); }
+
+    .hd-d { fill: #f2d2c2; }
+    .hd-c { fill: #bfdce1; }
+    .hd-b { fill: #d8c9f4; }
+
+    /* The badges sit on the panel, not on the canvas, so the wash under the
+       step number is thinner than the one the site uses on the page. */
+    .badge   { stroke-width: 1; }
+    .badge-d { fill: rgb(254 100 11 / 0.12);  stroke: rgb(171 63 0 / 0.8); }
+    .badge-c { fill: rgb(23 146 153 / 0.12);  stroke: rgb(0 109 115 / 0.8); }
+    .badge-b { fill: rgb(136 57 239 / 0.12);  stroke: rgb(128 46 229 / 0.8); }
+
+    .t-ttl  { font-size: 13px;   font-weight: 600; fill: #4c4f69; }
+    .t-sub  { font-size: 11px;   fill: #5c5f77; }
+    .t-lab  { font-size: 11px;   fill: #5c5f77; }
+    .t-step { font-size: 12px;   font-weight: 700; letter-spacing: 1px; }
+    .t-num  { font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+    .t-mid  { text-anchor: middle; }
+
+    .f-n { fill: #5c5f77; }
+    .f-d { fill: #ab3f00; }
+    .f-c { fill: #006d73; }
+    .f-b { fill: #802ee5; }
+
+    .arw  { stroke-width: 1.5; fill: none; }
+    .s-n  { stroke: #5c5f77; }
+    .s-d  { stroke: #ab3f00; }
+    .s-c  { stroke: #006d73; }
+    .s-b  { stroke: #802ee5; }
+    .dash { stroke-dasharray: 5 4; }
+
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #1e1e2e; stroke: #6c7086; }
+      .panel  { fill: #181825; stroke: #45475a; }
+
+      .blk   { fill: #313244; }
+      .blk-d { stroke: rgb(250 179 135 / 0.7); }
+      .blk-c { stroke: rgb(148 226 213 / 0.7); }
+      .blk-b { stroke: rgb(203 166 247 / 0.7); }
+
+      .hd-d { fill: #5d4e53; }
+      .hd-c { fill: #475964; }
+      .hd-b { fill: #534c6b; }
+
+      .badge-d { fill: rgb(250 179 135 / 0.18);  stroke: rgb(250 179 135 / 0.8); }
+      .badge-c { fill: rgb(148 226 213 / 0.18); stroke: rgb(148 226 213 / 0.8); }
+      .badge-b { fill: rgb(203 166 247 / 0.18); stroke: rgb(203 166 247 / 0.8); }
+
+      .t-ttl { fill: #cdd6f4; }
+      .t-sub { fill: #a6adc8; }
+      .t-lab { fill: #a6adc8; }
+
+      .f-n { fill: #a6adc8; }
+      .f-d { fill: #fab387; }
+      .f-c { fill: #94e2d5; }
+      .f-b { fill: #cba6f7; }
+
+      .s-n { stroke: #a6adc8; }
+      .s-d { stroke: #fab387; }
+      .s-c { stroke: #94e2d5; }
+      .s-b { stroke: #cba6f7; }
+    }
+  </style>
+
+  <rect class="canvas" x="0.5" y="0.5" width="699" height="299" rx="14"/>
+
+  <g transform="translate(23 26)">
+    <text class="t-ttl" x="0" y="14">Transaction</text>
+    <text class="t-sub" x="0" y="30">one RecordBatch, five columns</text>
+    <rect class="blk blk-d" x="0" y="42" width="150" height="150" rx="8"/>
+    <rect class="hd-d" x="0" y="42" width="150" height="22" rx="8"/>
+    <rect class="hd-d" x="0" y="56" width="150" height="8"/>
+    <text class="t-sub f-d" x="12" y="57">FIELD</text>
+    <rect class="panel" x="8" y="70" width="134" height="20" rx="3"/>
+    <text class="t-sub" x="16" y="84">id</text>
+    <rect class="hd-c" x="8" y="94" width="134" height="20" rx="3"/>
+    <text class="t-sub" x="16" y="108">amount</text>
+    <rect class="hd-c" x="8" y="118" width="134" height="20" rx="3"/>
+    <text class="t-sub" x="16" y="132">currency</text>
+    <rect class="hd-d" x="8" y="142" width="134" height="20" rx="3"/>
+    <text class="t-sub" x="16" y="156">valid</text>
+    <rect class="hd-d" x="8" y="166" width="134" height="20" rx="3"/>
+    <text class="t-sub" x="16" y="180">usd_amount</text>
+
+    <path class="arw s-c" d="M150 104 H206" marker-end="url(#m-c)"/>
+    <path class="arw s-d" d="M150 152 H206" marker-end="url(#m-d)"/>
+    <path class="arw s-d" d="M150 176 H206" marker-end="url(#m-d)"/>
+
+    <text class="t-sub f-c" x="212" y="30">STAGE 1: no order between these two</text>
+    <rect class="blk blk-c" x="212" y="42" width="190" height="62" rx="8"/>
+    <text class="t-ttl" x="226" y="64">ValidateSystem</text>
+    <text class="t-sub f-c" x="226" y="80">reads  amount</text>
+    <text class="t-sub f-d" x="226" y="94">writes valid</text>
+    <rect class="blk blk-c" x="212" y="116" width="190" height="76" rx="8"/>
+    <text class="t-ttl" x="226" y="138">EnrichSystem</text>
+    <text class="t-sub f-c" x="226" y="154">reads  amount, currency</text>
+    <text class="t-sub f-d" x="226" y="168">writes usd_amount</text>
+    <text class="t-sub" x="226" y="184">no shared write, no conflict</text>
+
+    <path class="arw s-c" d="M402 73 H428 V116 H458" marker-end="url(#m-c)"/>
+    <path class="arw s-c" d="M402 154 H428 V132 H458" marker-end="url(#m-c)"/>
+    <text class="t-sub f-c" x="464" y="100">STAGE 2</text>
+    <rect class="blk blk-c" x="464" y="108" width="190" height="62" rx="8"/>
+    <text class="t-ttl" x="478" y="130">ReportSystem</text>
+    <text class="t-sub f-c" x="478" y="146">reads  every field</text>
+    <text class="t-sub" x="478" y="160">waits for both writers</text>
+
+    <rect class="hd-c" x="0" y="226" width="14" height="14" rx="3"/>
+    <text class="t-sub" x="22" y="237">a system reads this column</text>
+    <rect class="hd-d" x="216" y="226" width="14" height="14" rx="3"/>
+    <text class="t-sub" x="238" y="237">a system writes this column</text>
+    <rect class="panel" x="446" y="226" width="14" height="14" rx="3"/>
+    <text class="t-sub" x="468" y="237">no stage 1 system touches it</text>
+  </g>
+
+  <defs>
+    <marker id="m-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-n"/>
+    </marker>
+    <marker id="m-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-d"/>
+    </marker>
+    <marker id="m-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-b"/>
+    </marker>
+    <marker id="m-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-c"/>
+    </marker>
+  </defs>
+</svg>

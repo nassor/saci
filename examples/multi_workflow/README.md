@@ -1,167 +1,128 @@
-# Multi-workflow: one stream routed across two workflows, bridged in process
+# Multi-workflow: one stream routed across two workflows
 
-A service can declare several workflows in one config: each has its own
-nodes, links, sources and sinks, and they run concurrently in one process. A
-`ChannelSink` in one workflow meets a `ChannelSource` in another on a shared
-channel `name`. That channel is the only crossing, because a `link` never
-leaves its workflow. `multi_workflow.kdl` is that arrangement in one
-long-running `saci-service` stream.
+A service can declare several workflows in one config. Each has its own nodes, links, sources and sinks, and all of them run concurrently in one process. A `link` never leaves its workflow, so the only crossing is an in-process channel: a `ChannelSink` in one workflow and a `ChannelSource` in another that share a channel `name`. The workflow and channel keys are on the [workflows config page](../../docs/content/service/config/workflows.md) and the [channel connector page](../../docs/content/service/connectors/channel.md). This file is the commands.
 
-| Workflow | Node | What happens |
-|----------|------|--------------|
-| `route` | `orders_in` | core NATS subject `multi.orders`, pulled round-robin, sliced into one pass per chunk |
-| `route` | `router` | wasm processor: routes each batch on its first row's `amount` |
-| `route` | `rush_sales` | PostgreSQL sink for `rush` batches (`amount >= 100.0`), rows land untouched |
-| `route` | `standard_bridge` | `ChannelSink` for `standard` batches, on channel `standard` |
-| `settle` | `standard_in` | `ChannelSource` on channel `standard`: the bridged half of the stream |
-| `settle` | `offsets_in` | second core NATS subject `multi.offsets`, same `Sale` schema |
-| `settle` | `window_sales` | wasm processor (the tumbling windowing demo's, unchanged): merges both sources into 30s tumbling windows, emits closed windows |
-| `settle` | `window_totals` | PostgreSQL sink for the closed windows |
+<img src="../../docs/static/multi-workflow-topology.svg" alt="Two workflows in one service. The route workflow reads NATS multi.orders and a WASM router sends rush batches to the PostgreSQL sink rush_sales and standard batches to a ChannelSink named standard. That channel feeds a ChannelSource in the settle workflow, which also reads NATS multi.offsets. Both feed a WASM tumbling window processor that writes window_totals in PostgreSQL." width="660">
 
-The router declares the same `Sale` schema the tumbling windowing processor
-uses, so rows bridge across the channel unchanged: `standard_bridge` and
-`standard_in` both declare `name="standard"`. The dashboard draws one card per
-workflow and a `channel bridges` card listing `standard` with its live rate.
+`multi_workflow.kdl` is a long-running `saci-service` stream:
+
+- `route` reads `multi.orders` and the `router` processor sends each batch to one branch, by the first row's `amount`. `rush` (`amount >= 100.0`) goes to the `rush_sales` table untouched. `standard` goes to the `standard` channel.
+- `settle` merges that channel and a second subject, `multi.offsets`, into 30 second tumbling windows and writes the closed windows to `window_totals`.
+
+Both workflows use the same `Sale` schema (`timestamp_ms`, `symbol`, `amount`), so rows cross the channel unchanged.
 
 ## Prerequisites
 
+- A clone of the repository. Every command runs from its root.
 - Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
-- A Docker daemon, for the NATS and PostgreSQL containers
+- A Docker daemon, for NATS and PostgreSQL.
 
-## Build the processors
+## 1. Build the processors
 
-The router is this example's own crate; the windowed half reuses the tumbling
-windowing example's component unchanged.
+The router is this example's own crate. The windowed half reuses the tumbling windowing example's component. Runs the same on Linux, macOS and Windows (PowerShell):
 
 ```text
 cargo build --release -p multi-workflow-router-wasm --target wasm32-wasip2
 cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip2
 ```
-Runs the same on Linux, macOS and Windows (PowerShell).
 
-## Run it
+## 2. Start the containers
 
-Start NATS and PostgreSQL, then the service, then the publisher.
-
-1. Start the containers:
+Runs the same on all three platforms:
 
 ```text
 docker compose -f examples/multi_workflow/docker-compose.yml up -d
 ```
 
-The compose file brings up `nats:2.11-alpine` and `postgres:18-alpine` and
-runs `schema.sql` on first initialisation, which creates the two tables.
-PostgreSQL only runs the init scripts when its data directory is empty: if
-the volume was initialised before `schema.sql` existed (or by another
-project's compose file), the sinks fail with `table ... does not exist`.
-Recreate the volume (`docker compose -f examples/multi_workflow/docker-compose.yml
-down -v`, then `up -d` again) or apply the SQL by hand:
+This starts `nats:2.11-alpine` and `postgres:18-alpine`. PostgreSQL runs `schema.sql` only when its data directory is empty, and the sinks never create tables. If a sink fails with `table ... does not exist`, recreate the volume:
 
 ```text
+docker compose -f examples/multi_workflow/docker-compose.yml down -v
+docker compose -f examples/multi_workflow/docker-compose.yml up -d
+```
+
+Or apply the SQL to the running database.
+
+Linux/macOS:
+
+```bash
 docker compose -f examples/multi_workflow/docker-compose.yml exec -T postgres psql -U postgres -d saci < examples/multi_workflow/schema.sql
 ```
+
 Windows (PowerShell):
 
 ```powershell
 Get-Content examples/multi_workflow/schema.sql | docker compose -f examples/multi_workflow/docker-compose.yml exec -T postgres psql -U postgres -d saci
 ```
 
-Stop everything with `docker compose -f examples/multi_workflow/docker-compose.yml
-down -v`.
+## 3. Start the service
 
-2. Start the service:
+Runs the same on all three platforms. It stays up until Ctrl-C.
 
 ```text
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
-  --config examples/multi_workflow/multi_workflow.kdl
-```
-Windows (PowerShell), on one line:
-
-```powershell
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/multi_workflow/multi_workflow.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql -- serve --config examples/multi_workflow/multi_workflow.kdl
 ```
 
-3. Publish, in another terminal:
+To check the config without running it, use `validate` in place of `serve` and add `--strict`.
+
+## 4. Publish sales
+
+In a second terminal. Runs the same on all three platforms:
 
 ```text
 cargo run -p saci --features connector-nats --example multi_workflow_publish -- --rate 20 --ts-step-ms 2000
 ```
-Runs the same on all three platforms.
 
-## What each table holds
+The publisher alternates NDJSON messages between `multi.orders` and `multi.offsets`. Each carries `timestamp_ms` (simulated event time), `symbol` (`AAPL`, `GOOG` or `MSFT`) and `amount` (50.0 to 150.0, so the 100.0 threshold splits the stream about in half). At these settings the simulated clock runs 40 seconds per wall second.
 
-The publisher's messages carry `timestamp_ms` (simulated event time,
-advancing `--ts-step-ms` per message), `symbol` (AAPL, GOOG or MSFT) and
-`amount` (50.0 to 150.0, so the router's 100.0 threshold splits the stream
-roughly in half). At the defaults, 20 messages per second and 2000 ms of
-simulated time each, the simulated clock runs 40 seconds per wall second, so
-a 30-second window closes roughly every 0.75 wall seconds and `window_totals`
-fills continuously.
+## 5. Check the tables
 
-| Table | Holds |
-|-------|-------|
-| `public.rush_sales` | every `rush` batch's rows, `amount >= 100.0`, untouched |
-| `public.window_totals` | one row per closed (window, symbol) group from the settle workflow |
-
-`rush_sales` upserts on `(timestamp_ms, symbol)`; `window_totals` has the
-columns `window_id` (tumbling window index; the window start in milliseconds
-is `window_id * 30000`), `symbol`, `count` and `sum`, upserting on
-`(window_id, symbol)` so a re-run of the publisher or a late re-fire within
-the lateness budget updates a row instead of duplicating it. The last window
-seen before the publisher stops stays open: a window only closes once the
-watermark passes its end, and the watermark only moves with the data.
+After a few seconds:
 
 ```text
 docker compose -f examples/multi_workflow/docker-compose.yml exec -T postgres psql -U postgres -d saci -c 'SELECT count(*) FROM public.rush_sales; SELECT count(*) FROM public.rush_sales WHERE amount < 100.0; SELECT * FROM public.window_totals ORDER BY window_id, symbol;'
 ```
 
-## Restarting the publisher
+The first count grows and `window_totals` fills continuously. The router decides from the first row of each pass, so the second count is `0` while every pass carries one message.
 
-The simulated clock starts at the same base on every run, so restarting the
-publisher against a still-running service rewinds event time by the whole
-previous run. `window_sales`'s watermark does not rewind with it. Every
-arrival is then beyond the 5-second lateness budget, so the node drops all of
-it and `window_totals` stops filling while `orders_in`, `offsets_in` and the
-processor all keep reporting work. The service warns once on the
-`saci::windowing` target, counts each dropped arrival in
-`saci_window_late_arrivals_total`, and the `window_sales` sheet shows a
-`dropped arrivals` row. Restart the service together with the publisher.
+| Table | Holds |
+|-------|-------|
+| `public.rush_sales` | every `rush` row, untouched; upserts on `(timestamp_ms, symbol)` |
+| `public.window_totals` | one row per closed window and symbol: `window_id`, `symbol`, `count`, `sum`; upserts on `(window_id, symbol)` |
 
-## What the dashboard shows
+A window starts at `window_id * 30000` ms. The last window before the publisher stops stays open, because a window closes only when the watermark passes its end and the watermark moves with the data.
 
-Open http://127.0.0.1:8080/ui. The Pipelines tab draws two cards, `route` and
-`settle`, each with its own header, its own run/error badges and its own
-independently laid out graph, plus a `channel bridges` card below them
-listing `standard  standard_bridge → standard_in` with its live rate. The
-`window_sales` box carries the `⟐30s` window chip; its detail sheet lists the
-window geometry, the time field, the key field, the lateness budget and the
-live watermark in UTC.
+## 6. Open the dashboard
 
-## The publisher's flags
+Open http://127.0.0.1:8080/ui. The Pipelines tab draws one card per workflow, `route` and `settle`, each with its own run and error badges. A `channel bridges` card below them lists `standard` with its live rate. The `window_sales` box carries a `⟐30s` window chip, and its detail sheet shows the window geometry, the time and key fields, the lateness budget and the live watermark.
 
-`--count` (0 runs until Ctrl-C, the default), `--rate` messages per second
-(default 20), `--ts-step-ms` simulated milliseconds per message (default
-2000), `--url` (default `nats://localhost:4222`), `--subject-a` /
-`--subject-b` (defaults `multi.orders` / `multi.offsets`), `--seed`.
+## Restart the service with the publisher
 
-Validate the config first, if you like:
+The simulated clock starts at the same base on every run. A publisher restarted against a running service rewinds event time, but the `window_sales` watermark does not rewind. Every arrival is then past the 5 second lateness budget, the node drops all of it, and `window_totals` stops filling while the other nodes keep reporting work. The service logs one warning on the `saci::windowing` target, counts each drop in `saci_window_late_arrivals_total`, and shows a `dropped arrivals` row on the `window_sales` sheet. Stop and start both together.
+
+Stop the containers and delete their data with:
 
 ```text
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate \
-  --config examples/multi_workflow/multi_workflow.kdl --strict
+docker compose -f examples/multi_workflow/docker-compose.yml down -v
 ```
-Windows (PowerShell), on one line:
 
-```powershell
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
-```
+## Publisher flags
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--count N` | `0` | messages to send; 0 runs until Ctrl-C |
+| `--rate N` | `20` | messages per second |
+| `--ts-step-ms N` | `2000` | simulated milliseconds per message |
+| `--url URL` | `nats://localhost:4222` | NATS server |
+| `--subject-a NAME`<br>`--subject-b NAME` | `multi.orders`<br>`multi.offsets` | the two subjects |
+| `--seed N` | a fixed constant | a re-run reproduces the same sequence |
 
 ## Files
 
-| File / directory | What it is |
-|------------------|------------|
+| Path | What it is |
+|------|------------|
 | `multi_workflow.kdl` | the `route` and `settle` workflows, bridged by the `standard` channel |
-| `multi_workflow_publish.rs` | the `saci` example that feeds both NATS subjects |
+| `multi_workflow_publish.rs` | the `multi_workflow_publish` example that feeds both subjects |
 | `schema.sql` | the `rush_sales` and `window_totals` tables |
 | `docker-compose.yml` | NATS 2.11 and PostgreSQL 18 |
-| `wasm/` | the `multi-workflow-router-wasm` processor component (cdylib, wasm32-wasip2) |
+| `wasm/` | `multi-workflow-router-wasm`, the router (cdylib, `wasm32-wasip2`) |

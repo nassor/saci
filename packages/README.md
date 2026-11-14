@@ -1,23 +1,22 @@
 # saci-sdk
 
-One package per language: the processor authoring package for that language,
-with the Arrow IPC codec inside it. The codec reads and mutates the SACI host
-to processor wire format using only the language's standard library, so a
-processor decodes a batch without an Arrow dependency that has to survive its
-componentizer. The codec stays internal to the SDK, so each package keeps its
-original module and namespace name.
+One package per language for writing SACI processors. Each package carries an Arrow IPC codec
+that reads and edits the host to processor wire format with the language's standard library
+only, so a processor decodes a batch without an Arrow dependency that has to survive its
+componentizer. The codec stays internal and keeps its original module name.
 
-The format itself is specified in
+<img src="../docs/static/sdk-packages-boundary.svg" alt="The saci-service host marshals a batch to Arrow IPC bytes and calls run-batch across the WIT boundary. Inside the WASM processor component the SDK codec decodes the stream, your transforms read and write typed rows, and the component returns run-result with the IPC bytes, the checkpoint and the metrics." width="660">
+
+The format is specified in
 [the wire format reference](https://nassor.github.io/saci/library/reference/wire-format/).
 A sixth language can reimplement it from there.
 
 ## Coordinates
 
-All five ship in lockstep at the version in `VERSION`: one wire format, one
-version. The Kotlin KSP symbol processor (`saci-sdk-kt-ksp`) and the C# source
-generator (`Saci.Sdk.Generators`) run at build time only. The generator is
-packed inside `Saci.Sdk`, and the KSP processor publishes into the same Maven
-repository as `saci-sdk-kt`.
+All five packages ship at the version in `VERSION`: one wire format, one version. The Kotlin
+KSP symbol processor (`saci-sdk-kt-ksp`) and the C# source generator (`Saci.Sdk.Generators`)
+run at build time only. The generator is packed inside `Saci.Sdk`, and the KSP processor
+publishes to the same Maven repository as `saci-sdk-kt`.
 
 | Language | Directory | Coordinate | Codec import |
 |---|---|---|---|
@@ -29,14 +28,14 @@ repository as `saci-sdk-kt`.
 
 ## Install
 
-Everything but Go is a GitHub Release asset of the `sdk-v0.1.0` tag. Go
-resolves through the module proxy from the `packages/saci-sdk-go/v0.1.0` tag.
-Neither tag exists on GitHub yet and no release has been cut, so these commands
-fail until the Release procedure below runs. `cargo xtask pack-sdk` builds every
-artifact into `target/arrow-ipc-dist/`, and the commands show the names and
-coordinates the release will serve.
+Python, TypeScript and C# are GitHub Release assets of the `sdk-v0.1.0` tag. Go resolves
+through the module proxy from the `packages/saci-sdk-go/v0.1.0` tag. Neither tag exists yet, so
+these commands fail until the release below is cut. `cargo xtask pack-sdk` builds every
+artifact into `target/arrow-ipc-dist/` under the names the release will serve.
 
-```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
+Runs the same on Linux, macOS and Windows (PowerShell):
+
+```bash
 # Go
 go get github.com/nassor/saci/packages/saci-sdk-go@v0.1.0
 
@@ -51,8 +50,8 @@ dotnet nuget add source <download-dir> -n saci-local
 dotnet add package Saci.Sdk --version 0.1.0
 ```
 
-Kotlin resolves from a static Maven repository served by the docs site, with
-the KSP processor alongside the runtime:
+Kotlin resolves from a static Maven repository the docs site serves, with the KSP processor
+beside the runtime:
 
 ```kotlin
 repositories {
@@ -68,15 +67,14 @@ dependencies {
 
 ## Tests
 
-Every suite reads `examples/polyglot/generated/`, so run the emitter first. It
-runs the same on Linux, macOS and Windows (PowerShell), from the repository
-root:
+Every suite reads `examples/polyglot/generated/`, so run the emitter first from the repository
+root. It runs the same on Linux, macOS and Windows (PowerShell):
 
-```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
+```bash
 cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit
 ```
 
-The five suites differ per shell. Linux/macOS:
+Then run the five suites. Linux/macOS:
 
 ```bash
 cd packages/saci-sdk-go && go test ./...
@@ -96,32 +94,30 @@ cd packages\saci-sdk-kt; gradle jvmTest
 cd packages\saci-sdk-cs; dotnet test tests
 ```
 
-Each suite covers the SDK and its codec, including the shared conformance
-corpus at `packages/arrow-ipc-conformance/`.
+Each suite covers its SDK and codec, including the shared corpus in
+[`arrow-ipc-conformance/`](arrow-ipc-conformance/).
 
 ## Release
 
-1. Bump `VERSION`, the five manifests that carry a version
-   (`saci-sdk-py/pyproject.toml`, `saci-sdk-ts/package.json`,
-   `saci-sdk-kt/build.gradle.kts`, `saci-sdk-kt-ksp/build.gradle.kts`,
-   `saci-sdk-cs/Saci.Sdk.csproj`), the KSP processor's runtime dependency
-   `implementation("io.github.nassor:saci-sdk-kt:...")` in
-   `saci-sdk-kt-ksp/build.gradle.kts`, and the Kotlin stage's
-   `implementation("io.github.nassor:saci-sdk-kt:...")` and
-   `add("kspWasmWasi", "io.github.nassor:saci-sdk-kt-ksp:...")` lines in
-   `examples/polyglot/stages/kotlin-fee/build.gradle.kts`. Go carries no manifest
-   version: its version is the git tag.
-2. `cargo xtask pack-sdk`. It asserts the version declarations agree with
-   `VERSION`, builds every artifact into `target/arrow-ipc-dist/`, and writes the
-   Kotlin publications into `docs/static/maven/`.
-3. Commit, including `docs/static/maven/**`, and push to `main`. That is what
-   makes the Maven repository live: `docs.yml` redeploys the Pages site and Zola
-   copies `docs/static/` verbatim.
-4. Tag `sdk-v<version>` and push the tag. `release-sdk.yml` packs again, creates
-   the release with the assets, and pushes the `packages/saci-sdk-go/v<version>`
-   tag the Go module proxy serves.
+1. Bump `VERSION` and every file that declares it:
+   - `saci-sdk-py/pyproject.toml`, `saci-sdk-ts/package.json`, `saci-sdk-kt/build.gradle.kts`,
+     `saci-sdk-kt-ksp/build.gradle.kts` and `saci-sdk-cs/Saci.Sdk.csproj`;
+   - the `implementation("io.github.nassor:saci-sdk-kt:...")` line in
+     `saci-sdk-kt-ksp/build.gradle.kts`;
+   - the `implementation("io.github.nassor:saci-sdk-kt:...")` and
+     `add("kspWasmWasi", "io.github.nassor:saci-sdk-kt-ksp:...")` lines in
+     `examples/polyglot/stages/kotlin-fee/build.gradle.kts`.
+
+   Go carries no manifest version: its version is the git tag.
+2. Run `cargo xtask pack-sdk`. It checks that every declaration matches `VERSION`, builds each
+   artifact into `target/arrow-ipc-dist/`, and writes the Kotlin publications into
+   `docs/static/maven/`.
+3. Commit, including `docs/static/maven/**`, and push to `main`. `docs.yml` redeploys the Pages
+   site, and Zola copies `docs/static/` verbatim, which makes the Maven repository live.
+4. Tag `sdk-v<version>` and push the tag. `release-sdk.yml` packs again, creates the release with
+   the assets, and pushes the `packages/saci-sdk-go/v<version>` tag the Go module proxy serves.
 
 ## License
 
-This subtree is Apache-2.0, per `LICENSE-APACHE`. The rest of the repository, the
-engine crates included, is AGPL-3.0-only.
+This subtree is Apache-2.0, per `LICENSE-APACHE`. The rest of the repository, the engine
+crates included, is AGPL-3.0-only.

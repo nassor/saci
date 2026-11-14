@@ -1,24 +1,28 @@
-# SACI Service Example Configs
+# SACI service example configs
 
-This directory holds runnable KDL configurations for the `saci-service`
-binary itself, one per connector plus standalone and cluster templates. Each
-is a `--config` argument to `saci-service validate` or `saci-service serve`.
+Runnable KDL configurations for the `saci-service` binary: one per connector, plus standalone and
+cluster templates. Each file is a `--config` argument to `saci-service validate` or
+`saci-service serve`. Run every command from the repository root.
 
-## Required features
+## Features each config needs
 
-Most configs in this directory declare a `wasm` node inside their `workflow`
-block, and that node needs the `wasm-host` feature to run. `service` does not imply
-it, so `--features service` alone refuses those files with
-``workflow 'orders': wasm node 'transform' needs the wasmtime processor host,
-which this binary was built without, so rebuild or reinstall with `--features
-wasm-host` ``. The file still parses: the refusal names the flag rather than
-reporting `wasm` as an unknown key. `standalone_plugin.kdl` declares a
-`plugin` node instead, which the `server` feature does **not** carry (it needs
-`plugin-host`) and which is refused the same way, and `redb.kdl`, `redb_connector.kdl` and `dlq.kdl`
-declare no processor node at all.
-Each `type="..."` also needs the feature that registers its factory. The table lists
-the features to enable beside `service`; `server` already carries `service`, `wasm-host`
-and the seven self-contained connectors. Build and run with:
+Most configs declare a `wasm` node in their `workflow`, and that node needs the `wasm-host`
+feature. `service` does not imply it, so a binary built with `--features service` alone refuses
+those files:
+
+```text
+workflow 'orders': wasm node 'transform' needs the wasmtime processor host, which this binary was built without, so rebuild or reinstall with `--features wasm-host`
+```
+
+The file still parses; the refusal names the missing flag. `standalone_plugin.kdl` declares a
+`plugin` node instead, which needs `plugin-host`. The `server` feature does not carry it.
+`redb.kdl`, `redb_connector.kdl`, `dlq.kdl` and `opentelemetry_metrics.kdl` declare no processor
+node.
+
+Each `type="..."` also needs the feature that registers its factory. `server` carries `service`,
+`wasm-host` and the seven self-contained connectors (`connector-channel`, `connector-file`,
+`connector-http`, `connector-tcp`, `connector-udp`, `connector-saci`, `connector-redb`) with the
+five transformers. The table lists what to enable beside it:
 
 | Config | Features |
 |--------|----------|
@@ -46,8 +50,7 @@ and the seven self-contained connectors. Build and run with:
 
 ## Build the binary
 
-The `saci-service` binary needs at least the features of the config you plan to
-run, so a build usually carries the same feature list:
+Build with `server` plus the features of the config you plan to run:
 
 ```text
 cargo build -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service
@@ -55,37 +58,81 @@ cargo build -p saci --features server,connector-file,transformer-csv,wasm-host -
 
 Runs the same on Linux, macOS and Windows (PowerShell).
 
-`--features all` covers every config here the stock binary can run, in one
-build: all eight opt-in connectors, the plugin host and cluster mode, so it needs
-`cmake` and a C toolchain on `PATH` for Kafka's vendored librdkafka.
+`--features all` covers every config here that the stock binary can run: the eight opt-in
+connectors, the plugin host and cluster mode. It needs `cmake` and a C toolchain on `PATH` for
+Kafka's vendored librdkafka.
 
-## How to run the standalone example
+## Run the standalone example
+
+`standalone_wasm.kdl` reads `fixtures/order_processing_input.csv`, runs the Rust processor from
+`examples/wasm/order_processing/`, and writes `/tmp/saci-order-processing-out.csv`. Its
+`run_mode` is `one_shot`, so the process exits after one iteration. The sink opens its file when
+the pipeline is built, so the output directory must exist first.
+
+1. Build the processor component. Runs the same on Linux, macOS and Windows (PowerShell):
+
+   ```text
+   cargo build --release -p order-processing-wasm --target wasm32-wasip2
+   ```
+
+   It writes `target/wasm32-wasip2/release/order_processing_wasm.wasm`, the module the config names.
+
+2. On Windows, create the output directory. `/tmp` in the config resolves to `\tmp` on the current
+   drive. Linux and macOS already have `/tmp`.
+
+   ```powershell
+   New-Item -ItemType Directory -Force C:\tmp | Out-Null
+   ```
+
+3. Validate the config. It has no side effects and exits 0 on success. Runs the same on Linux,
+   macOS and Windows (PowerShell):
+
+   ```text
+   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- validate --config examples/configs/standalone_wasm.kdl --strict
+   ```
+
+4. Run the pipeline. Runs the same on Linux, macOS and Windows (PowerShell):
+
+   ```text
+   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- serve --config examples/configs/standalone_wasm.kdl
+   ```
+
+5. Read the output. The processor has filled in `valid` and `usd_amount` on every row.
+
+   Linux/macOS:
+
+   ```bash
+   cat /tmp/saci-order-processing-out.csv
+   ```
+
+   Windows (PowerShell):
+
+   ```powershell
+   Get-Content C:\tmp\saci-order-processing-out.csv
+   ```
+
+`cargo xtask demo standalone_wasm` runs the same config with a generated `variables` block, and
+`cargo xtask validate` checks every runnable config in this repository.
+
+`standalone.kdl` is the same shape with a component named `pipelines/orders.wasm`, a path you
+supply. Without that file, `validate --connectors-only` still checks its source, sink and
+transformer:
 
 ```text
-# Validate the config. No side effects; exits 0 on success.
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- validate --config examples/configs/standalone.kdl --strict
-
-# Run the pipeline. Reads fixtures/orders.csv, writes /tmp/saci-standalone-orders-out.csv.
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- serve --config examples/configs/standalone.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- validate --config examples/configs/standalone.kdl --connectors-only
 ```
 
 Runs the same on Linux, macOS and Windows (PowerShell).
 
-The process exits after one pipeline iteration because `run_mode` sets
-`kind="one_shot"`. Check `/tmp/saci-standalone-orders-out.csv` for the output.
-The config's wasm node names `pipelines/orders.wasm`, a component that must
-exist when the pipeline loads.
+## Validate the cluster example
 
-## How to validate the cluster example
+Cluster mode needs `--features service-cluster`. It takes no `store` block: its application state
+is the raft-replicated `cluster-app.redb` under `node.data_dir`, and a `store` block there is a
+configuration error. The config declares a `wasm` node, so `wasm-host` comes with it.
 
-Cluster mode requires `--features service-cluster`, and takes no `store`
-block: its application state is the raft-replicated `cluster-app.redb` under
-`node.data_dir`, so a `store` block there is a configuration error. The config
-declares a `wasm` node, so the `wasm-host` feature comes with it.
+Linux/macOS:
 
-Linux and macOS:
-
-```text
+```bash
 SACI_NODE_ID=1 SACI_DATA_DIR=/tmp/saci-node-1 \
 cargo run -p saci --features server,service-cluster,wasm-host --bin saci-service -- validate --config examples/configs/cluster.kdl --strict
 ```
@@ -98,41 +145,36 @@ $env:SACI_DATA_DIR = "C:\tmp\saci-node-1"
 cargo run -p saci --features server,service-cluster,wasm-host --bin saci-service -- validate --config examples/configs/cluster.kdl --strict
 ```
 
-To run a three-node cluster you need three processes, each with a distinct
-`SACI_NODE_ID` and `SACI_DATA_DIR`, with `SACI_BOOTSTRAP=true` on exactly one
-node during the first bring-up. See the comments in `cluster.kdl` for the
-step-by-step procedure.
+A three-node cluster needs three processes, each with a distinct `SACI_NODE_ID` and
+`SACI_DATA_DIR`, and `SACI_BOOTSTRAP=true` on exactly one node during the first bring-up. The
+comments in `cluster.kdl` give the commands for each node.
 
-## How to run the redb-backed config
+## Run the redb-backed config
 
-`redb.kdl` needs no external service: the store is one local file. With the
-`store` block present, `serve` persists the raw config file to it before the
-pipeline builds, writes stream-mode source cursors and processor priors back
-as items flow, and a restarted service resumes from its last save point.
+`redb.kdl` needs no external service: the store is one local file at `SACI_STATE_DB`, default
+`/tmp/saci-state.redb`. With the `store` block present, `serve` saves the raw config file to it
+before the pipeline builds, and writes stream-mode source cursors and processor priors back as
+items flow. A restarted service resumes from its last save point.
+
+The pipeline reads `fixtures/orders.csv` and writes `/tmp/saci-redb-orders-out.csv`. On Windows,
+create `C:\tmp` first as in the standalone steps. Runs the same on Linux, macOS and Windows
+(PowerShell):
 
 ```text
 cargo run -p saci --features server,connector-file,transformer-csv --bin saci-service -- validate --config examples/configs/redb.kdl
 cargo run -p saci --features server,connector-file,transformer-csv --bin saci-service -- serve --config examples/configs/redb.kdl
 ```
 
-Runs the same on Linux, macOS and Windows (PowerShell).
-
-The pipeline reads `examples/configs/fixtures/orders.csv` and writes
-`/tmp/saci-redb-orders-out.csv`.
-
 ## Built-in factories
 
-Each factory lives in a module of the `saci` crate and reaches the registry only when
-its feature and `service` are both on. `service` alone registers nothing.
+Each factory lives in a module of the `saci` crate and registers only when its feature and
+`service` are both on. `service` alone registers nothing.
 
-A connector moves bytes and a transformer decides what they mean. A config
-that names a file therefore needs both: a `source`/`sink` node with
-`type="FileSource"`/`type="FileSink"` from `connector-file`, and a declared
-`transformer "..." format="csv"` node from `transformer-csv` that the
-source/sink references by id through its own `transformer="..."` property.
-Kafka, NATS and TCP resolve their byte format the same way and default to
-none: a byte-carrying source or sink always names its `transformer`
-explicitly, there is no implicit default format.
+A connector moves bytes and a transformer decides what they mean. A config that names a file
+therefore needs both: a `source` or `sink` with `type="FileSource"` or `type="FileSink"` from
+`connector-file`, and a `transformer "..." format="csv"` node from `transformer-csv` that the
+source or sink references by id through its own `transformer="..."` property. A byte-carrying
+source or sink always names its `transformer`: there is no implicit default format.
 
 ### Sources
 
@@ -175,64 +217,51 @@ explicitly, there is no implicit default format.
 
 ### Retry
 
-Every `source` and `sink` retries a failed operation with exponential backoff
-by default: 4 attempts, a 100 ms base, 2.0x growth, a 30 s cap and 0.1 jitter.
-An optional `retry` child on a `source` or `sink` overrides the policy per
-node; `max_attempts=1` disables retrying. `standalone.kdl` and
-`postgresql.kdl` carry explicit `retry` blocks, and
-`docs/content/service/config/_index.md` and
-`docs/content/service/config/workflows.md` document every key.
+Every `source` and `sink` retries a failed operation with exponential backoff: 4 attempts, a
+100 ms base, 2.0x growth, a 30 s cap and 0.1 jitter. An optional `retry` child on a node overrides
+the policy, and `max_attempts=1` disables retrying. `standalone.kdl` and `postgresql.kdl` carry
+explicit `retry` blocks. The keys are documented in
+[`docs/content/service/config/_index.md`](../../docs/content/service/config/_index.md) and
+[`workflows.md`](../../docs/content/service/config/workflows.md).
 
 ### Flow control
 
-On by default for every source, at hard-coded defaults: a top-level
-`flow_control` block, or a per-source override, changes them.
-`postgresql.kdl` carries both: a top-level block that shortens the
-adjustment epoch from its 60 s default to 10 s, since this workflow
-redrains every 2 s, and a per-source `flow_control { rows 8192 }` pinning
-its one source to a fixed admission size instead. `kafka.kdl`, `nats.kdl`,
-`redb.kdl`, `tcp.kdl`, `udp.kdl`, `extension_example.kdl`,
-`../quickstart/quickstart.kdl` and `../branching/branching.kdl` each carry
-their own top-level block, tuned differently per workflow (row bounds,
-growth step, adjustment epoch, or `target_latency_ms`), so the set as a
-whole covers the available keys.
-`../multi_workflow/multi_workflow.kdl` scopes its override to one source
-instead: only its "route" workflow's `orders_in` feeds a plain sink chain,
-while its "settle" workflow's two sources feed a windowed processor, and a
-stream-mode source on that path builds no controller at all regardless of
-what a block declares.
-`http.kdl`, `s3.kdl`, `standalone.kdl` and its three `standalone_*`
-variants run `one_shot`, which builds no controller for any source, so
-they declare no `flow_control` block at all; `cluster.kdl` declares no
-source to govern and `ServiceConfig::validate` rejects a `flow_control`
-block there outright, the same as a `store` block.
-`../windowing/`'s three configs each declare two sources feeding windowed
-processors under `stream` mode, which also builds no controller regardless of
-what a block would declare, so none of them carries one.
-`docs/content/service/operate/flow-control.md` documents every key, the
-epoch-paced A/B search and the guards that back off immediately, and which
-connectors act on the resulting `Source::request_batch_rows` hint.
+Flow control is on by default for every source. A top-level `flow_control` block or a per-source
+override changes its settings. The set of configs shows the keys:
+
+- `clickhouse.kdl`, `kafka.kdl`, `nats.kdl`, `redb.kdl`, `tcp.kdl`, `udp.kdl`,
+  `extension_example.kdl`, `../quickstart/quickstart.kdl` and `../branching/branching.kdl` each
+  carry a top-level block, tuned per workflow (row bounds, growth step, adjustment epoch or
+  `target_latency_ms`).
+- `postgresql.kdl`, `mariadb.kdl` and `mariadb_trigger.kdl` carry a top-level block and a
+  per-source `flow_control` block. In `postgresql.kdl` the top-level block shortens the
+  adjustment epoch from 60 s to 10 s because the workflow redrains every 2 s, and the per-source
+  `flow_control { rows 8192 }` pins one source to a fixed admission size.
+- `../multi_workflow/multi_workflow.kdl` carries only a per-source override.
+- `http.kdl`, `s3.kdl` and the `standalone*` configs run `one_shot`, which builds no controller
+  for any source, so they declare no block.
+- A stream-mode source builds no controller either, so the stream-mode configs here declare none.
+- `cluster.kdl` declares no source, and `ServiceConfig::validate` rejects a `flow_control` block
+  in cluster mode, as it does a `store` block.
+
+Every key, the epoch-paced A/B search and the guards that back off at once are in
+[`docs/content/service/operate/flow-control.md`](../../docs/content/service/operate/flow-control.md).
 
 ### Observability
 
-Every config's `observability` block sets `sample_ratio` and
-`error_sample_ratio` explicitly rather than taking the implicit `1.0`
-default, so the set as a whole shows the full range: from `0.01` on
-`../branching/branching.kdl`'s live stream, where one admitted chunk
-multicasts to three downstream nodes and reaches five sink destinations,
-up to `1.0` on the bounded one-shot tutorials (`standalone.kdl` and its
-`standalone_*` variants, plus `http.kdl`), with every other config graded by
-its own expected span volume. `error_sample_ratio` stays at `1.0` everywhere,
-so a lower `sample_ratio` trims chatter while every failure still shows.
-`docs/content/service/operate/observability.md` documents both keys and how
-they compose with `log_level`.
+Every config's `observability` block sets `sample_ratio` and `error_sample_ratio` explicitly. The
+`sample_ratio` values run from `0.01` on `../branching/branching.kdl`, where one admitted chunk
+multicasts to three downstream nodes, up to `1.0` on the bounded configs, graded by each
+workflow's expected span volume. `error_sample_ratio` is `1.0` everywhere, so a lower
+`sample_ratio` trims chatter while every failure still shows. Both keys and how they compose with
+`log_level` are in
+[`docs/content/service/operate/observability.md`](../../docs/content/service/operate/observability.md).
 
 ### Transformers
 
-A workflow declares each byte format it needs as its own `transformer "id"
-format="..."` node, and every source/sink that moves bytes in that format
-names it through its own `transformer="id"` property. `options` is an
-optional table handed to the format's own factory.
+A workflow declares each byte format as its own `transformer "id" format="..."` node, and every
+source or sink that moves bytes in that format names it through `transformer="id"`. `options` is
+an optional table handed to the format's factory.
 
 | `format` | Stream read | Stream write | Message codec | Schema rule | Feature |
 |----------|-------------|--------------|---------------|-------------|---------|
@@ -242,55 +271,49 @@ optional table handed to the format's own factory.
 | `avro` | yes | yes | one per row | read from the file; `schema_fields` rejected on a source, required on a sink and on the message surface | `transformer-avro` |
 | `arrow-ipc` | yes | yes | one per batch | read from the stream; `schema_fields` rejected on a source, required on a sink and on the message surface | `transformer-arrow-ipc` |
 
-`options`: `csv` takes `has_headers` (bool, default `#true`, stream surface
-only, a message is one record with no header row), `ndjson` takes `infer_max`
-(integer, default `1024`), `avro` takes `compression` (string, one of `null`,
-`deflate`, `snappy`, `zstd`, default `null`) and `schema_id` (integer, the
-Confluent registry id), and the other two take none.
+Options:
 
-`FileSink` opens the output file as soon as the factory is built,
-`saci-service validate` included, so the parent directory must exist before
-running `validate` or `serve`. The file is created when it is missing and its
-existing bytes are kept: rows land after them. Set `truncate #true` in the
-sink's `config` to replace the file on every build instead, which is what the
-example configs do.
+- `csv` takes `has_headers` (bool, default `#true`, stream surface only; a message is one record
+  with no header row).
+- `ndjson` takes `infer_max` (integer, default `1024`).
+- `avro` takes `compression` (one of `null`, `deflate`, `snappy`, `zstd`, default `null`) and
+  `schema_id` (integer, the Confluent registry id).
+- `parquet` and `arrow-ipc` take none.
+
+`FileSink` opens its output file as soon as the factory is built, `saci-service validate`
+included, so the parent directory must exist before `validate` or `serve`. A missing file is
+created and existing bytes are kept: rows land after them. `truncate #true` in the sink's
+`config` replaces the file on every build, which the example configs use.
 
 ### Components and systems
 
-There are no component or system factories: the config file has no path for
-declaring either. Each processor node in the workflow is supplied one of two
-ways:
+The config file has no way to declare a component or a system. A processor node is supplied one
+of two ways:
 
-- a `wasm`/`plugin` node names a WASM or native-plugin processor component,
-  which reports its components through the `describe()` export, or
-- a custom binary hands `ServiceBuilder::with_runtime` a
-  `Box<dyn PipelineRuntime>` keyed by that node's declared id, and the node
-  itself omits `module`/`library`.
+- a `wasm` or `plugin` node names a WASM or native plugin component, which reports its components
+  through the `describe()` export;
+- a custom binary hands `ServiceBuilder::with_runtime` a `Box<dyn PipelineRuntime>` keyed by the
+  node's declared id, and the node omits `module` and `library`.
 
-A `systems` or `components` node under `workflow` is a parse error, not a
-silently dropped section.
+A `systems` or `components` node under `workflow` is a parse error.
 
-### Supported Arrow types for `schema_fields`
+### Arrow types for `schema_fields`
 
-`Boolean`, `Int8`, `Int16`, `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`,
-`UInt64`, `Float32`, `Float64`, `Utf8`, `LargeUtf8`, `Binary`, `Date32`,
-`Date64`. All names are case-insensitive. That is the set every connector but
-PostgreSQL, MariaDB and Turso accepts; `PostgresSource`/`PostgresSink` parse `schema_fields`
-through their own wider vocabulary (`timestamp_micros`, `timestamp_micros_utc`,
-`uuid`, `json`, `decimal128` with `precision`/`scale`, `interval_month_day_nano`,
-`list` with `item`, plus an optional `pg_type` to pin the exact server column
-type), documented in `crates/saci/src/connector/postgresql.rs`;
-`MariadbSource`/`MariadbSink` read their own vocabulary (`boolean`,
-`int8` to `int64`, `uint8` to `uint64`, `float32`, `float64`, `decimal128` with
-`precision`/`scale`, `utf8`, `binary`, `date32`, `time64_micros`,
-`timestamp_micros`, `timestamp_micros_utc`, `json`, plus an optional
-`mariadb_type` that asserts the server column's type), documented in
-`crates/saci/src/connector/mariadb.rs`;
-`TursoSource`/`TursoSink` use a narrower vocabulary (`utf8`, `int64`, `float64`,
-`bool`, `binary`, `decimal128` with `precision`/`scale`), documented in
-`crates/saci/src/connector/turso.rs`.
+`Boolean`, `Int8`, `Int16`, `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `Float32`,
+`Float64`, `Utf8`, `LargeUtf8`, `Binary`, `Date32`, `Date64`. Names are case-insensitive. Every
+connector accepts this set except three, which read their own vocabulary:
 
-## Standalone vs cluster mode
+- `PostgresSource` and `PostgresSink`: `timestamp_micros`, `timestamp_micros_utc`, `uuid`, `json`,
+  `decimal128` with `precision` and `scale`, `interval_month_day_nano`, `list` with `item`, and an
+  optional `pg_type` that pins the server column type. See `crates/saci/src/connector/postgresql.rs`.
+- `MariadbSource` and `MariadbSink`: `boolean`, `int8` to `int64`, `uint8` to `uint64`,
+  `float32`, `float64`, `decimal128` with `precision` and `scale`, `utf8`, `binary`, `date32`,
+  `time64_micros`, `timestamp_micros`, `timestamp_micros_utc`, `json`, and an optional
+  `mariadb_type` that asserts the server column type. See `crates/saci/src/connector/mariadb.rs`.
+- `TursoSource` and `TursoSink`: `utf8`, `int64`, `float64`, `bool`, `binary`, `decimal128` with
+  `precision` and `scale`. See `crates/saci/src/connector/turso.rs`.
+
+## Standalone and cluster mode
 
 | Feature | `mode "standalone"` | `mode "cluster"` |
 |---------|---------------------|------------------|
@@ -304,27 +327,25 @@ type), documented in `crates/saci/src/connector/postgresql.rs`;
 | Crash recovery | Restart from source | Checkpoint + lease semantics |
 | Minimum nodes | 1 | 1 (1-node Raft is valid for testing) |
 
-A cluster-mode workflow declares exactly one processor node (`wasm` or
-`plugin`) and nothing else: the distributed runner ingests through
-`PartitionSource` and checkpoints its output, so there is no local sink to
-declare either.
+A cluster workflow declares exactly one processor node (`wasm` or `plugin`) and nothing else. The
+distributed runner ingests through `PartitionSource` and checkpoints its output, so there is no
+local sink to declare.
 
-Cluster state is replicated through the node's own raft, not a `store` block.
-Master batches, row-range claims and checkpoints live in `cluster-app.redb`
-under the node's `data_dir`, alongside `raft-log.redb`, `bootstrap.lock` and
-`node-id`.
+Raft replicates cluster state, not a `store` block. Master batches, row-range claims and
+checkpoints live in `cluster-app.redb` under the node's `data_dir`, beside `raft-log.redb`,
+`bootstrap.lock` and `node-id`.
 
-## How to extend saci-service with user factories
+## Extend saci-service with your own factories
 
-The stock binary is `saci::service::cli::main()`. Write a binary crate of your own that
-depends on `saci` with the features it needs:
+The stock binary is `saci::service::cli::main()`. A binary crate of your own depends on `saci`
+with the features it needs:
 
 ```toml
 [dependencies]
 saci = { version = "0.1", default-features = false, features = ["service", "wasm-host", "connector-file", "transformer-csv"] }
 ```
 
-Its `main` calls `saci::service::cli::main_with`. The closure receives the `ServiceBuilder`
+Its `main` calls `saci::service::cli::main_with`. The closure receives the `ServiceBuilder` that
 the `serve` and `validate` subcommands use, after the built-in factories are registered:
 
 ```rust
@@ -337,25 +358,19 @@ fn main() -> std::process::ExitCode {
 }
 ```
 
-Sources, sinks and transformers are the whole factory surface;
-`register_transformer` adds a byte format the same way. A processor node is
-either a `wasm`/`plugin` node naming a module/library, or a
-`Box<dyn PipelineRuntime>` passed to `ServiceBuilder::with_runtime` keyed by
-that node's declared id, with `module`/`library` omitted on the node itself.
+Sources, sinks and transformers are the whole factory surface; `register_transformer` adds a byte
+format the same way.
 
-See `extension_example.kdl` for a commented config showing all the types you
-would register in a real order-processing service. Validate it to see the
-unknown-factory warning behavior:
+`extension_example.kdl` is a commented config for the types such a binary registers. Validate it
+with the stock binary to see the unknown-factory warning. Runs the same on Linux, macOS and
+Windows (PowerShell):
 
 ```text
 cargo run -p saci --features server,wasm-host --bin saci-service -- validate --config examples/configs/extension_example.kdl
 ```
 
-Runs the same on Linux, macOS and Windows (PowerShell).
-
-This exits 0 and warns about the unknown types (`MongoSource`,
-`ClickHouseSink`). With `--strict` it exits 1, because unknown types are
-errors in strict mode.
+It exits 0 and warns about the unknown types `MongoSource` and `ClickHouseSink`. With `--strict`
+it exits 1.
 
 ## Files in this directory
 
@@ -370,6 +385,8 @@ errors in strict mode.
 | `postgresql.kdl` | runnable config driving PostgreSQL at both ends |
 | `mariadb.kdl` | runnable config replicating a MariaDB or MySQL table through the binlog with an initial snapshot, needs a server |
 | `mariadb_trigger.kdl` | runnable config capturing table changes with installed triggers, needs a server |
+| `turso.kdl` | runnable config driving Turso at both ends |
+| `clickhouse.kdl` | runnable config driving ClickHouse at both ends, needs a server |
 | `kafka.kdl` | runnable config driving Kafka at both ends, needs a broker |
 | `nats.kdl` | runnable config driving NATS at both ends, needs a server |
 | `s3.kdl` | runnable config driving S3 at both ends, needs a bucket |

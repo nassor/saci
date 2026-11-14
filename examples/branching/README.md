@@ -1,85 +1,66 @@
-# Branching: three fan-out splits in one workflow
+# Branching: one source, three fan-out splits
 
-Every `link` in a workflow delivers by default, so a node's output reaches all
-of its downstream links at once. A `branch` name on a link makes delivery
-conditional: the upstream processor names branches for the batch it just
-produced, and the host delivers that batch only to the links carrying those
-names. `docs/content/service/processors/branching.md` covers what routing is,
-when to use it and what load-time validation refuses. This file is the
-commands.
+One `saci-service` stream reads a NATS subject and fans every message out three ways, each into its own CSV files:
 
-`branching.kdl` is a long-running `saci-service` stream carrying every way
-output fans out, each split to its own sink:
+- Source split: the source's three links carry no `branch`, so every batch goes to the mirror sink and to both routers.
+- WASM split: `router_wasm` names `high` or `low` per batch, and the host delivers the batch only to the link with that `branch`.
+- Plugin split: `router_plugin` does the same with `premium` or `standard`.
 
-| Split | Edge | Where each batch goes |
-|-------|------|----------------------|
-| Source | `in` to `out_mirror`, `router_wasm`, `router_plugin` | Every downstream, unconditionally |
-| WASM processor | `router_wasm` to `out_wasm_high` / `out_wasm_low` | Only the branch the decision names |
-| Plugin | `router_plugin` to `out_plugin_premium` / `out_plugin_standard` | Only the branch the decision names |
+<img src="../../docs/static/branching-fanout.svg" alt="One NATS source fans out to a mirror sink and to two routers. router_wasm routes to out_wasm_high or out_wasm_low, and router_plugin routes to out_plugin_premium or out_plugin_standard." width="660">
 
-A NATS core subject feeds the workflow in `run_mode kind="stream"`, so every
-message is its own batch and the routers decide per message. The publisher
-(`branching_publish`, a `saci` example) draws priority 50/50 between
-`"high"` and `"low"`, so both branches of both processor splits fire
-continuously while it runs.
+Both routers read the first row's `priority` and insert a `RouteDecision`. The publisher draws `high` and `low` 50/50, so every branch fills while it runs. The concept and the load-time rules are on the [Branching page](../../docs/content/service/processors/branching.md); this file is the commands.
 
 ## Prerequisites
 
+- A clone of the repository. Every command runs from its root.
 - Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
-- A Docker daemon, for the NATS container
+- A Docker daemon, for NATS.
 
-## Build the processors
+## 1. Build the processors
 
-The same two commands work on every platform, from the repository root:
+Runs the same on Linux, macOS and Windows (PowerShell):
 
 ```text
 cargo build --release -p branching-wasm --target wasm32-wasip2
 cargo build --release -p branching-plugin
 ```
 
-The plugin artifact name is platform specific. The config's default library
-path (`target/release/libbranching_plugin.so`) is the Linux name, so only macOS
-and Windows need `SACI_PLUGIN_LIB`:
+This writes `target/wasm32-wasip2/release/branching_wasm.wasm` and the plugin library. The config's default plugin path is the Linux name, so macOS and Windows point `SACI_PLUGIN_LIB` at theirs in step 3:
 
-| Platform | Plugin artifact | `SACI_PLUGIN_LIB` |
-|----------|-----------------|------------------|
-| Linux | `target/release/libbranching_plugin.so` | not needed (config default) |
-| macOS | `target/release/libbranching_plugin.dylib` | `target/release/libbranching_plugin.dylib` |
-| Windows | `target/release/branching_plugin.dll` | `target/release/branching_plugin.dll` |
+| Platform | Plugin artifact |
+|----------|-----------------|
+| Linux | `target/release/libbranching_plugin.so` (the config default) |
+| macOS | `target/release/libbranching_plugin.dylib` |
+| Windows | `target/release/branching_plugin.dll` |
 
-## Run it
+## 2. Start NATS
 
-Start NATS, then the service, then the publisher. `SACI_OUT_DIR` names the
-directory the five sink files land in; it must exist before `serve` starts.
-
-1. Start NATS:
+Runs the same on all three platforms:
 
 ```text
 docker run -d --name saci-nats -p 4222:4222 nats:2.11-alpine
 ```
 
-Runs the same on all three platforms.
+## 3. Start the service
 
-Stop it with `docker rm -f saci-nats`.
-
-2. Start the service. NATS is an opt-in connector too.
+`SACI_OUT_DIR` is where the five CSV files land. The directory must exist before `serve` starts. The service runs until Ctrl-C.
 
 Linux:
 
-```text
+```bash
 mkdir -p /tmp/saci-branching
 SACI_OUT_DIR=/tmp/saci-branching \
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
+cargo run -p saci --features server,plugin-host,connector-nats -- serve \
   --config examples/branching/branching.kdl
 ```
 
 macOS:
 
-```text
+```bash
 mkdir -p /tmp/saci-branching
 SACI_OUT_DIR=/tmp/saci-branching \
 SACI_PLUGIN_LIB=target/release/libbranching_plugin.dylib \
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
+cargo run -p saci --features server,plugin-host,connector-nats -- serve \
   --config examples/branching/branching.kdl
 ```
 
@@ -89,62 +70,73 @@ Windows (PowerShell):
 mkdir C:\saci-branching
 $env:SACI_OUT_DIR = "C:/saci-branching"
 $env:SACI_PLUGIN_LIB = "target/release/branching_plugin.dll"
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve --config examples/branching/branching.kdl
+cargo run -p saci --features server,plugin-host,connector-nats -- serve --config examples/branching/branching.kdl
 ```
 
-The config's paths use forward slashes, which work on Windows too; the
-`C:/saci-branching` output path above follows the same rule.
+To check the link graph first, run the same command with `validate` in place of `serve` and `--strict` at the end. Validation opens no NATS connection.
 
-3. Publish, in another terminal. Runs the same on all three platforms:
+## 4. Publish orders
+
+In a second terminal, from the repository root. Runs the same on all three platforms:
 
 ```text
 cargo run -p saci --features connector-nats --example branching_publish -- --rate 50
 ```
 
-## What each file holds
+The publisher sends one NDJSON object per message to `branching.orders` and runs until Ctrl-C. Its flags:
 
-The publisher's messages carry `priority "high"` or `priority "low"`.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--count N` | `0` | messages to send; 0 runs until Ctrl-C |
+| `--rate N` | `50` | messages per second |
+| `--url URL` | `nats://localhost:4222` | NATS server |
+| `--subject NAME` | `branching.orders` | subject to publish on |
+| `--seed N` | a fixed constant | a re-run reproduces the same priority sequence |
 
-| Output | Holds |
-|--------|-------|
+## 5. Check the files
+
+Each file starts with the header `id,priority`.
+
+| File | Rows |
+|------|------|
 | `out-mirror.csv` | every message, in arrival order |
-| `out-wasm-high.csv` | the `"high"` messages |
-| `out-wasm-low.csv` | the `"low"` messages |
-| `out-plugin-premium.csv` | the `"high"` messages |
-| `out-plugin-standard.csv` | the `"low"` messages |
+| `out-wasm-high.csv` | `high` rows |
+| `out-wasm-low.csv` | `low` rows |
+| `out-plugin-premium.csv` | `high` rows |
+| `out-plugin-standard.csv` | `low` rows |
 
-`out_mirror` proves the source split: every batch is written there verbatim
-while the same batch feeds both routers. The wasm router
-(`examples/branching/wasm`) reads the first row's priority and inserts a
-`RouteDecision` naming branch `high` or `low`; the plugin
-(`examples/branching/plugin`) maps the same values to branches `premium` and
-`standard`. The host delivers each batch only to the links whose `branch` the
-decision names, so the sinks stay separate. The CSV header is written
-once, before the first batch, so each file stays a readable table however long
-the stream runs.
+A router decides from the first row of each pass, and a pass holds one message while the publisher is slow enough for the source's 5 ms poll window to close between messages. Look at the start of two files:
 
-The publisher's flags: `--count` (0 runs until Ctrl-C, the default), `--rate`
-messages per second (default 50), `--url` (default `nats://localhost:4222`),
-`--subject` (default `branching.orders`), `--seed`.
+Linux/macOS:
 
-Validate the config first, if you like (set `SACI_PLUGIN_LIB` as in the table
-above on macOS and Windows):
-
-```text
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate \
-  --config examples/branching/branching.kdl --strict
+```bash
+head -n 4 /tmp/saci-branching/out-mirror.csv /tmp/saci-branching/out-wasm-high.csv
 ```
-Windows (PowerShell), on one line:
+
+Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate --config examples/branching/branching.kdl --strict
+Get-Content C:/saci-branching/out-mirror.csv -TotalCount 4
+Get-Content C:/saci-branching/out-wasm-high.csv -TotalCount 4
 ```
+
+The mirror file mixes both priorities, and `out-wasm-high.csv` holds only `high`.
+
+Stop the publisher and the service with Ctrl-C, then remove NATS (same on all platforms):
+
+```text
+docker rm -f saci-nats
+```
+
+## One command for the build
+
+`cargo xtask demo branching` builds both processors and `saci-service`, writes `target/xtask/branching.kdl` with the plugin path and output directories already filled in, and prints the `serve` and publisher commands. It needs no environment variables on any platform. Its files land in `saci-xtask-branching` under the system temp directory.
 
 ## Files
 
-| File / directory | What it is |
-|------------------|------------|
-| `branching.kdl` | the stream workflow with all three fan-out splits |
-| `branching_publish.rs` | the `saci` example that feeds the NATS subject |
-| `wasm/` | the `branching-wasm` processor component (cdylib, wasm32-wasip2) |
-| `plugin/` | the `branching-plugin` native plugin (cdylib) |
+| Path | What it is |
+|------|------------|
+| `branching.kdl` | the stream workflow with all three splits |
+| `branching_publish.rs` | the `branching_publish` example that feeds the subject |
+| `wasm/` | `branching-wasm`, the WASM router (cdylib, `wasm32-wasip2`) |
+| `plugin/` | `branching-plugin`, the native router (cdylib) |

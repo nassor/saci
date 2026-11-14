@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 324" role="img" aria-labelledby="fcl-title fcl-desc">
+  <title id="fcl-title">Distributed fulfillment: three nodes share one Raft log</title>
+  <desc id="fcl-desc">
+    A generator on node 1 registers a batch of 300 to 500 Order rows every interval. Three nodes, node1 on port 9001, node2 on 9002 and node3 on 9003, each run a DistributedRunner and keep their own app.redb. Node 1 also bootstraps the cluster. All three read and write one replicated Raft log that carries master batches, row-range claims and checkpoints, so exactly one node claims and processes each row range.
+  </desc>
+
+  <style>
+    text { font-family: 'Fira Code', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace; }
+
+    /* Catppuccin Latte, with Mocha below for a dark viewer. Site CSS does not
+       reach a standalone figure, so both flavours live here. An accent tints
+       an area; the darker ink tone draws lines and sets letters, which is
+       what Latte needs to hold 4.5:1 and 3:1. */
+    .canvas { fill: #eff1f5; stroke: #7c7f93; }
+    .panel  { fill: #e6e9ef; stroke: #acb0be; }
+
+    .blk   { fill: #eff1f5; stroke-width: 1; }
+    .blk-d { stroke: rgb(171 63 0 / 0.7); }
+    .blk-c { stroke: rgb(0 109 115 / 0.7); }
+    .blk-b { stroke: rgb(128 46 229 / 0.7); }
+
+    .hd-d { fill: #f2d2c2; }
+    .hd-c { fill: #bfdce1; }
+    .hd-b { fill: #d8c9f4; }
+
+    /* The badges sit on the panel, not on the canvas, so the wash under the
+       step number is thinner than the one the site uses on the page. */
+    .badge   { stroke-width: 1; }
+    .badge-d { fill: rgb(254 100 11 / 0.12);  stroke: rgb(171 63 0 / 0.8); }
+    .badge-c { fill: rgb(23 146 153 / 0.12);  stroke: rgb(0 109 115 / 0.8); }
+    .badge-b { fill: rgb(136 57 239 / 0.12);  stroke: rgb(128 46 229 / 0.8); }
+
+    .t-ttl  { font-size: 13px;   font-weight: 600; fill: #4c4f69; }
+    .t-sub  { font-size: 11px;   fill: #5c5f77; }
+    .t-lab  { font-size: 11px;   fill: #5c5f77; }
+    .t-step { font-size: 12px;   font-weight: 700; letter-spacing: 1px; }
+    .t-num  { font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+    .t-mid  { text-anchor: middle; }
+
+    .f-n { fill: #5c5f77; }
+    .f-d { fill: #ab3f00; }
+    .f-c { fill: #006d73; }
+    .f-b { fill: #802ee5; }
+
+    .arw  { stroke-width: 1.5; fill: none; }
+    .s-n  { stroke: #5c5f77; }
+    .s-d  { stroke: #ab3f00; }
+    .s-c  { stroke: #006d73; }
+    .s-b  { stroke: #802ee5; }
+    .dash { stroke-dasharray: 5 4; }
+
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #1e1e2e; stroke: #6c7086; }
+      .panel  { fill: #181825; stroke: #45475a; }
+
+      .blk   { fill: #313244; }
+      .blk-d { stroke: rgb(250 179 135 / 0.7); }
+      .blk-c { stroke: rgb(148 226 213 / 0.7); }
+      .blk-b { stroke: rgb(203 166 247 / 0.7); }
+
+      .hd-d { fill: #5d4e53; }
+      .hd-c { fill: #475964; }
+      .hd-b { fill: #534c6b; }
+
+      .badge-d { fill: rgb(250 179 135 / 0.18);  stroke: rgb(250 179 135 / 0.8); }
+      .badge-c { fill: rgb(148 226 213 / 0.18); stroke: rgb(148 226 213 / 0.8); }
+      .badge-b { fill: rgb(203 166 247 / 0.18); stroke: rgb(203 166 247 / 0.8); }
+
+      .t-ttl { fill: #cdd6f4; }
+      .t-sub { fill: #a6adc8; }
+      .t-lab { fill: #a6adc8; }
+
+      .f-n { fill: #a6adc8; }
+      .f-d { fill: #fab387; }
+      .f-c { fill: #94e2d5; }
+      .f-b { fill: #cba6f7; }
+
+      .s-n { stroke: #a6adc8; }
+      .s-d { stroke: #fab387; }
+      .s-c { stroke: #94e2d5; }
+      .s-b { stroke: #cba6f7; }
+    }
+  </style>
+
+  <rect class="canvas" x="0.5" y="0.5" width="659" height="323" rx="14"/>
+
+  <g>
+    <rect class="blk blk-d" x="24" y="20" width="180" height="64" rx="8"/>
+    <rect class="hd-d" x="24" y="20" width="180" height="22" rx="8"/>
+    <rect class="hd-d" x="24" y="34" width="180" height="8"/>
+    <text class="t-ttl" x="36" y="36">generator</text>
+    <text class="t-sub" x="36" y="60">300 to 500 Order rows</text>
+    <text class="t-sub" x="36" y="76">one batch per interval</text>
+  </g>
+  <g>
+    <rect class="blk blk-d" x="24" y="130" width="180" height="88" rx="8"/>
+    <rect class="hd-d" x="24" y="130" width="180" height="22" rx="8"/>
+    <rect class="hd-d" x="24" y="144" width="180" height="8"/>
+    <text class="t-ttl" x="36" y="146">node1 :9001</text>
+    <text class="t-sub" x="36" y="170">bootstraps the cluster</text>
+    <text class="t-sub" x="36" y="186">DistributedRunner</text>
+    <text class="t-sub" x="36" y="202">app.redb</text>
+  </g>
+  <g>
+    <rect class="blk blk-d" x="240" y="130" width="180" height="88" rx="8"/>
+    <rect class="hd-d" x="240" y="130" width="180" height="22" rx="8"/>
+    <rect class="hd-d" x="240" y="144" width="180" height="8"/>
+    <text class="t-ttl" x="252" y="146">node2 :9002</text>
+    <text class="t-sub" x="252" y="170">joins the cluster</text>
+    <text class="t-sub" x="252" y="186">DistributedRunner</text>
+    <text class="t-sub" x="252" y="202">app.redb</text>
+  </g>
+  <g>
+    <rect class="blk blk-d" x="456" y="130" width="180" height="88" rx="8"/>
+    <rect class="hd-d" x="456" y="130" width="180" height="22" rx="8"/>
+    <rect class="hd-d" x="456" y="144" width="180" height="8"/>
+    <text class="t-ttl" x="468" y="146">node3 :9003</text>
+    <text class="t-sub" x="468" y="170">joins the cluster</text>
+    <text class="t-sub" x="468" y="186">DistributedRunner</text>
+    <text class="t-sub" x="468" y="202">app.redb</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="24" y="252" width="612" height="56" rx="8"/>
+    <rect class="hd-c" x="24" y="252" width="612" height="22" rx="8"/>
+    <rect class="hd-c" x="24" y="266" width="612" height="8"/>
+    <text class="t-ttl" x="36" y="268">Raft log</text>
+    <text class="t-sub" x="36" y="292">master batches, row-range claims, checkpoints</text>
+  </g>
+  <path class="arw s-d" d="M114 84 V126" marker-end="url(#m-d)"/>
+  <text class="t-lab f-d" x="126" y="110">register batch</text>
+  <path class="arw s-c" d="M104 218 V248" marker-end="url(#m-c)"/>
+  <path class="arw s-c" d="M124 248 V222" marker-end="url(#m-c)"/>
+  <path class="arw s-c" d="M320 218 V248" marker-end="url(#m-c)"/>
+  <path class="arw s-c" d="M340 248 V222" marker-end="url(#m-c)"/>
+  <path class="arw s-c" d="M536 218 V248" marker-end="url(#m-c)"/>
+  <path class="arw s-c" d="M556 248 V222" marker-end="url(#m-c)"/>
+
+  <defs>
+    <marker id="m-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-n"/>
+    </marker>
+    <marker id="m-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-d"/>
+    </marker>
+    <marker id="m-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-b"/>
+    </marker>
+    <marker id="m-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-c"/>
+    </marker>
+  </defs>
+</svg>

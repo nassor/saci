@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 420" role="img" aria-labelledby="integ-title integ-desc">
+  <title id="integ-title">Integrity example: two SACI processes, one verifier</title>
+  <desc id="integ-desc">
+    The integrity_check program publishes orders to Kafka, a catalog file, payments to NATS JetStream and audit rows to PostgreSQL, and also serves the HTTP endpoint every sink posts to. Process 1 runs integrity.kdl in stream mode with control plane port 8088. In it the ingest workflow reads orders_kafka and catalog_file into the classify wasm processor, which posts express orders as ndjson to /sink/express and standard orders as csv to /sink/standard, and sends every classified order through the classified channel to the settle workflow. There the aggregate wasm processor merges that channel with payments_nats into ten second tumbling windows and posts closed windows as arrow-ipc to /sink/window. Process 2 runs integrity_audit.kdl in interval mode with control plane port 8089. In it audit_cdc reads PostgreSQL logical replication into the verify_audit wasm processor, which posts one verdict per change as parquet to /sink/audit.
+  </desc>
+
+  <style>
+    text { font-family: 'Fira Code', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace; }
+
+    /* Catppuccin Latte, with Mocha below for a dark viewer. Site CSS does not
+       reach a standalone figure, so both flavours live here. An accent tints
+       an area; the darker ink tone draws lines and sets letters, which is
+       what Latte needs to hold 4.5:1 and 3:1. */
+    .canvas { fill: #eff1f5; stroke: #7c7f93; }
+    .panel  { fill: #e6e9ef; stroke: #acb0be; }
+
+    .blk   { fill: #eff1f5; stroke-width: 1; }
+    .blk-d { stroke: rgb(171 63 0 / 0.7); }
+    .blk-c { stroke: rgb(0 109 115 / 0.7); }
+    .blk-b { stroke: rgb(128 46 229 / 0.7); }
+
+    .hd-d { fill: #f2d2c2; }
+    .hd-c { fill: #bfdce1; }
+    .hd-b { fill: #d8c9f4; }
+
+    /* The badges sit on the panel, not on the canvas, so the wash under the
+       step number is thinner than the one the site uses on the page. */
+    .badge   { stroke-width: 1; }
+    .badge-d { fill: rgb(254 100 11 / 0.12);  stroke: rgb(171 63 0 / 0.8); }
+    .badge-c { fill: rgb(23 146 153 / 0.12);  stroke: rgb(0 109 115 / 0.8); }
+    .badge-b { fill: rgb(136 57 239 / 0.12);  stroke: rgb(128 46 229 / 0.8); }
+
+    .t-ttl  { font-size: 13px;   font-weight: 600; fill: #4c4f69; }
+    .t-sub  { font-size: 11px;   fill: #5c5f77; }
+    .t-lab  { font-size: 11px;   fill: #5c5f77; }
+    .t-step { font-size: 12px;   font-weight: 700; letter-spacing: 1px; }
+    .t-num  { font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+    .t-mid  { text-anchor: middle; }
+
+    .f-n { fill: #5c5f77; }
+    .f-d { fill: #ab3f00; }
+    .f-c { fill: #006d73; }
+    .f-b { fill: #802ee5; }
+
+    .arw  { stroke-width: 1.5; fill: none; }
+    .s-n  { stroke: #5c5f77; }
+    .s-d  { stroke: #ab3f00; }
+    .s-c  { stroke: #006d73; }
+    .s-b  { stroke: #802ee5; }
+    .dash { stroke-dasharray: 5 4; }
+
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #1e1e2e; stroke: #6c7086; }
+      .panel  { fill: #181825; stroke: #45475a; }
+
+      .blk   { fill: #313244; }
+      .blk-d { stroke: rgb(250 179 135 / 0.7); }
+      .blk-c { stroke: rgb(148 226 213 / 0.7); }
+      .blk-b { stroke: rgb(203 166 247 / 0.7); }
+
+      .hd-d { fill: #5d4e53; }
+      .hd-c { fill: #475964; }
+      .hd-b { fill: #534c6b; }
+
+      .badge-d { fill: rgb(250 179 135 / 0.18);  stroke: rgb(250 179 135 / 0.8); }
+      .badge-c { fill: rgb(148 226 213 / 0.18); stroke: rgb(148 226 213 / 0.8); }
+      .badge-b { fill: rgb(203 166 247 / 0.18); stroke: rgb(203 166 247 / 0.8); }
+
+      .t-ttl { fill: #cdd6f4; }
+      .t-sub { fill: #a6adc8; }
+      .t-lab { fill: #a6adc8; }
+
+      .f-n { fill: #a6adc8; }
+      .f-d { fill: #fab387; }
+      .f-c { fill: #94e2d5; }
+      .f-b { fill: #cba6f7; }
+
+      .s-n { stroke: #a6adc8; }
+      .s-d { stroke: #fab387; }
+      .s-c { stroke: #94e2d5; }
+      .s-b { stroke: #cba6f7; }
+    }
+  </style>
+
+  <rect class="canvas" x="0.5" y="0.5" width="659" height="419" rx="14"/>
+
+  <rect class="panel" x="12" y="24" width="326" height="240" rx="12"/>
+  <circle class="badge badge-c" cx="40" cy="50" r="11"/>
+  <text class="t-num f-c" x="40" y="54">1</text>
+  <text class="t-step f-c" x="60" y="54">STREAM HALF</text>
+  <text class="t-lab" x="160" y="54">run_mode stream, :8088</text>
+  <rect class="panel" x="12" y="280" width="326" height="124" rx="12"/>
+  <circle class="badge badge-c" cx="40" cy="306" r="11"/>
+  <text class="t-num f-c" x="40" y="310">2</text>
+  <text class="t-step f-c" x="60" y="310">CDC HALF</text>
+  <text class="t-lab" x="140" y="310">run_mode interval, :8089</text>
+  <g>
+    <rect class="blk blk-c" x="24" y="72" width="132" height="64" rx="8"/>
+    <rect class="hd-c" x="24" y="72" width="132" height="22" rx="8"/>
+    <rect class="hd-c" x="24" y="86" width="132" height="8"/>
+    <text class="t-ttl" x="36" y="88">Sources</text>
+    <text class="t-sub" x="36" y="112">orders_kafka</text>
+    <text class="t-sub" x="36" y="128">catalog_file</text>
+  </g>
+  <g>
+    <rect class="blk blk-b" x="176" y="72" width="150" height="64" rx="8"/>
+    <rect class="hd-b" x="176" y="72" width="150" height="22" rx="8"/>
+    <rect class="hd-b" x="176" y="86" width="150" height="8"/>
+    <text class="t-ttl" x="188" y="88">classify</text>
+    <text class="t-sub" x="188" y="112">wasm</text>
+    <text class="t-sub" x="188" y="128">join, derive, route</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="24" y="188" width="132" height="64" rx="8"/>
+    <rect class="hd-c" x="24" y="188" width="132" height="22" rx="8"/>
+    <rect class="hd-c" x="24" y="202" width="132" height="8"/>
+    <text class="t-ttl" x="36" y="204">Source</text>
+    <text class="t-sub" x="36" y="228">payments_nats</text>
+    <text class="t-sub" x="36" y="244">JetStream</text>
+  </g>
+  <g>
+    <rect class="blk blk-b" x="176" y="188" width="150" height="64" rx="8"/>
+    <rect class="hd-b" x="176" y="188" width="150" height="22" rx="8"/>
+    <rect class="hd-b" x="176" y="202" width="150" height="8"/>
+    <text class="t-ttl" x="188" y="204">aggregate</text>
+    <text class="t-sub" x="188" y="228">wasm, windowed</text>
+    <text class="t-sub" x="188" y="244">10s tumbling</text>
+  </g>
+  <g>
+    <rect class="blk blk-c" x="24" y="326" width="132" height="64" rx="8"/>
+    <rect class="hd-c" x="24" y="326" width="132" height="22" rx="8"/>
+    <rect class="hd-c" x="24" y="340" width="132" height="8"/>
+    <text class="t-ttl" x="36" y="342">Source</text>
+    <text class="t-sub" x="36" y="366">audit_cdc</text>
+    <text class="t-sub" x="36" y="382">cdc_logical</text>
+  </g>
+  <g>
+    <rect class="blk blk-b" x="176" y="326" width="150" height="64" rx="8"/>
+    <rect class="hd-b" x="176" y="326" width="150" height="22" rx="8"/>
+    <rect class="hd-b" x="176" y="340" width="150" height="8"/>
+    <text class="t-ttl" x="188" y="342">verify_audit</text>
+    <text class="t-sub" x="188" y="366">wasm, stateless</text>
+    <text class="t-sub" x="188" y="382">verdict per change</text>
+  </g>
+  <g>
+    <rect class="blk blk-d" x="474" y="72" width="170" height="318" rx="8"/>
+    <rect class="hd-d" x="474" y="72" width="170" height="22" rx="8"/>
+    <rect class="hd-d" x="474" y="86" width="170" height="8"/>
+    <text class="t-ttl" x="486" y="88">integrity_check</text>
+  </g>
+    <text class="t-sub" x="486" y="114">POST /sink/express</text>
+    <text class="t-sub" x="486" y="138">POST /sink/standard</text>
+    <text class="t-sub" x="486" y="224">POST /sink/window</text>
+    <text class="t-sub" x="486" y="362">POST /sink/audit</text>
+    <text class="t-sub" x="486" y="290">also publishes the</text>
+    <text class="t-sub" x="486" y="306">workload and verifies</text>
+    <text class="t-sub" x="486" y="322">every row</text>
+  <path class="arw s-d" d="M156 104 H168" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M156 220 H168" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M156 358 H168" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M326 110 H466" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M326 134 H466" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M326 220 H466" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M326 358 H466" marker-end="url(#m-d)"/>
+  <path class="arw s-d" d="M251 136 V180" marker-end="url(#m-d)"/>
+  <text class="t-lab t-mid f-d" x="396" y="104">ndjson</text>
+  <text class="t-lab t-mid f-d" x="396" y="128">csv</text>
+  <text class="t-lab t-mid f-d" x="396" y="214">arrow-ipc</text>
+  <text class="t-lab t-mid f-d" x="396" y="352">parquet</text>
+  <text class="t-lab f-d" x="261" y="158">channel</text>
+  <text class="t-lab f-d" x="261" y="172">classified</text>
+
+  <defs>
+    <marker id="m-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-n"/>
+    </marker>
+    <marker id="m-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-d"/>
+    </marker>
+    <marker id="m-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-b"/>
+    </marker>
+    <marker id="m-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" class="f-c"/>
+    </marker>
+  </defs>
+</svg>
