@@ -3,12 +3,17 @@
 # Runtime: minimal debian image with just the binary.
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM rust:1.89-slim AS builder
+FROM rust:1.99-slim AS builder
 
-# System deps for openssl / native TLS used by reqwest
+# Building an example compiles saci's dev-dependencies too, and rdkafka-sys
+# builds librdkafka with cmake and a C++ compiler; its rdkafka_conf.c includes
+# <curl/curl.h> even with curl off. libssl-dev serves the TLS dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
+    build-essential \
+    cmake \
+    libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
