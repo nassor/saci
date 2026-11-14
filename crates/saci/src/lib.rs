@@ -39,6 +39,12 @@
 //! use saci::prelude::*;
 //! ```
 
+// Compiles and runs the README's example under `cargo test --doc`, so the
+// crates.io page cannot drift from the API.
+#[cfg(all(doctest, feature = "engine"))]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub use arrow_array;
 pub use arrow_schema;
 

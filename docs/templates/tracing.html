@@ -439,9 +439,9 @@ service = ["connector-contract", "distributed", "parquet-checkpoint", "tracing",
 </p>
 
 <div class="code">
-    <div class="code-cap"><span>TOML</span><em>a path dependency: the crate is not published</em></div>
+    <div class="code-cap"><span>TOML</span><em>from crates.io</em></div>
     <pre><code class="language-toml">[dependencies]
-saci = { path = "../crates/saci", features = ["tracing"] }
+saci = { version = "0.1", features = ["tracing"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }</code></pre>
 </div>
 

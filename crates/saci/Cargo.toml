@@ -9,7 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
 description = "SACI: a batch processing engine on Apache Arrow. The columnar engine, connectors, byte formats, the wasm processor and native plugin SDKs, and the service host, each behind its own feature."
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["arrow", "etl", "dataflow", "wasm", "batch"]
 categories = ["database", "wasm", "asynchronous", "concurrency"]
 

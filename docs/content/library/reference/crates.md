@@ -22,8 +22,7 @@ The workspace also holds crates that are not published: `saci-processor-smoketes
 `saci-plugin-smoketest`, the crates under `examples/`, `xtask`, and `saci-service-ui`, the
 dashboard, which compiles `crates/saci/src/inspector_wire.rs` into itself by path.
 
-None of this is on crates.io yet, so depend on `saci` by path inside a clone, or by git outside
-one.
+Depend on `saci` with `saci = "0.1"`, or by path inside a clone of the repository.
 
 ## Modules and their features
 
@@ -31,7 +30,7 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 
 | Module | Feature | What it gives you |
 |---|---|---|
-| crate root | `engine` (default) | `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, plus the `Source` and `Sink` traits and the schema cast helpers. Arrow, serde and futures are always present; tokio and rayon arrive with `runtime`. |
+| crate root | `engine` (default) | `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, plus the `Source` and `Sink` traits and the schema cast helpers. Arrow and serde are always present; tokio and rayon arrive with `runtime`, and `futures` with `service` or `connector-udp`. |
 | `saci::config` | `config` | The configuration language: parses KDL into `ConfigValue` (an alias for `serde_json::Value`) plus `ConfigMap`, and exports `from_kdl_str`, `from_kdl_str_with_vars`, `one_or_many`, `substitute_env_vars` and `substitute_vars`. `from_kdl_str_with_vars` substitutes and parses in one call, and a parse failure over substituted text names the variables whose values were inserted, plus any holding a backslash or double quote. Values stay out of the message. |
 | `saci::transformer` | `transformer-contract` | The byte-format contract: `Transformer`, `BatchReader`, `BatchWriter`, `MessageDecoder`, `TransformerFactory`, `TransformerRegistry`. The traits live in `transformer::contract`. |
 | `saci::transformer::arrow_ipc` | `transformer-arrow-ipc` | `ArrowIpcTransformer`: stream read and write plus `PerBatch` messages, both over the same Arrow IPC stream encapsulation. |
@@ -217,7 +216,7 @@ The full `server` build runs the same on Linux, macOS and Windows (PowerShell):
     cargo build --release -p saci --bin saci-service --features server
 
 Kafka needs `cmake` and a C toolchain on `PATH`, so add it deliberately:
-`cargo install --path crates/saci --features server,connector-kafka`. Cluster
+`cargo install saci --features server,connector-kafka`. Cluster
 mode is `--features server,service-cluster`, and the native plugin host is
 `--features server,plugin-host`.
 
@@ -228,7 +227,7 @@ A binary crate that depends on `saci` with the server features it needs is a com
 
 ```toml
 [dependencies]
-saci = { git = "https://github.com/nassor/saci", default-features = false, features = ["service", "connector-file", "transformer-csv"] }
+saci = { version = "0.1", default-features = false, features = ["service", "connector-file", "transformer-csv"] }
 ```
 
 ```rust
@@ -252,7 +251,7 @@ An embedder names the features it uses and nothing else:
 
 ```toml
 [dependencies]
-saci = { git = "https://github.com/nassor/saci", features = ["connector-file", "transformer-csv"] }
+saci = { version = "0.1", features = ["connector-file", "transformer-csv"] }
 ```
 
 A wasm processor crate depends on the SDK feature alone, with the default features off, and gets
@@ -260,7 +259,7 @@ the derive and attribute macros from `saci::processor`:
 
 ```toml
 [dependencies]
-saci = { git = "https://github.com/nassor/saci", default-features = false, features = ["processor"] }
+saci = { version = "0.1", default-features = false, features = ["processor"] }
 ```
 
 Inside this workspace the dependency is `saci = { workspace = true, features = ["processor"] }`.

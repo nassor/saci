@@ -14,11 +14,11 @@ what is compiled in, and it registers a `connector-*` feature's factories only w
 also on.
 
 ```toml,name=One dependency, one feature per connector
+# From crates.io.
+saci = { version = "0.1", default-features = false, features = ["connector-file", "transformer-csv"] }
+
 # In a clone of the repository.
 saci = { path = "crates/saci", default-features = false, features = ["connector-file", "transformer-csv"] }
-
-# Outside one. saci is not published to crates.io.
-saci = { git = "https://github.com/nassor/saci", default-features = false, features = ["connector-file", "transformer-csv"] }
 ```
 
 Each connector is a module under `saci::connector`, gated by its `connector-<name>` feature, and

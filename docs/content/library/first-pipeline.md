@@ -25,8 +25,8 @@ and show the real output.
 <div class="note">
 <span class="note-label">Before you start</span>
 
-SACI crates are **not published to crates.io**. Every command here assumes you
-have cloned the repository and are running from its root.
+Run every command from the root of a clone of the repository. Step 7 runs one of its
+examples and step 8 reads the WIT package from it.
 
 </div>
 
@@ -41,7 +41,7 @@ Runs the same on Linux, macOS and Windows (PowerShell). Step 1 is done when
 ## 2. Add the dependencies
 
 The engine is `saci`, with its default `engine` feature; the code below imports it as `saci::`.
-Inside the clone, it is a path dependency:
+Inside the clone, it is a path dependency (`saci = "0.1"` selects the crates.io release instead):
 
 ```toml,name=The Cargo.toml dependencies
 [dependencies]

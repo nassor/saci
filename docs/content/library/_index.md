@@ -193,10 +193,10 @@ All of them share one `saci::pipeline::Pipeline`.
 
 ```toml,name=Two dependency shapes
 # The engine alone: no wasmtime, no HTTP.
-saci = { git = "https://github.com/nassor/saci" }
+saci = "0.1"
 
 # The engine plus the runners, the registry and the wasm host.
-saci = { git = "https://github.com/nassor/saci", features = ["service", "wasm-host"] }
+saci = { version = "0.1", features = ["service", "wasm-host"] }
 ```
 
 Add `connector-file` plus a `transformer-*` feature for each format you
@@ -206,7 +206,7 @@ feature flag and the module behind it.
 <div class="note">
 <span class="note-label">Depending on SACI</span>
 
-The crates are **not published to crates.io**. Inside a clone of the repository,
-use a path dependency; outside one, point cargo at the repository as above.
+`saci` and `saci-macros` are on crates.io. Inside a clone of the repository, a path
+dependency on `crates/saci` builds the working tree instead.
 
 </div>

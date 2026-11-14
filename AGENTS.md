@@ -372,8 +372,8 @@ let dataset2 = Dataset::read_ipc(&mut &buf[..])?;
 ```rust
 // Inline construction
 let mut pipeline = Pipeline::new("etl");
-pipeline.register_component::<Price>()?;         // forwards to self.data
-pipeline.append::<Price>(&rows)?;
+pipeline.data_mut().register_component::<Price>()?;
+pipeline.data_mut().append::<Price>(&rows)?;
 pipeline.add_system(EnrichPrice);
 pipeline.run().await?;                           // validate + DAG + retry
 
@@ -529,3 +529,41 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   skill, and walk both "Before you finish" lists over the diff. Current state only, no
   optimization history or task references; no mermaid, ASCII art or tables as diagrams, use SVG;
   no AI writing patterns.
+
+## Releases
+
+`saci` and `saci-macros` publish to crates.io together under one version, and `CHANGELOG.md` at
+the root records every release. Versions follow SemVer; before 1.0 a breaking change bumps the
+minor version (0.1 to 0.2) and everything else the patch version.
+
+A change that a user of the published crates can observe (a public item, a feature, a config key,
+a metric series, a behavior, a dependency or the MSRV) adds a bullet to `CHANGELOG.md` under
+`## Unreleased` in the same change, creating that heading above the newest release when it is
+missing. Bullets sit under `### Added`, `### Changed`, `### Fixed`, `### Removed` or
+`### Breaking`, name the feature or module first, and describe the result, not the work. Tests,
+CI, `xtask`, skills and this file need no entry.
+
+Cutting release `X.Y.Z`:
+
+1. On `main`, up to date with `origin/main`. Unrelated uncommitted work stays out of the release
+   commit.
+2. Rename `## Unreleased` to `## X.Y.Z - YYYY-MM-DD`. With no entries collected, write the section
+   from `git log vPREV..HEAD`.
+3. Set the version in the root `Cargo.toml` in three places: `[workspace.package] version`, and
+   the `version` of the `saci` and `saci-macros` entries in `[workspace.dependencies]`. Then
+   `cargo update -p saci -p saci-macros --offline` refreshes `Cargo.lock`.
+4. Gate: `cargo fmt --all -- --check`, both `cargo clippy` lines from Commands, the fast nextest
+   suite, `cargo test --workspace --all-features --doc`, and
+   `cargo publish -p saci-macros -p saci --dry-run --allow-dirty`. The dry run must print no
+   `unused dependency` warning; an `ignoring example` warning is expected for each example outside
+   `crates/saci/`.
+5. Commit only the release files as `chore: release X.Y.Z`, tag it `vX.Y.Z` (always the `v`
+   prefix), and push `main` and the tag without force.
+6. Wait for CI on the pushed commit to pass: `gh run list --commit <sha>`, then
+   `gh run watch <id> --exit-status`. A failure stops the release.
+7. Publish from the tagged commit: `cargo publish -p saci-macros -p saci`. Cargo publishes
+   `saci-macros` first and waits for the index before `saci`. With a dirty tree, publish from
+   `git worktree add ../saci-release-X.Y.Z vX.Y.Z` and remove the worktree afterwards.
+8. A published version that is broken is yanked once its replacement is out, both crates:
+   `cargo yank --version X.Y.Z saci` and `cargo yank --version X.Y.Z saci-macros`. Its
+   `CHANGELOG.md` heading gains ` (yanked)` and a line saying why.

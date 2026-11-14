@@ -14,6 +14,8 @@ key lists, code comments, the AI pattern list) are in the user-level skill `tech
 | Surface | What it holds | Kind |
 |---|---|---|
 | `README.md` | the pitch and the first command | pitch plus a how-to Quick start |
+| `crates/saci/README.md`, `crates/saci-macros/README.md` | each crate's crates.io page: what it is, the dependency line, one example | pitch plus a how-to |
+| `CHANGELOG.md` | what each release added, changed, fixed or removed | reference; the one surface that records history |
 | `docs/content/service/**` | pages for someone running the binary | tutorial, or how-to once the reader has a running service |
 | `docs/content/library/first-pipeline.md` | the embedding tutorial | tutorial |
 | `docs/content/library/service/*` | extending the service | how-to |
@@ -94,10 +96,12 @@ A page diagram is inline SVG inside the site's diagram frame:
 - Author at `viewBox` width 660; `.dgm-scroll` holds that as a minimum, so a wider drawing scrolls.
 - Wrap each step in `<g class="anim anim-1">` through `anim-4` for the reveal animation.
 - README figures are standalone files in `docs/static/*.svg`, referenced as
-  `<img src="https://raw.githubusercontent.com/nassor/saci/main/docs/static/NAME.svg" alt="...">`.
-- Every README link and image uses an absolute URL. `README.md` is also the `saci` crate's
-  readme, and crates.io resolves a relative link against `crates/saci/`, where the target is
-  missing.
+  `<img src="docs/static/NAME.svg" alt="...">`.
+- A crate README is packaged at the crate root and crates.io resolves its relative links against
+  `crates/<crate>/` on GitHub, so a link that leaves the crate directory is an absolute URL.
+  `crates/saci/src/lib.rs` compiles the `saci` README's Rust blocks as a doc test
+  (`ReadmeDoctests`), so `cargo test -p saci --doc` fails when the example drifts; the
+  `saci-macros` example is `rust,ignore` because it needs the wasm32-wasip2 target.
 
 ## Key lists
 
