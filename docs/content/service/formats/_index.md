@@ -117,7 +117,7 @@ single-object Avro on another.
 | [`avro`](@/service/formats/avro.md) | yes | yes | one per row | optional reading a file, required writing and on messages |
 | [`arrow-ipc`](@/service/formats/arrow-ipc.md) | yes | yes | one per batch | optional reading a stream, required writing and on messages |
 
-All five are in the default build, so no format needs a build of its own.
+All five are in the `server` feature, so no format needs a build of its own.
 
 The `Declared schema` column is about a source. A sink requires `schema_fields` whatever the format,
 because that is the schema the rows are written with.
@@ -149,7 +149,8 @@ The same bytes work on either surface, so a file written with `arrow-ipc` or `pa
 through the message path and one Kafka payload in those formats opens as a stream.
 
 Teaching `saci-service` a format it does not ship means writing a transformer in Rust and
-registering it in your own binary. [Writing a transformer](@/library/service/transformers.md)
+registering it in your own binary, with `builder.register_transformer(..)` inside
+`saci::service::cli::main_with`. [Writing a transformer](@/library/service/transformers.md)
 shows how.
 
 ## Next

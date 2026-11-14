@@ -1,13 +1,13 @@
 //! Order processing pipeline as a WebAssembly Component Model processor.
 //!
 //! A 2-stage field-granular DAG (Validate and Enrich in parallel, then Report)
-//! running inside a WASM processor via `saci-processor`. It mirrors
+//! running inside a WASM processor via `saci::processor`. It mirrors
 //! `examples/native/scheduler_etl.rs`, with two differences the
 //! WASM model forces:
 //!
 //! - No ingest system. Data arrives in the host's `run-batch` Arrow IPC
-//!   payload, one batch per partition, from whatever source `saci-service`'s
-//!   the config file configures.
+//!   payload, one batch per partition, from whatever source the service's
+//!   config file configures.
 //! - `FxRates` lives on the `EnrichSystem` struct rather than on the
 //!   `Dataset`. `Dataset::write_ipc` serializes registered components and the
 //!   alive bitmap, not the resource map, so a dataset rebuilt from IPC has no
@@ -36,7 +36,7 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci-processor/wit`. The
+// The bindings are generated in place from `crates/saci/wit`. The
 // module and the `export_pipeline!` invocation below are gated on
 // `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
 // `component-type` custom section, neither of which the host target can link.
@@ -44,7 +44,7 @@
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        path: "../../../crates/saci-processor/wit",
+        path: "../../../crates/saci/wit",
         world: "saci-pipeline",
         generate_all,
     });
@@ -52,9 +52,9 @@ mod bindings {
 
 use std::sync::Arc;
 
-use saci_processor::arrow_array::{BooleanArray, Float64Array, RecordBatch};
-use saci_processor::arrow_schema::{DataType, Field, Schema};
-use saci_processor::prelude::*;
+use saci::processor::arrow_array::{BooleanArray, Float64Array, RecordBatch};
+use saci::processor::arrow_schema::{DataType, Field, Schema};
+use saci::processor::prelude::*;
 
 /// A financial transaction in columnar form.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -156,7 +156,7 @@ impl FxRates {
 /// the same stage.
 struct ValidateSystem;
 
-#[saci_processor::prelude::async_trait]
+#[saci::processor::prelude::async_trait]
 impl System for ValidateSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("validate")
@@ -186,11 +186,11 @@ impl System for ValidateSystem {
             .index_of("valid")
             .map_err(|e| SaciError::generic(format!("Transaction.valid missing: {e}")))?;
 
-        let new_columns: Vec<Arc<dyn saci_processor::arrow_array::Array>> =
+        let new_columns: Vec<Arc<dyn saci::processor::arrow_array::Array>> =
             (0..schema.fields().len())
                 .map(|i| {
                     if i == valid_idx {
-                        new_valid.clone() as Arc<dyn saci_processor::arrow_array::Array>
+                        new_valid.clone() as Arc<dyn saci::processor::arrow_array::Array>
                     } else {
                         batch.column(i).clone()
                     }
@@ -219,7 +219,7 @@ struct EnrichSystem {
     rates: FxRates,
 }
 
-#[saci_processor::prelude::async_trait]
+#[saci::processor::prelude::async_trait]
 impl System for EnrichSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("enrich")
@@ -255,11 +255,11 @@ impl System for EnrichSystem {
             .index_of("usd_amount")
             .map_err(|e| SaciError::generic(format!("Transaction.usd_amount missing: {e}")))?;
 
-        let new_columns: Vec<Arc<dyn saci_processor::arrow_array::Array>> =
+        let new_columns: Vec<Arc<dyn saci::processor::arrow_array::Array>> =
             (0..schema.fields().len())
                 .map(|i| {
                     if i == usd_idx {
-                        new_usd.clone() as Arc<dyn saci_processor::arrow_array::Array>
+                        new_usd.clone() as Arc<dyn saci::processor::arrow_array::Array>
                     } else {
                         batch.column(i).clone()
                     }
@@ -362,4 +362,4 @@ pub fn build() -> Pipeline {
 }
 
 #[cfg(target_arch = "wasm32")]
-saci_processor::export_pipeline!(build);
+saci::export_pipeline!(build);

@@ -27,8 +27,8 @@ _FIXTURE_SACI = os.path.join(_GENERATED, "fixture_input.saci")
 _ORDER_SCHEMA = os.path.join(_GENERATED, "order_schema.ipc")
 
 _MISSING = (
-    "examples/polyglot/generated is gitignored; run `cargo run -p saci-service "
-    "--features wasm --example polyglot_schema_emit -- emit`"
+    "examples/polyglot/generated is gitignored; run `cargo run -p saci "
+    "--features wasm-host --example polyglot_schema_emit -- emit`"
 )
 
 #: Every byte of this value's IEEE-754 encoding is non-zero, so a short or

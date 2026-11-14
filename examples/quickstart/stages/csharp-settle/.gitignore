@@ -3,7 +3,7 @@
 /SchemaGen.cs
 
 # Build output. The WIT bindings land in obj/ and are regenerated from
-# crates/saci-processor/wit on every build, so they are never committed either.
+# crates/saci/wit on every build, so they are never committed either.
 bin/
 obj/
 

@@ -67,7 +67,7 @@
   <ItemGroup>
     <!-- The single canonical WIT copy, referenced in place. Vendoring it here
          would desynchronise the moment pipeline.wit changes. -->
-    <Wit Include="../../../../crates/saci-processor/wit" World="saci-pipeline" />
+    <Wit Include="../../../../crates/saci/wit" World="saci-pipeline" />
   </ItemGroup>
 
 </Project>

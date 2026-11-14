@@ -182,7 +182,7 @@ down -v`.
 2. Start the publisher and verifier, **before** either service:
 
 ```text
-cargo run -p saci-service --example integrity_check
+cargo run -p saci --features service,transformer-arrow-ipc,transformer-csv,transformer-ndjson,transformer-parquet --example integrity_check
 ```
 
 The order is enforced. The publisher resets every piece of shared state before
@@ -226,39 +226,39 @@ continues on its own as soon as both control planes answer.
 3. Start the stream half:
 
 ```text
-cargo run -p saci-service --features connector-kafka,connector-nats -- serve \
+cargo run -p saci --features server,connector-kafka,connector-nats -- serve \
   --config examples/integrity/integrity.kdl
 ```
 Windows (PowerShell), on one line:
 
 ```powershell
-cargo run -p saci-service --features connector-kafka,connector-nats -- serve --config examples/integrity/integrity.kdl
+cargo run -p saci --features server,connector-kafka,connector-nats -- serve --config examples/integrity/integrity.kdl
 ```
 
 4. Start the CDC half:
 
 ```text
-cargo run -p saci-service --features connector-postgresql -- serve --config examples/integrity/integrity_audit.kdl
+cargo run -p saci --features server,connector-postgresql -- serve --config examples/integrity/integrity_audit.kdl
 ```
 Runs the same on all three platforms.
 
 `connector-kafka`, `connector-nats` and `connector-postgresql` are the three features these two
-configs need outside the default bundle; every other connector and transformer they use is on by
-default.
+configs need outside the `server` feature; every other connector and transformer they use is in
+`server`.
 
 Validate the configs first, if you like:
 
 ```text
-cargo run -p saci-service --features connector-kafka,connector-nats -- validate \
+cargo run -p saci --features server,connector-kafka,connector-nats -- validate \
   --config examples/integrity/integrity.kdl --strict
-cargo run -p saci-service --features connector-postgresql -- validate \
+cargo run -p saci --features server,connector-postgresql -- validate \
   --config examples/integrity/integrity_audit.kdl --strict
 ```
 Windows (PowerShell), one command per line:
 
 ```powershell
-cargo run -p saci-service --features connector-kafka,connector-nats -- validate --config examples/integrity/integrity.kdl --strict
-cargo run -p saci-service --features connector-postgresql -- validate --config examples/integrity/integrity_audit.kdl --strict
+cargo run -p saci --features server,connector-kafka,connector-nats -- validate --config examples/integrity/integrity.kdl --strict
+cargo run -p saci --features server,connector-postgresql -- validate --config examples/integrity/integrity_audit.kdl --strict
 ```
 
 ## Delivery semantics, and which workflow proves which
@@ -360,7 +360,7 @@ absent. An unrecognised flag is an error, not a warning.
 |------------------|------------|
 | `integrity.kdl` | the `ingest` and `settle` workflows, stream mode, port 8088 |
 | `integrity_audit.kdl` | the `audit` workflow, interval mode, port 8089 |
-| `integrity_check.rs` | the `saci-service` example that publishes, receives, verifies and drives the lifecycle |
+| `integrity_check.rs` | the `saci` example that publishes, receives, verifies and drives the lifecycle |
 | `catalog.csv` | the eight-sku catalog the `FileSource` reads |
 | `schema.sql` | `public.order_audit`, its replica identity and the publication |
 | `docker-compose.yml` | Kafka 3.9, NATS 2.11 with JetStream, PostgreSQL 18 with `wal_level=logical` |

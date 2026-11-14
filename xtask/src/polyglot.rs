@@ -71,11 +71,11 @@ usage: cargo xtask polyglot [--only=LIST]
 /// Path to the canonical WIT package, relative to a stage directory. Every
 /// stage sits four levels below the repository root, and a toolchain invoked
 /// from inside one resolves the path against that directory.
-const WIT_DIR_REL: &str = "../../../../crates/saci-processor/wit";
+const WIT_DIR_REL: &str = "../../../../crates/saci/wit";
 
 /// The same WIT package from the repository root, for the tools that run there:
 /// wit-bindgen and `wasm-tools component embed`.
-const WIT_DIR: &str = "crates/saci-processor/wit";
+const WIT_DIR: &str = "crates/saci/wit";
 
 /// Exit code for a build that produced no artifact.
 const NO_ARTIFACT: u8 = 8;
@@ -163,7 +163,7 @@ pub fn run(args: &[String]) -> Result<()> {
     crate::examples::inject(&ctx, entry, &emitted)?;
     ctx.log(format!("emitted {} (self-contained)", emitted.display()));
 
-    ctx.log("next: cargo run -p saci-service --features wasm,tracing --example polyglot_orders");
+    ctx.log("next: cargo run -p saci --features wasm-host,tracing --example polyglot_orders");
     Ok(())
 }
 

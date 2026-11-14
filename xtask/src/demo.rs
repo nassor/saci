@@ -93,13 +93,23 @@ fn run_one_shot(ctx: &Ctx, binary: &Path, ex: &Example, config: &Path) -> Result
 /// sequence instead of each getting a `serve` + publisher pair.
 const INTEGRITY: [&str; 2] = ["integrity", "integrity_audit"];
 
+/// The `required-features` of the `integrity_check` `[[example]]` target,
+/// which the integrity sequence prints alongside its two `serve` lines.
+const INTEGRITY_CHECK_FEATURES: &[&str] = &[
+    "service",
+    "transformer-arrow-ipc",
+    "transformer-csv",
+    "transformer-ndjson",
+    "transformer-parquet",
+];
+
 /// One streaming demo's publisher: the `[[example]]` target that feeds its
 /// config, the features that target needs, and the arguments this demo runs
 /// it with.
 ///
 /// `features` is the target's `required-features` in
-/// `crates/saci-service/Cargo.toml`: every publisher reaches `async-nats`
-/// through `saci-connector-nats`, so each target names that connector
+/// `crates/saci/Cargo.toml`: every publisher reaches `async-nats`
+/// through the NATS connector, so each target names that connector
 /// feature. Cargo skips a target whose required features are off, silently
 /// and with a green exit, so a printed command missing the flag publishes
 /// nothing at all; the test module below pins every row against the manifest
@@ -118,14 +128,13 @@ struct Publisher {
 impl Publisher {
     /// The `cargo run` line [`print_commands`] prints for this publisher.
     ///
-    /// Built with [`feature_flag`], the helper the `serve` line above it
-    /// already uses, so both lines in one printed pair select their features
-    /// the same way.
+    /// Names exactly the target's own features: an `[[example]]` target needs
+    /// no `server` bundle.
     fn command(&self) -> String {
         format!(
-            "cargo run -p saci-service --example {0} {1}-- {2}",
+            "cargo run -p saci --example {0} --features {1} -- {2}",
             self.target,
-            feature_flag(self.features),
+            self.features.join(","),
             self.args
         )
     }
@@ -190,14 +199,17 @@ fn print_commands(ex: &Example) {
         let audit = by_name("integrity_audit").expect("EXAMPLES declares it, in examples.rs");
         println!("[demo] Start the stack, then run, in this order:");
         println!("[demo]   docker compose -f examples/integrity/docker-compose.yml up -d");
-        println!("[demo]   cargo run -p saci-service --example integrity_check");
         println!(
-            "[demo]   cargo run -p saci-service {}-- serve \
+            "[demo]   cargo run -p saci --example integrity_check --features {}",
+            INTEGRITY_CHECK_FEATURES.join(",")
+        );
+        println!(
+            "[demo]   cargo run -p saci {}-- serve \
              -c examples/integrity/integrity.kdl",
             feature_flag(stream.features)
         );
         println!(
-            "[demo]   cargo run -p saci-service {}-- serve \
+            "[demo]   cargo run -p saci {}-- serve \
              -c examples/integrity/integrity_audit.kdl",
             feature_flag(audit.features)
         );
@@ -234,7 +246,7 @@ fn print_commands(ex: &Example) {
         }
     }
     println!(
-        "[demo]   cargo run -p saci-service {0}-- serve -c target/xtask/{1}.kdl",
+        "[demo]   cargo run -p saci {0}-- serve -c target/xtask/{1}.kdl",
         feature_flag(ex.features),
         ex.name
     );
@@ -245,13 +257,13 @@ fn print_commands(ex: &Example) {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{INTEGRITY, PUBLISHERS, publisher};
+    use super::{INTEGRITY, INTEGRITY_CHECK_FEATURES, PUBLISHERS, publisher};
     use crate::examples::EXAMPLES;
 
-    /// `crates/saci-service/Cargo.toml`, read at compile time.
+    /// `crates/saci/Cargo.toml`, read at compile time.
     ///
-    /// Same mechanism as `crates/saci-service/tests/feature_bundles.rs`,
-    /// which reads its own crate's manifest this way and parses the one
+    /// Same mechanism as `crates/saci/tests/feature_bundles.rs`, which reads
+    /// the manifest this way and parses the one
     /// section it needs with a line classifier: no TOML dependency, and
     /// `xtask` keeps its empty `[dependencies]`. The path crosses into a
     /// sibling crate, which is what buys the check its teeth: cargo tracks an
@@ -260,7 +272,7 @@ mod tests {
     /// a check that reads a file nobody writes any more. Reading it at run
     /// time from the repository root would turn both of those into a silent
     /// pass or a late panic.
-    const SERVICE_MANIFEST: &str = include_str!("../../crates/saci-service/Cargo.toml");
+    const SERVICE_MANIFEST: &str = include_str!("../../crates/saci/Cargo.toml");
 
     /// Every `[[example]]` target in the manifest, as
     /// `(name, required-features)` in manifest order.
@@ -308,7 +320,7 @@ mod tests {
         }
         assert!(
             !targets.is_empty(),
-            "crates/saci-service/Cargo.toml declares no `[[example]]` target, so the parser in \
+            "crates/saci/Cargo.toml declares no `[[example]]` target, so the parser in \
              this module found nothing to compare the publisher table against"
         );
         targets
@@ -349,7 +361,7 @@ mod tests {
                 .find(|(name, _)| *name == entry.target)
                 .unwrap_or_else(|| {
                     panic!(
-                        "crates/saci-service/Cargo.toml declares no `[[example]]` target named \
+                        "crates/saci/Cargo.toml declares no `[[example]]` target named \
                          `{}`, so the `{}` demo prints a command cargo cannot run",
                         entry.target, entry.example
                     )
@@ -358,12 +370,30 @@ mod tests {
                 entry.features.iter().copied().collect::<BTreeSet<_>>(),
                 declared.1.iter().copied().collect::<BTreeSet<_>>(),
                 "the `{}` demo prints its publisher's `--features` from this table, and \
-                 `{}`'s `required-features` in crates/saci-service/Cargo.toml is what cargo \
+                 `{}`'s `required-features` in crates/saci/Cargo.toml is what cargo \
                  needs to build that target at all",
                 entry.example,
                 entry.target,
             );
         }
+    }
+
+    /// The integrity sequence's `integrity_check` line names exactly the
+    /// target's `required-features`, for the same reason a publisher row does.
+    #[test]
+    fn the_integrity_check_line_names_its_example_target_features() {
+        let targets = example_targets();
+        let declared = targets
+            .iter()
+            .find(|(name, _)| *name == "integrity_check")
+            .expect("crates/saci/Cargo.toml declares the `integrity_check` example");
+        assert_eq!(
+            INTEGRITY_CHECK_FEATURES
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            declared.1.iter().copied().collect::<BTreeSet<_>>(),
+        );
     }
 
     /// Every streaming registry entry is printable: it has a publisher row,
@@ -386,15 +416,12 @@ mod tests {
     }
 
     /// The rendered line names the target, then the features, then `--`.
-    ///
-    /// `feature_flag` carries its own trailing space, which is what keeps the
-    /// separator from fusing onto the feature list.
     #[test]
     fn a_publisher_line_separates_its_features_from_its_arguments() {
         let entry = publisher("branching").expect("PUBLISHERS declares it");
         assert_eq!(
             entry.command(),
-            "cargo run -p saci-service --example branching_publish --features connector-nats \
+            "cargo run -p saci --example branching_publish --features connector-nats \
              -- --rate 50"
         );
     }

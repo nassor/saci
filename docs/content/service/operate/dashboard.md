@@ -128,8 +128,8 @@ shows up in that number.
 
 Any config and any run mode serve the dashboard.
 `examples/windowing/tumbling/tumbling.kdl` runs with the inspector on. Its NATS
-sources, its PostgreSQL sinks and its `plugin` node all sit outside the default
-build, so build with `--features connector-nats,connector-postgresql,plugin` or
+sources, its PostgreSQL sinks and its `plugin` node all sit outside the `server`
+feature, so build with `--features server,connector-nats,connector-postgresql,plugin-host` or
 point at your own file:
 
 ```bash,name=Start the service

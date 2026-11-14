@@ -18,7 +18,7 @@ import (
 const generatedDir = "../../../examples/polyglot/generated"
 
 // emitHint is the command that produces the fixtures.
-const emitHint = "run `cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit` first"
+const emitHint = "run `cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit` first"
 
 // tolerance for float comparisons: 100.0 * 1.10 is not exactly 110.0, and the
 // same tolerance is used by every stage of the chain.

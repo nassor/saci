@@ -11,7 +11,7 @@
 //! `saci_window_watermark_seconds` series the dashboard reads.
 //!
 //! ```bash
-//! cargo run -p saci-service --example windowed_fan_in --features service,windows,connector-channel
+//! cargo run -p saci --example windowed_fan_in --features service,windows,connector-channel
 //! ```
 
 use std::sync::Arc;
@@ -19,21 +19,21 @@ use std::sync::Arc;
 use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
-use saci_connector_channel::{ChannelSink, ChannelSource};
+use saci::connector::channel::{ChannelSink, ChannelSource};
 use tokio_util::sync::CancellationToken;
 
-use saci_service::SaciError;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::pipeline::Pipeline;
-use saci_service::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
-use saci_service::service::config::{
+use saci::SaciError;
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::pipeline::Pipeline;
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::service::config::{
     HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
     StandaloneConfig, WorkflowSpec,
 };
-use saci_service::service::standalone::run_standalone;
-use saci_service::system::{System, SystemMeta};
-use saci_service::windows::{
+use saci::service::standalone::run_standalone;
+use saci::system::{System, SystemMeta};
+use saci::windows::{
     ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowWatermark,
     WindowedSystemBuilder,
 };
@@ -259,7 +259,7 @@ async fn main() -> Result<(), SaciError> {
             }],
             artifact: None,
             #[cfg(feature = "windows")]
-            window: Some(saci_service::service::config::WindowConfig {
+            window: Some(saci::service::config::WindowConfig {
                 spec: WindowSpec::Tumbling {
                     size_ms: 30_000,
                     offset_ms: 0,
@@ -318,7 +318,7 @@ async fn main() -> Result<(), SaciError> {
         workflow_id: "windowed-fan-in".to_string(),
         workflow_name: Some("Two streams, one windowed processor".to_string()),
         nodes,
-        registry: std::sync::Arc::new(saci_service::service::registry::Registry::new()),
+        registry: std::sync::Arc::new(saci::service::registry::Registry::new()),
         inspector: None,
         dlq: None,
     };

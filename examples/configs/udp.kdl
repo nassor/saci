@@ -1,9 +1,9 @@
 // SACI standalone service configuration driving UDP at both ends.
 //
 // Run:
-//   cargo run --features connector-udp,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-udp,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/udp.kdl
-//   cargo run --features connector-udp,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-udp,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/udp.kdl
 //
 // UDP delivers nothing. A datagram that leaves the socket is neither

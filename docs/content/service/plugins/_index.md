@@ -125,14 +125,14 @@ an environment variable:
 
 ## 3. Validate and run
 
-`plugin` is not in the default build. Add `--features plugin` to make the node bind.
+`plugin-host` is not in the `server` feature. Add `--features plugin-host` to make the node bind.
 
 Linux/macOS:
 
 ```bash,name=Validate a config with a plugin node
 cargo build -p saci-plugin-smoketest
 
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- validate \
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate \
   --config examples/configs/standalone_plugin.kdl --strict
 ```
 
@@ -142,7 +142,7 @@ Windows (PowerShell):
 cargo build -p saci-plugin-smoketest
 
 $env:SACI_PLUGIN_LIB = "target/debug/saci_plugin_smoketest.dll"
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- validate --config examples/configs/standalone_plugin.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate --config examples/configs/standalone_plugin.kdl --strict
 ```
 
 ```text,name=What validate prints
@@ -156,7 +156,7 @@ broken plugin fails here rather than at the first batch.
 Linux/macOS:
 
 ```bash,name=Run the service
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- serve \
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve \
   --config examples/configs/standalone_plugin.kdl
 ```
 
@@ -164,7 +164,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/debug/saci_plugin_smoketest.dll"
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- serve --config examples/configs/standalone_plugin.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve --config examples/configs/standalone_plugin.kdl
 ```
 
 The run reads `examples/configs/fixtures/counter_input.csv`, runs the plugin once, and writes

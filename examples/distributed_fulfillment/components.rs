@@ -9,8 +9,8 @@ use std::sync::Arc;
 use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use saci_service::component::Component;
-use saci_service::system::FieldRef;
+use saci::component::Component;
+use saci::system::FieldRef;
 
 /// A customer order flowing through the fulfillment pipeline. The generator
 /// writes the input fields; each remaining field records the system and stage

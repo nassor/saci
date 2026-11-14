@@ -19,7 +19,7 @@
     <dt>In one line</dt>
     <dd>Many pipelines, <strong>one dependency-ordered pass</strong> per tick</dd>
     <dt>You need</dt>
-    <dd>Nothing beyond <code>saci-core</code>. The <code>io</code> feature only changes what a tick does and unlocks the sink-depth probe</dd>
+    <dd>Nothing beyond <code>saci</code>. The <code>io</code> feature only changes what a tick does and unlocks the sink-depth probe</dd>
     <dt>Read this if</dt>
     <dd>You have two or more workloads sharing a process, and one of them must wait for another or be skipped because of it</dd>
 </dl>
@@ -51,7 +51,7 @@
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>two ways in, one prelude import</em></div>
-    <pre><code class="language-rust">use saci_core::prelude::*;
+    <pre><code class="language-rust">use saci::prelude::*;
 
 let mut sched = Scheduler::new();
 
@@ -81,7 +81,7 @@ sched.add_pipeline_with_config(
     first, default 0), and <code>backpressure</code> (an <code>Option</code>).
     <code>.after()</code> <em>pushes</em> an edge, so call it once per predecessor.
     <code>Scheduler</code>, <code>PipelineConfig</code>, <code>DependencyKind</code> and
-    <code>BackpressureSpec</code> are all in <code>saci_core::prelude</code>.
+    <code>BackpressureSpec</code> are all in <code>saci::prelude</code>.
 </p>
 
 <div class="note note-warn">
@@ -464,8 +464,8 @@ sched.add_pipeline_with_config(
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>pause the writer when its channel fills</em></div>
-    <pre><code class="language-rust">use saci_connector_channel::ChannelSink;
-use saci_core::prelude::*;
+    <pre><code class="language-rust">use saci::connector::channel::ChannelSink;
+use saci::prelude::*;
 
 // The receiver is consumed elsewhere; four batches of headroom.
 let (sink, rx) = ChannelSink::new(Transaction::schema(), 4);
@@ -574,8 +574,8 @@ if let Some(p) = sched.get_mut("ingest") {
 </table>
 
 <p>
-    One boundary to know. <code>Scheduler</code> is a <code>saci-core</code> API that you
-    drive from your own binary. <code>saci-service</code> re-exports the type, but a
+    One boundary to know. <code>Scheduler</code> is an engine API that you
+    drive from your own binary. A
     <a href="{{ get_url(path='@/service/_index.md') }}">service configuration</a> declares
     workflows that its own runners drive, and the service never constructs a scheduler. A
     standalone config may declare several workflows, which run concurrently with no edges
@@ -586,7 +586,7 @@ if let Some(p) = sched.get_mut("ingest") {
 <p>
     That boundary is also where <code>BackpressureSpec::Predicate</code> stops applying.
     It gates one <code>Pipeline</code> inside a hand-built <code>Scheduler</code>, and a
-    <code>saci-service</code> workflow never constructs a <code>Scheduler</code> at all.
+    service workflow never constructs a <code>Scheduler</code> at all.
     What a service workflow gets instead is the runners' own
     <a href="{{ get_url(path='@/service/operate/flow-control.md') }}">adaptive flow control</a>: an
     automatic per-source admission target, config-driven rather than a closure, with no

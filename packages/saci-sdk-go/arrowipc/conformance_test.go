@@ -30,7 +30,7 @@ const conformanceDir = "../../arrow-ipc-conformance"
 const conformanceFormatVersion = 1
 
 // conformanceHint is the command that regenerates the corpus.
-const conformanceHint = "regenerate with `cargo run -p saci-service --features conformance --example conformance_vectors -- emit`"
+const conformanceHint = "regenerate with `cargo run -p saci --features conformance --example conformance_vectors -- emit`"
 
 // reasonSubstring maps a corpus reason code to the fragment this codec's own
 // message carries.

@@ -33,8 +33,8 @@ finished component starts with it in memory.
 
 Build (from this directory):
 
-    componentize-py -d ../../../../crates/saci-processor/wit -w saci-pipeline bindings .
-    componentize-py -d ../../../../crates/saci-processor/wit -w saci-pipeline componentize app \
+    componentize-py -d ../../../../crates/saci/wit -w saci-pipeline bindings .
+    componentize-py -d ../../../../crates/saci/wit -w saci-pipeline componentize app \
         -p . -p ../../../../packages/saci-sdk-py/src -o enrich-py.wasm
 
 No `--stub-wasi`: the bundled CPython needs the real WASI imports, which the

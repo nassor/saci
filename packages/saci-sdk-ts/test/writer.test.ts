@@ -233,7 +233,7 @@ const FIXTURE_SACI = new URL('../../../examples/polyglot/generated/fixture_input
 
 const skip = existsSync(FIXTURE_SACI)
   ? false
-  : 'examples/polyglot/generated is absent — run `cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit`';
+  : 'examples/polyglot/generated is absent — run `cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit`';
 
 test('an arrow-rs stream re-encoded by the writer keeps every value', { skip }, () => {
   // The fixture is what arrow-rs produces, so this pins the writer against a

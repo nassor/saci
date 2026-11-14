@@ -7,146 +7,494 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 publish.workspace = true
-description = "Embed SACI as a pure-Rust library: the columnar engine, the connectors that need nothing installed or already running, byte formats, and the wasm processor / native plugin authoring SDKs. No external database or message broker."
+description = "SACI: a batch processing engine on Apache Arrow. The columnar engine, connectors, byte formats, the wasm processor and native plugin SDKs, and the service host, each behind its own feature."
 
 [features]
 default = ["engine"]
 
-# One dependency carrying every capability this crate has, for a host-side
-# embedder: the engine, windowed aggregation, every connector and byte format
-# this crate carries, and both authoring SDKs.
-#
-# A wasm processor crate still builds with `--no-default-features --features
-# processor`: `all` reaches saci-core's `runtime` feature through `engine`,
-# and tokio cannot target wasm32-wasip2.
-#
-# `all_bundle_reaches_every_feature` in `crates/saci/tests/feature_bundles.rs`
-# expands this list through the `connectors` and `transformers` groups
-# transitively and requires every feature the crate declares to be reachable,
-# so a connector or byte format left out of its group fails it.
-all = [
-    "engine",
-    "windows",
-    "connectors",
-    "transformers",
-    "transformer-contract",
-    "processor",
-    "plugin",
+# Bundles
+
+# What `cargo install saci --features server` builds: a `saci-service` binary
+# that runs with nothing installed or already running alongside it. Seven
+# connectors qualify: a channel inside the process, local disk, an HTTP client
+# and listening HTTP source, a raw TCP socket, a raw UDP socket, a peer SACI
+# service and an embedded redb file. Every connector that needs a specific
+# broker, database, object store or OTLP endpoint first is opt-in, and so is a
+# Raft cluster node, which is a deliberate deployment choice.
+server = [
+    "mimalloc", "service", "wasm-host", "windows", "parquet-checkpoint",
+    "connector-channel", "connector-file", "connector-http", "connector-tcp",
+    "connector-udp", "connector-saci", "connector-redb",
+    "transformer-ndjson", "transformer-csv", "transformer-parquet",
+    "transformer-avro", "transformer-arrow-ipc",
 ]
-
-# The columnar engine: Dataset, Pipeline, System, Scheduler, Component, plus
-# the Source/Sink traits and the schema cast helpers. Forwards saci-core's
-# `io` feature, which itself implies `runtime` (tokio and rayon stage
-# parallelism).
-engine = ["dep:saci-core", "saci-core/io"]
-
-# Beam-style windowed aggregation (WindowSpec, WatermarkState,
-# WindowedSystemBuilder, WindowAccumulator). `engine`, `processor` and
-# `plugin` each enable `dep:saci-core` directly (see both below), so
-# toggling saci-core's own `windows` feature here is enough regardless of
-# which of the three is active.
-windows = ["saci-core?/windows"]
-
-# The transformer contract (Transformer, BatchReader, BatchWriter,
-# MessageDecoder): pulled in by every connector that reads a byte format and
-# by every `transformer-*` feature below. Not meant to be enabled directly.
-transformer-contract = ["dep:saci-transformer"]
-
-# Connectors that need nothing installed or already running: a channel inside
-# the process, local disk, an embedded redb key/value file, an HTTP client, two
-# raw sockets, and a peer SACI service. HTTP, TCP, UDP and the peer link speak
-# the network and depend on no particular server product. Excluded are
-# saci-connector-kafka, -mariadb, -nats, -postgresql, -s3 and -turso, each of which
-# requires a specific broker, database or object store installed and running
-# first.
-connector-channel = ["engine", "dep:saci-connector-channel"]
-connector-file = ["engine", "dep:saci-connector-file", "transformer-contract"]
-connector-redb = ["engine", "dep:saci-connector-redb", "transformer-contract"]
-connector-http = ["engine", "dep:saci-connector-http", "transformer-contract"]
-connector-tcp = ["engine", "dep:saci-connector-tcp", "transformer-contract"]
-connector-udp = ["engine", "dep:saci-connector-udp", "transformer-contract"]
-# A `saci` node carries `RecordBatch`es natively, so this one needs no
-# transformer contract.
-connector-saci = ["engine", "dep:saci-connector-saci"]
+# The connectors that need nothing installed or already running.
 connectors = [
-    "connector-channel",
-    "connector-file",
-    "connector-redb",
-    "connector-http",
-    "connector-tcp",
-    "connector-udp",
-    "connector-saci",
+    "connector-channel", "connector-file", "connector-redb", "connector-http",
+    "connector-tcp", "connector-udp", "connector-saci",
 ]
-
-# Byte formats a connector reads and writes.
-transformer-arrow-ipc = ["dep:saci-transformer-arrow-ipc", "transformer-contract"]
-transformer-avro = ["dep:saci-transformer-avro", "transformer-contract"]
-transformer-csv = ["dep:saci-transformer-csv", "transformer-contract"]
-transformer-ndjson = ["dep:saci-transformer-ndjson", "transformer-contract"]
-transformer-parquet = ["dep:saci-transformer-parquet", "transformer-contract"]
 transformers = [
-    "transformer-arrow-ipc",
-    "transformer-avro",
-    "transformer-csv",
-    "transformer-ndjson",
-    "transformer-parquet",
+    "transformer-arrow-ipc", "transformer-avro", "transformer-csv",
+    "transformer-ndjson", "transformer-parquet",
+]
+# Every capability the crate carries. `connector-kafka` is in here, so this
+# build needs cmake and a C toolchain on PATH for its vendored librdkafka.
+#
+# `conformance` is deliberately absent: it enables `arrow-ipc/lz4`, which would
+# make the host accept a compressed record batch the wire format otherwise
+# rejects. It is the corpus generator's switch, not a capability.
+# `tests/feature_bundles.rs` requires every other feature to be reachable from
+# this list and fails if `conformance` is.
+all = [
+    "engine", "windows", "processor", "plugin", "server", "service-cluster",
+    "plugin-host", "connectors", "transformers",
+    "connector-clickhouse", "connector-kafka", "connector-mariadb",
+    "connector-nats", "connector-opentelemetry", "connector-postgresql",
+    "connector-s3", "connector-turso",
 ]
 
-# Author a WebAssembly Component Model processor pipeline by hand: `Pipeline`,
-# `System`, `Component` (the trait), `Config`, `Error`, `Result`,
-# `ProcessorState`, `RouteDecision` and `export_pipeline!`. A processor
-# targets wasm32-wasip2, so build with `--no-default-features --features
-# processor`: saci-core then carries its `processor` feature (the
-# sequential pollster executor) instead of `engine`'s `runtime`, which
-# pulls in tokio and cannot target wasm32-wasip2.
-#
-# Does NOT carry the `#[derive(Component)]`/`#[transform]`/`#[fold]`/
-# `#[processor]` macros: their expansions name `::saci_processor::...`
-# literally (crates/saci-macros/src/lib.rs's own doc), which only resolves
-# when `saci-processor` is a direct dependency of the crate invoking them,
-# not a transitive one reached through this facade. A processor crate that
-# wants those macros depends on `saci-processor` directly instead of (or
-# alongside) `saci`.
-processor = ["dep:saci-processor", "dep:saci-core", "saci-core/processor"]
+# Engine
 
-# Author a native plugin by hand: a cdylib the host `dlopen`s, exporting
-# the saci-plugin-abi C ABI through `export_plugin!`. Also enables
-# `dep:saci-core` directly (matching `processor`, above): saci-plugin's own
-# edge to saci-core already asks for `runtime`, so this adds no new feature
-# to the build, only a name this crate can use directly instead of going
-# through `saci-plugin::` for every re-export.
-plugin = ["dep:saci-plugin", "dep:saci-core"]
+# tokio and rayon stage parallelism. Cannot target wasm32-wasip2.
+runtime = ["dep:tokio", "dep:rayon", "dep:num_cpus"]
+# The Source/Sink traits and the schema cast helpers.
+io = ["runtime"]
+# The columnar engine: Dataset, Pipeline, System, Scheduler, Component, and the
+# Source/Sink traits.
+engine = ["io"]
+# Beam-style windowed aggregation.
+windows = []
+tracing = ["dep:tracing"]
+# OpenTelemetry instruments: the service's own series and the connectors'.
+metrics = ["dep:opentelemetry"]
+# Trace context carried across a `saci` connector link.
+trace-context = ["tracing", "dep:opentelemetry", "dep:tracing-opentelemetry"]
+
+# Authoring SDKs
+
+# A WebAssembly Component Model processor: sequential execution driven by the
+# pollster executor, so build with `--no-default-features --features processor`
+# for wasm32-wasip2.
+processor = ["dep:pollster", "dep:saci-macros"]
+# A native plugin: a cdylib the host `dlopen`s.
+plugin = ["runtime", "dep:pollster", "dep:serde_json", "dep:base64"]
+
+# Contracts, pulled in by the features below; not meant to be named directly.
+config = ["dep:kdl", "dep:serde_json"]
+transformer-contract = ["runtime", "config"]
+connector-contract = ["io", "transformer-contract"]
+
+# Byte formats
+transformer-arrow-ipc = ["transformer-contract", "io"]
+transformer-avro = ["transformer-contract", "io", "dep:arrow-avro"]
+transformer-csv = ["transformer-contract", "dep:arrow-csv"]
+transformer-ndjson = ["transformer-contract", "dep:arrow-json"]
+transformer-parquet = ["transformer-contract", "io", "dep:parquet", "dep:bytes"]
+
+# Connectors. Kafka, NATS and UDP imply `transformer-ndjson` and TCP implies
+# `transformer-arrow-ipc` so the feature alone is runnable; every other
+# connector's node names its `transformer` and the user picks the formats.
+connector-channel = ["connector-contract"]
+connector-file = ["connector-contract"]
+connector-http = [
+    "connector-contract", "dep:bytes", "dep:futures-util", "tokio/fs", "dep:tempfile",
+    "dep:reqwest", "reqwest/http2", "reqwest/gzip", "reqwest/brotli", "reqwest/zstd", "reqwest/deflate",
+    "dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pki-types",
+    "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:tokio-rustls",
+    "dep:h3", "dep:h3-quinn", "dep:quinn", "dep:brotli", "dep:flate2", "dep:zstd", "dep:subtle",
+]
+connector-kafka = ["connector-contract", "dep:futures-util", "dep:rdkafka", "transformer-ndjson"]
+connector-nats = ["connector-contract", "dep:futures-util", "tokio/fs", "dep:bytes", "dep:async-nats", "transformer-ndjson"]
+connector-opentelemetry = [
+    "connector-contract", "dep:base64", "dep:bytes", "dep:serde_json", "tokio/net",
+    "dep:opentelemetry-proto", "dep:prost",
+    "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util",
+    "dep:reqwest", "reqwest/http2", "reqwest/gzip", "reqwest/brotli", "reqwest/zstd", "reqwest/deflate",
+    "dep:rustls", "dep:subtle",
+]
+connector-postgresql = [
+    "connector-contract", "tokio/net", "tokio/io-util", "dep:futures-util",
+    "dep:tokio-postgres", "dep:postgres-protocol", "dep:bytes",
+    "dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types",
+]
+# MariaDB and MySQL servers share one connector.
+connector-mariadb = [
+    "connector-contract", "tokio/net", "tokio/io-util", "dep:futures-util", "dep:serde_json",
+    "dep:mysql_async", "dep:mysql_common",
+    "dep:rustls", "mysql_async/rustls-tls", "mysql_async/ring", "mysql_async/tls12",
+]
+# ClickHouse speaks native ArrowStream over HTTP.
+connector-clickhouse = [
+    "connector-contract", "dep:clickhouse", "clickhouse/rustls-tls-ring",
+    "clickhouse/rustls-tls-webpki-roots", "dep:bytes", "tokio/net", "tokio/rt", "dep:url",
+]
+connector-turso = ["connector-contract", "dep:serde_json", "dep:base64", "dep:turso"]
+connector-s3 = [
+    "connector-contract", "dep:futures-util", "tokio/fs", "tokio/io-util",
+    "dep:tempfile", "dep:object_store", "dep:chrono",
+]
+connector-tcp = ["connector-contract", "tokio/net", "tokio/io-util", "transformer-arrow-ipc"]
+connector-udp = ["connector-contract", "tokio/net", "transformer-ndjson"]
+connector-redb = ["connector-contract", "dep:tempfile", "dep:redb"]
+connector-saci = ["connector-contract", "tokio/net", "tokio/io-util"]
+
+# Host
+
+# In-process telemetry: time-bounded ring buffers fed by a `tracing` layer and
+# an in-memory OpenTelemetry metric exporter, read back through the control
+# plane's JSON API.
+inspector = ["runtime", "tracing", "metrics", "dep:tracing-subscriber", "dep:opentelemetry_sdk"]
+distributed = [
+    "runtime", "dep:redb", "dep:uuid", "dep:serde_json", "dep:serde_bytes", "dep:hex",
+    "tokio/net", "tokio/io-util", "dep:tokio-util",
+]
+distributed-raft = ["distributed", "dep:openraft", "dep:futures-util", "dep:postcard"]
+# Archival Parquet checkpoint store.
+parquet-checkpoint = ["distributed", "dep:parquet"]
+# The WebAssembly processor host.
+wasm-host = ["runtime", "dep:wasmtime", "dep:wasmtime-wasi", "dep:sha3"]
+# The native plugin host: dlopen a shared library exporting the plugin C ABI.
+# `sha3` is the optional content digest for the library file.
+plugin-host = ["runtime", "dep:libloading", "dep:base64", "dep:serde_json", "dep:sha3"]
+# Generator for the cross-language conformance corpus in
+# packages/arrow-ipc-conformance/. `arrow-ipc/lz4` is enabled only here, so a
+# normal build still refuses a compressed record batch: the corpus needs to
+# WRITE one to prove every codec rejects it.
+conformance = ["arrow-ipc/lz4", "dep:serde_json"]
+# KDL configuration, the factory Registry, the runners, the axum control plane
+# and the `saci-service` binary.
+service = [
+    "connector-contract", "distributed", "parquet-checkpoint", "tracing", "inspector",
+    "metrics", "trace-context",
+    "dep:axum", "dep:tower", "dep:tower-http", "dep:tokio-util", "dep:tracing-subscriber",
+    "dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry", "dep:prometheus", "dep:serde_json", "dep:postcard",
+    "dep:clap", "dep:reqwest", "reqwest/json", "dep:rustls", "dep:dotenvy",
+]
+service-cluster = ["service", "distributed-raft"]
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-saci-core = { workspace = true, optional = true }
+arrow-array   = { workspace = true }
+arrow-schema  = { workspace = true }
+arrow-buffer  = { workspace = true }
+arrow-select  = { workspace = true }
+arrow-cast    = { workspace = true }
+arrow-arith   = { workspace = true }
+arrow-ord     = { workspace = true }
+arrow-ipc     = { workspace = true }
+serde_arrow   = { workspace = true }
+async-trait   = { workspace = true }
+futures       = { workspace = true }
+serde         = { workspace = true }
+fnv           = { workspace = true }
+rand          = { workspace = true }
 
-saci-connector-channel = { workspace = true, optional = true }
-saci-connector-file = { workspace = true, optional = true }
-saci-connector-redb = { workspace = true, optional = true }
-saci-connector-http = { workspace = true, optional = true }
-saci-connector-tcp = { workspace = true, optional = true }
-saci-connector-udp = { workspace = true, optional = true }
-saci-connector-saci = { workspace = true, optional = true }
+# Engine and SDKs
+tokio         = { workspace = true, optional = true }
+rayon         = { workspace = true, optional = true }
+num_cpus      = { workspace = true, optional = true }
+tracing       = { workspace = true, optional = true }
+pollster      = { version = "1.0.1", optional = true }
+saci-macros   = { workspace = true, optional = true }
+kdl           = { workspace = true, optional = true }
+serde_json    = { workspace = true, optional = true }
+base64        = { workspace = true, optional = true }
+bytes         = { workspace = true, optional = true }
+futures-util  = { workspace = true, optional = true }
+tempfile      = { workspace = true, optional = true }
+opentelemetry = { version = "0.32", optional = true }
+# 0.33 is the release that depends on the pinned `opentelemetry 0.32` line.
+tracing-opentelemetry = { version = "0.33", optional = true }
 
-saci-transformer = { workspace = true, optional = true }
-saci-transformer-arrow-ipc = { workspace = true, optional = true }
-saci-transformer-avro = { workspace = true, optional = true }
-saci-transformer-csv = { workspace = true, optional = true }
-saci-transformer-ndjson = { workspace = true, optional = true }
-saci-transformer-parquet = { workspace = true, optional = true }
+# Byte formats
+arrow-avro    = { workspace = true, optional = true }
+arrow-csv     = { workspace = true, optional = true }
+arrow-json    = { workspace = true, optional = true }
+parquet       = { workspace = true, optional = true }
 
-saci-processor = { workspace = true, optional = true }
-saci-plugin = { workspace = true, optional = true }
+# Connectors
+reqwest       = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"], optional = true }
+rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-platform-verifier = { version = "0.7", optional = true }
+rustls-pki-types = { version = "1.15", features = ["std"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+http          = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper         = { version = "1", features = ["server", "http1", "http2"], optional = true }
+hyper-util    = { version = "0.1", features = ["server-auto", "tokio"], optional = true }
+tokio-rustls  = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+h3            = { version = "0.0.8", optional = true }
+h3-quinn      = { version = "0.0.10", optional = true }
+quinn         = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
+brotli        = { version = "9.0.0", optional = true }
+flate2        = { version = "1", optional = true }
+zstd          = { version = "0.14.0", optional = true }
+subtle        = { version = "2", optional = true }
+rdkafka       = { version = "0.39", features = ["cmake-build"], optional = true }
+async-nats    = { version = "0.50.0", default-features = false, features = [
+    "jetstream", "nkeys", "nuid", "ring", "server_2_10", "server_2_12", "server_2_14",
+], optional = true }
+opentelemetry-proto = { workspace = true, optional = true }
+prost         = { workspace = true, optional = true }
+tokio-postgres = { version = "0.7.18", optional = true }
+postgres-protocol = { version = "0.6.12", optional = true }
+tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["ring"], optional = true }
+mysql_async   = { workspace = true, optional = true }
+mysql_common  = { workspace = true, optional = true }
+clickhouse    = { workspace = true, optional = true }
+url           = { version = "2", optional = true }
+turso         = { workspace = true, optional = true }
+object_store  = { version = "0.14.2", default-features = false, features = ["aws"], optional = true }
+chrono        = { version = "0.4.45", default-features = false, features = ["clock", "std"], optional = true }
+redb          = { workspace = true, optional = true }
 
-arrow-array = { workspace = true }
-arrow-schema = { workspace = true }
+# Host
+uuid          = { workspace = true, optional = true }
+serde_bytes   = { workspace = true, optional = true }
+hex           = { version = "0.4.3", optional = true }
+tokio-util    = { workspace = true, optional = true }
+# `version` is required for `cargo package`/`publish` (a bare git dependency
+# is rejected); it is a caret floor, not an exact pin, so it tolerates the
+# `release-0.10` branch moving forward to a newer 0.10.0-alpha.N build while
+# still requiring the git-resolved crate to actually be a 0.10.0 pre-release.
+# Switch to a plain `version` (dropping `git`/`branch`) once 0.10.0 stabilizes.
+openraft      = { git = "https://github.com/databendlabs/openraft", branch = "release-0.10", version = "0.10.0-alpha.34", features = ["serde"], optional = true }
+postcard      = { workspace = true, optional = true }
+wasmtime      = { workspace = true, optional = true }
+wasmtime-wasi = { workspace = true, optional = true }
+sha3          = { workspace = true, optional = true }
+libloading    = { workspace = true, optional = true }
+axum          = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"], optional = true }
+tower         = { version = "0.5", optional = true }
+tower-http    = { version = "0.7", default-features = false, features = ["trace", "timeout", "limit"], optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"], optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["metrics", "trace"], optional = true }
+opentelemetry-prometheus = { version = "0.32", optional = true }
+prometheus    = { version = "0.14", default-features = false, optional = true }
+# `reqwest-blocking-client` is the exporter default and the only client the
+# non-experimental `BatchSpanProcessor` supports: that processor owns an OS
+# thread and drives the exporter with `futures_executor::block_on`, so an async
+# client would have no reactor. It shares the `reqwest 0.13` tree the CLI's own
+# client lives in, the one reqwest generation the crate links.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
+clap          = { version = "4", features = ["derive", "env"], optional = true }
+# Loads a repo-root `.env` for cloud-service credentials, so `${VAR}`
+# placeholders in a config resolve without a manual export.
+dotenvy       = { workspace = true, optional = true }
+mimalloc      = { version = "0.1.52", optional = true }
 
 [dev-dependencies]
-serde = { workspace = true }
-tokio = { workspace = true }
-async-trait = { workspace = true }
+anyhow        = { workspace = true }
+arrow-array   = { workspace = true }
+arrow-buffer  = { workspace = true }
+arrow-ipc     = { workspace = true }
+arrow-schema  = { workspace = true }
+async-nats    = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
+base64        = { workspace = true }
+clickhouse    = { workspace = true }
+criterion     = { workspace = true }
+# The reference engine the `vs_datafusion_q6` bench measures against.
+datafusion    = { version = "55", default-features = false, features = ["sql", "parquet"] }
+dotenvy       = { workspace = true }
+libc          = { workspace = true }
+mimalloc      = "0.1.52"
+mysql_async   = { workspace = true }
+num_cpus      = { workspace = true }
+openraft      = { git = "https://github.com/databendlabs/openraft", branch = "release-0.10", version = "0.10.0-alpha.34", features = ["serde"] }
+opentelemetry = { version = "0.32" }
+opentelemetry-prometheus = { version = "0.32" }
+opentelemetry_sdk = { version = "0.32", features = ["metrics", "trace"] }
+postcard      = { workspace = true }
+prometheus    = { version = "0.14", default-features = false }
+rayon         = { workspace = true }
+rcgen         = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+rdkafka       = { version = "0.39", features = ["cmake-build"] }
+redb          = { workspace = true }
+reqwest       = { version = "0.13.4", default-features = false, features = ["json", "rustls-no-provider", "blocking"] }
+serde         = { workspace = true }
+serde_arrow   = { workspace = true }
+serde_json    = { workspace = true }
+sha3          = { workspace = true }
+tempfile      = { workspace = true }
+testcontainers = "0.28"
+tokio         = { workspace = true, features = ["fs"] }
+tokio-postgres = "0.7.18"
+tokio-util    = { workspace = true }
+tracing       = { workspace = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "registry"] }
+turso         = { workspace = true }
+uuid          = { workspace = true }
+
+[[bin]]
+name = "saci-service"
+path = "src/bin/saci-service/main.rs"
+required-features = ["service"]
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[[bench]]
+name = "batch_vs_stream"
+harness = false
+required-features = ["io"]
+
+[[bench]]
+name = "parallelism"
+harness = false
+
+[[bench]]
+name = "parallelism_compute"
+harness = false
+
+[[bench]]
+name = "tpch_q1"
+harness = false
+
+[[bench]]
+name = "tpch_q6"
+harness = false
+
+[[bench]]
+name = "ipc_checkpoint"
+harness = false
+
+[[bench]]
+name = "vs_datafusion_q6"
+harness = false
+
+[[bench]]
+name = "distributed"
+harness = false
+required-features = ["distributed"]
+
+[[bench]]
+name = "wasm_roundtrip"
+harness = false
+# `wasm-host` carries the host runtime this measures; `service` is what puts
+# the `tracing` span and the metrics write on the measured path, so the figures
+# match what the shipped binary pays.
+required-features = ["service", "wasm-host"]
 
 [[example]]
 name = "first_pipeline"
 path = "../../examples/native/first_pipeline.rs"
 required-features = ["engine"]
+
+[[example]]
+name = "scheduler_etl"
+path = "../../examples/native/scheduler_etl.rs"
+required-features = ["engine"]
+
+[[example]]
+name = "scheduler_etl_parallel"
+path = "../../examples/native/scheduler_etl_parallel.rs"
+required-features = ["engine"]
+
+[[example]]
+name = "scheduler_dag"
+path = "../../examples/native/scheduler_dag.rs"
+required-features = ["engine"]
+
+[[example]]
+name = "distributed_scheduler"
+path = "../../examples/native/distributed_scheduler.rs"
+required-features = ["distributed"]
+
+[[example]]
+name = "window_aggregation"
+path = "../../examples/native/window_aggregation.rs"
+required-features = ["windows"]
+
+[[example]]
+name = "distributed_windowed"
+path = "../../examples/native/distributed_windowed.rs"
+required-features = ["distributed", "windows"]
+
+[[example]]
+name = "windowed_fan_in"
+path = "../../examples/native/windowed_fan_in.rs"
+# Two ChannelSources merged into one windowed processor: the fan-in merge and
+# the host-side watermark both live in the service runner.
+required-features = ["service", "windows", "connector-channel"]
+
+[[example]]
+name = "distributed_fulfillment"
+path = "../../examples/distributed_fulfillment/main.rs"
+required-features = ["service-cluster"]
+
+[[example]]
+name = "polyglot_orders"
+path = "../../examples/polyglot/polyglot_orders.rs"
+required-features = ["wasm-host"]
+
+[[example]]
+name = "polyglot_schema_emit"
+path = "../../examples/polyglot/schema_emit.rs"
+required-features = ["wasm-host"]
+
+[[example]]
+name = "native_plugin"
+path = "../../examples/plugins/native_plugin.rs"
+required-features = ["plugin-host"]
+
+[[example]]
+name = "conformance_vectors"
+path = "../../examples/conformance/conformance_vectors.rs"
+required-features = ["conformance"]
+
+[[example]]
+name = "stream_latency"
+path = "../../examples/native/stream_latency.rs"
+required-features = ["service", "connector-channel", "wasm-host"]
+
+# The four publishers reach `async-nats` through the NATS connector, so each
+# names the connector feature: `cargo check --examples` stays green whatever
+# features are selected.
+[[example]]
+name = "quickstart_publish"
+path = "../../examples/quickstart/quickstart_publish.rs"
+required-features = ["connector-nats"]
+
+[[example]]
+name = "branching_publish"
+path = "../../examples/branching/branching_publish.rs"
+required-features = ["connector-nats"]
+
+[[example]]
+name = "windowed_publish"
+path = "../../examples/windowing/windowed_publish.rs"
+required-features = ["connector-nats"]
+
+[[example]]
+name = "multi_workflow_publish"
+path = "../../examples/multi_workflow/multi_workflow_publish.rs"
+required-features = ["connector-nats"]
+
+[[example]]
+name = "integrity_check"
+path = "../../examples/integrity/integrity_check.rs"
+# Also an HTTP receiver and a control-plane client: it needs `axum` and
+# `reqwest`, both of which `service` turns on. Its three publish transports
+# reach it through `rdkafka`, `async-nats` and `tokio-postgres`, which are
+# unconditional dev-dependencies, so no connector feature is named.
+required-features = [
+    "service", "transformer-arrow-ipc", "transformer-csv", "transformer-ndjson",
+    "transformer-parquet",
+]
+
+[[example]]
+name = "scheduler_parquet_etl"
+path = "../../examples/connectors/scheduler_parquet_etl.rs"
+required-features = ["connector-file", "transformer-csv", "transformer-ndjson", "transformer-parquet"]
+
+[[example]]
+name = "mariadb_roundtrip"
+path = "../../examples/connectors/mariadb_roundtrip.rs"
+required-features = ["connector-mariadb"]
+
+[[example]]
+name = "postgres_roundtrip"
+path = "../../examples/connectors/postgres_roundtrip.rs"
+required-features = ["connector-postgresql"]

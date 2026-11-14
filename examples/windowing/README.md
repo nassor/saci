@@ -89,7 +89,7 @@ only macOS and Windows need `SACI_PLUGIN_LIB`:
 Serve. Linux:
 
 ```text
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve \
   --config examples/windowing/tumbling/tumbling.kdl
 ```
 
@@ -97,7 +97,7 @@ macOS:
 
 ```text
 SACI_PLUGIN_LIB=target/release/libwindowing_tumbling_plugin.dylib \
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve \
   --config examples/windowing/tumbling/tumbling.kdl
 ```
 
@@ -105,13 +105,13 @@ Windows (PowerShell), on one line, with `$env:SACI_PLUGIN_LIB` set as in the
 table above:
 
 ```powershell
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- serve --config examples/windowing/tumbling/tumbling.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve --config examples/windowing/tumbling/tumbling.kdl
 ```
 
 Publish, in another terminal, on every platform:
 
 ```text
-cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 ```
 
 Read the totals:
@@ -140,8 +140,8 @@ Build, serve and publish, on every platform:
 
 ```text
 cargo build --release -p windowing-sliding-wasm --target wasm32-wasip2
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve --config examples/windowing/sliding/sliding.kdl
-cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/windowing/sliding/sliding.kdl
+cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 ```
 
 Read the totals:
@@ -170,8 +170,8 @@ session never outlives its burst. Build, serve and publish, on every platform:
 
 ```text
 cargo build --release -p windowing-session-wasm --target wasm32-wasip2
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve --config examples/windowing/session/session.kdl
-cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 --gap-every 20 --gap-ms 30000
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/windowing/session/session.kdl
+cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 --gap-every 20 --gap-ms 30000
 ```
 
 Read the totals:
@@ -227,17 +227,17 @@ Validate a config first, if you like (set `SACI_PLUGIN_LIB` as in the
 tumbling table above on macOS and Windows):
 
 ```text
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate \
   --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 Windows (PowerShell), on one line:
 
 ```powershell
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- validate --config examples/windowing/tumbling/tumbling.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 
-The sliding and session configs also need `--features connector-nats,connector-postgresql,transformer-ndjson,wasm`,
-but no `plugin`: neither declares one.
+The sliding and session configs also need `--features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host`,
+but no `plugin-host`: neither declares a plugin node.
 
 ## Files
 
@@ -250,6 +250,6 @@ but no `plugin`: neither declares one.
 | `sliding/wasm/` | the `windowing-sliding-wasm` processor component |
 | `session/session.kdl` | the session workflow: the same fan-in, one processor, one sink |
 | `session/wasm/` | the `windowing-session-wasm` processor component |
-| `windowed_publish.rs` | the `saci-service` example that feeds both NATS subjects |
+| `windowed_publish.rs` | the `saci` example that feeds both NATS subjects |
 | `schema.sql` | the four tables, mounted into the Postgres container |
 | `docker-compose.yml` | NATS 2.11 and PostgreSQL 18 |

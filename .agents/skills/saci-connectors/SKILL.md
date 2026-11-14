@@ -1,21 +1,22 @@
 ---
 name: saci-connectors
-description: Use when adding, changing, configuring, testing or documenting a SACI source or sink connector (saci-connector and every saci-connector-* crate), a SourceFactory or SinkFactory registration, ConnectorContext, a connector's rebuildable/self-healing contract, a connector's KDL config or example, or the connector matrix test.
+description: Use when adding, changing, configuring, testing or documenting a SACI source or sink connector (`saci::connector` and every `connector-*` feature of the `saci` crate), a SourceFactory or SinkFactory registration, ConnectorContext, a connector's rebuildable/self-healing contract, a connector's KDL config or example, or the connector matrix test.
 ---
 
 # SACI connectors
 
 ## Contract
 
-`saci-connector` holds the factory contract: `SourceFactory`, `SinkFactory`, `ConnectorContext`
-(which carries the transformer the host resolved for this node, the optional channel bridge, and
-the `NodeIdentity` the host binds to every connector it builds), the `ChannelBridge` trait itself,
-`parse_schema_fields` and `parse_optional_schema_fields`. Both
+`saci::connector` (feature `connector-contract`) holds the factory contract: `SourceFactory`,
+`SinkFactory`, `ConnectorContext` (which carries the transformer the host resolved for this node,
+the optional channel bridge, and the `NodeIdentity` the host binds to every connector it builds),
+the `ChannelBridge` trait itself (`connector::bridge`), `parse_schema_fields` and
+`parse_optional_schema_fields`. Both
 factory traits also carry `rebuildable(&config) -> Result<(), &'static str>`, defaulting to
 `Err(REBUILD_UNDECLARED)`: whether the host may build this connector a second time to heal it. The
-crate sits below `saci-service`, so a connector needs no dependency on the host. `ConfigValue` is
+contract needs no host feature, so a connector needs no dependency on the host. `ConfigValue` is
 the value type in the `SourceFactory`/`SinkFactory`/`TransformerFactory` signatures, so every
-connector and transformer reaches it through `saci-connector` or `saci-transformer`, which
+connector and transformer reaches it through `saci::connector` or `saci::transformer`, which
 re-export it.
 
 `NodeIdentity { service, workflow, node }` is where a connector instance sits: the `node.label()`
@@ -26,15 +27,16 @@ connector built with none gets a configuration error naming itself. `Rebuilder` 
 heal rebuilds with the same identity; `builder.rs`'s `build_source_node`/`build_sink_node` pass
 `Some(...)` and `dlq.rs` passes `None`, because a dead-letter store is not a peer-facing node.
 
-`saci-core`'s `io` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
+The `io` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
 connector moves bytes and a transformer turns bytes into `RecordBatch`es and back, so transport and
-format are separate crates. Connectors: `saci-connector-channel`, `-clickhouse`, `-file`, `-http`, `-kafka`,
-`-mariadb`, `-nats`, `-opentelemetry`, `-postgresql`, `-redb`, `-s3`, `-saci`, `-tcp`, `-turso`, `-udp`. Transformers:
-`saci-transformer-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet`, each registered under its own
+format are separate modules. Connectors, each `saci::connector::<name>`: `channel`, `clickhouse`,
+`file`, `http`, `kafka`, `mariadb`, `nats`, `opentelemetry`, `postgresql`, `redb`, `s3`, `saci`,
+`tcp`, `turso`, `udp`. Transformers, each `saci::transformer::<name>`: `arrow_ipc`, `avro`, `csv`,
+`ndjson`, `parquet`, each registered under its own
 `format` name. A byte-carrying source or sink node names a declared `transformer` node's id;
 `ServiceBuilder` resolves that node's `format` against the `TransformerRegistry` in
-`saci-transformer` once per workflow build and hands the result to the factory inside a
-`ConnectorContext`, so no connector resolves a format itself. `saci-service` owns the `Registry`
+`saci::transformer` once per workflow build and hands the result to the factory inside a
+`ConnectorContext`, so no connector resolves a format itself. The `service` feature owns the `Registry`
 and `register_builtin_factories`, extended through `register_source`, `register_sink`, and
 `register_transformer`. Pipelines integrate via `drain_into_dataset` and `drain_dataset`.
 
@@ -76,13 +78,13 @@ The other shape the host cannot build twice is a `ChannelSource` or `ChannelSink
 `ChannelRegistry` latches per name and refuses a second time, so `rebuild_blocker` reports the
 workflow holding one as `restartable: false`.
 
-## Crates
+## Connectors
 
-- `saci-connector-channel`: `ChannelSource`, `ChannelSink`, an in-memory mpsc transport.
+- `connector::channel`: `ChannelSource`, `ChannelSink`, an in-memory mpsc transport.
   `Sink::pending_rows` reports the row backlog still queued, not the message count.
   `ChannelRegistry` is the name-keyed `ChannelBridge` pairing a sink in one workflow with a source
   in another.
-- `saci-connector-file`: `FileSource`, `FileSink`, local-file IO, format from a transformer.
+- `connector::file`: `FileSource`, `FileSink`, local-file IO, format from a transformer.
   `FileSink` makes `write_batch` exactly-once under `RetryingSink` and cancellation: it records
   the file length before each batch (`pending`), flushes (`BatchWriter::flush`) and syncs, and on
   any failure, or at the top of the next call after a dropped future, drops the writer and cuts
@@ -94,7 +96,7 @@ workflow holding one as `restartable: false`.
   append-only one). Writers write through `Counting`, and `recover` cuts only when the file length
   equals the pre-batch length plus the bytes counted, else another process appended: it leaves the
   file and refuses later calls. A failed `finish` also refuses later calls.
-- `saci-connector-http`: `HttpSource`, `HttpSink`, `HttpPushSource`: two halves that dial and one
+- `connector::http`: `HttpSource`, `HttpSink`, `HttpPushSource`: two halves that dial and one
   that listens, each decoded and encoded by a transformer. `http_version` picks `"auto"`, `"1.1"`,
   `"2"` or `"3"` per node. reqwest carries HTTP/1.1 and HTTP/2, a direct `h3`/`h3-quinn`/`quinn`
   client carries HTTP/3, and `"auto"` never reaches it, because nothing here reads `Alt-Svc` and
@@ -157,12 +159,12 @@ workflow holding one as `restartable: false`.
     (`role` = `source`, `sink` or `push`, plus `method` and `status`),
     `saci_http_request_errors_total` (`kind` = `transport`, `status`, `decode`, `size` or `auth`),
     `saci_http_request_duration_seconds` and `saci_http_bytes_total` (`direction` = `in` or `out`),
-    each also labelled `workflow` and `node` once the host bound a `NodeIdentity`. The crate's two
-    features are `metrics`, which emits them, and `tracing`.
-- `saci-connector-kafka`: `KafkaSource`, `KafkaSink`, librdkafka-backed, one topic or several.
-- `saci-connector-nats`: `NatsSource`, `NatsSink`, core subject pub/sub or JetStream, chosen by a
+    each also labelled `workflow` and `node` once the host bound a `NodeIdentity`. They are emitted
+    under the `metrics` feature and the push source's spans under `tracing`; `service` enables both.
+- `connector::kafka`: `KafkaSource`, `KafkaSink`, librdkafka-backed, one topic or several.
+- `connector::nats`: `NatsSource`, `NatsSink`, core subject pub/sub or JetStream, chosen by a
   mode node's `kind` key.
-- `saci-connector-opentelemetry`: `OpenTelemetryMetricsSource`,
+- `connector::opentelemetry`: `OpenTelemetryMetricsSource`,
   `OpenTelemetryMetricsSink`, OTLP/HTTP metrics in and out, Protobuf or JSON, and no `transformer`:
   an OTLP request is the wire format, so the connector decodes and encodes it itself the way `saci`
   owns Arrow IPC.
@@ -206,10 +208,10 @@ workflow holding one as `restartable: false`.
     double. Any status outside 2xx is a `SaciError::Store` naming the collector's own reason.
   - `Source::finish`, `request_batch_rows` and the metrics feature are not used: an export is
     awaited inside `write_batch`, so `Sink::pending_rows` answers `Some(0)`.
-- `saci-connector-postgresql`: `PostgresSource`, `PostgresSink`, native (non-JDBC) client, TLS, and
+- `connector::postgresql`: `PostgresSource`, `PostgresSink`, native (non-JDBC) client, TLS, and
   `polling` / `cdc_trigger` / `cdc_logical` read modes. Every PostgreSQL type is read/write through
-  `ROWS` in `src/types.rs`; an unmatched type is canonical text. `schema_fields`'s `pg_type` forces
-  and asserts the type; `list` plus `item` cover one-dimensional arrays. `tests/all_types.rs` is
+  `ROWS` in `connector/postgresql/types.rs`; an unmatched type is canonical text. `schema_fields`'s `pg_type` forces
+  and asserts the type; `list` plus `item` cover one-dimensional arrays. `tests/postgresql_all_types.rs` is
   the Docker round-trip per type family. A sink flush is one transaction; a failed `write_batch`
   does not keep its own batch (`RetryingSink` re-drives the same one, so keeping it would write it
   twice), while rows an earlier call accepted under `flush_rows` and a failed `finish` stay
@@ -217,7 +219,7 @@ workflow holding one as `restartable: false`.
   a commit and never reset by a reconnect. A dropped (cancelled) call leaves `own_rows` set and the
   next call takes that batch back out (`recover`); the session is reused, because tokio-postgres
   queues a `ROLLBACK` for a dropped transaction and fails a dropped `COPY` ahead of the next request.
-- `saci-connector-mariadb`: `MariadbSource`, `MariadbSink`, one native client (`mysql_async`, rustls on
+- `connector::mariadb`: `MariadbSource`, `MariadbSink`, one native client (`mysql_async`, rustls on
   ring) for both MariaDB and MySQL servers; `Flavor::{Mariadb, Mysql}` is detected per connection from
   `SELECT VERSION()` and only the SQL spelling differs (statement timeout, upsert tail). No transformer:
   rows arrive typed. Source modes: `polling` (cursor column, optional tiebreak); `cdc_trigger`, either an
@@ -235,11 +237,11 @@ workflow holding one as `restartable: false`.
   `finish` stay buffered. A statement holds at most `min(chunk_rows, 65535 / columns)` rows and, by
   `Chunker`, the session's `max_allowed_packet` in estimated bytes. `ssl_mode "verify_ca"` checks the
   host name too while `mysql_async`'s skip matches a rustls error text rustls 0.23 no longer emits
-  (`tests/tls.rs` pins it). A dropped (cancelled) call leaves `in_flight` set and the next call discards the session (`recover`), so a connection mid-statement is never reused; the saci service itself only drops the processor future, but a library caller may drop a sink one. Cursor and binlog positions persist
+  (`tests/mariadb_tls.rs` pins it). A dropped (cancelled) call leaves `in_flight` set and the next call discards the session (`recover`), so a connection mid-statement is never reused; the saci service itself only drops the processor future, but a library caller may drop a sink one. Cursor and binlog positions persist
   in the offset table `saci_source_offsets` (`INSERT ... ON DUPLICATE KEY UPDATE`, shaped per flavour).
   A cursor over an `AUTO_INCREMENT` integer column (polling, an outbox id, `__seq`; found per session
   in `information_schema.COLUMNS.EXTRA`) is numbered at write, not at commit, so `Holes` in
-  `src/source/sequence.rs` holds back the rows behind a gap wider than
+  `connector/mariadb/source/sequence.rs` holds back the rows behind a gap wider than
   `@@GLOBAL.auto_increment_increment` until a row fills it or the gap is passed. With `PROCESS`
   (probed once per session, `SELECT COUNT(*) FROM information_schema.INNODB_TRX`, error 1227 on
   both servers without it) the reader records, after the read that first shows a hole, the ids
@@ -276,7 +278,7 @@ workflow holding one as `restartable: false`.
   table, never a skip), and a `next_batch` the host drops mid-flight makes the reader replace the
   connections it used, because a connection left mid-statement answers the next statement with the
   previous reply. `cdc_binlog` decodes a row with the table definition in force when it was written:
-  `src/source/history.rs` records each `Definition` (the `information_schema` columns and primary key,
+  `connector/mariadb/source/history.rs` records each `Definition` (the `information_schema` columns and primary key,
   as JSON) in `<offset_table>_schema`, keyed by source `name` and table and tagged with the position it
   holds from (a file by log number and offset, a GTID set by containment). `binlog.rs` resolves one
   `Plan` per definition and every queued `Change` keeps its own, so a batch ends where the plan
@@ -292,16 +294,16 @@ workflow holding one as `restartable: false`.
   position always records the catalog as it is. Entries before the one in force at the stored position
   are pruned (`DELETE` privilege; a failed delete is counted as `kind="schema"`, not raised), and the
   history table's own writes are skipped like the offset table's. `mode.schema_history` (default
-  `#true`) and `mode.schema_history_table` configure it. `src/types.rs`
+  `#true`) and `mode.schema_history_table` configure it. `connector/mariadb/types.rs`
   holds the sorted `TYPES` table keyed by `DATA_TYPE`; `schema_fields`'s `mariadb_type` asserts the
-  server column's type. Tests: `tests/common/mod.rs` is a two-flavour harness, `try_start(Flavor)`
+  server column's type. Tests: `tests/common/mariadb.rs` is a two-flavour harness, `try_start(Flavor)`
   with images from `SACI_MARIADB_TEST_MARIADB_IMAGE` (default `mariadb:11.8`) and
   `SACI_MARIADB_TEST_MYSQL_IMAGE` (default `mysql:8.4`), and `SACI_MARIADB_TEST_ONLY=mariadb|mysql`
   skipping the other flavour (CI's `mariadb_servers` job sweeps older and newer servers). Each shared
   case is an `async fn case(server: &Server)` listed once in the file's `on_every_server!`, so it runs
-  as `mariadb::case` and `mysql::case`. Binaries: `sink`, `source_polling`, `source_trigger`,
-  `source_binlog`, `all_types`, `tls`.
-- `saci-connector-turso`: `TursoSource`, `TursoSink`, the in-process, SQLite-compatible `turso`
+  as `mariadb::case` and `mysql::case`. Binaries: `mariadb_sink`, `mariadb_source_polling`,
+  `mariadb_source_trigger`, `mariadb_source_binlog`, `mariadb_all_types`, `mariadb_tls`.
+- `connector::turso`: `TursoSource`, `TursoSink`, the in-process, SQLite-compatible `turso`
   engine, embedded (`connection.path`) or as a synced replica of Turso Cloud / sqld
   (`connection.remote`, pulled and pushed through `turso::sync`). Source modes `polling` (durable
   cursor), `dump`, and `cdc` (the change table a capture-enabled connection writes); sink write
@@ -317,9 +319,9 @@ workflow holding one as `restartable: false`.
   set and the next call takes that batch back out and rolls back a transaction the flush left open
   on the connection (`recover`, async, found through `is_autocommit`). The embedded engine's futures
   return `Pending` only while it waits on IO, so a local-file test cannot drop one mid-flush: the
-  unit tests in `src/sink.rs` build the open-transaction state by hand, and `tests/sink.rs` makes
+  unit tests in `connector/turso/sink.rs` build the open-transaction state by hand, and `tests/turso_sink.rs` makes
   flushes fail by holding the write lock on a second connection.
-- `saci-connector-clickhouse`: `ClickhouseSource`, `ClickhouseSink`, ClickHouse HTTP client with
+- `connector::clickhouse`: `ClickhouseSource`, `ClickhouseSink`, ClickHouse HTTP client with
   native `ArrowStream` format. Source modes `polling` (cursor column, optional initial cursor and
   tiebreak column, which resumes inside a repeated cursor value), `dump` (paginated full table
   scan), and `query` (arbitrary SQL statement); sink write mode `append` with optional
@@ -350,10 +352,10 @@ workflow holding one as `restartable: false`.
   `query_timeout_ms`), so a landed chunk is recorded and a `TRUNCATE` never runs after the retry's
   rows. Only a request given up on at the bound, or one that failed on the wire, has an unknown
   outcome, which the token covers on a deduplicating table. Tests: the Docker cases at the end of
-  `tests/roundtrip.rs` fail an INSERT with a `CHECK` constraint (`DROP CONSTRAINT` lets the retry
-  through) and slow one with a `sleepEachRow` column default; the unit tests in `src/sink.rs` use a
+  `tests/clickhouse_roundtrip.rs` fail an INSERT with a `CHECK` constraint (`DROP CONSTRAINT` lets the retry
+  through) and slow one with a `sleepEachRow` column default; the unit tests in `connector/clickhouse/sink.rs` use a
   TCP listener that hangs up or stays silent.
-- `saci-connector-redb`: `RedbSource`, `RedbSink`, an embedded redb key/value file as a
+- `connector::redb`: `RedbSource`, `RedbSink`, an embedded redb key/value file as a
   transport, `directory`/`file`/`table` naming it. One entry per non-empty batch, keyed
   `{key_prefix}{seq:020}{key_suffix}` so lexicographic key order is insertion order; the sink
   reads the highest matching key back at open and continues the sequence, and refuses a key that
@@ -384,7 +386,7 @@ workflow holding one as `restartable: false`.
     every key above the prefix region sorts ahead of the matching ones in reverse, so stopping
     there would reset the sequence and collide on the next write. `collect_keys` scans forward,
     where `break` on the first non-matching key is both correct and the early exit.
-- `saci-connector-s3`: `S3Source`, `S3Sink`, any S3-compatible endpoint, timestamped object keys,
+- `connector::s3`: `S3Source`, `S3Sink`, any S3-compatible endpoint, timestamped object keys,
   row/byte/age flush thresholds. The sink's open object (`Pending`) keeps its accepted batches and
   treats the encoder as a cache of them: a failed `write_batch` does not keep its own batch
   (`RetryingSink` re-drives the same one), rows an earlier call accepted and a failed `finish` stay
@@ -392,11 +394,11 @@ workflow holding one as `restartable: false`.
   sent (`attempted`), so a retried object computes the same key and overwrites an upload that
   landed but reported failure. A dropped call leaves `own_rows` set and the next call, or the
   `max_age_ms` ticker, takes that batch back out (`take_back`). Tests drive an in-memory store
-  with scripted `put` failures (`FlakyStore` in `src/sink.rs`).
-- `saci-connector-tcp`: `TcpIngestSource`, `TcpSink`, live length-prefixed frames, decoded and
+  with scripted `put` failures (`FlakyStore` in `connector/s3/sink.rs`).
+- `connector::tcp`: `TcpIngestSource`, `TcpSink`, live length-prefixed frames, decoded and
   encoded by a transformer. The source listens, the sink dials, both register as `"tcp"`. Framing
   is transport, decoding is format.
-- `saci-connector-udp`: `UdpSource`, `UdpSink`, fire-and-forget datagrams, one message each with
+- `connector::udp`: `UdpSource`, `UdpSink`, fire-and-forget datagrams, one message each with
   no length prefix, decoded and encoded by a transformer. The source binds, the sink sends, both
   register as `"udp"`.
   - A zero-length datagram is the liveness probe: the source answers one with a zero-length
@@ -431,7 +433,7 @@ workflow holding one as `restartable: false`.
     least 1 and defaulting to 64, matching `tcp`.
   - Reconnecting is the host's `heal` block and nothing else: a rebuilt sink re-resolves every
     `connect` address and opens fresh sockets.
-- `saci-connector-saci`: `SaciSource`, `SaciSink`, one standalone service pushing
+- `connector::saci`: `SaciSource`, `SaciSink`, one standalone service pushing
   `RecordBatch`es to another. Both register as `"saci"` and neither takes a `transformer`: Arrow
   IPC is the fixed wire format, so `ConnectorContext::transformer` is never called and only
   `identity` is.
@@ -461,22 +463,22 @@ workflow holding one as `restartable: false`.
   - Spans `peer.send` and `peer.receive` carry the same peer fields. Both are `debug_span!`s, the
     level `workflow.batch` opens at, so both also need `observability.log_level="debug"` (or an
     enabling `RUST_LOG`) on their service; the default `log_level="error"` records neither. The
-    `trace-context` feature (on under `saci-service`'s `connector-saci`) puts the sender's span
+    `trace-context` feature (on under `service`) puts the sender's span
     into the frame as a W3C `traceparent` and adopts it on receipt, which is effective only when
     both services also set `observability.otlp_endpoint`, since that is what installs the
     OpenTelemetry layer.
 
 ## Features
 
-`saci-service`:
+`crates/saci/Cargo.toml`:
 
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
   `connector-mariadb`, `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
   `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
-  one per connector
-  crate. Each pulls the crate in and registers its factories in `register_builtin_factories`
-  (each implies `service`). `connector-channel`, `connector-file`, `connector-http`,
-  `connector-tcp`, `connector-udp`, `connector-saci` and `connector-redb` are in `default`: an
+  one per connector module. Each compiles `saci::connector::<name>` with that module's optional
+  dependencies and registers its factories in `register_builtin_factories` only when `service` is
+  also on. `connector-channel`, `connector-file`, `connector-http`,
+  `connector-tcp`, `connector-udp`, `connector-saci` and `connector-redb` are in `connectors` and `server`: an
   in-process channel, local disk, an
   HTTP client and a listening HTTP source, two raw sockets, a peer SACI service, and an embedded
   key/value file on local
@@ -494,25 +496,24 @@ workflow holding one as `restartable: false`.
   connector resolves a format implicitly: a byte-carrying node names a declared `transformer`
   node's id, and that node's own `format` key is what the registry resolves. `connector-file`,
   `connector-http`, `connector-redb` and `connector-s3` imply no transformer, so the config picks
-  which formats the binary carries; `connector-http` turns on its crate's own `tracing` and
-  `metrics` features as well. `connector-saci` implies none and resolves none, and turns on
-  its crate's `trace-context` and `metrics` features instead.
-
-`saci`:
-
-- `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
-  `connector-udp`, `connector-saci` (`connectors` enables all seven): one per connector crate that
-  needs nothing installed or already running. Deliberately excludes `saci-connector-kafka`,
-  `-mariadb`, `-nats`, `-postgresql`, `-s3`, `-turso`, `-clickhouse` and `-opentelemetry`, each of which
-  requires a specific broker, database, object store or OTLP endpoint installed and running first.
+  which formats the binary carries. `connector-saci` implies none and resolves none. The metrics,
+  spans and W3C trace propagation of `connector-http` and `connector-saci` follow the `metrics`,
+  `tracing` and `trace-context` features, which `service` turns on. TLS is always compiled into
+  `connector-postgresql`, `connector-mariadb` and `connector-clickhouse`.
+- `connectors` enables the seven that need nothing installed or already running: `connector-channel`,
+  `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`, `connector-udp` and
+  `connector-saci`. `server` carries the same seven. Both deliberately exclude `connector-kafka`,
+  `connector-mariadb`, `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso`,
+  `connector-clickhouse` and `connector-opentelemetry`, each of which requires a specific broker,
+  database, object store or OTLP endpoint installed and running first.
 
 ## Build prerequisites
 
-`saci-connector-kafka` vendors librdkafka through `librdkafka-sys`'s `cmake-build` feature, so
+`connector-kafka` vendors librdkafka through `librdkafka-sys`'s `cmake-build` feature, so
 `cmake` and a C toolchain (MSVC Build Tools on Windows) must be on `PATH` before `cargo build`
 reaches it. On POSIX targets that build also needs libcurl's development headers
 (`libcurl4-openssl-dev` on Debian/Ubuntu, the equivalent elsewhere; CI installs them in the `test`,
-`distributed_chaos`, `wasm_processor` and `polyglot` jobs, every job that compiles a saci-service
+`distributed_chaos`, `wasm_processor` and `polyglot` jobs, every job that compiles a `saci`
 test or example target): the `config.h` cmake generates defines `WITH_OAUTHBEARER_OIDC` as `0`
 rather than leaving it undefined, and `rdkafka_conf.c` gates its `#include <curl/curl.h>` on
 `#ifdef`, so that header is
@@ -522,7 +523,7 @@ any of these.
 
 ## Examples and configs
 
-- `examples/connectors/`: one-off connector-crate examples, `postgres_roundtrip.rs`,
+- `examples/connectors/`: one-off connector examples, `postgres_roundtrip.rs`,
   `mariadb_roundtrip.rs` and `scheduler_parquet_etl.rs`.
 - `examples/configs/`: runnable KDL configs for the `saci-service` binary itself (not
   `[[example]]` targets), one per connector plus standalone and cluster templates. See its own
@@ -538,7 +539,7 @@ the directory rather than a hand-maintained list.
 Docker-backed tests soft-skip when no daemon is reachable; the `try_start` convention is in
 `AGENTS.md`'s Testing section.
 
-`crates/saci-service/tests/connector_matrix.rs` (`cargo xtask matrix`, the `matrix` nextest
+`crates/saci/tests/connector_matrix.rs` (`cargo xtask matrix`, the `matrix` nextest
 profile, `ci.yml`'s `connector_matrix_build` and `connector_matrix` jobs) covers 4320 cases, one
 per `{source connector, sink connector, byte format, processor runtime}` tuple over 16 source
 connectors and 15 sink connectors (`HttpPushSource` registers a source and no sink, so the two
@@ -589,7 +590,7 @@ transformer `formats` against `FORMATS`, as sorted name sets rather than counts.
 `every_slice_has_a_test` compares the `live_slices!` lists against `CONNECTORS`, `PROCESSORS` and
 `FORMATS`, so a dimension entry with no slice test fails.
 
-`saci-connector-turso::synced_roundtrip` follows the same shape for a remote endpoint rather than a
+`tests/turso_synced_roundtrip.rs` follows the same shape for a remote endpoint rather than a
 container: it soft-skips when `SACI_TURSO_URL` or `SACI_TURSO_TOKEN` is unset, when the probe
 fails, or when the endpoint does not answer within its 30 s probe budget, and every step past the
 seed panics, since
@@ -601,54 +602,64 @@ Toxiproxy container plus an N-node cluster with one proxy per directed edge) wit
 ports and nanosecond-unique resource names (topics, subjects, streams). For the connector suites
 that per-test isolation is the whole story, and it is what makes running them concurrently safe.
 `cargo test`'s default behavior runs one test binary at a time to completion before starting the
-next, so today's `kafka_roundtrip`/`nats_roundtrip`/`sink`/`source_cursor`/`source_logical`/
-`all_types` binaries each get their own turn; nextest schedules every test from every binary into
+next, so the `kafka_roundtrip`, `nats_roundtrip`, `postgresql_*` and `mariadb_*` binaries each get
+their own turn; nextest schedules every test from every binary into
 one global thread pool (`test-threads`, default `num-cpus`), so Docker-backed tests from different
-crates run alongside each other instead of one binary finishing before the next starts.
+binaries run alongside each other instead of one binary finishing before the next starts.
 
 ## Adding a connector
 
-1. New crate `crates/saci-connector-<name>` with `version.workspace = true` and
-   `{ workspace = true }` sibling deps, registered in the root `[workspace.dependencies]`.
-2. Implement `SourceFactory` and/or `SinkFactory` from `saci-connector`, including `type_name` and
+1. Module `crates/saci/src/connector/<name>.rs`, with sub-files under `connector/<name>/`, declared in
+   `crates/saci/src/connector.rs` as `#[cfg(feature = "connector-<name>")] pub mod <name>;`. Write
+   no `use` of an extern crate named like a connector module (`http`, `redb`, `turso`,
+   `clickhouse`, `opentelemetry`) in `connector.rs` itself: the child module shadows it there.
+2. Implement `SourceFactory` and/or `SinkFactory` from `saci::connector`, including `type_name` and
    `rebuildable`; read the format from `ConnectorContext`, never resolve one.
-3. Add a `connector-<name>` feature to `crates/saci-service/Cargo.toml` that pulls the crate and
-   registers the factories in `register_builtin_factories`; imply the transformer feature the
-   connector needs to be runnable alone, the way `connector-kafka` implies `transformer-ndjson`.
-4. Add the feature to `saci-service`'s `all` list in `crates/saci-service/Cargo.toml`, and to its
-   `default` list only when nothing has to be installed or already running for the connector to
-   work and it needs no extra build toolchain, the same condition step 5 applies to the `saci`
-   facade. In `crates/saci-service/tests/feature_bundles.rs`, `all_bundle_lists_every_feature`
-   asserts `all` lists every feature the crate declares except `default`, `all` and `conformance`,
+3. Add a `connector-<name>` feature to the `[features]` table of `crates/saci/Cargo.toml`. It
+   starts with `connector-contract`, then lists every `dep:` entry and `tokio/...` feature the
+   module needs; each such dependency is `optional = true` in `[dependencies]`. Imply the
+   transformer feature the connector needs to be runnable alone, the way `connector-kafka` implies
+   `transformer-ndjson`. A feature a module needs from a shared dependency is widened in that
+   connector's list, never in the base declaration.
+4. Register the factories in `register_builtin_factories`
+   (`crates/saci/src/service/factories.rs`) under `#[cfg(feature = "connector-<name>")]` and add each
+   registered type name to `BUILTIN_CONNECTOR_FEATURES`;
+   `builtin_connector_table_matches_the_registry` fails until both agree.
+5. Add the feature to `all` in `crates/saci/Cargo.toml`, and to `connectors` and `server` only
+   when nothing has to be installed or already running for the connector to work and it needs no
+   extra build toolchain. In `crates/saci/tests/feature_bundles.rs`, `all_bundle_lists_every_feature`
+   asserts `all` reaches every feature the crate declares except `default`, `all` and `conformance`,
+   following `server`, `connectors` and `transformers` transitively;
    `all_bundle_excludes_the_conformance_switch` fails when `conformance` sits in `all`, and
-   `default_bundle_requires_no_installed_service` fails when a connector that needs an installed
-   broker, database or object store sits in `default`.
-5. Add the feature to the `saci` facade only when nothing has to be installed or already running
-   for the connector to work, and put it in that crate's `connectors` group in
-   `crates/saci/Cargo.toml`, which is what `all` reaches. `all_bundle_reaches_every_feature` in
-   `crates/saci/tests/feature_bundles.rs` expands `all` through the groups transitively and fails
-   until every feature the facade declares is reachable from it.
+   `server_bundle_requires_no_installed_service` fails when a connector outside
+   `SELF_CONTAINED_CONNECTORS` that needs an installed broker, database or object store sits in
+   `server`.
 6. Add the connector's safe option keys to the per-`type` allowlist in
-   `crates/saci-service/src/service/topology.rs`. The key is the registered `type_name`, which
+   `crates/saci/src/service/topology.rs`. The key is the registered `type_name`, which
    `every_allowlist_key_is_a_connector_type_this_crate_ships` checks against
    `BUILTIN_CONNECTOR_FEATURES` in every build, so a misspelled or Rust-type-named key fails
    there rather than silently rendering no detail.
 7. Add an entry to `CONNECTORS`, the capability table and the maximal workflow in
-   `crates/saci-service/tests/common/matrix.rs`, and to the `live_slices!` sources list in
-   `crates/saci-service/tests/connector_matrix.rs`; `dimensions_cover_the_registry` and
+   `crates/saci/tests/common/matrix.rs`, and to the `live_slices!` sources list in
+   `crates/saci/tests/connector_matrix.rs`; `dimensions_cover_the_registry` and
    `every_slice_has_a_test` fail until this is done. A connector that needs a server adds a
    `Resource`, its `SACI_MATRIX_*` variable and readiness wait in `matrix.rs`, and its
    container to `services()` in `xtask/src/matrix.rs`. A connector or transformer not in the
    matrix is not considered wired.
-8. Docker-backed tests: `tests/common/mod.rs` with `try_start() -> Option<Container>`, and the
-   crate's `tests/` added to the `default` profile exclusion in `.config/nextest.toml`.
+8. Tests live in `crates/saci/tests/<name>_<case>.rs`, each opening with
+   `#![cfg(feature = "connector-<name>")]` plus the feature of every transformer it names. Docker-backed
+   tests share `crates/saci/tests/common/<name>.rs` with `try_start() -> Option<Container>`, included as
+   `#[path = "common/<name>.rs"] mod common;`, and each such binary is added to the `default`
+   profile exclusion in `.config/nextest.toml` as `binary_id(=saci::<name>_<case>)`. A `#[cfg(test)]`
+   item that names another `crate::connector::<n>` or `crate::transformer::<f>` module carries that
+   module's feature.
 9. A runnable config under `examples/configs/` and a page under
    `docs/content/service/connectors/` (skill `saci-docs`).
-10. Update this skill: its `## Crates` bullet, `## Features`, and any new build prerequisite.
+10. Update this skill: its `## Connectors` bullet, `## Features`, and any new build prerequisite.
 
 ## Keep this skill current
 
-Update this file in the same change that: adds or removes a connector crate; changes
+Update this file in the same change that: adds or removes a connector module or feature; changes
 `SourceFactory`, `SinkFactory`, `ConnectorContext`, `ChannelBridge` or `rebuildable`; adds or
 renames a connector config key, read mode or write mode; changes a connector's build prerequisite;
 changes the connector matrix's dimensions or rejection sites; changes `Source::request_batch_rows`,
@@ -656,7 +667,7 @@ changes the connector matrix's dimensions or rejection sites; changes `Source::r
 `ChannelSource`/`ChannelSink` pair (also check skill `saci-service`'s Service layer section, the
 canonical copy); changes the IO layer contract a connector relies on to reach its transformer, or
 the `Registry`'s `register_source`/`register_sink`/`register_transformer` surface (also check skill
-`saci-transformers`); changes which bundle (`default`, `all`) a connector feature belongs to in
-`saci-service`, or moves it into or out of the `saci` facade (also check skill `saci-service`);
+`saci-transformers`); changes which bundle (`all`, `connectors`, `server`) a connector feature belongs to
+(also check skill `saci-service`);
 changes which transformer feature a connector feature implies (also update skill
 `saci-transformers`).

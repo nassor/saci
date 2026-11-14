@@ -20,7 +20,7 @@
     <dt>In one line</dt>
     <dd>Many nodes, one pipeline, <strong>at-least-once</strong> per row range</dd>
     <dt>You need</dt>
-    <dd><code>saci-service</code> with <code>distributed</code>, which needs no external
+    <dd><code>saci</code> with the <code>distributed</code> feature, which needs no external
         service; add <code>distributed-raft</code> for a cluster</dd>
     <dt>Read this if</dt>
     <dd>One process is not enough, and you need work to survive a node dying halfway through a batch</dd>
@@ -265,8 +265,8 @@
             <td><code>service-cluster</code></td>
             <td><code>service</code> plus <code>distributed-raft</code>: what the
                 <code>saci-service</code> binary needs to run <code>mode "cluster"</code>
-                from a config file. Add the connectors and the <code>wasm</code> or
-                <code>plugin</code> feature the config names, and nothing else: a cluster
+                from a config file. Add the connectors and the <code>wasm-host</code> or
+                <code>plugin-host</code> feature the config names, and nothing else: a cluster
                 node's state is the <code>cluster-app.redb</code> under
                 <code>node.data_dir</code>.</td>
         </tr>
@@ -346,13 +346,13 @@
     <div class="code-cap"><span>Rust</span><em>features = "distributed"</em></div>
     <pre><code class="language-rust">use std::path::Path;
 
-use saci_service::SaciResult;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::distributed::RedbSharedStore;
-use saci_service::distributed::runner::{DistributedRunner, RunnerConfig};
-use saci_service::distributed::strategy::CheckpointStrategy;
-use saci_service::pipeline::Pipeline;
+use saci::SaciResult;
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::distributed::RedbSharedStore;
+use saci::distributed::runner::{DistributedRunner, RunnerConfig};
+use saci::distributed::strategy::CheckpointStrategy;
+use saci::pipeline::Pipeline;
 
 #[tokio::main]
 async fn main() -&gt; SaciResult&lt;()&gt; {
@@ -406,8 +406,8 @@ async fn main() -&gt; SaciResult&lt;()&gt; {
 
 <div class="code">
     <div class="code-cap"><span>Shell</span><em>runs the same on Linux, macOS and Windows (PowerShell)</em></div>
-    <pre><code class="language-bash">cargo run -p saci-service --example distributed_scheduler --features distributed
-cargo run -p saci-service --example distributed_windowed --features distributed,windows</code></pre>
+    <pre><code class="language-bash">cargo run -p saci --example distributed_scheduler --features distributed
+cargo run -p saci --example distributed_windowed --features distributed,windows</code></pre>
 </div>
 
 <h2 id="state">Where state lives</h2>
@@ -596,8 +596,8 @@ cargo run -p saci-service --example distributed_windowed --features distributed,
     <pre><code class="language-rust">use std::collections::HashMap;
 use std::sync::Arc;
 
-use saci_service::distributed::RedbSharedStore;
-use saci_service::distributed::consensus::{ArrowRaftDriver, ArrowRaftDriverConfig};
+use saci::distributed::RedbSharedStore;
+use saci::distributed::consensus::{ArrowRaftDriver, ArrowRaftDriverConfig};
 
 let (handle, _driver_task) = ArrowRaftDriver::start(
     ArrowRaftDriverConfig {
@@ -739,7 +739,7 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
 </p>
 
 <div class="code">
-    <div class="code-cap"><span>Rust</span><em>the host seam, from saci-core</em></div>
+    <div class="code-cap"><span>Rust</span><em>the host seam, from saci</em></div>
     <pre><code class="language-rust">async fn run_on_with_state(
     &amp;self,
     data: &amp;mut Dataset,
@@ -758,11 +758,11 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>in the processor crate</em></div>
     <pre><code class="language-rust">// Stateless: `prior` is ignored, `checkpoint` is always None.
-saci_processor::export_pipeline!(build);
+saci::export_pipeline!(build);
 
 // Stateful: systems read and write a `ProcessorState&lt;Counter&gt;` resource, and
 // whatever they leave in it becomes the next batch's `prior`.
-saci_processor::export_pipeline!(build, state = Counter);</code></pre>
+saci::export_pipeline!(build, state = Counter);</code></pre>
 </div>
 
 <p>

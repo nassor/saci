@@ -65,7 +65,7 @@ docker compose -f examples/distributed_fulfillment/docker-compose.yml down
 Build the example binary:
 
 ```text
-cargo build -p saci-service --example distributed_fulfillment --features service-cluster
+cargo build -p saci --example distributed_fulfillment --features service-cluster
 ```
 
 Then run three nodes, one per terminal. Node 1 bootstraps the cluster and

@@ -8,10 +8,10 @@ license.workspace = true
 publish = false
 description = "Routing demo native plugin: decides per batch which branch link its output is delivered to."
 
-# A native plugin is a shared library exporting the saci-plugin-abi C ABI.
+# A native plugin is a shared library exporting the `saci::plugin_abi` C ABI.
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-saci-plugin = { workspace = true }
+saci = { workspace = true, features = ["plugin"] }
 serde = { workspace = true }

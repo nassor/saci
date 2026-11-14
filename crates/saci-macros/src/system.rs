@@ -51,7 +51,7 @@ impl Parse for TransformArgs {
 ///
 /// Detected syntactically from the parameter count: one is `&mut Row`, two is
 /// `(&mut Row, &Config)`. No type inference is involved, so the author may
-/// write the config parameter as `&Config`, `&saci_processor::Config`, or any
+/// write the config parameter as `&Config`, `&saci::processor::Config`, or any
 /// alias of it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TransformArity {
@@ -88,7 +88,7 @@ pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result
     let map_err = map_user_error();
 
     // `crate::saci_config_get` is emitted by `#[processor]` into the processor
-    // crate's root. It cannot live in saci-processor: the WIT bindings it reads
+    // crate's root. It cannot live in `saci::processor`: the WIT bindings it reads
     // through are caller-side, so only the crate that expanded
     // `wit_bindgen::generate!` can name them.
     let (setup, call) = match arity {
@@ -98,16 +98,16 @@ pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result
         ),
         TransformArity::RowAndConfig => (
             quote! {
-                let __saci_config = ::saci_processor::Config::new(crate::saci_config_get);
+                let __saci_config = ::saci::processor::Config::new(crate::saci_config_get);
             },
             quote! { #fn_name(__saci_row, &__saci_config).map_err(#map_err)?; },
         ),
     };
 
     let meta = quote! {
-        ::saci_processor::__rt::SystemMeta::new(#system_name)
-            .read_component(<#component as ::saci_processor::__rt::Component>::name())
-            .write_component(<#component as ::saci_processor::__rt::Component>::name())
+        ::saci::processor::__rt::SystemMeta::new(#system_name)
+            .read_component(<#component as ::saci::processor::__rt::Component>::name())
+            .write_component(<#component as ::saci::processor::__rt::Component>::name())
     };
 
     // Whole-component read *and* write over-declaration is always safe: the DAG
@@ -120,7 +120,7 @@ pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result
             #call
         }
         __saci_data.replace_batch::<#component>(
-            <#component as ::saci_processor::__rt::Component>::to_record_batch(&__saci_rows)?,
+            <#component as ::saci::processor::__rt::Component>::to_record_batch(&__saci_rows)?,
         )
     };
 
@@ -197,9 +197,9 @@ pub(crate) fn expand_fold(args: FoldArgs, func: ItemFn) -> syn::Result<TokenStre
     let map_err = map_user_error();
 
     let meta = quote! {
-        ::saci_processor::__rt::SystemMeta::new(#system_name)
-            .read_component(<#reads as ::saci_processor::__rt::Component>::name())
-            .write_resource::<::saci_processor::__rt::ProcessorState<#state>>()
+        ::saci::processor::__rt::SystemMeta::new(#system_name)
+            .read_component(<#reads as ::saci::processor::__rt::Component>::name())
+            .write_resource::<::saci::processor::__rt::ProcessorState<#state>>()
     };
 
     // The rows are decoded into an owned `Vec` inside a block so the immutable
@@ -208,7 +208,7 @@ pub(crate) fn expand_fold(args: FoldArgs, func: ItemFn) -> syn::Result<TokenStre
     let body = quote! {
         let __saci_rows = #decode;
         let __saci_state =
-            ::saci_processor::__rt::ProcessorState::<#state>::get_or_insert_default(__saci_data)?;
+            ::saci::processor::__rt::ProcessorState::<#state>::get_or_insert_default(__saci_data)?;
         #fn_name(&__saci_rows, __saci_state).map_err(#map_err)
     };
 
@@ -254,7 +254,7 @@ mod tests {
         // A fully qualified config type, an alias, and a plain `&Config` must
         // all classify the same: only the parameter count is read.
         for source in [
-            "fn f(row: &mut Order, config: &saci_processor::Config) -> Result<()> { Ok(()) }",
+            "fn f(row: &mut Order, config: &saci::processor::Config) -> Result<()> { Ok(()) }",
             "fn f(row: &mut Order, config: &Cfg) -> Result<()> { Ok(()) }",
         ] {
             assert_eq!(

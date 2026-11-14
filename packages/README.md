@@ -73,7 +73,7 @@ runs the same on Linux, macOS and Windows (PowerShell), from the repository
 root:
 
 ```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
-cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit
+cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit
 ```
 
 The five suites differ per shell. Linux/macOS:

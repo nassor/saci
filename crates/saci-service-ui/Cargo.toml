@@ -17,12 +17,6 @@ license = "AGPL-3.0-only"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# The JSON contract, shared verbatim with the server. `saci-service` itself
-# cannot compile for wasm32-unknown-unknown (its non-optional `saci-core`
-# dependency pulls tokio and mio), which is why the wire types live in their
-# own crate.
-saci-inspector-wire = { path = "../saci-inspector-wire" }
-
 leptos = { version = "0.8", features = ["csr"] }
 gloo-net = { version = "0.7", default-features = false, features = ["http", "json"] }
 serde = { version = "1", features = ["derive"] }

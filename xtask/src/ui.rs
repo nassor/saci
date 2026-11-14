@@ -1,8 +1,8 @@
 //! Build the saci-service dashboard directly into
-//! `crates/saci-service/assets/ui/`.
+//! `crates/saci/assets/ui/`.
 //!
 //! The dashboard is a client-side-rendered Leptos app compiled to
-//! `wasm32-unknown-unknown`. `crates/saci-service/src/service/inspector_api.rs`
+//! `wasm32-unknown-unknown`. `crates/saci/src/service/inspector_api.rs`
 //! embeds the output with `include_str!`/`include_bytes!`, so the four
 //! filenames are a contract:
 //!
@@ -13,10 +13,10 @@
 //! | `app_bg.wasm`    | the module itself                            |
 //! | `app.css`        | Tailwind output                              |
 //!
-//! `crates/saci-service/assets/ui/` is the one committed home for all four,
+//! `crates/saci/assets/ui/` is the one committed home for all four,
 //! the same way the conformance vectors and the benchmark SVGs are committed,
-//! so `cargo build -p saci-service` never needs the wasm toolchain. It lives
-//! under `saci-service`'s own directory rather than `saci-service-ui`'s,
+//! so `cargo build -p saci --features server` never needs the wasm toolchain.
+//! It lives under `saci`'s own directory rather than `saci-service-ui`'s,
 //! because `cargo package`/`publish` never includes files outside the
 //! package being packaged: an `include_str!` reaching into `saci-service-ui`
 //! (itself excluded from the workspace) would silently drop out of a
@@ -32,9 +32,9 @@
 //! 1. fmt and clippy the UI crate.
 //! 2. `cargo build --release --target wasm32-unknown-unknown`.
 //! 3. wasm-bindgen `--target web`, at the exact version the lock file
-//!    resolves, writing straight into `crates/saci-service/assets/ui/`.
+//!    resolves, writing straight into `crates/saci/assets/ui/`.
 //! 4. Tailwind, using the standalone binary (no node anywhere in this repo),
-//!    writing `crates/saci-service/assets/ui/app.css` directly.
+//!    writing `crates/saci/assets/ui/app.css` directly.
 //!
 //! Exit codes name the missing prerequisite:
 //!
@@ -77,7 +77,7 @@ pub fn run(args: &[String]) -> Result<()> {
     }
 
     let ui_dir = ctx.path("crates/saci-service-ui");
-    let out = ctx.path("crates/saci-service/assets/ui");
+    let out = ctx.path("crates/saci/assets/ui");
 
     // The target check comes first: without it the missing prerequisite
     // surfaces as a cargo error about a core library it cannot find. A missing
@@ -164,11 +164,11 @@ pub fn run(args: &[String]) -> Result<()> {
         );
     }
 
-    ctx.log("crates/saci-service/assets/ui/:");
+    ctx.log("crates/saci/assets/ui/:");
     for name in ["index.html", "app.js", "app_bg.wasm", "app.css"] {
         ctx.log(format!("  {name} ({} bytes)", ctx.size(&out.join(name))?));
     }
-    ctx.log("PASS: commit crates/saci-service/assets/ui/");
+    ctx.log("PASS: commit crates/saci/assets/ui/");
     Ok(())
 }
 

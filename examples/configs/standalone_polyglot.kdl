@@ -3,9 +3,9 @@
 //
 // The paths below are CWD-relative, so run from the repository root:
 //   cargo xtask polyglot   # builds all six processors
-//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate \
+//   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate \
 //     --config examples/configs/standalone_polyglot.kdl --strict
-//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve \
+//   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve \
 //     --config examples/configs/standalone_polyglot.kdl
 //
 // It reads examples/configs/fixtures/polyglot_orders.csv, runs the Python

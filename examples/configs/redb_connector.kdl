@@ -1,13 +1,13 @@
 // SACI standalone service configuration writing rows into a redb file.
 //
 // Run:
-//   cargo run --features connector-file,connector-redb,transformer-csv --bin saci-service -- validate \
+//   cargo run --features server,connector-file,connector-redb,transformer-csv --bin saci-service -- validate \
 //     --config examples/configs/redb_connector.kdl
-//   cargo run --features connector-file,connector-redb,transformer-csv --bin saci-service -- serve \
+//   cargo run --features server,connector-file,connector-redb,transformer-csv --bin saci-service -- serve \
 //     --config examples/configs/redb_connector.kdl
 //
-// Both features are in the default bundle, so `cargo run --bin saci-service`
-// with no `--features` flag works too.
+// Both features are in the `server` bundle, so `cargo run --features server
+// --bin saci-service` works too.
 //
 // The pipeline reads examples/configs/fixtures/orders.csv and stores every
 // batch as one csv document in /tmp/saci-redb-connector/orders.redb. The

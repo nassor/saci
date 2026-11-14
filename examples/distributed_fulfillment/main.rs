@@ -35,14 +35,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use saci_service::SaciError;
-use saci_service::SaciResult;
-use saci_service::distributed::RedbSharedStore;
-use saci_service::distributed::consensus::{ArrowRaftDriver, ArrowRaftDriverConfig};
-use saci_service::distributed::runner::{DistributedRunner, RunnerConfig};
-use saci_service::distributed::strategy::CheckpointStrategy;
-use saci_service::service::config::{LogFormat, ObservabilityConfig};
-use saci_service::service::logging::init_logging;
+use saci::SaciError;
+use saci::SaciResult;
+use saci::distributed::RedbSharedStore;
+use saci::distributed::consensus::{ArrowRaftDriver, ArrowRaftDriverConfig};
+use saci::distributed::runner::{DistributedRunner, RunnerConfig};
+use saci::distributed::strategy::CheckpointStrategy;
+use saci::service::config::{LogFormat, ObservabilityConfig};
+use saci::service::logging::init_logging;
 
 use crate::store::FulfillmentStore;
 use crate::systems::build_pipeline;
@@ -366,7 +366,7 @@ async fn main() -> SaciResult<()> {
 /// before it accepts application writes, so `last_applied.is_some()` is the
 /// signal that proposals will succeed.
 async fn wait_for_leader(
-    handle: saci_service::distributed::consensus::ArrowRaftDriverHandle,
+    handle: saci::distributed::consensus::ArrowRaftDriverHandle,
     timeout: Duration,
 ) -> SaciResult<()> {
     let deadline = tokio::time::Instant::now() + timeout;

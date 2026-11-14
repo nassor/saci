@@ -6,7 +6,7 @@
 // other half: a real FlatBuffers *writer*, so a processor may also write a `Utf8`
 // column, drop rows, or emit a component the input did not carry.
 //
-// The format is the one `ArrowIpc.kt` documents and `crates/saci-core`'s
+// The format is the one `ArrowIpc.kt` documents and `crates/saci`'s
 // `dataset/ipc.rs` produces, down to the field ids this file shares with the
 // reader:
 //

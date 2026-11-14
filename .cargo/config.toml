@@ -20,7 +20,7 @@ xtask = "run --package xtask --"
 rustflags = ["-C", "target-feature=+simd128"]
 # MSVC's `link.exe` caps the number of modules a `/DEBUG` PDB can carry
 # (LNK1140). Once the all-features dependency graph passed ~200 objects per
-# binary, every dev link of a `saci-service` example and several test binaries
+# binary, every dev link of a `saci` example and several test binaries
 # started failing; `debug = 0` on dependencies does not help because the limit
 # counts modules, not debuginfo bytes. Drop the PDB for dev/test links on
 # Windows — release builds (debuginfo = 0) never request one. Debuggers lose

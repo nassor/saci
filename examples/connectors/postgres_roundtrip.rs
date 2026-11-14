@@ -6,7 +6,7 @@
 //!
 //! ```bash
 //! export SACI_PG_DSN='postgres://postgres:saci@localhost:5432/postgres'
-//! cargo run -p saci-connector-postgresql --example postgres_roundtrip
+//! cargo run -p saci --features connector-postgresql --example postgres_roundtrip
 //! ```
 //!
 //! Exits non-zero when the row counts or the values disagree.
@@ -14,13 +14,13 @@
 use std::process::ExitCode;
 
 use arrow_array::{Array, Decimal128Array, Int64Array, StringArray};
-use saci_connector::from_kdl_str;
-use saci_connector_postgresql::{
+use saci::connector::from_kdl_str;
+use saci::connector::postgresql::{
     PostgresSink, PostgresSinkConfig, PostgresSource, PostgresSourceConfig,
 };
-use saci_core::dataset::Dataset;
-use saci_core::io::sink::Sink;
-use saci_core::io::source::{Source, drain_into_dataset};
+use saci::dataset::Dataset;
+use saci::io::sink::Sink;
+use saci::io::source::{Source, drain_into_dataset};
 
 /// Rows inserted into the input table.
 const ROWS: i64 = 250;

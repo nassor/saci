@@ -2,9 +2,9 @@
 // metrics over OTLP/HTTP.
 //
 // Run:
-//   cargo run --features connector-opentelemetry --bin saci-service -- validate \
+//   cargo run --features server,connector-opentelemetry --bin saci-service -- validate \
 //     --config examples/configs/opentelemetry_metrics.kdl
-//   cargo run --features connector-opentelemetry --bin saci-service -- serve \
+//   cargo run --features server,connector-opentelemetry --bin saci-service -- serve \
 //     --config examples/configs/opentelemetry_metrics.kdl
 //
 // The source listens where an OpenTelemetry SDK or collector exports to, and

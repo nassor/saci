@@ -1,0 +1,68 @@
+//! Factory contract every SACI connector implements, and the connectors.
+//!
+//! [`SourceFactory`] and [`SinkFactory`] build a
+//! [`Source`](crate::io::source::Source) or a
+//! [`Sink`](crate::io::sink::Sink) from one opaque `config` table. They
+//! live outside `service` so a connector implements them without the host
+//! that loads it.
+//!
+//! That table is a [`ConfigValue`], the tree [`crate::config`] parses the
+//! KDL configuration file into. It is re-exported here, together with
+//! [`from_kdl_str`] and [`one_or_many`], so a connector names one path.
+//!
+//! [`ConnectorContext`] is what a factory can reach while it builds: the
+//! transformer the config bound to this connector instance, if any, resolved
+//! by the host against the [`TransformerRegistry`](crate::transformer::TransformerRegistry)
+//! once per workflow build, and the [`NodeIdentity`] naming the service,
+//! workflow and node it was declared on. A connector that moves bytes never
+//! owns a list of byte formats or a `format` config key of its own.
+//!
+//! [`parse_schema_fields`] reads the `schema_fields` entries a connector
+//! declares its Arrow schema with when the format carries no schema of its
+//! own; [`parse_optional_schema_fields`] is the same read for a connector
+//! whose format may carry one.
+//!
+//! Each connector is a child module behind its own `connector-<name>`
+//! feature.
+
+pub mod bridge;
+pub mod context;
+pub mod factory;
+pub mod schema;
+
+pub use crate::config::{ConfigMap, ConfigValue, from_kdl_str, one_or_many};
+pub use bridge::ChannelBridge;
+pub use context::{ConnectorContext, NodeIdentity};
+pub use factory::{REBUILD_UNDECLARED, SinkFactory, SourceFactory};
+pub use schema::{parse_optional_schema_fields, parse_schema_fields};
+
+#[cfg(feature = "connector-channel")]
+pub mod channel;
+#[cfg(feature = "connector-clickhouse")]
+pub mod clickhouse;
+#[cfg(feature = "connector-file")]
+pub mod file;
+#[cfg(feature = "connector-http")]
+pub mod http;
+#[cfg(feature = "connector-kafka")]
+pub mod kafka;
+#[cfg(feature = "connector-mariadb")]
+pub mod mariadb;
+#[cfg(feature = "connector-nats")]
+pub mod nats;
+#[cfg(feature = "connector-opentelemetry")]
+pub mod opentelemetry;
+#[cfg(feature = "connector-postgresql")]
+pub mod postgresql;
+#[cfg(feature = "connector-redb")]
+pub mod redb;
+#[cfg(feature = "connector-s3")]
+pub mod s3;
+#[cfg(feature = "connector-saci")]
+pub mod saci;
+#[cfg(feature = "connector-tcp")]
+pub mod tcp;
+#[cfg(feature = "connector-turso")]
+pub mod turso;
+#[cfg(feature = "connector-udp")]
+pub mod udp;

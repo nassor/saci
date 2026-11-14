@@ -5,10 +5,14 @@ template = "section.html"
 sort_by = "weight"
 weight = 12
 +++
-`saci-service` is a library before it is a binary. `ServiceBuilder` turns a
-`ServiceConfig` into one `BuiltService` per declared workflow, and a runner
-drives it. Everything the stock binary does, your own `main` can do with two
-more calls: your factories and your runtimes.
+The service is a library before it is a binary: `saci::service` with the `service` feature on.
+`ServiceBuilder` turns a `ServiceConfig` into one `BuiltService` per declared workflow, and a
+runner drives it. Everything the stock binary does, your own `main` can do with two more calls:
+your factories and your runtimes.
+
+For a server that only adds factories, skip the assembly below. A binary crate whose `main` is
+`saci::service::cli::main_with(|builder| builder.register_source(MyFactory))` runs the stock
+`serve` and `validate` subcommands with your factory registered after the built-in ones.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 170" role="img" aria-labelledby="emb-title emb-desc">
@@ -72,9 +76,9 @@ that node's `config` plus a `ConnectorContext` carrying the transformer the host
 resolved, and returns a boxed `Source` or `Sink`.
 
 ```rust,name=A sink factory for your own connector
-use saci_connector::{ConfigValue, ConnectorContext, SinkFactory};
-use saci_core::SaciError;
-use saci_core::io::sink::Sink;
+use saci::connector::{ConfigValue, ConnectorContext, SinkFactory};
+use saci::SaciError;
+use saci::io::sink::Sink;
 
 struct ClickHouseSinkFactory;
 
@@ -107,9 +111,9 @@ else. `register_source`, `register_sink` and `register_transformer` chain your
 own on, where registering the same name twice replaces the earlier factory.
 
 ```rust,name=Assembling the service yourself
-use saci_service::service::config::ServiceConfig;
-use saci_service::service::factories::register_builtin_factories;
-use saci_service::service::{ServiceBuilder, run_standalone};
+use saci::service::config::ServiceConfig;
+use saci::service::factories::register_builtin_factories;
+use saci::service::{ServiceBuilder, run_standalone};
 use tokio_util::sync::CancellationToken;
 
 let config = ServiceConfig::load("service.kdl")?;
@@ -182,9 +186,9 @@ library is loaded through its own constructor and handed over the same way.
 ```rust,name=Loading a component and a plugin yourself
 use std::collections::HashMap;
 use std::path::Path;
-use saci_service::plugin::NativePluginRuntime;
-use saci_service::service::ServiceBuilder;
-use saci_service::wasm::{WasmEngine, WasmPipelineRuntime};
+use saci::plugin_host::NativePluginRuntime;
+use saci::service::ServiceBuilder;
+use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
 
 // One engine per process is enough: it owns the wasmtime Engine, the epoch
 // ticker and the compiled programs.

@@ -14,7 +14,7 @@ value = "None: batches arrive already typed, so no transformer is named"
 label = "Run modes"
 value = "Any"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 One workflow hands part of its stream to a second workflow in the same process, with no broker
@@ -120,8 +120,8 @@ a channel is the only way rows move between workflows.
 and bridges half of it to the `settle` workflow on the channel `standard`.
 
 Two `NatsSource`s and two `PostgresSink`s sit alongside the channel, and neither
-connector is in the default build, so the two commands below need a binary built
-with `--features connector-nats,connector-postgresql`.
+connector is in the server build, so the two commands below need a binary built
+with `--features server,connector-nats,connector-postgresql`.
 
 Runs the same on Linux, macOS and Windows (PowerShell):
 

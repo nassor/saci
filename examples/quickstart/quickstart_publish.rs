@@ -8,7 +8,7 @@
 //! appear later.
 //!
 //! ```text
-//! cargo run -p saci-service --features connector-nats --example quickstart_publish -- --count 5000 --rate 500
+//! cargo run -p saci --features connector-nats --example quickstart_publish -- --count 5000 --rate 500
 //! ```
 //!
 //! Flags: `--count` (default 5000, `0` runs until Ctrl-C), `--rate` messages

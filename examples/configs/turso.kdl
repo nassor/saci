@@ -2,9 +2,9 @@
 //
 // Run from the repository root, so the binary loads the gitignored `.env`:
 //
-//   cargo run -p saci-service --features connector-turso,wasm --bin saci-service -- \
+//   cargo run -p saci --features server,connector-turso,wasm-host --bin saci-service -- \
 //     validate --connectors-only --config examples/configs/turso.kdl
-//   cargo run -p saci-service --features connector-turso,wasm --bin saci-service -- \
+//   cargo run -p saci --features server,connector-turso,wasm-host --bin saci-service -- \
 //     serve --config examples/configs/turso.kdl
 //
 // The source polls the embedded database for new rows and the sink upserts the

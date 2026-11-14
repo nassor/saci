@@ -53,19 +53,9 @@ arrow-array = "59.2"
 arrow-schema = "59.2"
 ```
 
-Depend on `saci-service` directly, with its default features, when you also want the host
-(wasmtime and the HTTP control plane) in the same binary; `saci`'s `engine` feature carries the
-columnar engine alone.
-
-<div class="note">
-<span class="note-label">Depending on the engine directly</span>
-
-`saci`'s `engine` feature re-exports `saci-core` behind one path dependency. Depend on
-`saci-core` directly, reached through `saci_core::prelude` instead of `saci::prelude`, when a
-narrower dependency graph than `saci`'s feature groups is worth the extra path entry. See
-[Crates and features](@/library/reference/crates.md) for every crate and feature flag.
-
-</div>
+Add the `service` and `wasm-host` features when you also want the host (wasmtime and the HTTP
+control plane) in the same binary; the default `engine` feature carries the columnar engine alone.
+See [Crates and features](@/library/reference/crates.md) for every feature flag.
 
 ```bash,name=Build the skeleton
 cargo build
@@ -458,7 +448,7 @@ primitives you already used, plus `Dataset::replace_batch` for the
 column swaps. Run the shipped example to see it:
 
 ```bash,name=Run the ETL example
-cargo run -p saci-service --example scheduler_etl
+cargo run -p saci --example scheduler_etl
 ```
 
 Runs the same on all three platforms. The visible result is the transaction
@@ -506,8 +496,8 @@ stage without any stage list in your code.
 ## 8. Ship the same pipeline as a component
 
 Make a second crate for the component, at the repository root next to
-`order-pipeline/` (`saci`'s `processor` feature pins `saci-core` to its own
-`processor` feature, which swaps the rayon stages for sequential execution):
+`order-pipeline/` (`saci`'s `processor` feature swaps the rayon stages for sequential
+execution):
 
 ```bash,name=Create the processor crate
 cd ..
@@ -538,7 +528,7 @@ use saci::prelude::*;
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        path: "../crates/saci-processor/wit",
+        path: "../crates/saci/wit",
         world: "saci-pipeline",
         generate_all,
     });

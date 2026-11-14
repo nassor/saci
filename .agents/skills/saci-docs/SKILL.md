@@ -23,7 +23,7 @@ Three rules carry most of the weight:
 | `docs/content/library/{dataset,systems,pipeline,scheduler,io,distributed,tracing}.md` | front matter only; prose sits in `docs/templates/<name>.html` | n/a |
 | `docs/templates/*.html` | the concept pages: dataset, systems, pipeline, scheduler, io, distributed, tracing | simple, worked examples |
 | every other page under `docs/content/{service,library}/` | markdown pages with prose and inline SVG. A `template = "page.html"` page must open its body with its own `#` heading, because that template renders no title | simple, longer |
-| `AGENTS.md` | the workspace map, commands, testing profiles and the `saci-core` engine reference | dense, terse |
+| `AGENTS.md` | the workspace map, commands, testing profiles and the `saci` engine reference | dense, terse |
 | `.agents/skills/saci-*/SKILL.md` | the per-area reference for agents | dense, terse, reference |
 | `//!` and `///` | API reference | precise, example driven |
 
@@ -154,8 +154,8 @@ Benchmark numbers are a current measurement plus method, never a trend across ru
 Every normative claim has an authoritative source in this repository. Find it before writing a
 config key, a default, a limit, a flag, a metric series name, or a behavior.
 
-- Implementation: `crates/saci-service/src/`.
-- Tests: `crates/*/tests/` and unit tests next to the code.
+- Implementation: `crates/saci/src/`.
+- Tests: `crates/saci/tests/` and unit tests next to the code.
 - Workspace map: `AGENTS.md`; per-area reference: `.agents/skills/saci-*/SKILL.md`.
 - Examples: `examples/`.
 - Conformance corpus: `packages/arrow-ipc-conformance/`.

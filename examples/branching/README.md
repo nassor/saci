@@ -19,7 +19,7 @@ output fans out, each split to its own sink:
 
 A NATS core subject feeds the workflow in `run_mode kind="stream"`, so every
 message is its own batch and the routers decide per message. The publisher
-(`branching_publish`, a `saci-service` example) draws priority 50/50 between
+(`branching_publish`, a `saci` example) draws priority 50/50 between
 `"high"` and `"low"`, so both branches of both processor splits fire
 continuously while it runs.
 
@@ -69,7 +69,7 @@ Linux:
 ```text
 mkdir -p /tmp/saci-branching
 SACI_OUT_DIR=/tmp/saci-branching \
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve \
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
   --config examples/branching/branching.kdl
 ```
 
@@ -79,7 +79,7 @@ macOS:
 mkdir -p /tmp/saci-branching
 SACI_OUT_DIR=/tmp/saci-branching \
 SACI_PLUGIN_LIB=target/release/libbranching_plugin.dylib \
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve \
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
   --config examples/branching/branching.kdl
 ```
 
@@ -89,7 +89,7 @@ Windows (PowerShell):
 mkdir C:\saci-branching
 $env:SACI_OUT_DIR = "C:/saci-branching"
 $env:SACI_PLUGIN_LIB = "target/release/branching_plugin.dll"
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve --config examples/branching/branching.kdl
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve --config examples/branching/branching.kdl
 ```
 
 The config's paths use forward slashes, which work on Windows too; the
@@ -98,7 +98,7 @@ The config's paths use forward slashes, which work on Windows too; the
 3. Publish, in another terminal. Runs the same on all three platforms:
 
 ```text
-cargo run -p saci-service --features connector-nats --example branching_publish -- --rate 50
+cargo run -p saci --features connector-nats --example branching_publish -- --rate 50
 ```
 
 ## What each file holds
@@ -131,13 +131,13 @@ Validate the config first, if you like (set `SACI_PLUGIN_LIB` as in the table
 above on macOS and Windows):
 
 ```text
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- validate \
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate \
   --config examples/branching/branching.kdl --strict
 ```
 Windows (PowerShell), on one line:
 
 ```powershell
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- validate --config examples/branching/branching.kdl --strict
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate --config examples/branching/branching.kdl --strict
 ```
 
 ## Files
@@ -145,6 +145,6 @@ cargo run -p saci-service --features connector-file,connector-nats,transformer-c
 | File / directory | What it is |
 |------------------|------------|
 | `branching.kdl` | the stream workflow with all three fan-out splits |
-| `branching_publish.rs` | the `saci-service` example that feeds the NATS subject |
+| `branching_publish.rs` | the `saci` example that feeds the NATS subject |
 | `wasm/` | the `branching-wasm` processor component (cdylib, wasm32-wasip2) |
 | `plugin/` | the `branching-plugin` native plugin (cdylib) |

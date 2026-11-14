@@ -18,13 +18,13 @@ use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use saci_service::SaciError;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::pipeline::Pipeline;
-use saci_service::system::{FieldRef, System, SystemMeta};
+use saci::SaciError;
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::pipeline::Pipeline;
+use saci::system::{FieldRef, System, SystemMeta};
 
-use saci_service::windows::{
+use saci::windows::{
     ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowedSystemBuilder,
 };
 
@@ -137,12 +137,12 @@ impl System for BuildLookupSystem {
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-        use saci_service::windows::WindowedSystemBuilder as W;
+        use saci::windows::WindowedSystemBuilder as W;
 
         // The key-hash helper is crate-private, so each category's hash comes
         // from running an identically configured windowed system over a
         // one-row dataset and reading back its `key_hash` output.
-        use saci_service::windows::WindowSpec as WS;
+        use saci::windows::WindowSpec as WS;
         let known_categories = ["Electronics", "Books"];
         let mut map = HashMap::new();
 

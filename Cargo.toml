@@ -1,38 +1,9 @@
 [workspace]
 members = [
-    "crates/saci-core",
-    "crates/saci-config",
-    "crates/saci-connector",
-    "crates/saci-connector-channel",
-    "crates/saci-connector-clickhouse",
-    "crates/saci-connector-file",
-    "crates/saci-connector-http",
-    "crates/saci-connector-kafka",
-    "crates/saci-connector-mariadb",
-    "crates/saci-connector-nats",
-    "crates/saci-connector-opentelemetry",
-    "crates/saci-connector-postgresql",
-    "crates/saci-connector-turso",
-    "crates/saci-connector-redb",
-    "crates/saci-connector-s3",
-    "crates/saci-connector-tcp",
-    "crates/saci-connector-udp",
-    "crates/saci-connector-saci",
-    "crates/saci-transformer",
-    "crates/saci-transformer-arrow-ipc",
-    "crates/saci-transformer-avro",
-    "crates/saci-transformer-csv",
-    "crates/saci-transformer-ndjson",
-    "crates/saci-transformer-parquet",
-    "crates/saci-macros",
-    "crates/saci-processor",
-    "crates/saci-processor-smoketest",
-    "crates/saci-plugin",
-    "crates/saci-plugin-abi",
-    "crates/saci-plugin-smoketest",
-    "crates/saci-inspector-wire",
-    "crates/saci-service",
     "crates/saci",
+    "crates/saci-macros",
+    "crates/saci-processor-smoketest",
+    "crates/saci-plugin-smoketest",
     "examples/wasm/order_processing",
     "examples/polyglot/stages/rust-settle",
     "examples/branching/wasm",
@@ -61,61 +32,30 @@ version = "0.1.0"
 rust-version = "1.99.0"
 edition = "2024"
 license = "AGPL-3.0-only"
-# Flipped from the historical `false`: every crate below is meant to publish
-# to crates.io. The handful that are CI fixtures or samples, not libraries an
-# external consumer would add as a dependency, override this back to `false`
-# in their own manifest: saci-processor-smoketest, saci-plugin-smoketest,
-# xtask, and the thirteen example-workspace crates under examples/.
+# Two crates publish to crates.io: `saci` and `saci-macros`. The members that
+# are CI fixtures or samples override this back to `false` in their own
+# manifest: saci-processor-smoketest, saci-plugin-smoketest, xtask, and the
+# twelve example crates under examples/.
 publish = true
 repository = "https://github.com/nassor/saci"
 homepage = "https://nassor.github.io/saci/"
 authors = ["Nassor Frazier-Silva <nassor@gmail.com>"]
 
 [workspace.dependencies]
-# The workspace's own crates. Every internal edge is declared once here and
+# The workspace's own crates. Each internal edge is declared once here and
 # taken as `{ workspace = true }` in the member, so the version requirement
-# between two SACI crates lives next to `[workspace.package] version` above
-# instead of in each of the thirty-odd manifests that names a sibling. The
-# requirement cannot simply be dropped: `cargo publish` rejects a path
-# dependency that carries no version.
+# lives next to `[workspace.package] version` above. The requirement cannot
+# simply be dropped: `cargo publish` rejects a path dependency that carries no
+# version.
 #
-# `saci-core` is the one entry declared `default-features = false`. Its
-# default is `runtime` (tokio and rayon), which cannot target
-# wasm32-wasip2, so the two authoring SDKs must not receive it; cargo
-# ignores a member's own `default-features = false` when the workspace
-# dependency does not set one, which would leave that exclusion silently
-# undone. The baseline is therefore the narrower of the two, and a member
-# that wants the host runtime asks for it by name: `features = ["runtime"]`,
-# or `features = ["io"]`, which implies it.
-saci-core                  = { path = "crates/saci-core", version = "0.1.0", default-features = false }
-saci-config                = { path = "crates/saci-config", version = "0.1.0" }
-saci-connector             = { path = "crates/saci-connector", version = "0.1.0" }
-saci-connector-channel     = { path = "crates/saci-connector-channel", version = "0.1.0" }
-saci-connector-clickhouse  = { path = "crates/saci-connector-clickhouse", version = "0.1.0" }
-saci-connector-file        = { path = "crates/saci-connector-file", version = "0.1.0" }
-saci-connector-http        = { path = "crates/saci-connector-http", version = "0.1.0" }
-saci-connector-kafka       = { path = "crates/saci-connector-kafka", version = "0.1.0" }
-saci-connector-mariadb     = { path = "crates/saci-connector-mariadb", version = "0.1.0" }
-saci-connector-nats        = { path = "crates/saci-connector-nats", version = "0.1.0" }
-saci-connector-opentelemetry = { path = "crates/saci-connector-opentelemetry", version = "0.1.0" }
-saci-connector-postgresql  = { path = "crates/saci-connector-postgresql", version = "0.1.0" }
-saci-connector-turso       = { path = "crates/saci-connector-turso", version = "0.1.0" }
-saci-connector-redb        = { path = "crates/saci-connector-redb", version = "0.1.0" }
-saci-connector-s3          = { path = "crates/saci-connector-s3", version = "0.1.0" }
-saci-connector-tcp         = { path = "crates/saci-connector-tcp", version = "0.1.0" }
-saci-connector-udp         = { path = "crates/saci-connector-udp", version = "0.1.0" }
-saci-connector-saci        = { path = "crates/saci-connector-saci", version = "0.1.0" }
-saci-transformer           = { path = "crates/saci-transformer", version = "0.1.0" }
-saci-transformer-arrow-ipc = { path = "crates/saci-transformer-arrow-ipc", version = "0.1.0" }
-saci-transformer-avro      = { path = "crates/saci-transformer-avro", version = "0.1.0" }
-saci-transformer-csv       = { path = "crates/saci-transformer-csv", version = "0.1.0" }
-saci-transformer-ndjson    = { path = "crates/saci-transformer-ndjson", version = "0.1.0" }
-saci-transformer-parquet   = { path = "crates/saci-transformer-parquet", version = "0.1.0" }
-saci-macros                = { path = "crates/saci-macros", version = "0.1.0" }
-saci-processor             = { path = "crates/saci-processor", version = "0.1.0" }
-saci-plugin                = { path = "crates/saci-plugin", version = "0.1.0" }
-saci-plugin-abi            = { path = "crates/saci-plugin-abi", version = "0.1.0" }
-saci-inspector-wire        = { path = "crates/saci-inspector-wire", version = "0.1.0" }
+# `saci` is declared `default-features = false`. Its default is `engine`, whose
+# `runtime` (tokio and rayon) cannot target wasm32-wasip2, so the processor
+# crates must not receive it; cargo ignores a member's own
+# `default-features = false` when the workspace dependency does not set one,
+# which would leave that exclusion silently undone. A member asks for what it
+# needs by name: `features = ["processor"]` or `features = ["plugin"]`.
+saci        = { path = "crates/saci", version = "0.1.0", default-features = false }
+saci-macros = { path = "crates/saci-macros", version = "0.1.0" }
 
 # Arrow core sub-crates, exact-pinned at workspace level. `arrow-ipc` defines the
 # on-disk checkpoint format, so bump it only after validating round-trip reads
@@ -156,7 +96,7 @@ serde_bytes   = { version = "0.11.19" }
 # the self-describing `ConfigValue` tree the factory signatures carry. `span`
 # positions every diagnostic as `line:column`; the default `serde` feature is
 # off because it is the crate's experimental KDL-to-serde mapping, which
-# `saci-config` deliberately does not use.
+# the `config` module deliberately does not use.
 kdl           = { version = "6.7", default-features = false, features = ["span"] }
 tracing       = { version = "0.1.44" }
 rayon         = { version = "1.12.0" }
@@ -179,7 +119,7 @@ turso         = { version = "=0.8.2", default-features = false, features = ["syn
 clickhouse    = { version = "0.15.2", default-features = false, features = ["lz4"] }
 
 # The OTLP message definitions the `opentelemetry` connector carries, and the
-# prost runtime its generated types are built on. `saci-service` already reaches
+# prost runtime its generated types are built on. The service already reaches
 # this same release through `opentelemetry-otlp`, so the two share one tree.
 #
 # `default-features = false` is what keeps `tonic` out: the crate's `full`
@@ -193,8 +133,8 @@ opentelemetry-proto = { version = "0.32", default-features = false, features = [
 # connector can encode and decode the request type itself.
 prost         = { version = "0.14" }
 
-# The embedded key/value store. saci-service's `distributed` feature keeps its
-# local state file and its raft log in one, and saci-connector-redb uses one as
+# The embedded key/value store. The `distributed` feature keeps its
+# local state file and its raft log in one, and the `redb` connector uses one as
 # a transport, so a single version covers every user.
 redb          = { version = "4.3.0" }
 
@@ -211,7 +151,7 @@ wasmtime-wasi = { version = "49.0.2" }
 sha3          = { version = "0.12.0" }
 
 # WASM component model guest. Every Rust processor component invokes
-# `wit_bindgen::generate!` against `crates/saci-processor/wit`, so the generator
+# `wit_bindgen::generate!` against `crates/saci/wit`, so the generator
 # and its runtime support are one dependency pinned in one place. The five
 # processor crates take it as a `cfg(target_arch = "wasm32")` dependency: the
 # generated module is gated on wasm32, so a host build needs neither the crate

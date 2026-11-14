@@ -2,9 +2,9 @@
 //
 // Run:
 //   export NATS_SERVERS='nats://localhost:4222'
-//   cargo run --features connector-nats,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-nats,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/nats.kdl
-//   cargo run --features connector-nats,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-nats,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/nats.kdl
 //
 // Both ends speak JetStream, so the source has a durable pull consumer and the

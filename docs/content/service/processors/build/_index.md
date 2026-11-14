@@ -108,7 +108,7 @@ and must return.
 
 | Language | SDK package | Toolchain | Page |
 |---|---|---|---|
-| Rust | none needed: `saci-processor` carries it | `cargo build --target wasm32-wasip2`, Rust 1.95+ | [A Rust processor](@/service/processors/build/rust.md) |
+| Rust | none needed: the `saci` crate's `processor` feature carries it | `cargo build --target wasm32-wasip2`, Rust 1.95+ | [A Rust processor](@/service/processors/build/rust.md) |
 | Go | `github.com/nassor/saci/packages/saci-sdk-go` | `componentize-go` 0.4.1, Go 1.25.5+ | [A Go processor](@/service/processors/build/go.md) |
 | Python | `saci-sdk` | `componentize-py` 0.25.0, Python 3.10+ | [A Python processor](@/service/processors/build/python.md) |
 | TypeScript | `@nassor/saci-sdk` | `jco` 1.30.0 and `typescript` 5.9.3, Node 24.12+ | [A TypeScript processor](@/service/processors/build/typescript.md) |
@@ -121,7 +121,7 @@ and must return.
 Go, Python, TypeScript, Kotlin and C# have no WASI 0.2 friendly Arrow library today, so each of
 those SDKs carries its own reader and its own in-place writers.
 [The SDK packages](@/library/reference/sdk-packages.md) lists the coordinates, the shared API and
-what those readers refuse. Rust needs none of it, because `saci-processor` handles the encoding
+what those readers refuse. Rust needs none of it, because the `processor` feature handles the encoding
 itself.
 
 </div>
@@ -136,7 +136,7 @@ Point every toolchain at the same WIT package. It is the single canonical copy, 
 second one is how two builds end up on two worlds.
 
 ```text,name=The one canonical WIT package
-crates/saci-processor/wit/pipeline.wit
+crates/saci/wit/pipeline.wit
 ```
 
 You need `wasm-tools` once, whatever the language:
@@ -308,7 +308,7 @@ region.
 
 ```bash,name=Build the six components then drive the chain
 cargo xtask polyglot
-cargo run -p saci-service --features wasm,tracing --example polyglot_orders
+cargo run -p saci --features wasm-host,tracing --example polyglot_orders
 ```
 
 Runs the same on Linux, macOS and Windows (PowerShell). The first command needs Go, Python,

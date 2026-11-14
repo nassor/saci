@@ -1,12 +1,12 @@
 //! `cargo xtask matrix`: the connector matrix's slices against one shared set
 //! of containers.
 //!
-//! `crates/saci-service/tests/connector_matrix.rs` declares one test per
+//! `crates/saci/tests/connector_matrix.rs` declares one test per
 //! `{source, processor, format}` slice, and nextest runs every test in its own
 //! process, so a container started inside a test would be one per slice. This
 //! task starts one container per external resource for the whole run instead,
 //! and names each endpoint in a `SACI_MATRIX_*` variable the harness
-//! (`crates/saci-service/tests/common/matrix.rs`) reads.
+//! (`crates/saci/tests/common/matrix.rs`) reads.
 //!
 //! Steps:
 //!
@@ -99,13 +99,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "all",
     ]);
     if !archived {
-        nextest = nextest.args([
-            "-p",
-            "saci-service",
-            "--all-features",
-            "--test",
-            "connector_matrix",
-        ]);
+        nextest = nextest.args(["-p", "saci", "--all-features", "--test", "connector_matrix"]);
     }
     for (key, value) in &env {
         nextest = nextest.env(key, value);

@@ -12,14 +12,14 @@ use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 
-use saci_connector_file::{FileSink, FileSource};
-use saci_core::SaciError;
-use saci_core::dataset::Dataset;
-use saci_core::io::sink::Sink;
-use saci_core::io::source::Source;
-use saci_core::pipeline::Pipeline;
-use saci_core::system::{ParallelSystem, SystemMeta, WriteSet};
-use saci_transformer_parquet::ParquetTransformer;
+use saci::SaciError;
+use saci::connector::file::{FileSink, FileSource};
+use saci::dataset::Dataset;
+use saci::io::sink::Sink;
+use saci::io::source::Source;
+use saci::pipeline::Pipeline;
+use saci::system::{ParallelSystem, SystemMeta, WriteSet};
+use saci::transformer::parquet::ParquetTransformer;
 
 /// Schema with `id` (Int64), `price` (Float64), `rounded` (Int64).
 fn trade_schema() -> Arc<Schema> {

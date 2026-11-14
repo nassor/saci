@@ -17,7 +17,7 @@
 //! cargo xtask polyglot
 //!
 //! # run the six-language chain
-//! cargo run -p saci-service --features wasm,tracing --example polyglot_orders
+//! cargo run -p saci --features wasm-host,tracing --example polyglot_orders
 //! ```
 //!
 //! Without the `tracing` feature the host prints processor logs through `eprintln!`
@@ -41,13 +41,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema};
-use saci_core::runtime::PipelineRuntime;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::wasm::{WasmEngine, WasmPipelineRuntime};
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::runtime::PipelineRuntime;
+use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
 
 /// Epoch ticks granted to each processor call: 100 × 100 ms, the same 10 s budget
-/// `saci-service`'s own WASM loader uses.
+/// the host's own WASM loader uses.
 const EPOCH_TICKS: u64 = 100;
 
 /// Absolute tolerance for every float comparison and for the formatted table.
@@ -60,7 +60,7 @@ const EPS: f64 = 1e-6;
 #[cfg(feature = "tracing")]
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,saci_service::wasm=trace"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,saci::wasm_host=trace"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .without_time()
@@ -78,7 +78,7 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("workspace root above crates/saci-service")
+        .expect("workspace root above crates/saci")
         .to_path_buf()
 }
 
@@ -320,7 +320,7 @@ fn print_table(dataset: &Dataset) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Read the ledger totals out of a `run-result.checkpoint` blob. The blob is a
-/// standalone single-component Arrow IPC stream written by `saci-processor`'s
+/// standalone single-component Arrow IPC stream written by `saci::processor`'s
 /// `Stateful::capture`, so the host decodes it with the same `Dataset::read_ipc`
 /// it uses for the data plane.
 fn ledger_totals(blob: &[u8]) -> Result<(i64, f64), Box<dyn std::error::Error>> {

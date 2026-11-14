@@ -112,7 +112,7 @@ first and you patch the result. Global flags come **before** the subcommand.
 Linux/macOS:
 
 ```bash,name=Generate the bindings, then re-add the SDK
-componentize-go -d ../../../../crates/saci-processor/wit -w saci-pipeline bindings --format
+componentize-go -d ../../../../crates/saci/wit -w saci-pipeline bindings --format
 go mod edit \
     -require=github.com/nassor/saci/packages/saci-sdk-go@v0.0.0 \
     -replace=github.com/nassor/saci/packages/saci-sdk-go=../../../../packages/saci-sdk-go
@@ -121,7 +121,7 @@ go mod edit \
 Windows (PowerShell):
 
 ```powershell
-componentize-go -d ..\..\..\..\crates\saci-processor\wit -w saci-pipeline bindings --format
+componentize-go -d ..\..\..\..\crates\saci\wit -w saci-pipeline bindings --format
 go mod edit -require=github.com/nassor/saci/packages/saci-sdk-go@v0.0.0 -replace=github.com/nassor/saci/packages/saci-sdk-go=..\..\..\..\packages\saci-sdk-go
 ```
 
@@ -345,13 +345,13 @@ step used.
 Linux/macOS:
 
 ```bash,name=Build the component
-componentize-go -d ../../../../crates/saci-processor/wit -w saci-pipeline build -o validate-go.wasm
+componentize-go -d ../../../../crates/saci/wit -w saci-pipeline build -o validate-go.wasm
 ```
 
 Windows (PowerShell):
 
 ```powershell
-componentize-go -d ..\..\..\..\crates\saci-processor\wit -w saci-pipeline build -o validate-go.wasm
+componentize-go -d ..\..\..\..\crates\saci\wit -w saci-pipeline build -o validate-go.wasm
 ```
 
 `validate-go.wasm` now sits in the stage directory. `cargo xtask polyglot`
@@ -414,9 +414,9 @@ Linux/macOS:
 
 ```bash,name=Validate the config, then run it
 cargo xtask polyglot
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- \
     validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- \
     serve --config examples/configs/standalone_polyglot.kdl
 ```
 
@@ -424,8 +424,8 @@ Windows (PowerShell):
 
 ```powershell
 cargo xtask polyglot
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 `run_mode kind="one_shot"` means `serve` processes the file once and exits.

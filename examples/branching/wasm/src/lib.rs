@@ -28,7 +28,7 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci-processor/wit`. The
+// The bindings are generated in place from `crates/saci/wit`. The
 // module and the `export_pipeline!` invocation below are gated on
 // `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
 // `component-type` custom section, neither of which the host target can link.
@@ -36,7 +36,7 @@
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        path: "../../../crates/saci-processor/wit",
+        path: "../../../crates/saci/wit",
         world: "saci-pipeline",
         generate_all,
     });
@@ -44,10 +44,10 @@ mod bindings {
 
 use std::sync::Arc;
 
-use saci_processor::RouteDecision;
-use saci_processor::arrow_array::StringArray;
-use saci_processor::arrow_schema::{DataType, Field, Schema};
-use saci_processor::prelude::*;
+use saci::processor::RouteDecision;
+use saci::processor::arrow_array::StringArray;
+use saci::processor::arrow_schema::{DataType, Field, Schema};
+use saci::processor::prelude::*;
 
 /// A row of the demo workload: an id plus the priority that selects the branch.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -125,4 +125,4 @@ pub fn build() -> Pipeline {
 }
 
 #[cfg(target_arch = "wasm32")]
-saci_processor::export_pipeline!(build);
+saci::export_pipeline!(build);

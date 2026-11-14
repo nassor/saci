@@ -20,7 +20,7 @@
     <dt>In one line</dt>
     <dd>A transform that <strong>declares its own reads and writes</strong>, per field, up front</dd>
     <dt>You need</dt>
-    <dd>Nothing beyond <code>saci-core</code>. Concurrent stages need its default <code>runtime</code> feature</dd>
+    <dd>Nothing beyond <code>saci</code>. Concurrent stages need its <code>runtime</code> feature, which the default <code>engine</code> feature enables</dd>
     <dt>Read this if</dt>
     <dd>You are writing your first transform, or two of your systems refuse to share a stage and you want to know which declaration is forcing them apart</dd>
 </dl>
@@ -35,7 +35,7 @@
 </p>
 
 <div class="code">
-    <div class="code-cap"><span>Rust</span><em>the trait, as declared in saci-core</em></div>
+    <div class="code-cap"><span>Rust</span><em>the trait, as declared in saci</em></div>
     <pre><code class="language-rust">#[async_trait]
 pub trait System: Send + Sync {
     /// Defaults to an empty declaration named after the concrete type.
@@ -178,7 +178,7 @@ pub trait System: Send + Sync {
     <div class="code-cap"><span>Rust</span><em>declaration and body, side by side</em></div>
     <pre><code class="language-rust">use std::sync::Arc;
 use arrow_array::Float64Array;
-use saci_core::prelude::*;
+use saci::prelude::*;
 
 struct AddTotal;
 
@@ -439,7 +439,7 @@ SystemMeta::new("ingest")
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>meta stays explicit; only the struct goes away</em></div>
-    <pre><code class="language-rust">use saci_core::prelude::*;
+    <pre><code class="language-rust">use saci::prelude::*;
 
 let load = system_fn(
     SystemMeta::new("load").write_component("Order"),
@@ -561,7 +561,7 @@ pipeline.add_parallel_system(Score);</code></pre>
 <p>
     Slice parallelism is gated on two conditions, both checked before any thread is
     spawned. The dataset must hold at least
-    <code>saci_core::system::SLICE_PARALLEL_THRESHOLD</code> rows, which is
+    <code>saci::system::SLICE_PARALLEL_THRESHOLD</code> rows, which is
     <b>100_000</b>, and <code>run_slice</code> must return <code>Some</code>. When
     either fails, the executor calls plain <code>run</code> over the whole dataset
     instead. Below the threshold, rayon's fan-out costs more than the work it

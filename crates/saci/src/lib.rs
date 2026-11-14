@@ -1,55 +1,39 @@
-//! Embed SACI as a pure-Rust library, with no external database or message
-//! broker.
+//! SACI: a batch processing engine on Apache Arrow.
 //!
-//! `use saci::prelude::*;` is the one import for whichever combination of
-//! feature groups is enabled below. This crate itself defines no types: it
-//! re-exports the workspace crates that make up each group.
+//! One crate, compiled to what its features select. `use saci::prelude::*;`
+//! is the one import for whichever combination is enabled.
 //!
-//! - `engine` (default): the columnar engine, `Dataset`, `Pipeline`,
-//!   `System`, `Scheduler`, `Component`, and the `Source`/`Sink` traits.
-//! - `connector-channel`, `connector-file`, `connector-redb`,
-//!   `connector-http`, `connector-tcp`, `connector-udp`, `connector-saci`
-//!   (`connectors` enables all seven): the connectors that need nothing
-//!   installed or already running. A channel inside the process, local disk,
-//!   an embedded redb key/value file, an HTTP client and a listening HTTP
-//!   source, two raw sockets, and a peer SACI service; HTTP, TCP, UDP and the
-//!   peer link speak the network and depend on no particular server product.
-//!   `saci-connector-kafka`, `-mariadb`, `-nats`, `-postgresql`, `-s3` and `-turso` each
-//!   require a specific broker, database or object store installed and
-//!   running first, and this crate carries none of them.
-//! - `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`,
-//!   `transformer-ndjson`, `transformer-parquet` (`transformers` enables all
-//!   five): the byte formats a connector reads and writes.
-//! - `windows`: Beam-style windowed aggregation, forwarded to whichever of
-//!   `engine`, `processor` or `plugin` is enabled.
-//! - `processor`: `Pipeline`/`System`/`Component` (hand-written, not
-//!   derived), `Config`/`Error`/`Result` and `export_pipeline!`, for a
-//!   WebAssembly Component Model processor. A processor targets
-//!   wasm32-wasip2 and must not pull tokio in, so build with
-//!   `--no-default-features --features processor`. Does not carry the
-//!   `#[derive(Component)]`/`#[transform]`/`#[fold]`/`#[processor]` macros:
-//!   their expansions name `saci-processor` literally, which only resolves
-//!   as a direct dependency of the crate invoking them, not a transitive
-//!   one reached through this facade. A processor crate that wants those
-//!   macros depends on `saci-processor` directly.
-//! - `plugin`: `Pipeline`/`System`/`Component` again, `ProcessorState`,
-//!   `RouteDecision` and `export_plugin!`, for a native plugin: a cdylib
-//!   the host `dlopen`s.
-//! - `all`: every feature this crate carries, `engine`, `windows`,
-//!   `connectors`, `transformers`, `processor` and `plugin`, in one
-//!   build, for a host-side embedder that wants one dependency. `all`
-//!   reaches saci-core's `runtime` feature through `engine`, and tokio
-//!   cannot target wasm32-wasip2, so a wasm processor crate still
-//!   builds with `--no-default-features --features processor`.
+//! - `engine` (default): the columnar engine. `Dataset`, `Pipeline`,
+//!   `System`, `Scheduler`, `Component`, and the `Source`/`Sink` traits in
+//!   [`io`].
+//! - `windows`: Beam-style windowed aggregation in `windows`.
+//! - `connector-<name>`: one connector in `connector::<name>`. `connectors`
+//!   enables the seven that need nothing installed or already running:
+//!   `channel`, `file`, `redb`, `http`, `tcp`, `udp` and `saci`. `kafka`,
+//!   `mariadb`, `nats`, `postgresql`, `s3`, `turso`, `clickhouse` and
+//!   `opentelemetry` each need a specific broker, database, object store or
+//!   OTLP endpoint running first.
+//! - `transformer-<format>`: one byte format in `transformer::<format>`.
+//!   `transformers` enables all five: `arrow-ipc`, `avro`, `csv`, `ndjson`
+//!   and `parquet`.
+//! - `processor`: the WebAssembly Component Model processor SDK in
+//!   `processor`, with the `#[derive(Component)]`, `#[transform]`, `#[fold]`
+//!   and `#[processor]` macros and `export_pipeline!`. A processor targets
+//!   wasm32-wasip2, where tokio cannot build, so it depends on this crate
+//!   with `default-features = false, features = ["processor"]`.
+//! - `plugin`: the native plugin SDK in `plugin` and `export_plugin!`, for a
+//!   cdylib the host `dlopen`s.
+//! - `service`: the host in `service`: KDL configuration, the factory
+//!   Registry, the standalone and distributed runners, the HTTP control
+//!   plane and the `saci-service` binary. `wasm-host` and `plugin-host` add
+//!   the two processor hosts, `service-cluster` a Raft cluster node.
+//!   `server` is the bundle `cargo install saci --features server` builds:
+//!   the service, the WebAssembly host, the seven connectors above and every
+//!   byte format.
+//! - `all`: every feature above in one build.
 //!
-//! `engine`, `processor` and `plugin` each enable `dep:saci-core` directly,
-//! so every name above that saci-core declares unconditionally (regardless
-//! of its own `runtime`/`processor` feature) is one `pub use` shared by all
-//! three, with nothing to reconcile between them: they are the identical
-//! types either way. `engine`, `processor` and `plugin` are still not meant
-//! to be combined in one build: each authors a different artifact, a host
-//! binary, a wasm component, or a native shared library. Doing so is not
-//! ambiguous, only redundant.
+//! A custom server is the same binary with a different feature set, or a
+//! `main.rs` that calls into [`service`].
 //!
 //! ```ignore
 //! use saci::prelude::*;
@@ -58,140 +42,183 @@
 pub use arrow_array;
 pub use arrow_schema;
 
-// Mirrors `saci_service`'s crate root: module paths plus the flattened
-// types, so a crate written against `saci_service::{component::Component,
-// dataset::Dataset, ...}` ports to `saci::{component::Component,
-// dataset::Dataset, ...}` with no other changes. Every name below is
-// declared unconditionally in saci-core regardless of which of its own
-// features (`runtime` or `processor`) ends up active, so one `pub use`
-// covers `engine`, `processor` and `plugin` alike.
-#[cfg(any(feature = "engine", feature = "processor", feature = "plugin"))]
-pub use saci_core::{
-    column, component, dataset, error, partition, pipeline, resource, retry, row, scheduler,
-    schema, system,
+pub mod error;
+pub mod retry;
+
+pub mod column;
+pub mod component;
+pub mod dataset;
+pub mod partition;
+pub mod pipeline;
+pub mod resource;
+pub mod row;
+pub mod scheduler;
+pub mod schema;
+pub mod sdk;
+pub mod system;
+
+#[cfg(feature = "runtime")]
+pub mod runtime;
+
+#[cfg(feature = "io")]
+pub mod io;
+
+/// The `window` geometry enum. Declared in every build: a host parses a
+/// window declaration whether or not it carries the engine that serves one.
+pub mod window_spec;
+
+#[cfg(feature = "windows")]
+pub mod windows;
+
+pub use error::{SaciError, SaciResult};
+pub use retry::{RetryMode, SystemConfig};
+
+pub use component::Component;
+pub use dataset::{Dataset, DatasetBuilder};
+pub use partition::KeyPartition;
+pub use pipeline::{Pipeline, PipelineBuilder, RunStats};
+pub use row::Row;
+pub use scheduler::{BackpressureSpec, DependencyKind, PipelineConfig, Scheduler};
+pub use schema::SchemaRegistry;
+pub use system::{
+    FieldAccess, FieldRef, ParallelSystem, ResourceUpdate, SliceWriteSet, System, SystemMeta,
+    WriteSet, system_fn,
 };
 
-#[cfg(any(feature = "engine", feature = "processor", feature = "plugin"))]
-pub use saci_core::{
-    BackpressureSpec, Component, Dataset, DependencyKind, FieldAccess, KeyPartition,
-    ParallelSystem, Pipeline, PipelineBuilder, PipelineConfig, ResourceUpdate, RetryMode, Row,
-    RunStats, SaciError, SaciResult, Scheduler, SchemaRegistry, SliceWriteSet, System,
-    SystemConfig, SystemMeta, WriteSet, system_fn,
-};
+#[cfg(feature = "runtime")]
+pub use runtime::{PipelineRuntime, RuntimeDescriptorInfo, RuntimeOutput};
 
-// `io` (the Source/Sink traits, drain_into_dataset, drain_dataset, the cast
-// helpers) needs saci-core's own `io` feature, which only `engine`'s entry
-// below requests. `processor` avoids it deliberately: `io` implies
-// `runtime` (tokio, rayon), which cannot target wasm32-wasip2. `plugin`
-// already carries `runtime` through saci-plugin's own saci-core edge (its
-// own default features), but a plugin authors a batch processor, not a
-// host-level connector, so it has no use for `io` either way.
-#[cfg(feature = "engine")]
-pub use saci_core::io;
+#[cfg(feature = "config")]
+pub mod config;
 
-#[cfg(all(
-    any(feature = "engine", feature = "processor", feature = "plugin"),
-    feature = "windows"
+#[cfg(feature = "transformer-contract")]
+pub mod transformer;
+
+#[cfg(feature = "connector-contract")]
+pub mod connector;
+
+#[cfg(feature = "processor")]
+pub mod processor;
+
+#[cfg(feature = "plugin")]
+pub mod plugin;
+
+#[cfg(any(feature = "plugin", feature = "plugin-host"))]
+pub mod plugin_abi;
+
+#[cfg(feature = "metrics")]
+pub mod inspector_wire;
+
+// The host's OpenTelemetry instruments. The no-op impl behind a disabled
+// `metrics` keeps every call site free of `#[cfg]`.
+#[cfg(any(
+    feature = "metrics",
+    feature = "distributed",
+    feature = "wasm-host",
+    feature = "plugin-host",
+    feature = "service"
 ))]
-pub use saci_core::windows;
+pub mod metrics;
+
+// In-process telemetry. Sibling of `metrics`, not part of `service`, so a
+// library embedder can capture spans and samples without the axum control
+// plane.
+#[cfg(feature = "inspector")]
+pub mod inspector;
+
+#[cfg(feature = "distributed")]
+pub mod distributed;
+
+// Shared by the two out-of-process pipeline runtimes: both decode declared
+// component schemas into a template dataset the same way.
+#[cfg(any(feature = "wasm-host", feature = "plugin-host"))]
+mod descriptor;
+
+#[cfg(feature = "wasm-host")]
+pub mod wasm_host;
+
+#[cfg(feature = "plugin-host")]
+pub mod plugin_host;
+
+#[cfg(feature = "service")]
+pub mod service;
 
 #[cfg(feature = "connector-channel")]
-pub use saci_connector_channel::{ChannelRegistry, ChannelSink, ChannelSource};
+pub use connector::channel::{ChannelRegistry, ChannelSink, ChannelSource};
 
 #[cfg(feature = "connector-file")]
-pub use saci_connector_file::{FileSink, FileSource};
+pub use connector::file::{FileSink, FileSource};
 
 #[cfg(feature = "connector-redb")]
-pub use saci_connector_redb::{RedbSink, RedbSinkConfig, RedbSource, RedbSourceConfig};
+pub use connector::redb::{RedbSink, RedbSinkConfig, RedbSource, RedbSourceConfig};
 
 #[cfg(feature = "connector-http")]
-pub use saci_connector_http::{
+pub use connector::http::{
     ContentEncoding, HttpClientOptions, HttpPushOptions, HttpPushSource, HttpSink, HttpSinkOptions,
     HttpSource, HttpSourceOptions, HttpVersion, Pagination, ReadMode, SchemaFrom, ServerTls,
     TlsFiles, Window,
 };
 
 #[cfg(feature = "connector-tcp")]
-pub use saci_connector_tcp::{TcpIngestSource, TcpSink};
+pub use connector::tcp::{TcpIngestSource, TcpSink};
 
 #[cfg(feature = "connector-udp")]
-pub use saci_connector_udp::{UdpSink, UdpSource};
+pub use connector::udp::{UdpSink, UdpSource};
 
 #[cfg(feature = "connector-saci")]
-pub use saci_connector_saci::{SaciSink, SaciSource};
+pub use connector::saci::{SaciSink, SaciSource};
 
 #[cfg(feature = "transformer-contract")]
-pub use saci_transformer::{BatchReader, BatchWriter, MessageDecoder, Transformer};
+pub use transformer::{BatchReader, BatchWriter, MessageDecoder, Transformer};
 
 #[cfg(feature = "transformer-arrow-ipc")]
-pub use saci_transformer_arrow_ipc::ArrowIpcTransformer;
+pub use transformer::arrow_ipc::ArrowIpcTransformer;
 
 #[cfg(feature = "transformer-avro")]
-pub use saci_transformer_avro::AvroTransformer;
+pub use transformer::avro::AvroTransformer;
 
 #[cfg(feature = "transformer-csv")]
-pub use saci_transformer_csv::CsvTransformer;
+pub use transformer::csv::CsvTransformer;
 
 #[cfg(feature = "transformer-ndjson")]
-pub use saci_transformer_ndjson::NdjsonTransformer;
+pub use transformer::ndjson::NdjsonTransformer;
 
 #[cfg(feature = "transformer-parquet")]
-pub use saci_transformer_parquet::ParquetTransformer;
-
-/// Author a WebAssembly Component Model processor pipeline.
-///
-/// `export_pipeline!` wires a `fn() -> Pipeline` to the `saci:pipeline@0.3.0`
-/// WIT world exports; see [`saci_processor`] for the full authoring guide.
-/// Safe to re-export: unlike the `#[derive(Component)]`/`#[transform]`/
-/// `#[fold]`/`#[processor]` macros this crate deliberately omits (see the
-/// `processor` feature's own doc in `Cargo.toml`), `export_pipeline!` is a
-/// `macro_rules!` macro whose `$crate`-qualified paths resolve to
-/// `saci-processor` regardless of which path the caller invoked it
-/// through.
-#[cfg(feature = "processor")]
-pub use saci_processor::export_pipeline;
-
-/// Author a native plugin: a cdylib the host `dlopen`s.
-///
-/// `export_plugin!` wires a `fn() -> Pipeline` to the `saci-plugin-abi` C
-/// ABI; see [`saci_plugin`] for the full authoring guide.
-#[cfg(feature = "plugin")]
-pub use saci_plugin::export_plugin;
+pub use transformer::parquet::ParquetTransformer;
 
 // `ProcessorState` and `RouteDecision` cross a batch boundary for `processor`
-// and `plugin` alike; both SDKs re-export the identical `saci_core::sdk`
-// items, so reaching them directly needs no reconciliation between the two
-// features either.
+// and `plugin` alike.
 #[cfg(any(feature = "processor", feature = "plugin"))]
-pub use saci_core::sdk::{ProcessorState, RouteDecision};
+pub use sdk::{ProcessorState, RouteDecision};
 
-// `Config`, `Error` and `Result` are real types `saci-processor` defines
-// itself, not re-exports of anything saci-core or saci-plugin also carry,
-// so they stay `processor`-only with no shared or excluded name.
 #[cfg(feature = "processor")]
-pub use saci_processor::{Config, Error, Result};
+pub use processor::{Config, Error, Result};
 
 /// Convenience re-exports of the most commonly used types and traits.
 ///
-/// `use saci::prelude::*;` pulls in whatever the enabled feature groups
-/// provide: with `engine`, `processor` or `plugin`, `Dataset`, `Pipeline`,
-/// `System`, `Component` (the trait), plus the connector and transformer
-/// types the enabled `connector-*`/`transformer-*` features add, and with
-/// `processor` also `Config`/`Error`/`Result`. Does not carry
-/// `#[derive(Component)]`, `#[transform]`, `#[fold]` or `#[processor]`; see
-/// the `processor` feature's doc in `Cargo.toml` for why.
+/// `use saci::prelude::*;` pulls in the engine types plus whatever the
+/// enabled `processor`, `connector-*` and `transformer-*` features add.
 pub mod prelude {
-    // Every name `saci_core::prelude` exports is declared unconditionally
-    // there too (its own `windows`-gated items follow this crate's own
-    // `windows` feature transparently), so one glob, active under any of
-    // the three SDK features, replaces what would otherwise be three
-    // separate globs needing pairwise exclusion to stay `unused_imports`-
-    // clean under `--all-features`.
-    #[cfg(any(feature = "engine", feature = "processor", feature = "plugin"))]
-    pub use saci_core::prelude::*;
+    #[cfg(feature = "runtime")]
+    pub use crate::runtime::RuntimeOutput;
+    pub use crate::{
+        BackpressureSpec, Component, Dataset, DependencyKind, FieldAccess, KeyPartition,
+        ParallelSystem, Pipeline, PipelineBuilder, PipelineConfig, ResourceUpdate, RetryMode, Row,
+        RunStats, SaciError, SaciResult, Scheduler, SchemaRegistry, SliceWriteSet, System,
+        SystemConfig, SystemMeta, WriteSet, system_fn,
+    };
+
+    pub use crate::column::ComponentView;
+    pub use crate::dataset::DatasetBuilder;
+    pub use crate::system::FieldRef;
+
+    pub use async_trait::async_trait;
+
+    #[cfg(feature = "windows")]
+    pub use crate::windows::{CURRENT_ACCUMULATOR_VERSION, WindowAccumulator, WindowWatermark};
 
     #[cfg(feature = "processor")]
-    pub use saci_processor::{Config, Error, Result};
+    pub use crate::processor::{Config, Error, Result};
 
     #[cfg(feature = "connector-channel")]
     pub use crate::{ChannelRegistry, ChannelSink, ChannelSource};

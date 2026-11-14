@@ -21,9 +21,9 @@
 //
 // Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
 // then run the service and the publisher:
-//   cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- serve \
+//   cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve \
 //     --config examples/windowing/tumbling/tumbling.kdl
-//   cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+//   cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 //
 // On Windows set SACI_PLUGIN_LIB=target/release/windowing_tumbling_plugin.dll
 // too: the plugin cdylib is windowing_tumbling_plugin.dll there, not

@@ -172,7 +172,7 @@ about your component is touched until gate 2.
 </div>
 
 Gate 2 as drawn is the WebAssembly path. `PipelineRuntimeLoader::load` exists
-only under the `wasm` feature; a `plugin` node reaches the same gate through
+only under the `wasm-host` feature; a `plugin` node reaches the same gate through
 `load_plugin_runtime`, which resolves a path rather than bytes, checks the
 optional `sha3_256` on the file, and hands off to `NativePluginRuntime::open`.
 That constructor calls the plugin's `describe` once, so a manifest error, an ABI

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use arrow_array::{Float64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
-use saci_service::prelude::*;
+use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

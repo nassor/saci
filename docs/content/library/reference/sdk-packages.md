@@ -132,7 +132,7 @@ flatbuffer that could drift from what arrow-rs emits. Regenerate it after any
 wire format or `Order` schema change:
 
 ```bash,name=Regenerate the conformance corpus
-cargo run -p saci-service --features conformance --example conformance_vectors -- emit
+cargo run -p saci --features conformance --example conformance_vectors -- emit
 ```
 
 Two reference rules are host-side, not codec rules, so the corpus deliberately
@@ -148,14 +148,14 @@ workspace exact-pins as the host to processor wire format, and the
 packages talks to a host built from the same pin.
 
 Version 0.1.0 of all five decodes what
-`cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit`
+`cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit`
 writes to `examples/polyglot/generated/fixture_input.saci`. Each package's test
 suite asserts exactly that, column by column, against the JSON the same command
 emits.
 
 ## License
 
-The `packages/` subtree is Apache-2.0. The engine crates are AGPL-3.0-only.
+The `packages/` subtree is Apache-2.0. The `saci` and `saci-macros` crates are AGPL-3.0-only.
 
 ## Where to go next
 

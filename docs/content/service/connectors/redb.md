@@ -14,7 +14,7 @@ value = "Required on both halves"
 label = "Run modes"
 value = "Any: the source reaches EOF after the last entry"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 [redb](https://github.com/cberner/redb) is an embedded key/value store: one file, no server. This

@@ -56,8 +56,8 @@
 //   cargo build --release -p integrity-audit-wasm --target wasm32-wasip2
 //
 // Then:
-//   cargo run -p saci-service \
-//     --features connector-postgresql,connector-http,transformer-parquet,wasm \
+//   cargo run -p saci \
+//     --features server,connector-postgresql,connector-http,transformer-parquet,wasm-host \
 //     -- serve --config examples/integrity/integrity_audit.kdl
 
 mode "standalone"

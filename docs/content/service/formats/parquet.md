@@ -17,7 +17,7 @@ value = "One message per batch"
 label = "Needs schema_fields"
 value = "Optional reading a file, required writing and on messages"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 Columnar files that describe themselves. The footer carries every column, its type and the row count

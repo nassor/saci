@@ -8,7 +8,7 @@
 //! the pre-linked `InstancePre`, IPC in, IPC out.
 //!
 //! ```text
-//! cargo run --release -p saci-service --features service,wasm --example stream_latency
+//! cargo run --release -p saci --features service,wasm-host,connector-channel --example stream_latency
 //! ```
 //!
 //! The WASM half needs the smoketest component:
@@ -25,13 +25,13 @@ use arrow_schema::{DataType, Field, Schema};
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
-use saci_connector_channel::{ChannelSink, ChannelSource};
-use saci_core::system::{SystemMeta, WriteSet, system_fn};
-use saci_core::{Pipeline, SaciError};
-use saci_service::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
-use saci_service::service::flow::FlowPlan;
-use saci_service::service::registry::Registry;
-use saci_service::service::stream::run_stream;
+use saci::connector::channel::{ChannelSink, ChannelSource};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::service::flow::FlowPlan;
+use saci::service::registry::Registry;
+use saci::service::stream::run_stream;
+use saci::system::{SystemMeta, WriteSet, system_fn};
+use saci::{Pipeline, SaciError};
 
 const COMP: &str = "Tick";
 const NATIVE_ITEMS: usize = 10_000;
@@ -207,16 +207,16 @@ async fn native_latency() -> Vec<u64> {
     samples
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(feature = "wasm-host")]
 mod wasm_probe {
     use super::*;
 
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use saci_core::runtime::PipelineRuntime;
-    use saci_service::component::Component;
-    use saci_service::wasm::{WasmEngine, WasmPipelineRuntime};
+    use saci::component::Component;
+    use saci::runtime::PipelineRuntime;
+    use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
     use serde::{Deserialize, Serialize};
 
     const WASM_CALLS: usize = 1_000;
@@ -245,7 +245,7 @@ mod wasm_probe {
         let workspace_root = manifest_dir
             .parent()
             .and_then(|p| p.parent())
-            .expect("workspace root above crates/saci-service");
+            .expect("workspace root above crates/saci");
         workspace_root
             .join("target")
             .join("wasm32-wasip2")
@@ -306,12 +306,12 @@ async fn main() {
     let native = native_latency().await;
     report("native (source→sink)", native);
 
-    #[cfg(feature = "wasm")]
+    #[cfg(feature = "wasm-host")]
     if let Some(samples) = wasm_probe::processor_call_latency().await {
         report("wasm run_on_with_state", samples);
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(feature = "wasm-host"))]
     println!("\n(build with --features service,wasm for the processor-boundary numbers)");
 
     // Keep the epoch ticker from being the last thing holding the runtime.

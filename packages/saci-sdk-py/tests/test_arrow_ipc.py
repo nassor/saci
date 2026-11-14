@@ -25,7 +25,7 @@ _FIXTURE_JSON = os.path.join(_GENERATED, "fixture_input.json")
 
 _HAVE_FIXTURES = os.path.isfile(_FIXTURE_SACI) and os.path.isfile(_FIXTURE_JSON)
 _MISSING = (
-    "generated fixtures absent; run `cargo run -p saci-service --features wasm "
+    "generated fixtures absent; run `cargo run -p saci --features wasm-host "
     "--example polyglot_schema_emit -- emit`"
 )
 

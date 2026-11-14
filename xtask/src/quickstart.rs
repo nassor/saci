@@ -50,7 +50,7 @@ const USAGE: &str = "usage: cargo xtask quickstart";
 /// Path to the canonical WIT package, relative to a stage directory. Both stage
 /// directories sit four levels below the repository root, and a toolchain
 /// invoked from inside one resolves the path against that directory.
-const WIT_DIR_REL: &str = "../../../../crates/saci-processor/wit";
+const WIT_DIR_REL: &str = "../../../../crates/saci/wit";
 
 /// Exit code for a build that produced no artifact.
 const NO_ARTIFACT: u8 = 8;
@@ -123,7 +123,7 @@ pub fn run(args: &[String]) -> Result<()> {
 /// command matches what `build_service` compiled.
 fn serve_command_hint(features: &[&str]) -> String {
     format!(
-        "      cargo run -p saci-service {}-- serve \
+        "      cargo run -p saci {}-- serve \
          -c examples/quickstart/quickstart.kdl",
         crate::examples::feature_flag(features)
     )
@@ -210,22 +210,19 @@ fn collect(ctx: &Ctx, from: &Path, build_dir: &Path, name: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// An entry needing nothing beyond the default bundle prints a runnable
-    /// command, not an empty flag.
+    /// An entry needing nothing beyond the `server` bundle still names it,
+    /// with one space before the separator.
     ///
     /// `feature_flag` carries its own trailing space, so the template has
-    /// none before `--`. Interpolating a bare `join(",")` here instead, which
-    /// is what this file did, renders `--features  -- serve`: cargo reads the
-    /// `--` as the value of `--features` and the command dies. The quickstart
-    /// entry names two connectors today, so nothing else would catch the
-    /// regression if it came back.
+    /// none before `--`. Interpolating a bare `join(",")` here instead
+    /// renders `--features  -- serve` for an empty list: cargo reads the `--`
+    /// as the value of `--features` and the command dies.
     #[test]
-    fn an_entry_needing_no_extra_features_prints_no_features_flag() {
+    fn an_entry_needing_no_extra_features_names_the_server_bundle() {
         let line = serve_command_hint(&[]);
-        assert!(!line.contains("--features"), "{line}");
         assert!(
-            line.contains("cargo run -p saci-service -- serve"),
-            "one space between the package and the separator: {line}"
+            line.contains("cargo run -p saci --features server -- serve"),
+            "{line}"
         );
     }
 
@@ -235,7 +232,7 @@ mod tests {
         let line = serve_command_hint(&["connector-nats", "connector-postgresql"]);
         assert!(
             line.contains(
-                "cargo run -p saci-service --features connector-nats,connector-postgresql -- serve"
+                "cargo run -p saci --features server,connector-nats,connector-postgresql -- serve"
             ),
             "{line}"
         );

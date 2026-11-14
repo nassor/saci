@@ -288,10 +288,10 @@ below the repository root.
 Linux/macOS:
 
 ```bash,name=Generate bindings, compile and componentize
-wit-bindgen kotlin --kotlin-imports 'impl.*' ../../../../crates/saci-processor/wit \
+wit-bindgen kotlin --kotlin-imports 'impl.*' ../../../../crates/saci/wit \
   --out-dir src/wasmWasiMain/kotlin/bindings
 gradle compileProductionExecutableKotlinWasmWasiOptimize
-wasm-tools component embed ../../../../crates/saci-processor/wit \
+wasm-tools component embed ../../../../crates/saci/wit \
   build/compileSync/wasmWasi/main/productionExecutable/optimized/fee-kt.wasm \
   -o build/compileSync/wasmWasi/main/productionExecutable/optimized/fee-kt-embedded.wasm
 wasm-tools component new \
@@ -304,9 +304,9 @@ Windows (PowerShell):
 
 ```powershell
 $opt = "build\compileSync\wasmWasi\main\productionExecutable\optimized"
-wit-bindgen kotlin --kotlin-imports 'impl.*' ..\..\..\..\crates\saci-processor\wit --out-dir src/wasmWasiMain/kotlin/bindings
+wit-bindgen kotlin --kotlin-imports 'impl.*' ..\..\..\..\crates\saci\wit --out-dir src/wasmWasiMain/kotlin/bindings
 gradle compileProductionExecutableKotlinWasmWasiOptimize
-wasm-tools component embed ..\..\..\..\crates\saci-processor\wit "$opt\fee-kt.wasm" -o "$opt\fee-kt-embedded.wasm"
+wasm-tools component embed ..\..\..\..\crates\saci\wit "$opt\fee-kt.wasm" -o "$opt\fee-kt-embedded.wasm"
 wasm-tools component new "$opt\fee-kt-embedded.wasm" --adapt wasi_snapshot_preview1=..\..\generated\wasi_snapshot_preview1.reactor.wasm -o fee-kt.wasm
 ```
 
@@ -364,17 +364,17 @@ in the config are relative to the working directory.
 Linux/macOS:
 
 ```bash,name=Validate the config, then run it
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- \
   validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- \
   serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 `run_mode kind="one_shot"` means `serve` processes the file once and stops. The

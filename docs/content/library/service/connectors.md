@@ -9,33 +9,39 @@ weight = 1
 A connector is reached either by calling its constructor in Rust and handing the
 result to `Pipeline::add_source`, or by naming its `type` string in the service
 config and letting the factory build it. The second path needs the connector's
-feature on `saci-service`, because `register_builtin_factories` only installs
-what is compiled in.
+feature on `saci`, because `register_builtin_factories` only installs
+what is compiled in, and it registers a `connector-*` feature's factories only when `service` is
+also on.
 
-```toml,name=The dependency form is the same for all of them
+```toml,name=One dependency, one feature per connector
 # In a clone of the repository.
-saci-connector-file = { path = "crates/saci-connector-file" }
+saci = { path = "crates/saci", default-features = false, features = ["connector-file", "transformer-csv"] }
 
-# Outside one. The crates are not published to crates.io.
-saci-connector-file = { git = "https://github.com/nassor/saci" }
+# Outside one. saci is not published to crates.io.
+saci = { git = "https://github.com/nassor/saci", default-features = false, features = ["connector-file", "transformer-csv"] }
 ```
 
-Every connector depends on `saci-core` with its `io` feature, so the `Source` and
-`Sink` traits arrive with it. Nothing here depends on `saci-service`: the factory
-contract lives in `saci-connector`, below the host, so a connector compiles
-without wasmtime, axum or openraft in the graph. The config keys each node
-accepts, and the errors they raise, are on
+Each connector is a module under `saci::connector`, gated by its `connector-<name>` feature, and
+every one of them turns on `connector-contract` and `io`, so the `Source` and `Sink` traits and
+the factory contract arrive with it. A connector compiles without wasmtime, axum or openraft in
+the graph. The config keys each node accepts, and the errors they raise, are on
 [Sources and sinks](@/service/connectors/_index.md).
 
 ## Writing your own
 
-An out-of-tree connector is a crate that depends on `saci-core` for the traits
-and `saci-connector` for `SourceFactory` and `SinkFactory`, and on nothing else
-of SACI. Both traits build through
+A connector is a module in `crates/saci/src/connector/<name>.rs` (with `connector/<name>/` for
+its submodules), declared in `crates/saci/src/connector.rs` under
+`#[cfg(feature = "connector-<name>")]`, and enabled by a `connector-<name>` entry in the
+`[features]` table of `crates/saci/Cargo.toml`. Its factories register in
+`service/factories.rs`.
+
+A connector outside the repository is a crate that depends on `saci` with `connector-contract`
+for `SourceFactory` and `SinkFactory`, and on nothing else of SACI. Both traits build through
 `fn build(&self, config: &ConfigValue, ctx: &ConnectorContext)`, where `ctx`
 resolves the node's transformer against the transformer registry so no connector
 owns a list of formats. A custom binary then chains `register_source` or
-`register_sink` onto `register_builtin_factories`. Registering a `type_name`
+`register_sink` onto `register_builtin_factories`, or passes them to
+`saci::service::cli::main_with`. Registering a `type_name`
 that is already taken replaces the earlier factory.
 
 [Embedding saci-service](@/library/service/_index.md) has the factory and the
@@ -43,12 +49,12 @@ builder call side by side.
 
 ## The built-in constructors
 
-Ten crates, and the constructors are not uniform.
+Ten modules, and the constructors are not uniform.
 
 ### Channel
 
-```rust,name=saci-connector-channel
-use saci_connector_channel::{ChannelSink, ChannelSource};
+```rust,name=saci::connector::channel
+use saci::connector::channel::{ChannelSink, ChannelSource};
 
 ChannelSource::new(Arc<Schema>, buffer: usize) -> (mpsc::Sender<RecordBatch>, Self)
 ChannelSink::new  (Arc<Schema>, buffer: usize) -> (Self, mpsc::Receiver<RecordBatch>)
@@ -61,8 +67,8 @@ number is a row backlog whatever size the batches are.
 
 ### File
 
-```rust,name=saci-connector-file
-use saci_connector_file::{FileSink, FileSource};
+```rust,name=saci::connector::file
+use saci::connector::file::{FileSink, FileSource};
 
 FileSource::open           (&Path, Arc<dyn Transformer>, Option<Arc<Schema>>) -> Result<Self>
 FileSource::open_async     (&Path, Arc<dyn Transformer>, Option<Arc<Schema>>) -> Result<Self>
@@ -77,8 +83,8 @@ rows without reading them.
 
 ### HTTP
 
-```rust,name=saci-connector-http
-use saci_connector_http::{HttpSink, HttpSource};
+```rust,name=saci::connector::http
+use saci::connector::http::{HttpSink, HttpSource};
 
 HttpSource::new(
     url: &str,
@@ -107,8 +113,8 @@ without reading them.
 
 ### Kafka
 
-```rust,name=saci-connector-kafka
-use saci_connector_kafka::{
+```rust,name=saci::connector::kafka
+use saci::connector::kafka::{
     KafkaSink, KafkaSinkConfig, KafkaSource, KafkaSourceConfig,
 };
 
@@ -122,8 +128,8 @@ lazily, so `saci-service validate` stays broker free.
 
 ### NATS
 
-```rust,name=saci-connector-nats
-use saci_connector_nats::{
+```rust,name=saci::connector::nats
+use saci::connector::nats::{
     NatsSink, NatsSinkConfig, NatsSource, NatsSourceConfig,
 };
 
@@ -140,8 +146,8 @@ changes.
 
 ### PostgreSQL
 
-```rust,name=saci-connector-postgresql
-use saci_connector_postgresql::{
+```rust,name=saci::connector::postgresql
+use saci::connector::postgresql::{
     PostgresSink, PostgresSinkConfig, PostgresSource, PostgresSourceConfig,
 };
 
@@ -156,8 +162,8 @@ needs no database.
 
 ### S3
 
-```rust,name=saci-connector-s3
-use saci_connector_s3::{S3Sink, S3Source};
+```rust,name=saci::connector::s3
+use saci::connector::s3::{S3Sink, S3Source};
 
 S3Source::new(S3SourceConfig, Arc<Schema>, Arc<dyn Transformer>) -> Result<Self>
 S3Sink::new  (S3SinkConfig,   Arc<Schema>, Arc<dyn Transformer>) -> Result<Self>
@@ -168,8 +174,8 @@ happens inside the first call.
 
 ### TCP
 
-```rust,name=saci-connector-tcp
-use saci_connector_tcp::{TcpIngestSource, TcpSink};
+```rust,name=saci::connector::tcp
+use saci::connector::tcp::{TcpIngestSource, TcpSink};
 
 TcpIngestSource::new(
     bind: &str,
@@ -196,8 +202,8 @@ the two halves agree on is in
 
 ### UDP
 
-```rust,name=saci-connector-udp
-use saci_connector_udp::{OnFailure, ProbeKind, ProbeSettings, UdpSink, UdpSource};
+```rust,name=saci::connector::udp
+use saci::connector::udp::{OnFailure, ProbeKind, ProbeSettings, UdpSink, UdpSource};
 
 UdpSource::new(
     bind: &str,
@@ -228,9 +234,9 @@ source answers and never decodes.
 
 ### SACI
 
-```rust,name=saci-connector-saci
-use saci_connector::NodeIdentity;
-use saci_connector_saci::{SaciSink, SaciSource};
+```rust,name=saci::connector::saci
+use saci::connector::NodeIdentity;
+use saci::connector::saci::{SaciSink, SaciSource};
 
 SaciSource::bind(
     bind: &str,

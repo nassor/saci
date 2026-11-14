@@ -4,10 +4,10 @@
 //! checks and `cargo xtask demo` runs. An entry carries everything a command
 //! needs that is not in the config file itself:
 //!
-//! - the `saci-service` features the config needs beyond the default bundle:
-//!   the processor host it loads from, plus every connector it names that
-//!   needs an installed broker, database or object store, all of which are
-//!   opt-in,
+//! - the `saci` features the config needs beyond the `server` bundle: the
+//!   plugin host when it loads a native plugin, plus every connector it names
+//!   that needs an installed broker, database or object store, all of which
+//!   are opt-in,
 //! - a step that builds the processor components the config loads,
 //! - the names a `variables` block must resolve so the config is
 //!   self-contained. A committed example config uses `${NAME:-default}`
@@ -36,7 +36,7 @@ pub struct Example {
     pub name: &'static str,
     /// Path to the committed KDL config, relative to the repository root.
     pub config: &'static str,
-    /// Extra `saci-service` features beyond the default bundle.
+    /// Extra `saci` features beyond the `server` bundle.
     pub features: &'static [&'static str],
     /// Build the processor components this config loads.
     pub build: fn(&Ctx) -> Result<()>,
@@ -156,7 +156,7 @@ pub const EXAMPLES: &[Example] = &[
     Example {
         name: "standalone_plugin",
         config: "examples/configs/standalone_plugin.kdl",
-        features: &["plugin"],
+        features: &["plugin-host"],
         build: build_saci_plugin_smoketest,
         variables: &[
             ("SACI_PLUGIN_LIB", |_| {
@@ -170,7 +170,7 @@ pub const EXAMPLES: &[Example] = &[
         name: "branching",
         config: "examples/branching/branching.kdl",
         // A NatsSource fanned out to FileSinks by both processor hosts.
-        features: &["plugin", "connector-nats"],
+        features: &["plugin-host", "connector-nats"],
         build: build_branching,
         variables: &[
             ("SACI_PLUGIN_LIB", |_| plugin_lib("branching_plugin", true)),
@@ -183,7 +183,7 @@ pub const EXAMPLES: &[Example] = &[
         name: "windowing_tumbling",
         config: "examples/windowing/tumbling/tumbling.kdl",
         // Two NatsSources feeding two PostgresSinks, one per processor host.
-        features: &["plugin", "connector-nats", "connector-postgresql"],
+        features: &["plugin-host", "connector-nats", "connector-postgresql"],
         build: build_windowing_tumbling,
         variables: &[
             ("SACI_PLUGIN_LIB", |_| {
@@ -299,9 +299,10 @@ pub fn inject(ctx: &Ctx, ex: &Example, out: &Path) -> Result<()> {
     inject_variables(ctx, Path::new(ex.config), &pairs, out)
 }
 
-/// Build `saci-service` with the features `selected` examples need, once.
+/// Build `saci-service` with the `server` bundle plus the features `selected`
+/// examples need, once.
 pub fn build_service(ctx: &Ctx, selected: &[&Example]) -> Result<()> {
-    let mut features: Vec<&str> = Vec::new();
+    let mut features: Vec<&str> = vec!["server"];
     for ex in selected {
         for feature in ex.features {
             if !features.contains(feature) {
@@ -309,30 +310,22 @@ pub fn build_service(ctx: &Ctx, selected: &[&Example]) -> Result<()> {
             }
         }
     }
-    let mut build = ctx
-        .cargo()?
-        .args(["build", "-p", "saci-service", "--bin", "saci-service"]);
-    if !features.is_empty() {
-        build = build.args(["--features", &features.join(",")]);
-    }
-    build.run()
+    ctx.cargo()?
+        .args(["build", "-p", "saci", "--bin", "saci-service"])
+        .args(["--features", &features.join(",")])
+        .run()
 }
 
 /// The `--features` argument a printed `cargo run` line needs, with its
-/// trailing space, or an empty string when the default bundle covers the
-/// entry.
+/// trailing space: the `server` bundle plus the entry's own features.
 ///
 /// Lives beside [`build_service`] because the two answer the same question
 /// from one source, `Example::features`: that one compiles the binary, this
-/// one prints the command a reader is meant to be able to paste. Both have
-/// to treat an entry needing nothing beyond the default bundle as "no
-/// `--features` at all" rather than as an empty flag, which `cargo` rejects.
+/// one prints the command a reader is meant to be able to paste.
 pub fn feature_flag(features: &[&str]) -> String {
-    if features.is_empty() {
-        String::new()
-    } else {
-        format!("--features {} ", features.join(","))
-    }
+    let mut all = vec!["server"];
+    all.extend_from_slice(features);
+    format!("--features {} ", all.join(","))
 }
 
 /// Build `saci-service` with every feature, for the config-only pass over
@@ -344,7 +337,7 @@ pub fn build_service_all_features(ctx: &Ctx) -> Result<()> {
         .args([
             "build",
             "-p",
-            "saci-service",
+            "saci",
             "--bin",
             "saci-service",
             "--all-features",

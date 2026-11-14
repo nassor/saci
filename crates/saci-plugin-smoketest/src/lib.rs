@@ -2,7 +2,7 @@
 //! fixture.
 //!
 //! It declares one data component and one system, and exercises
-//! `saci_plugin::export_plugin!` end to end through a real shared library.
+//! `saci::export_plugin!` end to end through a real shared library.
 //!
 //! - `Counter` is the data plane. Its `id` field passes through untouched, so a
 //!   byte difference there indicates `arrow-ipc` drift between host and plugin.
@@ -25,10 +25,10 @@
 
 use std::sync::Arc;
 
-use saci_plugin::arrow_array::{ArrayRef, Int64Array, RecordBatch};
-use saci_plugin::arrow_schema::{DataType, Field, Schema};
-use saci_plugin::prelude::*;
-use saci_plugin::{ProcessorState, RouteDecision};
+use saci::plugin::arrow_array::{ArrayRef, Int64Array, RecordBatch};
+use saci::plugin::arrow_schema::{DataType, Field, Schema};
+use saci::plugin::prelude::*;
+use saci::plugin::{ProcessorState, RouteDecision};
 
 /// Config key holding the factor applied to every `seen` value.
 const MULTIPLIER_KEY: &str = "smoketest.multiplier";
@@ -82,7 +82,7 @@ impl Component for Total {
 /// Numbers every row and advances the running total.
 struct AdvanceSystem;
 
-#[saci_plugin::prelude::async_trait]
+#[saci::plugin::prelude::async_trait]
 impl System for AdvanceSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("advance")
@@ -153,8 +153,8 @@ impl System for AdvanceSystem {
             None => state.rows.push(Total { total: advanced }),
         }
 
-        saci_plugin::host::metric("smoketest.rows", rows as f64);
-        saci_plugin::host::info(
+        saci::plugin::host::metric("smoketest.rows", rows as f64);
+        saci::plugin::host::info(
             "smoketest",
             &format!("numbered {rows} rows through {advanced}"),
         );
@@ -194,4 +194,4 @@ pub fn build() -> Pipeline {
 /// Config key selecting the branch names this fixture's output is delivered to.
 const ROUTE_KEY: &str = "smoketest.route";
 
-saci_plugin::export_plugin!(build, state = Total);
+saci::export_plugin!(build, state = Total);

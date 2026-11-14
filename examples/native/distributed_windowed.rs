@@ -20,15 +20,15 @@ use arrow_array::{Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use saci_service::SaciError;
-use saci_service::System;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::distributed::strategy::CheckpointStrategy;
-use saci_service::distributed::{DistributedRunner, KeyPartition, RedbSharedStore, RunnerConfig};
-use saci_service::pipeline::Pipeline;
-use saci_service::system::{SystemMeta, system_fn};
-use saci_service::windows::{
+use saci::SaciError;
+use saci::System;
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::distributed::strategy::CheckpointStrategy;
+use saci::distributed::{DistributedRunner, KeyPartition, RedbSharedStore, RunnerConfig};
+use saci::pipeline::Pipeline;
+use saci::system::{SystemMeta, system_fn};
+use saci::windows::{
     ReduceAggregate, WindowAccumulator, WindowFunction, WindowResults, WindowSpec,
     WindowedSystemBuilder,
 };

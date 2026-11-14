@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 # CI fixture, not a library a downstream consumer would depend on.
 publish = false
-description = "Minimal saci-plugin consumer used as the native plugin load fixture and Arrow IPC round-trip fixture."
+description = "Minimal plugin SDK consumer used as the native plugin load fixture and Arrow IPC round-trip fixture."
 
 # This crate exists to verify:
 #   1. `export_plugin!` expands cleanly and the resulting cdylib exports
@@ -16,12 +16,12 @@ description = "Minimal saci-plugin consumer used as the native plugin load fixtu
 #   4. arrow-ipc stays pinned at the exact workspace version across the
 #      boundary. This crate is a workspace member, so the pin propagates.
 #
-# `cargo test -p saci-service` does not build unrelated workspace members, so
-# `crates/saci-service/tests/plugin_roundtrip.rs` names
+# `cargo test -p saci --features server` does not build unrelated workspace members, so
+# `crates/saci/tests/plugin_roundtrip.rs` names
 # `cargo build -p saci-plugin-smoketest` in its assertion message.
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-saci-plugin = { workspace = true }
+saci = { workspace = true, features = ["plugin"] }
 serde       = { workspace = true }

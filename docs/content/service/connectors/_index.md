@@ -93,7 +93,7 @@ Every row is a source and a sink, so one transport serves both ends of a workflo
 means the node names a declared [transformer](@/service/formats/_index.md); the seven row-carrying
 connectors take none.
 
-| Connector | Source | Sink | Needs a format | Run modes | In the default build |
+| Connector | Source | Sink | Needs a format | Run modes | In the server build |
 |---|---|---|---|---|---|
 | [File](@/service/connectors/file.md) | yes | yes | yes | any | yes |
 | [HTTP](@/service/connectors/http.md) | yes | yes | yes | any | yes |
@@ -158,7 +158,21 @@ therefore only take effect when the runner sends no hint.
 
 Teaching `saci-service` a transport it does not ship means writing a source or a sink in Rust and
 registering it in your own binary. [Writing a connector](@/library/service/connectors.md) is that
-route.
+route. The binary is a crate that depends on `saci` with the `service` feature, plus the built-in
+connectors it keeps:
+
+```toml
+[dependencies]
+saci = { version = "0.1", default-features = false, features = ["service", "connector-file", "transformer-csv"] }
+```
+
+Its `main` hands the factory to the same `serve` and `validate` subcommands as `saci-service`:
+
+```rust
+fn main() -> std::process::ExitCode {
+    saci::service::cli::main_with(|builder| builder.register_source(MyFactory))
+}
+```
 
 ## Next
 

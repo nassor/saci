@@ -1,36 +1,49 @@
 ---
 name: saci-service
-description: Use when changing, operating, testing or documenting the saci-service host or its dashboard: crates/saci-service/src/service/ (config, builder, runners, lifecycle, flow control, self-healing, HTTP control plane, logging and sampling), src/distributed/ (runner, checkpoints, Raft consensus, redb stores), src/metrics.rs, src/inspector/, the saci-service binary and its CLI, saci-inspector-wire, or the crates/saci-service-ui Leptos dashboard and its committed bundle.
+description: Use when changing, operating, testing or documenting the saci-service host or its dashboard: crates/saci/src/service/ (config, builder, runners, lifecycle, flow control, self-healing, HTTP control plane, logging and sampling, the CLI in service/cli.rs), src/distributed/ (runner, checkpoints, Raft consensus, redb stores), src/metrics.rs, src/inspector/, the saci-service binary, src/inspector_wire.rs, the saci `service`/`server` features, or the crates/saci-service-ui Leptos dashboard and its committed bundle.
 ---
 
 # SACI service and dashboard
 
 ## Layout
 
-- `saci-service`: the host. wasmtime runtime, distributed/Raft, HTTP control plane, config
-  loading, the factory `Registry`, and the `saci-service` binary. It ships no `Source`, `Sink`, or
-  `Transformer` of its own.
+- The host is part of the one `saci` crate (`crates/saci`), behind features: `src/service/`,
+  `src/distributed/`, `src/inspector/`, `src/metrics.rs`, `src/descriptor.rs`, `src/wasm_host/`
+  and `src/plugin_host/`. It carries wasmtime, distributed/Raft, the HTTP control plane, config
+  loading and the factory `Registry`. Connectors and transformers are sibling modules
+  (`connector::<name>`, `transformer::<format>`), each behind its own feature.
+- The `saci-service` binary: `src/bin/saci-service/main.rs` holds the optional mimalloc
+  `#[global_allocator]` and `fn main() -> ExitCode { saci::service::cli::main() }`. The CLI lives in
+  the library: `src/service/cli.rs` (the `Cli` parser, `main`, `main_with`) and
+  `src/service/cli/commands/{serve,validate,status,cluster}.rs`. `main_with(|builder| ...)` hands
+  the `ServiceBuilder` that `serve` and `validate` use to the caller after the built-in factories
+  are registered, so a custom server registers its own `SourceFactory`/`SinkFactory` there.
+  `required-features = ["service"]` on the `[[bin]]` keeps a build without `service` from
+  compiling it.
 - `saci-service-ui`: the `/ui` live dashboard. CSR Leptos, wasm32-unknown-unknown only, so **not**
-  a workspace member. Its committed bundle lives at `crates/saci-service/assets/ui/`, rebuilt by
+  a workspace member. Its committed bundle lives at `crates/saci/assets/ui/`, rebuilt by
   `cargo xtask ui`.
-- `saci-inspector-wire`: the inspector's JSON contract, `Topology`, `Snapshot`, `SpanRecord` and
-  friends, plus the lifecycle plane's `WorkflowRunState`, `WorkflowStatus` and
-  `ServiceLifecycleReport`, and the dead letter queue's `DlqSummary`, `DlqGroup`, `DlqTrigger`,
-  `DlqReplayReport` and `DlqReplayRequest`. serde only, so both the host and the browser can
-  compile it;
-  `saci-service` itself cannot target wasm32-unknown-unknown.
+- `src/inspector_wire.rs` (`saci::inspector_wire`, feature `metrics`): the inspector's JSON
+  contract, `Topology`, `Snapshot`, `SpanRecord` and friends, plus the lifecycle plane's
+  `WorkflowRunState`, `WorkflowStatus` and `ServiceLifecycleReport`, and the dead letter queue's
+  `DlqSummary`, `DlqGroup`, `DlqTrigger`, `DlqReplayReport` and `DlqReplayRequest`. serde only, so
+  both the host and the browser can compile it: `saci-service-ui` includes the file by
+  `#[path = "../../saci/src/inspector_wire.rs"]` instead of depending on `saci`, which cannot
+  target wasm32-unknown-unknown with the host features on.
 
-The wasm host (`src/wasm/`) is documented in skill `saci-processors` and the native plugin host in
-skill `saci-plugins`; connectors and transformers in their own skills.
+The wasm host (`src/wasm_host/`) is documented in skill `saci-processors` and the native plugin
+host (`src/plugin_host/`) in skill `saci-plugins`; connectors and transformers in their own skills.
 
 ## Features
 
-The **default** bundle is `mimalloc`, `service`, `wasm`, `windows`, `parquet-checkpoint`,
+Defined in `crates/saci/Cargo.toml` `[features]`. The library default is `engine` only. The
+**`server`** bundle is `mimalloc`, `service`, `wasm-host`, `windows`, `parquet-checkpoint`,
 `connector-channel`, `connector-file`, `connector-http`, `connector-tcp`, `connector-udp`,
 `connector-saci`, `connector-redb`, and
 every transformer,
-so `cargo install saci-service` yields a runnable binary with no flags. A connector may be default
-only when nothing has to be installed or already running for it to work, and it needs no extra
+so `cargo install saci --features server` yields a runnable `saci-service` binary. A connector may
+be in `server` only
+when nothing has to be installed or already running for it to work, and it needs no extra
 build toolchain: `connector-channel` is in-process, `connector-file` reads the local filesystem,
 `connector-redb` reads and writes one embedded key/value file on local disk,
 `connector-http` is an HTTP client with no server of its own (one GET in, one request per batch
@@ -46,13 +59,16 @@ opt-in because `librdkafka-sys` builds vendored C and needs `cmake` plus a C too
 `connector-turso` stays opt-in because its synced mode pulls hyper and rustls; `distributed-raft`
 and `service-cluster` stay opt-in because a cluster node is a deliberate deployment choice.
 
+- `server`, `connectors`, `transformers`: bundles. `connectors` is the seven connectors `server`
+  carries; `transformers` is the five formats.
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
   `connector-mariadb`, `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
   `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
-  one per connector
-  crate. Each pulls
-  the crate in and registers its factories in `register_builtin_factories` (each implies
-  `service`).
+  one per connector module `connector::<name>`. Each implies `connector-contract`. Its factories
+  register in `register_builtin_factories` only when `service` is also on; without `service` the
+  feature is a library module.
+  TLS is always compiled into `connector-postgresql`, `connector-mariadb` and
+  `connector-clickhouse`; there is no `tls` feature.
   `connector-kafka`, `connector-nats` and `connector-udp` imply `transformer-ndjson` and
   `connector-tcp` implies
   `transformer-arrow-ipc`, so the connector feature alone is runnable. No connector resolves a
@@ -60,27 +76,33 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
   node's own `format` key is what the registry resolves. `connector-file`, `connector-http`,
   `connector-redb` and `connector-s3` imply no transformer, so the config picks which formats the
   binary carries. `connector-saci` implies none and resolves none, since Arrow IPC is its fixed
-  wire format; it turns on its crate's `trace-context` and `metrics` features instead.
+  wire format; its trace propagation and series compile under `trace-context` and `metrics`,
+  which `service` turns on.
 - `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`, `transformer-ndjson`,
-  `transformer-parquet`: one per transformer crate, registering its factory under its `format`
-  name (each implies `service`).
+  `transformer-parquet`: one per `transformer::<format>` module, registering its factory under its
+  `format` name when `service` is also on.
+- `processor`, `plugin`: the authoring SDKs (skills `saci-processors`, `saci-plugins`), not hosts.
+  `processor` carries the derive and attribute macros, so a processor crate needs only
+  `saci` with `default-features = false, features = ["processor"]`.
 - `parquet-checkpoint`: `ParquetCheckpointStore`, the archival checkpoint store (implies
   `distributed`).
-- `windows`: forwards `saci-core/windows`.
-- `metrics`: the OpenTelemetry instruments in `src/metrics.rs`. Pulls `dep:opentelemetry` plus
-  `dep:saci-inspector-wire`, for the `SOURCE_ATTR`/`PROCESSOR_ATTR`/`SINK_ATTR`/`BRANCH_ATTR`/
+- `windows`: Beam-style windowed aggregation, `saci::windows`.
+- `metrics`: the OpenTelemetry instruments in `src/metrics.rs`. Pulls `dep:opentelemetry` and
+  compiles `src/inspector_wire.rs`, for the `SOURCE_ATTR`/`PROCESSOR_ATTR`/`SINK_ATTR`/`BRANCH_ATTR`/
   `WORKFLOW_ATTR` attribute keys, and stands alone: a library embedder can compile the writers
   without the HTTP control plane.
 - `inspector`: the in-process telemetry in `src/inspector/`. Time-bounded ring buffers for spans,
   log events, metric samples and flow-control decisions: the first three fed by one `tracing`
   layer and one in-memory `PushMetricExporter`, the fourth written directly by the standalone and
   stream runners; read back through the JSON API in `src/service/inspector_api.rs` and the `/ui`
-  dashboard. Implies `tracing` and `metrics`, and pulls `dep:saci-inspector-wire`,
-  `dep:tracing-subscriber` and `dep:opentelemetry_sdk`. `service` implies it. Not under `service/`,
+  dashboard. Implies `tracing` and `metrics`, and pulls `dep:tracing-subscriber` and
+  `dep:opentelemetry_sdk`. `service` implies it. Not under `service/`,
   so a library embedder can capture without the axum control plane.
-- `wasm`: wasmtime host. `WasmEngine`, `WasmPipelineRuntime`, the `bindgen!` host bindings.
-- `plugin`: native plugin host. `NativePluginRuntime` dlopens a shared library exporting the
-  `saci-plugin-abi` C ABI, validates its manifest, and runs each batch through its `run_batch` slot.
+- `wasm-host`: wasmtime host, `saci::wasm_host`. `WasmEngine`, `WasmPipelineRuntime`, the
+  `bindgen!` host bindings.
+- `plugin-host`: native plugin host, `saci::plugin_host`. `NativePluginRuntime` dlopens a shared
+  library exporting the `saci::plugin_abi` C ABI (`crates/saci/include/saci_plugin.h`), validates
+  its manifest, and runs each batch through its `run_batch` slot.
 - `distributed`: `PartitionSource`, `CheckpointStore`, `DistributedRunner`, `CheckpointStrategy`,
   plus `RedbSharedStore`, which serves both traits over a local redb file. This is the feature
   that pulls `dep:redb`, so `RedbSharedStore::single_node` is a working store with no consensus
@@ -90,29 +112,34 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
   application tables in `cluster-app.redb`), the driver, and the request/response TCP peer
   transport. `RedbSharedStore::multi_node` proposes every mutation through it (implies
   `distributed`).
-- `service`: the `saci-service` binary. axum HTTP control plane, KDL config through
-  `dep:saci-config`, metrics, standalone runner (implies `saci-core/io`, `distributed`,
-  `parquet-checkpoint`, `tracing`, `metrics`, `inspector`). Also pulls `opentelemetry-otlp` and
-  `tracing-opentelemetry` for OTLP span export, `dep:postcard` for the source cursors
-  `RedbStateClient` persists, and `dep:saci-transformer-arrow-ipc`, which the dead letter queue
-  names directly to encode a refused batch. `transformer-arrow-ipc` still owns the registration
-  that lets a config name the format.
+- `service`: KDL configuration through `config`, the factory `Registry`, the axum HTTP control
+  plane, the standalone runner, the CLI and the `saci-service` binary (implies `connector-contract`,
+  `distributed`, `parquet-checkpoint`, `tracing`, `metrics`, `inspector`, `trace-context`). Also
+  pulls `opentelemetry-otlp` and `tracing-opentelemetry` for OTLP span export, `dep:postcard` for
+  the source cursors `RedbStateClient` persists, and compiles `transformer::arrow_ipc`, which the
+  dead letter queue names directly to encode a refused batch. `transformer-arrow-ipc` still owns
+  the registration that lets a config name the format.
   It does **not** imply `distributed-raft`.
 - `service-cluster`: cluster/Raft mode on top of `service` (implies `service`, `distributed-raft`).
   A cluster node keeps its state under `node.data_dir`, so a cluster binary needs no other
   feature: `--features service-cluster`.
 - `all`: every capability this crate carries, including all eight opt-in connectors, the native
   plugin host and a Raft cluster node (`connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`,
-  `connector-kafka`, `connector-turso`, `connector-clickhouse`, `connector-opentelemetry`, `plugin`,
-  `service-cluster`, on top of the default
-  bundle). Excludes `conformance`: that feature turns on `arrow-ipc/lz4` so the corpus generator
+  `connector-kafka`, `connector-turso`, `connector-clickhouse`, `connector-opentelemetry`, `plugin-host`,
+  `service-cluster`, on top of `server`, `connectors`, `transformers`, `engine`, `windows`,
+  `processor` and `plugin`). Excludes `conformance`: that feature turns on `arrow-ipc/lz4` so the corpus generator
   can write a compressed record batch, which the wire format otherwise rejects, so it is the
   corpus generator's own switch rather than a capability of the service.
 
+A custom server is a binary crate depending on `saci` with `default-features = false` and
+the features it needs (`service`, the `connector-*` and `transformer-*` it carries), whose
+`main.rs` is `fn main() -> std::process::ExitCode { saci::service::cli::main() }`. To add factories of its own it calls
+`saci::service::cli::main_with(|builder| builder.register_source(MyFactory))`.
+
 ## Distributed processing (`src/distributed/`)
 
-Multi-instance batch execution with at-least-once semantics. `saci-core`'s `distributed` feature
-contributes shared types only; all runner code lives here. The application state, meaning master
+Multi-instance batch execution with at-least-once semantics. The `distributed` feature
+carries the partition and checkpoint traits and the runner code. The application state, meaning master
 batches, row-range claims, checkpoints and instance heartbeats, is replicated by the SACI raft
 itself and applied into each node's own redb file.
 
@@ -173,7 +200,7 @@ replicates:
   unconditionally: a backlog reaches such a node over several passes, and it accumulates
   across passes by definition (`service/standalone.rs`, `service/windowing.rs`)
 
-## Service layer (`src/service/`, `src/bin/saci-service/`)
+## Service layer (`src/service/`, `src/service/cli/`, `src/bin/saci-service/`)
 
 Requires the `service` feature. KDL-driven config, factory registry, HTTP control plane, and
 standalone/cluster runners.
@@ -193,9 +220,9 @@ Key types:
   is the same in every build, so a node whose host is compiled out, or a `window` block in a
   build without the windowing engine, is a named feature refusal
   (`validate_build_capabilities`) rather than an unknown key. `WindowConfig` names
-  `saci_core::window_spec::WindowSpec`, which lives outside saci-core's `windows` feature for
-  exactly that reason; the engine under `saci_core::windows` stays gated and re-exports the
-  enum so `saci_core::windows::WindowSpec` still resolves. `nodes()`, `rebuild_blocker`, both
+  `saci::window_spec::WindowSpec`, which lives outside the `windows` feature for
+  exactly that reason; the engine under `saci::windows` stays gated and re-exports the
+  enum so `saci::windows::WindowSpec` still resolves. `nodes()`, `rebuild_blocker`, both
   window checks and `WindowConfig`'s whole parse path read unconditionally for the same
   reason; only `build_processor_node`'s dispatch with its two host-gated builders,
   `BuiltNode::window` and the two host modules stay `#[cfg]`-gated.
@@ -230,8 +257,8 @@ Key types:
   workflow reports `restartable: false` and 409s on `start`, `stop` and `restart`. `stop` is
   included, because stopping something unstartable is a one-way door. `pause`/`resume`
   stay available.
-- `Registry` plus `saci_connector::{SourceFactory, SinkFactory}`, re-exported from
-  `saci_service::service::registry`: the whole extension surface. `source_names` and `sink_names`
+- `Registry` plus `saci::connector::{SourceFactory, SinkFactory}`, re-exported from
+  `saci::service::registry`: the whole extension surface. `source_names` and `sink_names`
   enumerate what actually registered, the counterpart of `TransformerRegistry::formats`.
 - `BUILTIN_CONNECTOR_FEATURES` and `builtin_feature` (`src/service/factories.rs`): the eighteen
   connector type names this crate carries, each paired with the feature that compiles it in
@@ -284,10 +311,10 @@ Key types:
   answers "will this binary run this config", called by the binary's `validate` (ahead of
   everything, `--connectors-only` included) and by `serve` immediately after the load, before
   logging, the store, the meter provider or the port. It refuses a `wasm` node without
-  `wasm`, a `plugin` node without `plugin`, a `window` block on either without `windows`, and
+  `wasm-host`, a `plugin` node without `plugin-host`, a `window` block on either without `windows`, and
   `mode "cluster"` without `service-cluster`, naming the flag. A node's own host is answered
   before its window block, so a `window` on a `wasm` node in a binary carrying neither names
-  `--features wasm` first. The four checks read `cfg!` rather than carrying `#[cfg]` arms, so
+  `--features wasm-host` first. The four checks read `cfg!` rather than carrying `#[cfg]` arms, so
   every producer stays compiled and reachable in every build. `ServiceConfig::load`
   deliberately does not call it: a library embedder parsing a config to inspect it is not
   asking whether this binary can run it. `build_connectors_only` does not either: it builds
@@ -356,7 +383,7 @@ Key types:
   `docs/content/service/operate/workflows.md`.
 - `FlowController`, `FlowSettings`, `FlowPlan`, `FlowControlConfig` and `FlowAdjustment`
   (`src/service/flow.rs`, `src/service/config.rs`; all nine flow types re-exported from
-  `saci_service::service`, along with `FlowOutcome`, `FlowSample`, `FlowMove` and `FlowCause`):
+  `saci::service`, along with `FlowOutcome`, `FlowSample`, `FlowMove` and `FlowCause`):
   per-source adaptive admission control `run_standalone` and `run_stream` apply before every
   pass. `run_stream`
   takes a `flow: &FlowPlan` parameter; `run_standalone` resolves its own plan from the
@@ -405,7 +432,7 @@ Key types:
   `FlowCause` names the evidence: `Experiment` with both arms' rows per second,
   `LatencyObjective` with the breaching mean pass, `PassError`, `ChunkBytes` with the projected
   weight, or `SinkBacklog` with the newest backlog. That is what the runners turn into a
-  `saci_inspector_wire::FlowDecision`; `flow.rs` itself stays pure arithmetic and formats no
+  `saci::inspector_wire::FlowDecision`; `flow.rs` itself stays pure arithmetic and formats no
   string.
   `ServiceConfig::validate` refuses a `flow_control` block in cluster mode outright, the way it
   refuses a `store` block: a cluster workflow declares no source node, so there is no admission
@@ -430,7 +457,7 @@ Key types:
   == 0` still ends the drain there, so the credit decides how many whole arrivals one pass
   merges in `continuous`/`interval` and its gauges stay meaningful; `flow_control { rows N }`
   or `enabled #false` on every feeding source pins that too.
-  `crates/saci-service/tests/windowed_fetch_hint.rs` covers the withheld hint in both runners,
+  `crates/saci/tests/windowed_fetch_hint.rs` covers the withheld hint in both runners,
   and `standalone.rs`'s `a_windowed_path_source_publishes_{no_flow_target_in_stream_mode,
   a_flow_target_in_continuous_mode}` pin the two halves of the controller rule. See
   `docs/content/service/operate/flow-control.md`.
@@ -537,7 +564,7 @@ Key types:
   lifecycle registry 404s instead of answering 403. A per-workflow `POST` answers `200` once the
   transition settled, `202` while it is still in progress, `404`/`409`/`503` for the three
   refusals, each a `{"error": ...}` body. A `/api/service/` verb answers a
-  `saci_inspector_wire::ServiceLifecycleReport` (`applied`, `refused`, `settled`) and reserves
+  `saci::inspector_wire::ServiceLifecycleReport` (`applied`, `refused`, `settled`) and reserves
   `409` for the case where not one workflow accepted it: a verb some workflows cannot take still
   moves the rest, which is the whole point of one operator action over a per-workflow script.
   `/api/service/` is a separate path rather than a reserved id, because `pause` is a legal
@@ -587,7 +614,7 @@ Key types:
   decision line and the inspector record share one formatted `reason`.
 - `SpanMetricsLayer`: turns each `pipeline.stage` span into a `saci_stage_duration_seconds` sample.
 
-CLI subcommands: `serve`, `validate`, `status`, `cluster init`, `cluster join`, `cluster leave`,
+CLI subcommands (`src/service/cli.rs`, one file per command in `src/service/cli/commands/`): `serve`, `validate`, `status`, `cluster init`, `cluster join`, `cluster leave`,
 `cluster status`. `--config`/`-c` (env `SACI_CONFIG`) defaults to `saci.kdl`, so `saci-service serve`
 needs no flags; a missing file surfaces as
 `error: Configuration error: reading config file saci.kdl: <os error>` with exit code 1.
@@ -600,7 +627,7 @@ registered at serve time, so it stays `WARNING:` plus the `NOTE:` line and exit 
 is what promotes it to exit 1. `--connectors-only` follows the same split.
 
 `serve`'s shutdown is two stages sharing one deadline, `SHUTDOWN_BUDGET` (30 s), taken the moment
-either the signal or a runner exit fires (`bin/saci-service/commands/serve.rs`). The runner future
+either the signal or a runner exit fires (`src/service/cli/commands/serve.rs`). The runner future
 is `pin!`ed rather than moved into the signal `select!`, so the signal arm goes on awaiting it
 under `timeout_at(deadline, ..)`: `wait_for_signal` has already cancelled the root token every
 runner polls, so that await is what runs each runner's own drain, `flush_and_finish_all` plus
@@ -623,7 +650,7 @@ both its writes carry `metric=` and only the second adds `processor=`, so it has
 attribute-free form. `saci_rows_processed_total`,
 `saci_source_batches_drained_total` and `saci_flow_backoff_total` are each recorded once with no
 attributes (the process-wide total every `/metrics` consumer reads) and once more
-under `saci_inspector_wire::SOURCE_ATTR` (`source="<id>"`) naming the source node that produced
+under `saci::inspector_wire::SOURCE_ATTR` (`source="<id>"`) naming the source node that produced
 them. `saci_sink_batches_written_total` and `saci_sink_rows_written_total` do the same under
 `SINK_ATTR` (`sink="<id>"`), the other five `saci_processor_*` series do the same under
 `PROCESSOR_ATTR` (`processor="<id>"`), and `saci_workflow_runs_total` and
@@ -672,7 +699,7 @@ target rather than with the data. `saci_sink_pending_rows` is the same number th
 controller reads as congestion, taken from `Sink::pending_rows`; a sink that answers `None`
 records nothing rather than zero.
 
-`Instruments` copies the dual-impl shape of `crates/saci-connector-postgresql/src/metrics.rs`: one
+`Instruments` copies the dual-impl shape of `crates/saci/src/connector/postgresql/metrics.rs`: one
 real struct under `metrics`, one zero-sized no-op struct without it, identical method surface.
 Instruments are process-global, because `ServiceConfig::validate` enforces node ids unique across
 every declared workflow, so there is no per-workflow handle to thread through
@@ -684,17 +711,17 @@ is the declared id instead: `WasmPipelineRuntime::with_identity(workflow_id, pro
 Four constraints that are not visible from a call site:
 
 - Instruments bind to whichever meter provider is installed when they are first built, so
-  `saci_service::metrics::init()` must run **after** `opentelemetry::global::set_meter_provider`.
+  `saci::metrics::init()` must run **after** `opentelemetry::global::set_meter_provider`.
 - The Prometheus exporter is built with `without_counter_suffixes()`. Instrument names already end
   in `_total`; without it the endpoint exports `saci_workflow_runs_total_total`.
-- Installing a meter provider is a process-global one-shot, and many `saci-service` lib tests write
+- Installing a meter provider is a process-global one-shot, and many `saci` lib tests write
   metrics. A lib test that asserts on a series reads `crate::metrics::test_registry()` rather than
   installing its own; an integration test that needs its own provider gets its own test binary,
   which is why `tests/metrics_series.rs` and `tests/processor_metrics.rs` hold one test each.
 - `saci_stage_duration_seconds` is derived host-side from the `pipeline.stage` span a native
-  `saci_core::Pipeline` opens per system, because `saci-core` carries no metrics dependency and
+  `saci::Pipeline` opens per system, because the engine modules carry no metrics dependency and
   `RunStats` has no per-system breakdown. The `EnvFilter` is subscriber-wide, so a filter
-  suppressing `saci_core` spans also stops that histogram.
+  suppressing `saci::pipeline` spans also stops that histogram.
 
 `host-io::metric` names come from processor code, so distinct names are capped at
 `MAX_PROCESSOR_METRIC_NAMES` (256) and further names are dropped after one warning. The native
@@ -714,7 +741,7 @@ collector, a scraper or external storage. Nothing leaves the process.
   unwrapped: a panicking consumer must not disable telemetry.
 - `InspectorLayer` (`layer.rs`): one `tracing_subscriber::Layer` capturing spans **and** events in a
   single pass, installed by `init_logging` on the existing registry. A second span pipeline would
-  double-instrument every span `saci-core` opens. Processor code reaches `tracing` through the WIT
+  double-instrument every span the engine opens. Processor code reaches `tracing` through the WIT
   `host-io::log` import, so field content is untrusted: values are truncated at `MAX_FIELD_BYTES`
   (512), records capped at `MAX_FIELDS` (32), and `("truncated","true")` appended when either bites.
 - `InMemoryMetricExporter` (`metric_exporter.rs`): a `PushMetricExporter` on a second
@@ -729,7 +756,7 @@ collector, a scraper or external storage. Nothing leaves the process.
 - `Snapshot::flow_decisions` is the one part of a snapshot the execution path writes rather than
   the capture layer. `FlowController::observe` returns a `FlowAdjustment` carrying a `FlowMove`
   (`from_rows`, `to_rows`, `FlowCause`) on every outcome but `Held`, and the runners map it to a
-  `saci_inspector_wire::FlowDecision` through `standalone::record_flow_decision`: the runner stamps
+  `saci::inspector_wire::FlowDecision` through `standalone::record_flow_decision`: the runner stamps
   the time, names the workflow and source, and phrases the cause, because `flow.rs` reads no clock
   and knows no node ids.
   **The buffer carries episodes, not trips.** Safety is unpaced, so a guard under sustained
@@ -747,7 +774,7 @@ collector, a scraper or external storage. Nothing leaves the process.
   episode is one record. `snapshot` filters the buffer by the same window cutoff the series
   histories use, so a marker and the point it annotates share one axis; the order is
   `TimeBoundedBuffer` push order, not a sort on `at_unix_ms`.
-- `record.rs` re-exports the `saci-inspector-wire` shapes rather than redefining them, so the buffers
+- `record.rs` re-exports the `saci::inspector_wire` shapes rather than redefining them, so the buffers
   hold exactly what `/api/*` serves. `trace_id`/`span_id` are `tracing`'s own `span::Id` values, not
   W3C trace ids.
 - Edge rates come from whichever end of the edge measures what crossed it. An edge between two
@@ -772,7 +799,7 @@ collector, a scraper or external storage. Nothing leaves the process.
 - Host-side spans are what fills the traces tab, and their level is what decides whether it has
   anything in it. The five runner spans are **`debug`**: `workflow.batch` (the root each runner
   iteration or claim opens), `source.drain` per source, `runtime.run` per processor, `sink.write`
-  per sink, and `processor.batch` from the WASM and plugin hosts. The four `saci-core` names are
+  per sink, and `processor.batch` from the WASM and plugin hosts. The four engine names are
   **`info`**: `pipeline.run`, `pipeline.stage`, `system.execute`, plus `task_attempt`, which opens
   **only on a retry** so a clean run produces none. One whole `debug` tree opens per item, so the
   default `log_level="error"` materialises no span at all, `log_level="info"` leaves the traces tab
@@ -791,9 +818,9 @@ collector, a scraper or external storage. Nothing leaves the process.
   `WasmPipelineRuntime` is the exception in reverse: it re-enters its span inside the
   `spawn_blocking` closure, which is what puts a processor's `host-io::log` lines in the trace.
   `span_stats` is unaffected: it still groups only `pipeline.stage` and `system.execute`, the spans
-  a native `saci_core::Pipeline` opens.
-- The `EnvFilter` is subscriber-wide, so a `RUST_LOG` suppressing `saci_service` empties the span
-  buffer and the traces tab, and suppressing `saci_core` also empties `span_stats`, the
+  a native `saci::Pipeline` opens.
+- The `EnvFilter` is subscriber-wide, so a `RUST_LOG` suppressing `saci::service` empties the span
+  buffer and the traces tab, and suppressing `saci::pipeline` also empties `span_stats`, the
   same caveat `saci_stage_duration_seconds` carries. `observability.sample_ratio` below 1.0 drops
   whole traces from this buffer too: the capture layer sits in the same sampled group as the
   format and OTLP layers.
@@ -809,14 +836,14 @@ cargo fmt --manifest-path crates/saci-service-ui/Cargo.toml -- --check
 cargo clippy --manifest-path crates/saci-service-ui/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
 ```
 
-`crates/saci-service/assets/ui/{index.html,app.js,app_bg.wasm,app.css}` is the one committed home
+`crates/saci/assets/ui/{index.html,app.js,app_bg.wasm,app.css}` is the one committed home
 for the dashboard bundle: `cargo xtask ui` writes the three generated files straight there, next
 to the hand-written `index.html`, and `include_str!`/`include_bytes!` in
-`crates/saci-service/src/service/inspector_api.rs` embeds them from there. It lives under
-`saci-service`'s own directory rather than `saci-service-ui`'s (which carries no committed bundle of
+`crates/saci/src/service/inspector_api.rs` embeds them from there. It lives under
+the `saci` package rather than `saci-service-ui` (which carries no committed bundle of
 its own) because `cargo package`/`publish` never includes files outside the package being packaged;
 an `include_str!` reaching into `saci-service-ui` (itself excluded from the workspace) would drop out
-of a published `saci-service` tarball. Committed, so `cargo build -p saci-service` needs no wasm
+of the published `saci` tarball. Committed, so `cargo build -p saci --features server` needs no wasm
 toolchain. Regenerating it does:
 
 ```bash
@@ -830,24 +857,27 @@ crate exactly; a mismatch is a hard runtime panic in the browser, not a warning,
 the version from the lock file and refuses to run on a mismatch. It also downloads the Tailwind
 v4.3.3 standalone binary into the gitignored `crates/saci-service-ui/.tools/`, so there is no node and
 no `package.json` anywhere in this repository. `assets/ui/index.html` is hand-written and never
-generated.
+generated. The dashboard reads the JSON shapes from the same source file the server serializes
+from: `crates/saci-service-ui/src/lib.rs` compiles `crates/saci/src/inspector_wire.rs` through
+`#[path = "../../saci/src/inspector_wire.rs"] pub mod wire;`, so a shape change in that file reaches
+both sides on the next `cargo xtask ui`.
 
 ## Examples
 
-- `examples/native/`: single-file saci-core/saci-service tutorials and feature demos,
+- `examples/native/`: single-file `saci` tutorials and feature demos,
   `first_pipeline`, `scheduler_etl(_parallel|_dag)`, `window_aggregation`,
   `distributed_scheduler`, `distributed_windowed`, `windowed_fan_in`, `stream_latency`. The two
   `distributed_*` demos run on a local redb store, so they need no external service. Declared as
-  `[[example]]` targets of the `saci-service` crate, except `first_pipeline`, an `[[example]]` of
-  `saci` itself: it backs the embedding tutorial, so it depends on the same crate the tutorial
-  tells the reader to add.
+  `[[example]]` targets of `saci`, each with the `required-features` it needs.
+  `first_pipeline` needs only the default `engine` feature: it backs the embedding tutorial, so it
+  builds with the same dependency line the tutorial tells the reader to add.
 - `examples/distributed_fulfillment/`: a 3-node SACI Raft cluster demo, field-granular DAG
   scheduling, checkpointing into the raft-replicated `cluster-app.redb`, Docker Compose deployment
-  of the three nodes. One `[[example]]` target of `saci-service`.
+  of the three nodes. One `[[example]]` target of `saci`.
 - `examples/branching/`: one long-running stream workflow (`branching.kdl`) demonstrating every
   fan-out split: a core-subject `NatsSource` multicasting to a mirror sink and two routing
   processors, the branching-wasm component processor and the branching-plugin native plugin, each
-  delivering per message to branch-labelled `FileSink`s. The `branching_publish` `saci-service`
+  delivering per message to branch-labelled `FileSink`s. The `branching_publish` `saci`
   example feeds the stream. Demo processors in `wasm/` and `plugin/`; see its `README.md`.
 - `examples/windowing/`: Beam-style windowing, one runnable workflow per window kind,
   `tumbling/tumbling.kdl`, `sliding/sliding.kdl` and `session/session.kdl`. Each fans the same two
@@ -856,7 +886,7 @@ generated.
   native plugin running the same logic (duplicated like the branching pair), so its two tables
   agree row for row. Four processor crates: windowing-tumbling-wasm, windowing-tumbling-plugin,
   windowing-sliding-wasm, windowing-session-wasm, in each mode's own `wasm/` and `plugin/`.
-  `docker-compose.yml`, `schema.sql` (four tables) and the `windowed_publish` `saci-service`
+  `docker-compose.yml`, `schema.sql` (four tables) and the `windowed_publish` `saci`
   example are shared by all three; the sources are too, so one mode runs at a time.
   `windowed_publish`'s `--gap-every`/`--gap-ms` put a silence in every symbol's stream at the same
   instant, so a session closes at each burst boundary rather than wherever the random symbol draw
@@ -865,7 +895,7 @@ generated.
   processor splits a core-subject `NatsSource` into a PostgreSQL sink and a `ChannelSink`, and the
   second workflow's `ChannelSource` feeds the tumbling windowing example's processor unchanged. No
   link crosses a workflow; the shared channel name does. The `multi_workflow_publish`
-  `saci-service` example (an `[[example]]` target, `required-features connector-nats`) feeds both
+  `saci` example (an `[[example]]` target, `required-features connector-nats`) feeds both
   NATS subjects. Router component in `wasm/`; see its `README.md`.
 - `examples/integrity/`: end-to-end proof that every published row is processed correctly, across
   two `saci-service` processes because `run_mode` is a whole-config property. `integrity.kdl` runs
@@ -877,7 +907,7 @@ generated.
   mode reports EOF once caught up and the stream runner retires such a source for good. That one
   reads `public.order_audit` through a `cdc_logical` replication slot into integrity-audit-wasm and
   a parquet `HttpSink`. All four sinks POST to one endpoint served by `integrity_check`, the
-  `saci-service` example that is publisher, verifier and lifecycle driver at once: it recomputes
+  `saci` example that is publisher, verifier and lifecycle driver at once: it recomputes
   every derived field and FNV-1a checksum from what it published and exits non-zero on any
   mismatch. Both stream-half workflows hold a Channel node, so the control plane answers 409 to
   stop/start/restart and only pause/resume; audit holds none and restarts cleanly.
@@ -894,7 +924,9 @@ generated.
 ## Tests
 
 Profiles, the Docker soft-skip convention and the `heavy-docker` group are in `AGENTS.md`'s Testing
-section. Service suites under `crates/saci-service/tests/`: the in-memory store fixture
+section. Every integration suite lives under `crates/saci/tests/` (nextest binary ids are
+`saci::<file stem>`; connector suites are `<connector>_<name>.rs` with their helpers in
+`tests/common/<connector>.rs`). Service suites: the in-memory store fixture
 `tests/common/memory_store.rs` backs `distributed_scheduler`, `runner_chaos`, `checkpoint_chaos`,
 `wasm_chaos` and `distributed_processor_state`; `redb_store` drives a local redb file;
 `transport_chaos`, `raft_consensus_chaos`, `distributed_harness_smoke` and
@@ -905,22 +937,23 @@ record, replay and consume cycle, while
 trip and the binlog snapshot into MySQL, both servers started inline); `metrics_series.rs` holds one
 test because a meter provider is a process-global one-shot; `windowed_fetch_hint.rs` covers the
 withheld `request_batch_rows` hint in both runners; `feature_bundles.rs` parses this crate's own
-`Cargo.toml` and holds the three bundle invariants, that `all` lists every feature the crate
-declares except `default`, `all` and `conformance`, that `conformance` (the corpus generator's
+`Cargo.toml` and holds the three bundle invariants, that `all` reaches every feature the crate
+declares except `default`, `all` and `conformance` (transitively, so it may name `server`,
+`connectors` and `transformers`), that `conformance` (the corpus generator's
 `arrow-ipc/lz4` switch, which relaxes a refusal instead of adding a capability) stays out of
-`all`, and that `default` carries no connector that needs an installed broker, database or object
+`all`, and that `server` carries no connector that needs an installed broker, database or object
 store, so it needs no Docker and no running service. Lib unit tests that assert on a series read
 `crate::metrics::test_registry()`.
 
 ## Keep this skill current
 
-Update this file in the same change that: adds, removes or re-implies a `saci-service` feature;
+Update this file in the same change that: adds, removes or re-implies a `saci` host feature (`service`, `server`, `wasm-host`, `plugin-host`, `distributed*`, `inspector`, `metrics`);
 adds or renames a config block or key (`ServiceConfig`, `WorkflowSpec`, `StoreConfig`,
 `FlowControlConfig`, `HealConfig`, `DlqBlock`, `ObservabilityConfig`, the cluster header); changes a runner, the
 lifecycle transition table, flow control's search or guards, the healing state machine, the dead
 letter queue's store table, envelope or replay triggers, or a
 control-plane route or status code; adds, removes or re-attributes a metric series; changes a span
-name or level; changes an inspector buffer, cap or snapshot shape; changes `saci-inspector-wire`;
+name or level; changes an inspector buffer, cap or snapshot shape; changes `saci::inspector_wire`;
 changes the dashboard bundle's build or its committed location; adds or removes a service example.
 
 This file is the canonical copy of `rebuild_blocker`/`restartable` semantics,

@@ -12,14 +12,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use saci_service::SaciError;
-use saci_service::SaciResult;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::distributed::RedbSharedStore;
-use saci_service::distributed::checkpoint::{Checkpoint, CheckpointStore};
-use saci_service::distributed::consensus::state_machine::read_master_batch;
-use saci_service::distributed::partition::{BatchClaim, PartitionSource};
+use saci::SaciError;
+use saci::SaciResult;
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::distributed::RedbSharedStore;
+use saci::distributed::checkpoint::{Checkpoint, CheckpointStore};
+use saci::distributed::consensus::state_machine::read_master_batch;
+use saci::distributed::partition::{BatchClaim, PartitionSource};
 
 use crate::components::{Invoice, Order};
 use crate::resources::{FxRateTable, InventoryCatalog, NodeId, TaxRateTable};

@@ -14,7 +14,7 @@ value = "Required on both halves; one message per frame"
 label = "Run modes"
 value = "Stream for the source, any for the sink"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 A workflow accepts framed batches on a listening port, processes them as they arrive, and forwards

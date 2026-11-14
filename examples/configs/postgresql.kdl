@@ -2,9 +2,9 @@
 //
 // Run:
 //   export SACI_PG_DSN='postgres://saci@localhost:5432/app'
-//   cargo run --features connector-postgresql,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-postgresql,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/postgresql.kdl
-//   cargo run --features connector-postgresql,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-postgresql,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/postgresql.kdl
 //
 // The source decodes `pgoutput` logical replication for public.orders and the

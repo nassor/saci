@@ -72,19 +72,19 @@ down -v`.
 2. Start the service:
 
 ```text
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
   --config examples/multi_workflow/multi_workflow.kdl
 ```
 Windows (PowerShell), on one line:
 
 ```powershell
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve --config examples/multi_workflow/multi_workflow.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/multi_workflow/multi_workflow.kdl
 ```
 
 3. Publish, in another terminal:
 
 ```text
-cargo run -p saci-service --features connector-nats --example multi_workflow_publish -- --rate 20 --ts-step-ms 2000
+cargo run -p saci --features connector-nats --example multi_workflow_publish -- --rate 20 --ts-step-ms 2000
 ```
 Runs the same on all three platforms.
 
@@ -147,13 +147,13 @@ live watermark in UTC.
 Validate the config first, if you like:
 
 ```text
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate \
   --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 Windows (PowerShell), on one line:
 
 ```powershell
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 
 ## Files
@@ -161,7 +161,7 @@ cargo run -p saci-service --features connector-nats,connector-postgresql,transfo
 | File / directory | What it is |
 |------------------|------------|
 | `multi_workflow.kdl` | the `route` and `settle` workflows, bridged by the `standard` channel |
-| `multi_workflow_publish.rs` | the `saci-service` example that feeds both NATS subjects |
+| `multi_workflow_publish.rs` | the `saci` example that feeds both NATS subjects |
 | `schema.sql` | the `rush_sales` and `window_totals` tables |
 | `docker-compose.yml` | NATS 2.11 and PostgreSQL 18 |
 | `wasm/` | the `multi-workflow-router-wasm` processor component (cdylib, wasm32-wasip2) |

@@ -23,11 +23,11 @@
 
 use std::sync::Arc;
 
-use saci_plugin::ProcessorState;
-use saci_plugin::arrow_array::{Float64Array, Int64Array, StringArray};
-use saci_plugin::arrow_schema::{DataType, Field, FieldRef, Schema};
-use saci_plugin::prelude::*;
-use saci_plugin::windows::WindowSpec;
+use saci::plugin::ProcessorState;
+use saci::plugin::arrow_array::{Float64Array, Int64Array, StringArray};
+use saci::plugin::arrow_schema::{DataType, Field, FieldRef, Schema};
+use saci::plugin::prelude::*;
+use saci::plugin::windows::WindowSpec;
 
 /// One row of the demo workload: a sale at an instant in time.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -283,9 +283,9 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
     // The borrow through `state` ends here (NLL), before `data.append` below.
 
     data.append::<WindowTotal>(&emitted)?;
-    saci_plugin::host::metric("window.open", open_count as f64);
-    saci_plugin::host::metric("window.closed", closed as f64);
-    saci_plugin::host::metric("window.late_rows", late_rows as f64);
+    saci::plugin::host::metric("window.open", open_count as f64);
+    saci::plugin::host::metric("window.closed", closed as f64);
+    saci::plugin::host::metric("window.late_rows", late_rows as f64);
     Ok(())
 }
 
@@ -315,12 +315,12 @@ pub fn build() -> Pipeline {
     pipeline
 }
 
-saci_plugin::export_plugin!(build, state = WindowState);
+saci::export_plugin!(build, state = WindowState);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci_plugin::__rt::{ProcessorStateSpec, Stateful};
+    use saci::plugin::__rt::{ProcessorStateSpec, Stateful};
 
     fn geo() -> WindowGeometry {
         WindowGeometry {

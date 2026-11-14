@@ -112,8 +112,8 @@ install command.
     "node": ">=24.12"
   },
   "scripts": {
-    "build": "jco componentize score.ts --wit ../../../../crates/saci-processor/wit --world-name saci-pipeline --disable http --disable fetch-event -o score-ts.wasm",
-    "types": "jco types ../../../../crates/saci-processor/wit --world-name saci-pipeline -o types",
+    "build": "jco componentize score.ts --wit ../../../../crates/saci/wit --world-name saci-pipeline --disable http --disable fetch-event -o score-ts.wasm",
+    "types": "jco types ../../../../crates/saci/wit --world-name saci-pipeline -o types",
     "typecheck": "npm run types && tsc"
   },
   "dependencies": {
@@ -312,9 +312,9 @@ repository root:
 
 ```bash,name=Build the processors then validate and serve
 cargo xtask polyglot
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate \
   --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve \
   --config examples/configs/standalone_polyglot.kdl
 ```
 
@@ -322,8 +322,8 @@ Windows (PowerShell), each command on one line:
 
 ```powershell
 cargo xtask polyglot
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 `validate` compiles the component, checks its WIT world, and walks every `link`

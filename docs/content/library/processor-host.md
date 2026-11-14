@@ -97,7 +97,7 @@ it.
 
 ## What host-io costs the host
 
-`crates/saci-service/src/wasm/host_impl.rs` implements the three imports a
+`crates/saci/src/wasm_host/host_impl.rs` implements the three imports a
 processor gets:
 
 - `log` bridges to `tracing`, one macro per level, tagged with the pipeline name

@@ -1,30 +1,35 @@
 ---
 name: saci-processors
-description: Use when writing, building, hosting, testing or documenting a SACI wasm processor: the saci-processor SDK and saci-macros, the saci:pipeline WIT package and its vendored copies, the wasmtime host under crates/saci-service/src/wasm/, the Arrow IPC wire format and conformance corpus, the polyglot SDKs under packages/, or the wasm, polyglot and quickstart examples.
+description: Use when writing, building, hosting, testing or documenting a SACI wasm processor: the saci::processor SDK and saci-macros, the saci:pipeline WIT package and its vendored copy, the wasmtime host under crates/saci/src/wasm_host/, the Arrow IPC wire format and conformance corpus, the polyglot SDKs under packages/, or the wasm, polyglot and quickstart examples.
 ---
 
 # SACI processors
 
 ## SDK and WIT
 
-- `saci-processor`: the processor SDK. Re-exports saci-core, the `export_pipeline!` macro, and
+- `saci::processor` (feature `processor` of the `saci` crate): the processor SDK. Re-exports the
+  core types, the `saci::export_pipeline!` macro, the prelude `saci::processor::prelude`, and
   `saci_macros::{Component, transform, fold, processor}` plus `Config`/`Error`/`Result`, so a
-  processor crate depends only on `saci-processor`. Owns the canonical WIT package at
-  `wit/pipeline.wit`; `saci-service` and `saci-macros` each vendor a byte-identical copy at their
-  own `wit/pipeline.wit`, because `cargo package` cannot reach outside a crate's own directory.
+  processor crate depends only on `saci = { workspace = true, features = ["processor"] }` (add
+  `"windows"` for window specs). The workspace dependency is `default-features = false`; outside
+  this repository it is `saci = { version = "0.1", default-features = false, features =
+  ["processor"] }`. The macro expansions name `::saci::processor::__rt`. The crate also owns the
+  canonical WIT package at `crates/saci/wit/pipeline.wit`; `saci-macros` vendors a byte-identical
+  copy at `crates/saci-macros/wit/pipeline.wit`, because `cargo package` cannot reach outside a
+  crate's own directory.
 - `saci-processor-smoketest`: a minimal processor component used as a CI fixture: the arrow-ipc
   drift gate, config delivery, and cross-batch state.
 - `saci-macros`: the proc-macro crate, `#[derive(Component)]`, `#[transform]`, `#[fold]`,
-  `#[processor]`, re-exported through `saci-processor`, so a processor crate never depends on it
+  `#[processor]`, re-exported through `saci::processor`, so a processor crate never depends on it
   directly.
 
-`wit/pipeline.wit` is the canonical `saci:pipeline@0.3.0` WIT package. The processor exports
-exactly two functions:
+`crates/saci/wit/pipeline.wit` is the canonical `saci:pipeline@0.3.0` WIT package. The processor
+exports exactly two functions:
 
 - `describe()`: name, version, component schemas, schema fingerprint, stateful flag.
 - `run-batch(input, prior)`: Arrow IPC in, Arrow IPC out, plus metrics and an updated state blob.
 
-The `#[processor]` attribute macro (`saci-macros`, re-exported through `saci-processor`) is the
+The `#[processor]` attribute macro (`saci-macros`, re-exported through `saci::processor`) is the
 zero-ceremony path: it embeds the WIT, auto-cfgs the wasm32 target, and emits the log/metric/config
 helpers, and is what `examples/polyglot/stages/rust-settle` uses. `export_pipeline!` is the
 explicit wiring macro, used by `examples/wasm/order_processing`, `examples/branching`,
@@ -42,7 +47,7 @@ names one of them (absent = legacy multicast).
 The host creates a fresh wasmtime `Store` per call, so `prior`/`checkpoint` is the only channel by
 which processor state survives a batch boundary.
 
-## Host (`crates/saci-service/src/wasm/`, `wasm` feature)
+## Host (`crates/saci/src/wasm_host/`, `wasm-host` feature)
 
 `WasmEngine` owns the wasmtime `Engine`, the epoch ticker, and the compiled programs. Compiling,
 linking and pre-instantiating a component is synchronous and costs about 1.7 s of one fast core for
@@ -56,16 +61,16 @@ recycles pre-reserved slots instead of asking the OS for a linear memory per cal
 The `POOL_*` constants in `engine.rs` size it for 128 concurrent processor calls; exceeding that
 is a `PoolConcurrencyLimitError` at instantiate, not a queue, and each engine reserves 1 TiB of
 address space, which bounds how many engines one process can hold. `WasmPipelineRuntime` implements
-`saci_core::runtime::PipelineRuntime`: it serializes the dataset to Arrow IPC, calls the processor's
-`run-batch` on a fresh `Store`, and reads the result back. `bindings.rs` is 26 lines of
-`wasmtime::component::bindgen!` pointed at `../saci-processor/wit`, so host bindings cannot drift.
+`saci::runtime::PipelineRuntime`: it serializes the dataset to Arrow IPC, calls the processor's
+`run-batch` on a fresh `Store`, and reads the result back. `bindings.rs` is a
+`wasmtime::component::bindgen!` pointed at `crates/saci/wit`, so host bindings cannot drift.
 `host_impl.rs` implements the `host-io` imports (`log`, `metric`, `get-config`); `metric` records
 the `saci_processor_metric` histogram, and `runner.rs` records the five `run-metrics` numbers off
 every `run-result`.
 
-`wasm` is the feature: the wasmtime host, `WasmEngine`, `WasmPipelineRuntime`, the `bindgen!` host
-bindings. It is in `saci-service`'s default bundle, so only a build that trimmed it lacks the
-host; such a build still parses a `wasm` node and refuses the file by feature name through
+`wasm-host` is the feature: the wasmtime host, `WasmEngine`, `WasmPipelineRuntime`, the `bindgen!`
+host bindings. It is in the `server` bundle, so only a build without it lacks the host; such a
+build still parses a `wasm` node and refuses the file by feature name through
 `validate_build_capabilities` (skill `saci-service`).
 
 A config-loaded `wasm` node gets its own declared node id (`ServiceBuilder` calls
@@ -90,9 +95,9 @@ reports such a workflow as `restartable: false`.
 
 Each Rust processor generates its WIT bindings in-macro via `wit_bindgen::generate!`, so nothing
 has to be produced on disk before `cargo fmt --all -- --check`. The one build `cargo test` needs
-is the smoketest component: `crates/saci-service/tests/{wasm_roundtrip,processor_metrics,
+is the smoketest component: `crates/saci/tests/{wasm_roundtrip,processor_metrics,
 workflow_branching,workflow_metrics,workflow_dag}.rs` all reach it through the shared
-`crates/saci-service/tests/common/smoketest.rs` fixture and assert the artifact exists before
+`crates/saci/tests/common/smoketest.rs` fixture and assert the artifact exists before
 loading it; `connector_matrix.rs` resolves the same path through `Fixtures::resolve`, which
 fails naming the build command. `cargo xtask bench wasm_roundtrip` needs the same artifact and
 refuses the same way.
@@ -108,32 +113,24 @@ itself, so plain `cargo build` writes the finished component to
 adapter step. `.cargo/config.toml` adds `-C target-feature=+simd128` for that target only, so
 every processor's core module ships the SIMD proposal; wasmtime enables it by default.
 
-`saci-core`'s Arrow crates, serde_arrow, serde, futures, async-trait, fnv and rand are
-unconditional; the default `runtime` feature adds tokio, rayon and num_cpus, so a wasm32-wasip2
-processor build takes `--no-default-features --features processor`. That `saci-core` feature is
-`processor`: wasm32-wasip2 target, sequential-only execution driven by the `pollster` sync
-executor.
-
-The `saci` facade carries the same path behind one crate name:
-
-- `processor`: `Pipeline`, `System`, `Component` (the trait, not the derive), `Config`, `Error`,
-  `Result` and `export_pipeline!`, for `--no-default-features --features processor`: saci-core
-  then carries `processor` instead of `engine`'s `runtime`, so the build never needs tokio on
-  wasm32-wasip2. Does not carry `#[derive(Component)]`/`#[transform]`/`#[fold]`/`#[processor]`:
-  their expansions name `saci-processor` literally, which resolves only as a direct dependency,
-  not one reached through this facade; a processor crate using those macros depends on
-  `saci-processor` directly.
+`saci`'s Arrow crates, serde_arrow, serde, futures, async-trait, fnv and rand are unconditional;
+the default `engine` feature adds `runtime` (tokio, rayon, num_cpus), so a wasm32-wasip2 processor
+build takes `default-features = false, features = ["processor"]`. The `processor` feature is the
+wasm32-wasip2 target, sequential-only execution driven by the `pollster` sync executor. It exposes
+`Pipeline`, `System`, `Component` (the trait), `Config`, `Error`, `Result`, `export_pipeline!` and
+the four macros, and never needs tokio. The macro expansions name `::saci::processor::...`, which
+resolves through the one direct `saci` dependency.
 
 ## Bindings convention
 
-A crate that expands `wasmtime::component::bindgen!`/`wit_bindgen::generate!` for
-`saci:pipeline` and then names `saci::` at that same scope (`saci-service`'s
-`src/wasm/bindings.rs` does exactly this) must not itself depend on the `saci` crate: the
-macro generates a `mod saci` from the WIT namespace, and an extern crate of the same name
-makes every unqualified `saci::` reference there ambiguous (E0659), not a silent shadow. A
-`wit_bindgen::generate!` wrapped one level down in its own `mod bindings { ... }` (every
-processor crate's own pattern) never hits this: the generated `mod saci` nests inside
-`bindings`, so it never shares a scope with a bare `use saci::...`.
+A scope that expands `wasmtime::component::bindgen!`/`wit_bindgen::generate!` for `saci:pipeline`
+and then names `saci::` at that same scope (`crates/saci/src/wasm_host/bindings.rs` does exactly
+this) must not have an extern crate named `saci` in scope: the macro generates a `mod saci` from
+the WIT namespace, and an extern crate of the same name makes every unqualified `saci::`
+reference there ambiguous (E0659), not a silent shadow. `wasm_host` sits inside the `saci` crate,
+which has no extern crate of its own name. A processor crate does depend on `saci`, so it wraps
+`wit_bindgen::generate!` one level down in its own `mod bindings { ... }`: the generated
+`mod saci` nests inside `bindings` and never shares a scope with a bare `use saci::...`.
 
 ## Wire format and conformance
 
@@ -142,17 +139,17 @@ are valid. Vectors and manifest are committed, so a codec's suite needs no Rust 
 Regenerate after any wire format or `Order` schema change, then commit the result:
 
 ```bash
-cargo run -p saci-service --features conformance --example conformance_vectors -- emit
+cargo run -p saci --features conformance --example conformance_vectors -- emit
 ```
 
 The `conformance` feature exists to enable `arrow-ipc/lz4` for the generator alone, so a normal
 build still cannot write a compressed record batch and must reject one.
 
 `arrow-ipc = "=59.3.0"` is exact-pinned workspace-wide. It is the host to processor wire format and
-the on-disk checkpoint format. See `crates/saci-processor/PINS.md` before touching it.
+the on-disk checkpoint format. See `crates/saci/PINS.md` before touching it.
 
 The wasm host/processor boundary's instrument is `cargo xtask bench wasm_roundtrip`
-(`crates/saci-service/benches/wasm_roundtrip.rs`), which reports store lifecycle, host IPC encode,
+(`crates/saci/benches/wasm_roundtrip.rs`), which reports store lifecycle, host IPC encode,
 host IPC decode and the full `run_on_with_state` round trip as separate groups, since a change
 there routinely moves cost between phases while leaving the total flat.
 
@@ -189,10 +186,9 @@ The xtask commands that build and check a processor:
 - `cargo xtask quickstart`: build the two Quick Start processors.
 - `cargo xtask pack-sdk`: package the SDKs under `packages/`, asserting every manifest matches
   `packages/VERSION`.
-- `cargo xtask check-wasm-processor`: `cargo check` both `saci-core` and the `saci` facade for
-  wasm32-wasip2 with `--no-default-features --features processor`, the combination that keeps
-  tokio out of the build and the one the facade's crate docs hand a processor author. It installs
-  the target first.
+- `cargo xtask check-wasm-processor`: `cargo check` `saci` for wasm32-wasip2 with
+  `--no-default-features --features processor`, the combination that keeps tokio out of the
+  build and the one the crate docs hand a processor author. It installs the target first.
 - `cargo xtask processor-ipc-roundtrip`: drive one Arrow IPC round trip through a component.
 
 ## Examples
@@ -206,12 +202,12 @@ The xtask commands that build and check a processor:
 - `examples/quickstart/`: the runnable Quick Start, NATS to PostgreSQL through the reused Go stage
   and a purpose-built C# stage, one `saci-service` process chaining them, compose file and
   `schema.sql`. Built by `cargo xtask quickstart` into the gitignored `build/`.
-- `examples/conformance/`: `conformance_vectors.rs`, the `saci-service` example that regenerates
-  `packages/arrow-ipc-conformance/`'s corpus.
+- `examples/conformance/`: `conformance_vectors.rs`, the `saci` example (feature `conformance`)
+  that regenerates `packages/arrow-ipc-conformance/`'s corpus.
 
 ## Tests
 
-`crates/saci-service/tests/{wasm_roundtrip,processor_metrics,workflow_branching,workflow_metrics,workflow_dag}.rs`
+`crates/saci/tests/{wasm_roundtrip,processor_metrics,workflow_branching,workflow_metrics,workflow_dag}.rs`
 reach the smoketest through `tests/common/smoketest.rs`; `connector_matrix.rs` resolves it through
 `Fixtures::resolve`. `tests/processor_metrics.rs` holds one test because it installs its own meter
 provider (skill `saci-service`, Observability). `wasm_chaos` drives the wasm runtime against the
@@ -219,9 +215,9 @@ in-memory store fixture and needs no daemon.
 
 ## Changing a processor
 
-1. A WIT change edits `crates/saci-processor/wit/pipeline.wit` and the byte-identical copies at
-   `crates/saci-service/wit/pipeline.wit` and `crates/saci-macros/wit/pipeline.wit`, then every SDK
-   under `packages/` and the six polyglot stages.
+1. A WIT change edits `crates/saci/wit/pipeline.wit` and the byte-identical copy at
+   `crates/saci-macros/wit/pipeline.wit` (`crates/saci-macros/tests/wit_vendored.rs` checks the
+   two match), then every SDK under `packages/` and the six polyglot stages.
 2. A wire format or `Order` schema change regenerates `packages/arrow-ipc-conformance/` (command
    above) and commits the result.
 3. A new processor runtime kind is added to the connector matrix's runtime dimension (skill

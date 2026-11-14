@@ -93,7 +93,7 @@ _BUFFER_SLOTS = {
 #: 32-bit index the same way.
 _MAX_ROWS = 2**31 - 1
 
-#: Schema metadata key carrying the saci-core component name.
+#: Schema metadata key carrying the engine's component name.
 _COMPONENT_KEY = "__saci_component"
 
 #: Schema metadata key carrying that component's decimal `u32` version. Absent

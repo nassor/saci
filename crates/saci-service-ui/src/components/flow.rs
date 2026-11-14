@@ -28,11 +28,11 @@
 //! for a connector that reports none. `ChannelSink`, `PostgresSink` and
 //! `S3Sink` report one; `FileSink`, `HttpSink`, Kafka, NATS and TCP do not.
 
-use leptos::prelude::*;
-use saci_inspector_wire::{
+use crate::wire::{
     FlowDecision, FlowDecisionKind, PointAt, SINK_ATTR, SOURCE_ATTR, Snapshot, TopoNode,
     WorkflowTopology,
 };
+use leptos::prelude::*;
 
 use super::Swatch;
 use super::graph::{Reading, attributed, display, format_count};

@@ -1,13 +1,13 @@
 +++
 title = "Windowed aggregation"
-description = "The saci-core `windows` feature: the three WindowSpec kinds, WindowedSystemBuilder, watermarks and the time field, the WindowResults resource, and WindowAccumulator persistence through CheckpointStore."
+description = "The saci `windows` feature: the three WindowSpec kinds, WindowedSystemBuilder, watermarks and the time field, the WindowResults resource, and WindowAccumulator persistence through CheckpointStore."
 template = "page.html"
 weight = 7
 aliases = ["/reference/windowing/"]
 +++
 # Windowed aggregation
 
-`saci-core`'s `windows` feature, part of the service default bundle, is the native route to windowed aggregation, and this page is its API reference. `WindowedSystem` and `WindowedSystemBuilder` assign rows to tumbling, sliding or session windows, track watermarks, aggregate per key, and publish results as a `WindowResults` resource.
+The `windows` feature, part of the `server` bundle, is the native route to windowed aggregation, and this page is its API reference. `WindowedSystem` and `WindowedSystemBuilder` assign rows to tumbling, sliding or session windows, track watermarks, aggregate per key, and publish results as a `WindowResults` resource.
 
 A WASM processor or a plugin cannot use this path, because resources never cross the Arrow IPC boundary; those runtimes keep their windows in processor state instead.
 

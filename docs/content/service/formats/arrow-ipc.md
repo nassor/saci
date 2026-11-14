@@ -17,7 +17,7 @@ value = "One message per batch"
 label = "Needs schema_fields"
 value = "Optional reading a stream, required writing and on messages"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 Arrow's own stream format, over a message transport and as whole files. There is no decoding cost

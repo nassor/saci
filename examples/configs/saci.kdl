@@ -2,9 +2,9 @@
 // both ends.
 //
 // Run:
-//   cargo run --features connector-saci,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-saci,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/saci.kdl
-//   cargo run --features connector-saci,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-saci,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/saci.kdl
 //
 // The source listens and the sink dials: `bind` is an address this process

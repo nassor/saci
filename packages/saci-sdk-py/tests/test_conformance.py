@@ -24,7 +24,7 @@ _CORPUS = pathlib.Path(__file__).resolve().parents[2] / "arrow-ipc-conformance"
 _MANIFEST = _CORPUS / "manifest.json"
 
 _REGENERATE = (
-    "cargo run -p saci-service --features conformance --example conformance_vectors -- emit"
+    "cargo run -p saci --features conformance --example conformance_vectors -- emit"
 )
 
 #: Reason code -> a substring of the message this codec raises for that rule.

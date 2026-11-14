@@ -5,9 +5,9 @@
 // Run:
 //   export SACI_MARIADB_DSN='mysql://saci@localhost:3306/shop'
 //   export SACI_MARIADB_SINK_DSN='mysql://saci@localhost:3307/shop'
-//   cargo run --features connector-mariadb,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-mariadb,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/mariadb_trigger.kdl
-//   cargo run --features connector-mariadb,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-mariadb,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/mariadb_trigger.kdl
 //
 // With `install_triggers #true` the source creates three triggers on

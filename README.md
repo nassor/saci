@@ -88,7 +88,7 @@ cd saci
 Then run a pipeline without writing any code:
 
 ```bash
-cargo run -p saci-service --example scheduler_etl
+cargo run -p saci --example scheduler_etl
 ```
 
 It prints the stage plan SACI derived from the systems' field declarations (ValidateSystem and
@@ -127,7 +127,7 @@ Then build every stage and drive the chain:
 
 ```bash
 cargo xtask polyglot
-cargo run -p saci-service --features wasm,tracing --example polyglot_orders
+cargo run -p saci --features wasm-host,tracing --example polyglot_orders
 ```
 
 Every command in this section runs the same on Linux, macOS and Windows (PowerShell). The processor
@@ -156,21 +156,24 @@ Also in this repo: the [WASM processor example](./examples/wasm/), the [polyglot
 example](./examples/polyglot/), [Rust-native examples](./examples/native/), the
 [branching example](./examples/branching/), the
 Apache-2.0 [SDK packages](./packages/), and toolchain pins for [Rust
-processors](./crates/saci-processor/PINS.md) and [the other
+processors](./crates/saci/PINS.md) and [the other
 languages](./examples/polyglot/PINS.md).
 
-## Main crates
+## Crates
 
-| Crate | What it holds |
+`saci` is one crate with a feature per part, so a build compiles only what it names:
+
+| Feature | What it adds |
 |---|---|
-| `saci-core` | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits |
-| `saci-service` | The host binary: wasmtime, KDL config, HTTP control plane, distributed runner |
-| `saci-processor` | The processor SDK and the canonical `saci:pipeline@0.3.0` WIT world |
-| `saci-connector-*`, `saci-transformer-*` | One transport and one byte format per crate |
-| `saci-plugin`, `saci-plugin-abi` | The native plugin SDK and its C ABI; the host is `saci-service` |
+| `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits |
+| `connector-<name>`, `transformer-<format>` | One transport or one byte format each, in `saci::connector` and `saci::transformer` |
+| `processor` | The processor SDK and the canonical `saci:pipeline@0.3.0` WIT world |
+| `plugin` | The native plugin SDK and its C ABI |
+| `server` | The `saci-service` binary: wasmtime, KDL config, HTTP control plane, distributed runner |
 
-The workspace map and the build and test commands live in [`AGENTS.md`](./AGENTS.md); the
-per-area reference for each crate group sits beside it under `.agents/skills/`.
+`cargo install saci --features server` installs the binary. `saci-macros` holds the processor
+SDK's derive macros. The workspace map and the build and test commands live in
+[`AGENTS.md`](./AGENTS.md); the per-area reference sits beside it under `.agents/skills/`.
 
 ## Project status
 

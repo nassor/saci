@@ -93,7 +93,7 @@ Register batches from a producer instead.
 </p>
 </div>
 
-Cluster mode is outside the default build. Build it with
+Cluster mode is outside the `server` feature. Build it with
 `--features service-cluster`: [Install saci-service](@/service/install.md).
 [Distributed processing](@/library/distributed.md) in the Library area covers
 the claim loop, the leases and the checkpoints.

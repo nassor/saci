@@ -39,7 +39,7 @@ const FIXTURE_JSON = new URL('fixture_input.json', GENERATED);
 const skip =
   existsSync(FIXTURE_SACI) && existsSync(FIXTURE_JSON)
     ? false
-    : 'examples/polyglot/generated is absent — run `cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit`';
+    : 'examples/polyglot/generated is absent — run `cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit`';
 
 /** A fresh mutable copy of the fixture, so mutation tests cannot leak into each other. */
 function fixtureBytes(): Uint8Array {

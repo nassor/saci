@@ -2,9 +2,9 @@
 //
 // Run:
 //   export KAFKA_BROKERS='localhost:9092'
-//   cargo run --features connector-kafka,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-kafka,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/kafka.kdl
-//   cargo run --features connector-kafka,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-kafka,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/kafka.kdl
 //
 // Two workflows. "orders" drains orders-raw once per cycle (stop_at_end

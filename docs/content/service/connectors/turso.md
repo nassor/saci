@@ -14,8 +14,8 @@ value = "None: batches arrive already typed, so no transformer is named"
 label = "Run modes"
 value = "Any"
 [[extra.facts]]
-label = "In the default build"
-value = "no: build with --features connector-turso"
+label = "In the server build"
+value = "no: build with --features server,connector-turso"
 +++
 A workflow reads rows out of a Turso database and writes rows back into one, whether the database is
 a single local file or a replica kept in sync with a remote endpoint.
@@ -69,7 +69,7 @@ SQLite-compatible database. This page pins the engine at `0.8.2`.
 
 ## What you need
 
-- Build the binary with the connector: `cargo run -p saci-service --features connector-turso`.
+- Build the binary with the connector: `cargo run -p saci --features server,connector-turso`.
 - For an embedded database, a writable path. The file is created on first use.
 - For a synced replica, the local path plus a `remote` block naming the endpoint URL and an auth
   token. A `turso://` or `libsql://` URL is rewritten to `https://`.
@@ -222,7 +222,7 @@ Runs the same on Linux, macOS and Windows (PowerShell):
 <div class="code-cap"><span>Shell</span><em>validate opens no database: both factories stop after parsing</em></div>
 
 ```text
-cargo run -p saci-service --features connector-turso,wasm --bin saci-service -- \
+cargo run -p saci --features server,connector-turso,wasm-host --bin saci-service -- \
   validate --connectors-only --config examples/configs/turso.kdl
 ```
 

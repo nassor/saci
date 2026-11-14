@@ -11,12 +11,12 @@ description = "Windowing sliding demo processor component: merges two NATS strea
 
 # A processor pipeline component, NOT a binary. `cargo build --target wasm32-wasip2`
 # links the cdylib straight into a Component Model component exporting the
-# saci-pipeline world from saci-processor's WIT package.
+# saci-pipeline world from the WIT package of the `saci` crate.
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-saci-processor = { workspace = true, features = ["windows"] }
+saci = { workspace = true, features = ["processor", "windows"] }
 serde = { workspace = true }
 # Traces the nested state component's Arrow schema from a sample, so it matches
 # serde_arrow's encoding exactly.

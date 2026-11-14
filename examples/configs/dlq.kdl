@@ -1,8 +1,8 @@
 // SACI standalone service configuration with a dead letter queue.
 //
 // Run:
-//   cargo run -p saci-service -- validate --config examples/configs/dlq.kdl
-//   cargo run -p saci-service -- serve --config examples/configs/dlq.kdl
+//   cargo run -p saci --features server -- validate --config examples/configs/dlq.kdl
+//   cargo run -p saci --features server -- serve --config examples/configs/dlq.kdl
 //
 // Both commands work with the default feature bundle: connector-file,
 // connector-http and connector-redb are all in it.

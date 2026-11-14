@@ -9,7 +9,7 @@ aliases = ["/reference/wire-format/", "/polyglot/wire-format/"]
 
 Read this only if you are writing an Arrow codec by hand. Five languages already
 have one, carried inside [`the SDK packages`](@/library/reference/sdk-packages.md).
-The implementation on both sides is `crates/saci-core/src/dataset/ipc.rs`, called
+The implementation on both sides is `crates/saci/src/dataset/ipc.rs`, called
 identically by the host and by the `export_pipeline!` expansion in the processor.
 
 `run-batch` takes `list<u8>` and answers with a `run-result` whose `output`
@@ -19,7 +19,7 @@ TypeScript, Kotlin and C# stages of
 [the polyglot example](@/service/processors/build/_index.md) do exactly that.
 
 The numbers here match the stream that
-`cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit`
+`cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit`
 writes to `examples/polyglot/generated/fixture_input.saci`.
 
 ---
@@ -218,7 +218,7 @@ so one answer covers which streams are valid. Regenerate it after any wire
 format or `Order` schema change:
 
 ```bash,name=Regenerate the conformance corpus
-cargo run -p saci-service --features conformance --example conformance_vectors -- emit
+cargo run -p saci --features conformance --example conformance_vectors -- emit
 ```
 
 The corpus is processor-side: it deliberately has no vector for the two rules
@@ -240,8 +240,7 @@ A clean close between frames is a normal disconnect, and the sink's `finish` clo
 that way. On the source a failed frame-header read, an oversized frame, a truncated payload, a
 frame that decodes to no batch, and a frame that cannot be projected onto the declared schema each
 close that one connection and leave the listener and every other producer running. Each one warns
-only when `saci-connector-tcp` carries its `tracing` feature, which `saci-service`'s
-`connector-tcp` turns on and a direct dependency does not:
+only when the `tracing` feature is on, which `service` turns on:
 `TcpIngestSource: frame header read failed`,
 `TcpIngestSource: oversized frame, closing connection`,
 `TcpIngestSource: truncated frame payload, closing connection`, `TcpIngestSource: frame decoded no
@@ -267,8 +266,7 @@ On the source one decoder serves every producer, pushed and flushed per datagram
 leaks from one into the next and a datagram carrying several batches yields their concatenation.
 A datagram that cannot be decoded, or that decodes to no batch, is dropped on its own: there is
 no connection to close, and the decoder is replaced because its state after a failed push is
-unspecified. Both warn only when `saci-connector-udp` carries its `tracing` feature, which
-`saci-service`'s `connector-udp` turns on and a direct dependency does not:
+unspecified. Both warn only when the `tracing` feature is on, which `service` turns on:
 `UdpSource: undecodable datagram dropped` and
 `UdpSource: datagram decoded no batch, dropped`.
 
@@ -276,7 +274,7 @@ unspecified. Both warn only when `saci-connector-udp` carries its `tracing` feat
 
 A `saci` frame is a `u32` big-endian body length followed by that many body bytes, whose first
 byte is the frame kind. A `str` below is a `u16` big-endian byte length followed by UTF-8 bytes.
-`saci_connector_saci::wire` is public, so a foreign producer speaks this without linking the
+`saci::connector::saci::wire` is public, so a foreign producer speaks this without linking the
 host.
 
 | Kind | Body |
@@ -299,9 +297,8 @@ is a failed dial and the sink tries the next `connect` address.
 
 After the handshake, a failed frame-header read, a zero-length or oversized frame, a frame that is
 not a data frame, and Arrow IPC bytes that will not decode each close that one session and leave
-the listener and every other peer running. Each warns only when `saci-connector-saci` carries its
-`tracing` feature, which `saci-service`'s `connector-saci` turns on and a direct dependency does
-not.
+the listener and every other peer running. Each warns only when the `tracing` feature is on,
+which `service` turns on.
 
 A write that fails mid-frame closes the session the same way, and the runner's retry of that
 batch opens a fresh session, possibly to the next peer. There is no acknowledgement frame: a

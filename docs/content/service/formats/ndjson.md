@@ -17,7 +17,7 @@ value = "One message per row"
 label = "Needs schema_fields"
 value = "Optional reading a stream, required on messages"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 Newline delimited JSON, one object per row, on files and on messages alike. It is the one format

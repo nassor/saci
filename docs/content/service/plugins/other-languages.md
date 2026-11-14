@@ -69,7 +69,7 @@ author a plugin, and `saci-service` never learns which toolchain did.
 
 | Language | How the symbols get exported | Build |
 |---|---|---|
-| **Rust** | `saci_plugin::export_plugin!` in a `cdylib` crate | `cargo build --release -p my-plugin` |
+| **Rust** | `saci::export_plugin!` in a `cdylib` crate | `cargo build --release -p my-plugin` |
 | **Go** | cgo, `//export saci_abi_version` and `//export saci_plugin_v1` | `go build -buildmode=c-shared -o my_plugin.so .` |
 | **C#** | NativeAOT, `[UnmanagedCallersOnly(EntryPoint = "saci_abi_version")]` | `dotnet publish -r linux-x64 -c Release` |
 | **Kotlin** | GraalVM, `@CEntryPoint(name = "saci_abi_version")` | `native-image --shared` |

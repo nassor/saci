@@ -136,7 +136,7 @@ these except the last surface in CI without moving any data.
 | `schema fingerprint mismatch: the pipeline declares 4f2a1c08 but this node's persisted checkpoints were written with 91bd3e77.` | Restore the previous processor, or start the node with an empty `data_dir`. |
 | A digest mismatch on `sha3_256` | Recompute the digest of the artifact you are actually shipping, or drop the key. |
 | `mode "cluster"` in a binary without cluster support | Rebuild with `--features service-cluster`: [Install saci-service](@/service/install.md). |
-| A `wasm` or `plugin` node in a binary without that host | Rebuild with the `--features` flag the message names, `wasm` or `plugin`: [Install saci-service](@/service/install.md). |
+| A `wasm` or `plugin` node in a binary without that host | Rebuild with the `--features` flag the message names, `wasm-host` or `plugin-host`: [Install saci-service](@/service/install.md). |
 | A `window` block on either, in a binary built without `windows` | Rebuild with `--features windows`: [Install saci-service](@/service/install.md). |
 | `type="NatsSource"`, or any connector, in a binary built without it | Rebuild with the `--features` flag the message names: [Install saci-service](@/service/install.md). |
 | `format="csv"`, or any format, on a `transformer` node in a binary built without it | Rebuild with the `--features` flag the message names: [Install saci-service](@/service/install.md). |
@@ -185,15 +185,15 @@ key or the mode as unknown. `validate` refuses first, ahead of
 `--connectors-only`, and `serve` refuses before it binds a port:
 
 ```text
-error: Configuration error: workflow 'orders': plugin node 'audit' needs the native plugin host, which this binary was built without, so rebuild or reinstall with `--features plugin`
+error: Configuration error: workflow 'orders': plugin node 'audit' needs the native plugin host, which this binary was built without, so rebuild or reinstall with `--features plugin-host`
 ```
 
-`plugin` is not in the default bundle, so that is the one a
-`cargo install saci-service` binary meets. `wasm` and `windows` are, so only a
+`plugin-host` is not in the `server` feature, so that is the one a
+`cargo install saci --features server` binary meets. `wasm-host` and `windows` are, so only a
 build that trimmed them meets the other two.
 
 A node's own host is answered first. A `window` block on a `wasm` node in a
-binary carrying neither names `--features wasm`, and the window refusal
+binary carrying neither names `--features wasm-host`, and the window refusal
 follows once that host is in:
 
 ```text

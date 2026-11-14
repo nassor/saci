@@ -14,7 +14,7 @@ value = "Required on both halves, and never inferred from the extension"
 label = "Run modes"
 value = "Any: the source reaches EOF at the end of the file"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 A workflow reads `orders.csv` off the disk, hands the rows to a processor, and writes the result

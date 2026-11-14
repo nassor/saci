@@ -56,12 +56,12 @@
 // the publisher's startup reset deletes this topic, its consumer group, the
 // JetStream messages, the audit table and the replication slot, so it refuses
 // to run at all while either control plane answers.
-//   cargo run -p saci-service --example integrity_check
-//   cargo run -p saci-service \
-//     --features connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm,windows \
+//   cargo run -p saci --features service,transformer-arrow-ipc,transformer-csv,transformer-ndjson,transformer-parquet --example integrity_check
+//   cargo run -p saci \
+//     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm-host,windows \
 //     -- serve --config examples/integrity/integrity.kdl
-//   cargo run -p saci-service \
-//     --features connector-postgresql,connector-http,transformer-parquet,wasm \
+//   cargo run -p saci \
+//     --features server,connector-postgresql,connector-http,transformer-parquet,wasm-host \
 //     -- serve --config examples/integrity/integrity_audit.kdl
 
 mode "standalone"
@@ -76,7 +76,7 @@ run_mode kind="stream"
 // No `store "redb"` block on purpose. Both processors carry cross-batch state,
 // and in stream mode the runner threads every processor's checkpoint blob from
 // one item to the next in memory whether a store exists or not
-// (`prior[i] = out.state` in crates/saci-service/src/service/stream.rs), so
+// (`prior[i] = out.state` in crates/saci/src/service/stream.rs), so
 // the catalog `classify` accumulates and the windows `aggregate` holds work
 // without a file. A store adds one thing here: those blobs are also written to
 // disk and loaded back when the workflow is built, and the blob that comes

@@ -5,9 +5,9 @@
 //   export SACI_S3_ENDPOINT='http://127.0.0.1:9000'
 //   export SACI_S3_ACCESS_KEY='rustfsadmin'
 //   export SACI_S3_SECRET_KEY='rustfsadmin'
-//   cargo run --features connector-s3,transformer-csv,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-s3,transformer-csv,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/s3.kdl
-//   cargo run --features connector-s3,transformer-csv,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-s3,transformer-csv,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/s3.kdl
 //
 // Both ends speak the same csv format through one declared transformer. The

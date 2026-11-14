@@ -2,7 +2,7 @@
 
 One plugin, one language, no WebAssembly. `settle-go` is a C shared library the
 host loads with dlopen, built from Go with cgo, exporting the ABI in
-`crates/saci-plugin-abi/include/saci_plugin.h`. `examples/polyglot/PINS.md` covers
+`crates/saci/include/saci_plugin.h`. `examples/polyglot/PINS.md` covers
 the six WASM processors; this file covers what the native path needs.
 
 ## Required tools
@@ -60,7 +60,7 @@ checksum, so there is no `go.sum`.
 
 `arrow-ipc = "=59.3.0"` in the workspace `Cargo.toml` is the host's Arrow IPC
 implementation and the byte layout this plugin walks. A patch bump there can
-move the buffers the codec resolves by offset. `crates/saci-processor/PINS.md` holds
+move the buffers the codec resolves by offset. `crates/saci/PINS.md` holds
 the upgrade policy. The plugin ABI version is independent of it:
 `SACI_ABI_VERSION` is `0x00010000` and covers the struct layout, not the wire
 format inside the buffers.

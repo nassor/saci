@@ -31,9 +31,9 @@ pub fn emit(ctx: &Ctx, what: &str, required: &[&str], missing: u8) -> Result<()>
         .args([
             "run",
             "-p",
-            "saci-service",
+            "saci",
             "--features",
-            "wasm",
+            "wasm-host",
             "--example",
             "polyglot_schema_emit",
             "--",

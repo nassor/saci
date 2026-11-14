@@ -71,13 +71,13 @@
 
 use std::collections::HashMap;
 
-use leptos::prelude::*;
-use leptos::task::spawn_local;
-use saci_inspector_wire::{
+use crate::wire::{
     BridgeEdge, EdgeRate, LogRecord, PROCESSOR_ATTR, Pair, PointAt, SINK_ATTR, SOURCE_ATTR,
     SeriesKind, SeriesSummary, Snapshot, TopoEdge, TopoNode, Topology, WORKFLOW_ATTR, WindowInfo,
     WorkflowRunState, WorkflowStatus, WorkflowTopology,
 };
+use leptos::prelude::*;
+use leptos::task::spawn_local;
 
 use crate::api;
 use crate::components::Swatch;

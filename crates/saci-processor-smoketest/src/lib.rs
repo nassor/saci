@@ -1,7 +1,7 @@
 //! Minimal processor pipeline: a build fixture and Arrow IPC round-trip fixture.
 //!
 //! It declares one data component and one system, and exercises
-//! `saci_processor::export_pipeline!` against `wit-bindgen`-generated bindings.
+//! `saci::export_pipeline!` against `wit-bindgen`-generated bindings.
 //!
 //! - `Ping` is the data plane. No system touches it, so `run-batch` is an
 //!   identity function and any byte difference in the round-tripped Arrow IPC
@@ -22,7 +22,7 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci-processor/wit`. The
+// The bindings are generated in place from `crates/saci/wit`. The
 // module is gated on wasm32 because the expansion emits the canonical ABI
 // intrinsics and the `component-type` custom section, neither of which the host
 // target can link; `#[allow(warnings)]` silences bindgen output noise.
@@ -30,15 +30,15 @@
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        path: "../saci-processor/wit",
+        path: "../saci/wit",
         world: "saci-pipeline",
         generate_all,
     });
 }
 
-use saci_processor::arrow_schema::{DataType, Field, Schema};
-use saci_processor::prelude::*;
-use saci_processor::{ProcessorState, RouteDecision};
+use saci::processor::arrow_schema::{DataType, Field, Schema};
+use saci::processor::prelude::*;
+use saci::processor::{ProcessorState, RouteDecision};
 use std::sync::Arc;
 
 /// A single no-op component so `describe()` has a schema to emit: one `u64`
@@ -167,4 +167,4 @@ const ROUTE_KEY: &str = "route";
 // The macro references `crate::bindings`, which only exists on wasm32, so the
 // invocation is gated out on the host target.
 #[cfg(target_arch = "wasm32")]
-saci_processor::export_pipeline!(build, state = Counter);
+saci::export_pipeline!(build, state = Counter);

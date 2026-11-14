@@ -14,9 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Cache dependency compilation first — copy the whole workspace manifest tree.
-# `distributed_fulfillment` is a saci-service example living outside the crate
+# `distributed_fulfillment` is a service example living outside the crate
 # (examples/distributed_fulfillment/), so the build context is the repository
-# root and needs every crate saci-service depends on by path, plus its own
+# root and needs the `saci` and `saci-macros` crates by path, plus its own
 # example source.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -24,7 +24,7 @@ COPY examples ./examples
 COPY xtask ./xtask
 
 RUN cargo build \
-    -p saci-service \
+    -p saci \
     --example distributed_fulfillment \
     --features service-cluster \
     --release

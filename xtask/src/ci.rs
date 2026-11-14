@@ -1,30 +1,28 @@
 //! The two processor-target gates CI runs on every push.
 //!
-//! Both exist to catch drift that a host-only build cannot see: `saci-core`
-//! and the `saci` facade have to keep compiling for `wasm32-wasip2` without
-//! their default features, and the `arrow-ipc` pin has to keep meaning the
-//! same bytes on both sides of the component boundary.
+//! Both exist to catch drift that a host-only build cannot see: `saci` has
+//! to keep compiling for `wasm32-wasip2` without its default features, and
+//! the `arrow-ipc` pin has to keep meaning the same bytes on both sides of
+//! the component boundary.
 
 use crate::sh::{Ctx, Result};
 
 const CHECK_USAGE: &str = "usage: cargo xtask check-wasm-processor";
 const ROUNDTRIP_USAGE: &str = "usage: cargo xtask processor-ipc-roundtrip";
 
-/// Check that `saci-core` and the `saci` facade still compile for the
-/// processor target.
+/// Check that `saci` still compiles for the processor target.
 ///
 /// A processor build has no tokio and no rayon: it runs the system DAG through
 /// the `pollster` sync executor, which only the `processor` feature selects. A
 /// host-only test run cannot catch a dependency that crept into that path.
 ///
-/// Both crates are checked with `--no-default-features --features processor`,
-/// and the first failure ends the task with cargo's own exit code. The facade
-/// half carries a documented promise: `crates/saci/src/lib.rs` and AGENTS.md
-/// hand a processor author that same combination, because `engine` forwards
-/// `saci-core/io`, which implies `runtime` (tokio and rayon), and tokio cannot
-/// target wasm32-wasip2. Nothing in a host build compiles the facade that way,
-/// so a feature edge leaking tokio back in would falsify the instruction
-/// silently.
+/// The crate is checked with `--no-default-features --features processor`,
+/// and a failure ends the task with cargo's own exit code. That combination is
+/// a documented promise: `crates/saci/src/lib.rs` and AGENTS.md hand a
+/// processor author exactly it, because the default `engine` implies
+/// `runtime` (tokio and rayon), and tokio cannot target wasm32-wasip2. Nothing
+/// in a host build compiles the crate that way, so a feature edge leaking
+/// tokio back in would falsify the instruction silently.
 ///
 /// It installs the `wasm32-wasip2` target first, as
 /// [`processor_ipc_roundtrip`] does.
@@ -38,34 +36,28 @@ pub fn check_wasm_processor(args: &[String]) -> Result<()> {
         .args(["target", "add", "wasm32-wasip2"])
         .run()?;
 
-    for (krate, manifest) in [
-        ("saci-core", "crates/saci-core/Cargo.toml"),
-        ("saci", "crates/saci/Cargo.toml"),
-    ] {
-        ctx.log(format!("checking {krate} for wasm32-wasip2..."));
-        ctx.cargo()?
-            .args([
-                "check",
-                "--manifest-path",
-                manifest,
-                "--target",
-                "wasm32-wasip2",
-                "--no-default-features",
-                "--features",
-                "processor",
-            ])
-            .run()?;
-    }
+    ctx.log("checking saci for wasm32-wasip2...");
+    ctx.cargo()?
+        .args([
+            "check",
+            "--manifest-path",
+            "crates/saci/Cargo.toml",
+            "--target",
+            "wasm32-wasip2",
+            "--no-default-features",
+            "--features",
+            "processor",
+        ])
+        .run()?;
 
-    ctx.log("PASS: saci-core and saci build for wasm32-wasip2");
+    ctx.log("PASS: saci builds for wasm32-wasip2");
     Ok(())
 }
 
 /// Drive the host to processor Arrow IPC round-trip regression test.
 ///
-/// It catches `arrow-ipc` version drift between `saci-core` (host) and
-/// `saci-processor` (processor) before drift can corrupt checkpoints in
-/// production.
+/// It catches `arrow-ipc` version drift between the host and the processor
+/// SDK before drift can corrupt checkpoints in production.
 ///
 /// Steps:
 ///
@@ -85,12 +77,12 @@ pub fn check_wasm_processor(args: &[String]) -> Result<()> {
 /// processor logic bug.
 ///
 /// Cold runs are slow: the first `wasm32-wasip2` build of `arrow-ipc`,
-/// `saci-core` and the `wit-bindgen` generator. CI should cache `target/` and
+/// `saci` and the `wit-bindgen` generator. CI should cache `target/` and
 /// `~/.cargo/registry` between runs.
 ///
 /// Exit codes: 3 build produced no artifact.
 pub fn processor_ipc_roundtrip(args: &[String]) -> Result<()> {
-    let ctx = Ctx::with_pins("processor-ipc-roundtrip", "crates/saci-processor/PINS.md");
+    let ctx = Ctx::with_pins("processor-ipc-roundtrip", "crates/saci/PINS.md");
     if ctx.no_options(args, ROUNDTRIP_USAGE)? {
         return Ok(());
     }
@@ -119,7 +111,7 @@ pub fn processor_ipc_roundtrip(args: &[String]) -> Result<()> {
     ctx.expect_artifact(&artifact, 3)?;
     ctx.log(format!("smoketest built: {} bytes", ctx.size(&artifact)?));
 
-    // The test name and crate are pinned so later saci-service test additions do
+    // The test name and crate are pinned so later `saci` test additions do
     // not silently join this gate.
     ctx.log("running host-side round-trip test...");
     ctx.cargo()?
@@ -128,9 +120,9 @@ pub fn processor_ipc_roundtrip(args: &[String]) -> Result<()> {
             "--test",
             "wasm_roundtrip",
             "-p",
-            "saci-service",
+            "saci",
             "--features",
-            "wasm",
+            "wasm-host",
             "--",
             "--nocapture",
         ])

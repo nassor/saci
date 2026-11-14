@@ -18,7 +18,7 @@ Both are generated. Regenerate after any change to the wire format or the
 canonical `Order` schema:
 
 ```bash
-cargo run -p saci-service --features conformance --example conformance_vectors -- emit
+cargo run -p saci --features conformance --example conformance_vectors -- emit
 ```
 
 The generator is `examples/conformance/conformance_vectors.rs`. It builds

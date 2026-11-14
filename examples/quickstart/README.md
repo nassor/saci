@@ -45,14 +45,14 @@ docker compose -f examples/quickstart/docker-compose.yml up -d
    command names them:
 
 ```text
-cargo run -p saci-service --features connector-nats,connector-postgresql -- serve -c examples/quickstart/quickstart.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql -- serve -c examples/quickstart/quickstart.kdl
 ```
 
 4. Publish 5000 authorisations at 500 per second. `--count 0` runs until
    Ctrl-C, for watching the dashboard against a live stream:
 
 ```text
-cargo run -p saci-service --example quickstart_publish --features connector-nats -- --count 5000 --rate 500
+cargo run -p saci --example quickstart_publish --features connector-nats -- --count 5000 --rate 500
 ```
 
 5. Watch the dashboard while it runs. The Pipelines tab draws both stages
@@ -81,7 +81,7 @@ docker compose -f examples/quickstart/docker-compose.yml down -v
 | File | What it is |
 |------|------------|
 | `quickstart.kdl` | the one service: NATS in, Go stage, C# stage, PostgreSQL out |
-| `quickstart_publish.rs` | the `saci-service` example that feeds the NATS subject |
+| `quickstart_publish.rs` | the `saci` example that feeds the NATS subject |
 | `docker-compose.yml` | NATS 2.11 and PostgreSQL 18, host ports 4222 and 5432 |
 | `schema.sql` | the `settlements` table, mounted into the Postgres container |
 | `stages/csharp-settle/` | the C# processor, written for this tutorial |

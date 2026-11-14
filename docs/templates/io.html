@@ -19,7 +19,7 @@
     <dt>In one line</dt>
     <dd>How rows <strong>get into</strong> a Dataset and <strong>back out</strong> again</dd>
     <dt>You need</dt>
-    <dd>The <code>saci-core/io</code> feature for the traits, plus a connector crate for the transport and a transformer crate for the format</dd>
+    <dd>The <code>io</code> feature for the traits, plus a <code>connector-*</code> feature for the transport and a <code>transformer-*</code> feature for the format</dd>
     <dt>Read this if</dt>
     <dd>Your Parquet file has an <code>Int32</code> column where the component declares <code>Int64</code>, or your second run says <em>write_batch called after finish</em></dd>
 </dl>
@@ -186,13 +186,13 @@
 <h2 id="traits">The two traits</h2>
 
 <p>
-    Both live in <code>saci-core</code> behind its <code>io</code> feature. Every
-    implementation lives in a connector crate that depends on them.
+    Both live in <code>saci</code> behind its <code>io</code> feature. Every
+    implementation lives in a connector module that depends on them.
     Each is a schema, a step, and a way to signal <em>done</em>.
 </p>
 
 <div class="code">
-    <div class="code-cap"><span>Rust</span><em>crates/saci-core/src/io/source.rs</em></div>
+    <div class="code-cap"><span>Rust</span><em>crates/saci/src/io/source.rs</em></div>
     <pre><code class="language-rust">#[async_trait]
 pub trait Source: Send + Sync {
     /// Fixed per source instance. Must not change between calls.
@@ -210,7 +210,7 @@ pub trait Source: Send + Sync {
 </div>
 
 <div class="code">
-    <div class="code-cap"><span>Rust</span><em>crates/saci-core/src/io/sink.rs</em></div>
+    <div class="code-cap"><span>Rust</span><em>crates/saci/src/io/sink.rs</em></div>
     <pre><code class="language-rust">#[async_trait]
 pub trait Sink: Send {
     /// May be called multiple times.
@@ -269,8 +269,8 @@ pub trait Sink: Send {
 use arrow_array::{Array, Float64Array, RecordBatch};
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use saci_core::SaciError;
-use saci_core::io::Source;
+use saci::SaciError;
+use saci::io::Source;
 
 struct RampSource {
     schema: Arc&lt;Schema&gt;,
@@ -306,7 +306,7 @@ impl Source for RampSource {
 
 <p>
     Emit the transport's natural unit rather than buffering up one giant batch when a source
-    is driven directly against <code>saci-core</code>, with no host in the loop. The trait
+    is driven directly against <code>saci</code>, with no host in the loop. The trait
     docs name no size: whatever a source produces is correct, because the
     caller reshapes it. Under <code>saci-service</code>, a source's own size matters less, because the
     standalone and stream runners size chunks themselves, admitting only what their
@@ -469,11 +469,11 @@ pub async fn drain_dataset&lt;K: Sink + ?Sized&gt;(
     <div class="code-cap"><span>Rust</span><em>driving both ends by hand</em></div>
     <pre><code class="language-rust">use std::path::Path;
 use std::sync::Arc;
-use saci_connector_file::{FileSink, FileSource};
-use saci_core::Component;
-use saci_core::dataset::Dataset;
-use saci_core::io::{Sink, drain_dataset, drain_into_dataset};
-use saci_transformer_parquet::ParquetTransformer;
+use saci::connector::file::{FileSink, FileSource};
+use saci::Component;
+use saci::dataset::Dataset;
+use saci::io::{Sink, drain_dataset, drain_into_dataset};
+use saci::transformer::parquet::ParquetTransformer;
 
 let mut data = Dataset::new();
 data.register_component::&lt;Trade&gt;()?;
@@ -541,9 +541,9 @@ use std::path::Path;
 use std::sync::Arc;
 use arrow_cast::CastOptions;
 use arrow_schema::DataType;
-use saci_connector_file::FileSource;
-use saci_core::io::{CastingSource, build_target_schema};
-use saci_transformer_csv::CsvTransformer;
+use saci::connector::file::FileSource;
+use saci::io::{CastingSource, build_target_schema};
+use saci::transformer::csv::CsvTransformer;
 
 // The file says Int32 / Float32; the component declares Int64 / Float64.
 let csv  = Arc::new(CsvTransformer::new(true));   // true: the file has a header row
@@ -601,159 +601,160 @@ let src = CastingSource::new(file, target, CastOptions::default());</code></pre>
 
 <p>
     The traits, the two drain functions and the cast helpers live in
-    <code>saci-core</code>. The factory contract lives in <code>saci-connector</code>. A
-    connector crate carries bytes over one transport and a transformer crate turns bytes into
-    batches, so a build pulls in <code>parquet</code>, <code>arrow-csv</code> or
+    <code>saci</code> behind the <code>io</code> feature. The factory contract lives in
+    <code>saci::connector</code>. A connector module carries bytes over one transport and a
+    transformer module turns bytes into batches, each behind its own feature, so a build
+    pulls in <code>parquet</code>, <code>arrow-csv</code> or
     <code>tokio-postgres</code> only when it reads or writes that format.
 </p>
 
 <table class="rule-table">
     <thead>
-        <tr><th>What</th><th>Source</th><th>Sink</th><th>Crate</th></tr>
+        <tr><th>What</th><th>Source</th><th>Sink</th><th>Module</th></tr>
     </thead>
     <tbody>
         <tr>
             <td><strong>Traits &amp; drains</strong></td>
             <td colspan="2"><code>Source</code>, <code>Sink</code>, <code>drain_into_dataset</code>, <code>drain_dataset</code></td>
-            <td><code>saci-core</code></td>
+            <td><code>saci::io</code></td>
         </tr>
         <tr>
             <td><strong>Cast helpers</strong></td>
             <td colspan="2"><code>cast_batch</code>, <code>CastingSource</code>, <code>build_target_schema</code></td>
-            <td><code>saci-core</code></td>
+            <td><code>saci::io</code></td>
         </tr>
         <tr>
             <td><strong>Factory contract</strong></td>
             <td colspan="2"><code>SourceFactory</code>, <code>SinkFactory</code>, <code>ConnectorContext</code>, <code>parse_schema_fields</code></td>
-            <td><code>saci-connector</code></td>
+            <td><code>saci::connector</code></td>
         </tr>
         <tr>
             <td><strong>Transformer contract</strong></td>
             <td colspan="2"><code>Transformer</code>, <code>BatchReader</code>, <code>BatchWriter</code>, <code>MessageDecoder</code></td>
-            <td><code>saci-transformer</code></td>
+            <td><code>saci::transformer</code></td>
         </tr>
         <tr>
             <td><strong>Channel</strong></td>
             <td><code>ChannelSource</code></td>
             <td><code>ChannelSink</code></td>
-            <td><code>saci-connector-channel</code></td>
+            <td><code>saci::connector::channel</code></td>
         </tr>
         <tr>
             <td><strong>File</strong></td>
             <td><code>FileSource</code></td>
             <td><code>FileSink</code></td>
-            <td><code>saci-connector-file</code></td>
+            <td><code>saci::connector::file</code></td>
         </tr>
         <tr>
             <td><strong>redb</strong></td>
             <td><code>RedbSource</code></td>
             <td><code>RedbSink</code></td>
-            <td><code>saci-connector-redb</code></td>
+            <td><code>saci::connector::redb</code></td>
         </tr>
         <tr>
             <td><strong>PostgreSQL</strong></td>
             <td><code>PostgresSource</code></td>
             <td><code>PostgresSink</code></td>
-            <td><code>saci-connector-postgresql</code></td>
+            <td><code>saci::connector::postgresql</code></td>
         </tr>
         <tr>
             <td><strong>MariaDB</strong></td>
             <td><code>MariadbSource</code></td>
             <td><code>MariadbSink</code></td>
-            <td><code>saci-connector-mariadb</code></td>
+            <td><code>saci::connector::mariadb</code></td>
         </tr>
         <tr>
             <td><strong>Turso</strong></td>
             <td><code>TursoSource</code></td>
             <td><code>TursoSink</code></td>
-            <td><code>saci-connector-turso</code></td>
+            <td><code>saci::connector::turso</code></td>
         </tr>
         <tr>
             <td><strong>Kafka</strong></td>
             <td><code>KafkaSource</code></td>
             <td><code>KafkaSink</code></td>
-            <td><code>saci-connector-kafka</code></td>
+            <td><code>saci::connector::kafka</code></td>
         </tr>
         <tr>
             <td><strong>NATS</strong></td>
             <td><code>NatsSource</code></td>
             <td><code>NatsSink</code></td>
-            <td><code>saci-connector-nats</code></td>
+            <td><code>saci::connector::nats</code></td>
         </tr>
         <tr>
             <td><strong>TCP</strong></td>
             <td><code>TcpIngestSource</code></td>
             <td><code>TcpSink</code></td>
-            <td><code>saci-connector-tcp</code></td>
+            <td><code>saci::connector::tcp</code></td>
         </tr>
         <tr>
             <td><strong>UDP</strong></td>
             <td><code>UdpSource</code></td>
             <td><code>UdpSink</code></td>
-            <td><code>saci-connector-udp</code></td>
+            <td><code>saci::connector::udp</code></td>
         </tr>
         <tr>
             <td><strong>SACI</strong></td>
             <td><code>SaciSource</code></td>
             <td><code>SaciSink</code></td>
-            <td><code>saci-connector-saci</code></td>
+            <td><code>saci::connector::saci</code></td>
         </tr>
         <tr>
             <td><strong>HTTP</strong></td>
             <td><code>HttpSource</code></td>
             <td><code>HttpSink</code></td>
-            <td><code>saci-connector-http</code></td>
+            <td><code>saci::connector::http</code></td>
         </tr>
         <tr>
             <td><strong>S3</strong></td>
             <td><code>S3Source</code></td>
             <td><code>S3Sink</code></td>
-            <td><code>saci-connector-s3</code></td>
+            <td><code>saci::connector::s3</code></td>
         </tr>
         <tr>
             <td><strong>Config registration</strong></td>
             <td colspan="2"><code>Registry</code>, <code>register_builtin_factories</code></td>
-            <td><code>saci-service</code></td>
+            <td><code>saci::service</code></td>
         </tr>
     </tbody>
 </table>
 
 <p>
     A <code>format</code> key names the transformer that turns a connector's bytes into
-    batches, and one crate implements each name. The
+    batches, and one module implements each name. The
     <a href="{{ get_url(path='@/service/formats/_index.md') }}">transformers</a> page has the schema
     rules and the options each one takes.
 </p>
 
 <table class="rule-table">
     <thead>
-        <tr><th><code>format</code></th><th>Transformer</th><th>Crate</th></tr>
+        <tr><th><code>format</code></th><th>Transformer</th><th>Module</th></tr>
     </thead>
     <tbody>
         <tr>
             <td><code>csv</code></td>
             <td><code>CsvTransformer</code></td>
-            <td><code>saci-transformer-csv</code></td>
+            <td><code>saci::transformer::csv</code></td>
         </tr>
         <tr>
             <td><code>ndjson</code></td>
             <td><code>NdjsonTransformer</code></td>
-            <td><code>saci-transformer-ndjson</code></td>
+            <td><code>saci::transformer::ndjson</code></td>
         </tr>
         <tr>
             <td><code>parquet</code></td>
             <td><code>ParquetTransformer</code></td>
-            <td><code>saci-transformer-parquet</code></td>
+            <td><code>saci::transformer::parquet</code></td>
         </tr>
         <tr>
             <td><code>avro</code></td>
             <td><code>AvroTransformer</code></td>
-            <td><code>saci-transformer-avro</code></td>
+            <td><code>saci::transformer::avro</code></td>
         </tr>
         <tr>
             <td><code>arrow-ipc</code></td>
             <td><code>ArrowIpcTransformer</code></td>
-            <td><code>saci-transformer-arrow-ipc</code></td>
+            <td><code>saci::transformer::arrow_ipc</code></td>
         </tr>
     </tbody>
 </table>
@@ -771,8 +772,8 @@ let src = CastingSource::new(file, target, CastOptions::default());</code></pre>
 <p>
     No connector resolves a format implicitly. A node that moves bytes names a declared
     <code>transformer</code> node by id, and that node's own <code>format</code> key is
-    what the registry resolves. Which crates a build carries is one
-    <code>saci-service</code> feature per crate, listed on
+    what the registry resolves. Which modules a build carries is one
+    <code>connector-*</code> or <code>transformer-*</code> feature per module, listed on
     <a href="{{ get_url(path='@/library/reference/crates.md') }}">Crates and features</a>.
 </p>
 
@@ -780,26 +781,26 @@ let src = CastingSource::new(file, target, CastOptions::default());</code></pre>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>signatures, not calls</em></div>
-    <pre><code class="language-rust">// saci-connector-file. open_async moves the open and the metadata read off the executor.
+    <pre><code class="language-rust">// saci::connector::file. open_async moves the open and the metadata read off the executor.
 // create appends to an existing file, create_truncating replaces it.
 FileSource::open           (&amp;Path, Arc&lt;dyn Transformer&gt;, Option&lt;Arc&lt;Schema&gt;&gt;) -&gt; Result&lt;Self&gt;
 FileSource::open_async     (&amp;Path, Arc&lt;dyn Transformer&gt;, Option&lt;Arc&lt;Schema&gt;&gt;) -&gt; Result&lt;Self&gt;
 FileSink::create           (&amp;Path, Arc&lt;dyn Transformer&gt;, Arc&lt;Schema&gt;)         -&gt; Result&lt;Self&gt;
 FileSink::create_truncating(&amp;Path, Arc&lt;dyn Transformer&gt;, Arc&lt;Schema&gt;)         -&gt; Result&lt;Self&gt;
 
-// saci-connector-http. Neither makes a request: the source GETs and the sink
+// saci::connector::http. Neither makes a request: the source GETs and the sink
 // sends on the first batch, so validate needs no reachable endpoint.
 HttpSource::new(&amp;str, Option&lt;Arc&lt;Schema&gt;&gt;, SchemaFrom, Arc&lt;dyn Transformer&gt;, Vec&lt;(String, String)&gt;, Duration) -&gt; Result&lt;Self&gt;
 HttpSink::new  (&amp;str, Arc&lt;Schema&gt;, Arc&lt;dyn Transformer&gt;, method: &amp;str, Vec&lt;(String, String)&gt;, Duration) -&gt; Result&lt;Self&gt;
 
-// The transformer each of those takes, one crate per format.
+// The transformer each of those takes, one module per format.
 CsvTransformer::new(has_headers: bool)   -&gt; Self   // csv
 NdjsonTransformer::new(infer_max: usize) -&gt; Self   // ndjson
 ParquetTransformer::new()                -&gt; Self   // parquet, Snappy
 ArrowIpcTransformer::new()               -&gt; Self   // arrow-ipc
 AvroTransformer::new(compression: Option&lt;CompressionCodec&gt;, schema_id: Option&lt;u32&gt;) // avro
 
-// saci-connector-channel. Returns the paired endpoint alongside the source or sink.
+// saci::connector::channel. Returns the paired endpoint alongside the source or sink.
 ChannelSource::new(Arc&lt;Schema&gt;, buffer: usize) -&gt; (mpsc::Sender&lt;RecordBatch&gt;, Self)
 ChannelSink::new  (Arc&lt;Schema&gt;, buffer: usize) -&gt; (Self, mpsc::Receiver&lt;RecordBatch&gt;)</code></pre>
 </div>
@@ -835,8 +836,8 @@ ChannelSink::new  (Arc&lt;Schema&gt;, buffer: usize) -&gt; (Self, mpsc::Receiver
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>the sender and receiver are yours to hold</em></div>
-    <pre><code class="language-rust">use saci_connector_channel::{ChannelSink, ChannelSource};
-use saci_core::io::Source;
+    <pre><code class="language-rust">use saci::connector::channel::{ChannelSink, ChannelSource};
+use saci::io::Source;
 
 let (tx, mut src)   = ChannelSource::new(schema.clone(), 8);
 let (mut sink, mut rx) = ChannelSink::new(schema.clone(), 8);
@@ -876,7 +877,7 @@ assert!(src.next_batch().await?.is_none());</code></pre>
     <a href="{{ get_url(path='@/service/connectors/_index.md') }}" class="next-card">
         <span class="next-card-label">Moving data</span>
         <h3>Connectors</h3>
-        <p>One page per connector: the crate to depend on, the constructor to call, and the config keys its node accepts.</p>
+        <p>One page per connector: the feature to enable, the constructor to call, and the config keys its node accepts.</p>
     </a>
     <a href="{{ get_url(path='@/service/_index.md') }}" class="next-card">
         <span class="next-card-label">Service</span>

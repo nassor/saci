@@ -14,8 +14,8 @@ value = "None: rows arrive already typed, so no transformer is named"
 label = "Run modes"
 value = "Any: every mode reaches EOF once it is caught up"
 [[extra.facts]]
-label = "In the default build"
-value = "no: build with <code>--features connector-clickhouse</code>"
+label = "In the server build"
+value = "no: build with <code>--features server,connector-clickhouse</code>"
 +++
 A workflow reads rows out of one ClickHouse table, processes the data, and writes the results to another table.
 
@@ -73,7 +73,7 @@ A workflow reads rows out of one ClickHouse table, processes the data, and write
 
 ## What you need
 
-- A binary built with `--features connector-clickhouse`. ClickHouse requires an external server, so it sits outside the default build.
+- A binary built with `--features server,connector-clickhouse`. ClickHouse requires an external server, so it sits outside the `server` feature.
 - A reachable ClickHouse HTTP endpoint (default port 8123), version 22.2 or later. The sink sends
   `insert_deduplication_token` with every `INSERT`, and a server that does not know the setting
   refuses it. The suite runs against 24.8.

@@ -123,7 +123,7 @@ the feed the AOT backend ships on.
                     ReferenceOutputAssembly="false" />
   <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
   <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).Microsoft.DotNet.ILCompiler.LLVM" Version="$(IlcLlvmVersion)" />
-  <Wit Include="../../../../crates/saci-processor/wit" World="saci-pipeline" />
+  <Wit Include="../../../../crates/saci/wit" World="saci-pipeline" />
 </ItemGroup>
 ```
 
@@ -356,17 +356,17 @@ Then validate the config and serve it, from the repository root.
 Linux/macOS:
 
 ```bash,name=Validate, then serve
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- \
   validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- \
   serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 The observable result is the `review_tier` column of

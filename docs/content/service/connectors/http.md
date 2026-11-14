@@ -14,7 +14,7 @@ value = "Required on all three node types"
 label = "Run modes"
 value = "Any for a document read; stream for a streaming read and for HttpPushSource"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 A workflow pulls one document over HTTP, processes the rows, and posts each processed batch to a

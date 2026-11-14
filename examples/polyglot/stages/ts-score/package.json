@@ -8,8 +8,8 @@
     "node": ">=24.12"
   },
   "scripts": {
-    "build": "jco componentize score.ts --wit ../../../../crates/saci-processor/wit --world-name saci-pipeline --disable http --disable fetch-event -o score-ts.wasm",
-    "types": "jco types ../../../../crates/saci-processor/wit --world-name saci-pipeline -o types",
+    "build": "jco componentize score.ts --wit ../../../../crates/saci/wit --world-name saci-pipeline --disable http --disable fetch-event -o score-ts.wasm",
+    "types": "jco types ../../../../crates/saci/wit --world-name saci-pipeline -o types",
     "typecheck": "npm run types && tsc"
   },
   "dependencies": {

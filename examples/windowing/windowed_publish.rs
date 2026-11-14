@@ -12,7 +12,7 @@
 //! continuously while the publisher runs.
 //!
 //! ```text
-//! cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+//! cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 //! ```
 //!
 //! A session window closes on silence in one key's own event time. A steady

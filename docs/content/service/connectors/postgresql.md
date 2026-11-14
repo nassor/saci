@@ -14,8 +14,8 @@ value = "None: rows arrive already typed, so no transformer is named"
 label = "Run modes"
 value = "Any: every mode reaches EOF once it is caught up"
 [[extra.facts]]
-label = "In the default build"
-value = "no: build with <code>--features connector-postgresql</code>"
+label = "In the server build"
+value = "no: build with <code>--features server,connector-postgresql</code>"
 +++
 A workflow reads changes out of one table, processes the rows, and upserts the result into another
 table.
@@ -74,8 +74,8 @@ table.
 
 ## What you need
 
-- A binary built with `--features connector-postgresql`; PostgreSQL is one of eight connectors
-  that need a specific service installed and running, so it sits outside the default build.
+- A binary built with `--features server,connector-postgresql`; PostgreSQL is one of eight connectors
+  that need a specific service installed and running, so it sits outside the `server` feature.
 - A reachable server. One in a container is enough, and this command starts it with the settings
   logical decoding needs:
 
@@ -510,7 +510,6 @@ Each message is prefixed with the half it came from, `PostgresSource:` or `Postg
 | `reserved column '{name}' must be declared type "{expected}", not "{actual}"` | declare `utf8` for `__op` and `__table`, `int64` for `__lsn` and `__xid`, `timestamp_micros_utc` for `__commit_ts` |
 | `write_mode "{mode}" requires a non-empty conflict_columns` | add `conflict_columns` to the sink |
 | `update_columns '{column}' is also a conflict column; a conflict key cannot be rewritten by its own upsert` | remove that column from `update_columns` |
-| `connection.sslmode = "require" needs the 'tls' feature`, naming the build it is missing from | use a build carrying TLS, or set `sslmode "prefer"` |
 | `'item' applies to type "list" only, not "{type}"` | drop `item`, or declare `type "list"` |
 | `type "list" requires 'item'` | add `item` naming the element type |
 | `'item' must be a scalar type, not "list"; Arrow's List is one-dimensional` | name a scalar element type |

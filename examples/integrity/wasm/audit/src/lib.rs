@@ -22,7 +22,7 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci-processor/wit`. The
+// The bindings are generated in place from `crates/saci/wit`. The
 // module and the `export_pipeline!` invocation below are gated on
 // `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
 // `component-type` custom section, neither of which the host target can link.
@@ -30,7 +30,7 @@
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        path: "../../../../crates/saci-processor/wit",
+        path: "../../../../crates/saci/wit",
         world: "saci-pipeline",
         generate_all,
     });
@@ -38,9 +38,9 @@ mod bindings {
 
 use std::sync::Arc;
 
-use saci_processor::arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
-use saci_processor::arrow_schema::{DataType, Field, Schema};
-use saci_processor::prelude::*;
+use saci::processor::arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
+use saci::processor::arrow_schema::{DataType, Field, Schema};
+use saci::processor::prelude::*;
 
 /// The statuses an audit row may legitimately carry, in workflow order.
 pub const VALID_STATUSES: [&str; 4] = ["placed", "picked", "shipped", "settled"];
@@ -250,12 +250,12 @@ pub fn build() -> Pipeline {
 }
 
 #[cfg(target_arch = "wasm32")]
-saci_processor::export_pipeline!(build);
+saci::export_pipeline!(build);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci_processor::arrow_array::BooleanArray;
+    use saci::processor::arrow_array::BooleanArray;
 
     fn row(op: &str, audit_id: i64, status: &str, revision: i32) -> AuditRow {
         AuditRow {

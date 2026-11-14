@@ -124,13 +124,13 @@ Generating the bindings is optional and buys you editor completion on the
 generated records. Run it from the stage directory:
 
 ```bash,name=Write the binding stubs
-componentize-py -d ../../../../crates/saci-processor/wit -w saci-pipeline bindings .
+componentize-py -d ../../../../crates/saci/wit -w saci-pipeline bindings .
 ```
 
 Windows (PowerShell):
 
 ```powershell
-componentize-py -d ..\..\..\..\crates\saci-processor\wit -w saci-pipeline bindings .
+componentize-py -d ..\..\..\..\crates\saci\wit -w saci-pipeline bindings .
 ```
 
 The directory now holds `wit_world/`, `componentize_py_types.py`,
@@ -288,14 +288,14 @@ Build from the stage directory. `-p .` finds `app.py`, and the second `-p` finds
 the SDK:
 
 ```bash,name=Build the component
-componentize-py -d ../../../../crates/saci-processor/wit -w saci-pipeline componentize app \
+componentize-py -d ../../../../crates/saci/wit -w saci-pipeline componentize app \
     -p . -p ../../../../packages/saci-sdk-py/src -o enrich-py.wasm
 ```
 
 Windows (PowerShell):
 
 ```powershell
-componentize-py -d ..\..\..\..\crates\saci-processor\wit -w saci-pipeline componentize app -p . -p ..\..\..\..\packages\saci-sdk-py\src -o enrich-py.wasm
+componentize-py -d ..\..\..\..\crates\saci\wit -w saci-pipeline componentize app -p . -p ..\..\..\..\packages\saci-sdk-py\src -o enrich-py.wasm
 ```
 
 Do **not** pass `--stub-wasi`. The bundled CPython needs the real WASI imports,
@@ -326,9 +326,9 @@ once and exits, because the file asks for `one_shot`:
 
 ```bash,name=Build the component then run the service
 cargo xtask polyglot
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate \
   --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve \
   --config examples/configs/standalone_polyglot.kdl
 ```
 
@@ -336,8 +336,8 @@ Windows (PowerShell), one command per line:
 
 ```powershell
 cargo xtask polyglot
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 The run reads `examples/configs/fixtures/polyglot_orders.csv` and writes

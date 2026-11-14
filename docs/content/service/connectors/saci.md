@@ -14,7 +14,7 @@ value = "None: Arrow IPC on the wire"
 label = "Run modes"
 value = "Stream for the source, any for the sink"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 A workflow in one service pushes its results to a workflow in another, and the receiving side knows
@@ -73,8 +73,8 @@ which service, workflow and sink node produced every batch.
 
 - A free port for the source's `bind`. The listener is opened while the config is built, `validate`
   included, so a busy port fails before the service starts.
-- Another `saci-service` with a `saci` sink pointing at that port. Both halves are in the default
-  build, so no flag is needed on either side.
+- Another `saci-service` with a `saci` sink pointing at that port. Both halves are in the `server`
+  feature, so no extra feature is needed on either side.
 - `run_mode kind="stream"` whenever a `saci` source is declared. The source blocks for the next
   batch and never reaches EOF, and validation rejects it in any other run mode. A `saci` sink
   carries no such rule.

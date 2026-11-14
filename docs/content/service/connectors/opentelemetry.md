@@ -14,7 +14,7 @@ value = "None: OTLP/HTTP, Protobuf or JSON"
 label = "Run modes"
 value = "Stream for a listening source, any for a stop_at_end pull"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "no"
 +++
 An OpenTelemetry SDK or collector exports metrics to this source, and the sink exports a batch to
@@ -83,7 +83,7 @@ can take rows from anywhere.
 - A free port for the source's `bind`. The listener is opened while the config is built, `validate`
   included, so a busy port fails before the service starts.
 - The `connector-opentelemetry` feature on both the `validate` and the `serve` run. It is not in
-  the default bundle, because an OpenTelemetry deployment is a deliberate choice of endpoint.
+  the `server` feature, because an OpenTelemetry deployment is a deliberate choice of endpoint.
 - `run_mode kind="stream"` whenever a listening source is declared. It blocks for the next request
   and never reaches EOF, and validation rejects it in any other run mode. A `stop_at_end` pull
   source reaches EOF after one body and runs in either mode.

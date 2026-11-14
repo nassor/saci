@@ -1,6 +1,6 @@
 +++
 title = "A Rust plugin"
-description = "Build a cdylib exporting the saci-plugin-abi C ABI, point a plugin node at it, and run."
+description = "Build a cdylib exporting the plugin C ABI with the saci SDK, point a plugin node at it, and run."
 template = "page.html"
 weight = 1
 aliases = ["/native/plugins/"]
@@ -97,7 +97,7 @@ wrong: step 2 says why.
 
 ## 1. Create a cdylib crate
 
-`saci-plugin` is the Rust SDK. A plugin crate sets `crate-type = ["cdylib"]`
+The `saci` crate's `plugin` feature is the Rust SDK. A plugin crate sets `crate-type = ["cdylib"]`
 and depends on it; `export_plugin!` writes the two exported symbols, the four
 vtable thunks, and the `saci_config_get` and `saci_config_parse` functions into
 the crate. Every block below is from `crates/saci-plugin-smoketest/src/lib.rs`,
@@ -108,7 +108,7 @@ which CI builds.
 crate-type = ["cdylib"]
 
 [dependencies]
-saci-plugin = { workspace = true }
+saci       = { version = "0.1", default-features = false, features = ["plugin"] }
 serde      = { workspace = true }
 ```
 
@@ -119,7 +119,7 @@ components and systems are the plugin's, written exactly as in a
 [native pipeline](@/library/first-pipeline.md).
 
 ```rust,name=The build function and the export macro
-use saci_plugin::prelude::*;
+use saci::plugin::prelude::*;
 
 pub fn build() -> Pipeline {
     let mut pipeline = Pipeline::new("smoketest-plugin");
@@ -131,7 +131,7 @@ pub fn build() -> Pipeline {
     pipeline
 }
 
-saci_plugin::export_plugin!(build, state = Total);
+saci::export_plugin!(build, state = Total);
 ```
 
 The optional `state = T` names the one component whose rows survive a batch,
@@ -183,7 +183,7 @@ is used as it stands. An unknown key in the node is a parse error.
 Linux/macOS:
 
 ```bash,name=Validate the config
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- validate \
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate \
   --config examples/configs/standalone_plugin.kdl --strict
 ```
 
@@ -191,13 +191,13 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/debug/saci_plugin_smoketest.dll"
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- validate --config examples/configs/standalone_plugin.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate --config examples/configs/standalone_plugin.kdl --strict
 ```
 
 Linux/macOS:
 
 ```bash,name=Run the service
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- serve \
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve \
   --config examples/configs/standalone_plugin.kdl
 ```
 
@@ -205,7 +205,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/debug/saci_plugin_smoketest.dll"
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- serve --config examples/configs/standalone_plugin.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve --config examples/configs/standalone_plugin.kdl
 ```
 
 The config reads `examples/configs/fixtures/counter_input.csv`, runs the
@@ -235,12 +235,12 @@ let multiplier = match saci_config_parse::<i64>(MULTIPLIER_KEY) {
 A misconfigured value is worth refusing rather than defaulting. An unparseable multiplier
 silently becoming 1 is harder to notice than a batch that fails with a message naming the key.
 
-Logs and metrics go out through `saci_plugin::host`, the native counterpart of the imports a
+Logs and metrics go out through `saci::plugin::host`, the native counterpart of the imports a
 WebAssembly processor calls.
 
 ```rust,name=Logs and metrics through the host
-saci_plugin::host::metric("smoketest.rows", rows as f64);
-saci_plugin::host::info("smoketest", &format!("numbered {rows} rows through {advanced}"));
+saci::plugin::host::metric("smoketest.rows", rows as f64);
+saci::plugin::host::info("smoketest", &format!("numbered {rows} rows through {advanced}"));
 ```
 
 A metric the plugin names goes out as a trace event on the service's own

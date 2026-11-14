@@ -341,7 +341,7 @@ reaches the purge, because the source half fails on it first.
 
 | Store | Sink half | Source half | Notes |
 |---|---|---|---|
-| `redb` (default) | `RedbSink` | `RedbSource` | one embedded file on local disk, needs `connector-redb`, which is in the default bundle |
+| `redb` (default) | `RedbSink` | `RedbSource` | one embedded file on local disk, needs `connector-redb`, which is in the `server` feature |
 | `kafka` | `KafkaSink` | `KafkaSource` | one topic, needs `connector-kafka`; an elapsed poll window ends a drain, so an empty read is not a confirmed empty topic |
 | `nats` | `NatsSink` | `NatsSource` | JetStream only, needs `connector-nats`; a drain ends only once the server reports nothing waiting and nothing unacknowledged |
 

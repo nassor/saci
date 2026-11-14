@@ -22,17 +22,3 @@ proc-macro = true
 syn = { version = "3.0.4", features = ["full"] }
 quote = "1.0.47"
 proc-macro2 = "1.0.107"
-
-# A dev-dependency cycle back onto the SDK the macros target. Cargo permits
-# cycles through dev-dependencies, and it is the only way to compile-and-run
-# the expansions in this crate's own test suite: the generated code names
-# `::saci_processor` paths, so a test that exercises it needs that crate in
-# scope.
-[dev-dependencies]
-saci-processor = { workspace = true }
-serde = { workspace = true }
-
-# A current-thread runtime with a timer, for the two tests that drive a failing
-# system: `saci_core::retry` waits on `tokio::time::sleep` in every host build,
-# and `pollster` has no reactor to run it on.
-tokio = { workspace = true }

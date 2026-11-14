@@ -10,13 +10,13 @@
 //!
 //! ```text
 //! docker compose -f examples/integrity/docker-compose.yml up -d
-//! cargo run -p saci-service --example integrity_check --features service
+//! cargo run -p saci --example integrity_check --features service,transformer-arrow-ipc,transformer-csv,transformer-ndjson,transformer-parquet
 //! # then, in two more terminals, the two services the example drives:
-//! cargo run -p saci-service \
-//!     --features connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm,windows \
+//! cargo run -p saci \
+//!     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm-host,windows \
 //!     -- serve --config examples/integrity/integrity.kdl
-//! cargo run -p saci-service \
-//!     --features connector-postgresql,connector-http,transformer-parquet,wasm \
+//! cargo run -p saci \
+//!     --features server,connector-postgresql,connector-http,transformer-parquet,wasm-host \
 //!     -- serve --config examples/integrity/integrity_audit.kdl
 //! ```
 //!
@@ -113,12 +113,12 @@ use axum::http::StatusCode;
 use axum::routing::post;
 // `random_range` lives on `RngExt` in rand 0.10, not on `Rng`.
 use rand::{RngExt as _, SeedableRng as _};
-use saci_inspector_wire::{ServiceLifecycleReport, WorkflowStatus};
-use saci_transformer::Transformer;
-use saci_transformer_arrow_ipc::ArrowIpcTransformer;
-use saci_transformer_csv::CsvTransformer;
-use saci_transformer_ndjson::NdjsonTransformer;
-use saci_transformer_parquet::ParquetTransformer;
+use saci::inspector_wire::{ServiceLifecycleReport, WorkflowStatus};
+use saci::transformer::Transformer;
+use saci::transformer::arrow_ipc::ArrowIpcTransformer;
+use saci::transformer::csv::CsvTransformer;
+use saci::transformer::ndjson::NdjsonTransformer;
+use saci::transformer::parquet::ParquetTransformer;
 use tokio_util::sync::CancellationToken;
 
 /// Simulated epoch the example's clock starts at, milliseconds.
@@ -1832,7 +1832,7 @@ async fn await_stream(
 /// 4. Assert it is there and unheld.
 ///
 /// Step 3 issues the statement
-/// `crates/saci-connector-postgresql/src/source/logical.rs`'s `create_slot`
+/// `crates/saci/src/connector/postgresql/source/logical.rs`'s `create_slot`
 /// issues, argument for argument, so the connector's own call answers
 /// `DUPLICATE_OBJECT` and it accepts this slot as its own: the plugin is
 /// `pgoutput`, and the two-argument form leaves every optional argument
@@ -2309,7 +2309,7 @@ struct Prepared {
 async fn prepare(args: &Args, cancel: &CancellationToken) -> Result<Prepared, String> {
     // reqwest 0.13's `rustls-no-provider` refuses to build a client until a
     // crypto provider is installed.
-    saci_service::service::install_ring_provider();
+    saci::service::install_ring_provider();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()

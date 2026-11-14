@@ -20,11 +20,11 @@ use arrow_array::{BooleanArray, Float64Array};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 
-use saci_service::SaciError;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::pipeline::Pipeline;
-use saci_service::system::{FieldRef, ParallelSystem, System, SystemMeta, WriteSet, system_fn};
+use saci::SaciError;
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::pipeline::Pipeline;
+use saci::system::{FieldRef, ParallelSystem, System, SystemMeta, WriteSet, system_fn};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

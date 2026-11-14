@@ -1,9 +1,9 @@
 // SACI standalone service configuration reading documents pushed over HTTP.
 //
 // Run:
-//   cargo run --features connector-http,transformer-ndjson,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-http,transformer-ndjson,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/http_push.kdl
-//   cargo run --features connector-http,transformer-ndjson,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-http,transformer-ndjson,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/http_push.kdl
 //
 // The source listens and the sink dials: `bind` is an address this process

@@ -1,7 +1,7 @@
 # Order Processing: a WASM processor pipeline
 
 This is a realistic processor component for `wasm32-wasip2`. It runs the
-`saci-processor` SDK and the `export_pipeline!` macro end to end, with
+`saci` crate's `processor` feature and the `export_pipeline!` macro end to end, with
 field-granular DAG scheduling inside the sandbox. The host hands the
 processor one Arrow IPC payload per batch and gets one back; everything
 between, meaning the DAG build, stage execution and retry handling, is native
@@ -58,13 +58,13 @@ CSV fixture. Its paths are relative to the repository root.
 Validate the config:
 
 ```text
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate --config examples/configs/standalone_wasm.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_wasm.kdl --strict
 ```
 
 Run the pipeline:
 
 ```text
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve --config examples/configs/standalone_wasm.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_wasm.kdl
 ```
 
 `run_mode` is `one_shot`, so `serve` processes

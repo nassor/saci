@@ -1,6 +1,6 @@
 +++
 title = "Any other language: the WIT contract"
-description = "A walk through crates/saci-processor/wit/pipeline.wit: every record, what the host does with each field, and the two commands that prove your component exports the world."
+description = "A walk through crates/saci/wit/pipeline.wit: every record, what the host does with each field, and the two commands that prove your component exports the world."
 template = "page.html"
 weight = 7
 aliases = ["/processors/wit-contract/", "/guests/wit-contract/"]
@@ -14,7 +14,7 @@ useful. Compile a component against a world and the toolchain, not the host, che
 implemented it.
 
 SACI ships one world. The whole file is
-`crates/saci-processor/wit/pipeline.wit`, 124 lines, and it ends with this:
+`crates/saci/wit/pipeline.wit`, 124 lines, and it ends with this:
 
 ```wit,name=The world pipeline.wit ends with
 package saci:pipeline@0.3.0;
@@ -27,7 +27,7 @@ world saci-pipeline {
 
 That is why the contract is a world and not an SDK. An SDK is a library in one language, and
 depending on it makes that language part of the contract. A world is a type signature.
-`saci-processor` is a convenience for Rust authors that happens to satisfy it.
+The `processor` feature of `saci` is a convenience for Rust authors that happens to satisfy it.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 180" role="img" aria-labelledby="wit-title wit-desc">

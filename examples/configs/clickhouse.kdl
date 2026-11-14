@@ -2,9 +2,9 @@
 //
 // Run:
 //   export SACI_CLICKHOUSE_URL='http://localhost:8123'
-//   cargo run --features connector-clickhouse,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-clickhouse,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/clickhouse.kdl
-//   cargo run --features connector-clickhouse,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-clickhouse,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/clickhouse.kdl
 //
 // The source reads from `events_in` via polling mode and the sink writes

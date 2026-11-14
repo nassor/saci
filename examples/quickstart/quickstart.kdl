@@ -9,8 +9,8 @@
 //                         public.settlements
 //
 // Run:
-//   cargo run -p saci-service --features connector-nats,connector-postgresql -- validate -c examples/quickstart/quickstart.kdl
-//   cargo run -p saci-service --features connector-nats,connector-postgresql -- serve    -c examples/quickstart/quickstart.kdl
+//   cargo run -p saci --features server,connector-nats,connector-postgresql -- validate -c examples/quickstart/quickstart.kdl
+//   cargo run -p saci --features server,connector-nats,connector-postgresql -- serve    -c examples/quickstart/quickstart.kdl
 //
 // NATS and PostgreSQL are opt-in connectors; `wasm` and `transformer-ndjson`
 // are on by default.

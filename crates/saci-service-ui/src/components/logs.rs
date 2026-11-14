@@ -27,9 +27,9 @@
 //! record wants. The poll keeps running while paused so the badge can say how
 //! many records arrived.
 
+use crate::wire::{LogRecord, Pair};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use saci_inspector_wire::{LogRecord, Pair};
 
 use crate::api;
 use crate::ui::{

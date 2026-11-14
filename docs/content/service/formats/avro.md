@@ -17,7 +17,7 @@ value = "One message per row"
 label = "Needs schema_fields"
 value = "Optional reading a file, required writing and on messages"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 Avro object container files on a stream, and framed single records on a message transport. The two

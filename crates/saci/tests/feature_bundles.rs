@@ -1,60 +1,85 @@
-//! The invariant the `all` feature bundle must hold: it reaches every feature
-//! this facade declares.
+//! The three invariants the `server` and `all` feature bundles must hold.
 //!
-//! `all` is a hand-written array in `crates/saci/Cargo.toml`, and it names the
-//! `connectors` and `transformers` groups instead of the ten features behind
-//! them. Cargo says nothing about a feature left out of a group: a
-//! `connector-x` added to this crate without touching `connectors` compiles
-//! and works on its own feature, and `--features all` quietly does not carry
-//! it. The same hole swallows a new capability feature that nobody adds to
-//! `all` at all. This test fails on both.
-//!
-//! So the check expands `all` through the feature graph rather than reading its
-//! array: `all` reaches `connectors`, which reaches `connector-file`. A member
-//! that is not a declared feature key of this crate (`dep:saci-core`,
-//! `saci-core/io`, `saci-core?/windows`) is a leaf and contributes nothing
-//! further. The expansion carries a visited set, so a manifest whose groups
-//! name each other cannot hang the test.
-//!
-//! The asserted set is every key in `[features]` minus the two bundles
-//! themselves, so it needs no list to maintain and covers a capability feature
-//! that does not exist yet. `default` is a subset by design, and `all` cannot
-//! be asked to reach itself.
+//! Both bundles are hand-written arrays in `crates/saci/Cargo.toml`,
+//! and cargo says nothing about a feature left out of one: a connector added
+//! without touching `all` compiles, registers and runs, and
+//! `--features all` quietly does not carry it. Nor does anything stop a
+//! connector that needs an installed broker or database from landing in
+//! `server`, which would make `cargo install saci --features server` produce a
+//! binary that works only once a server is installed and running. The third
+//! rule pushes the other way and keeps `conformance` out of `all`, since that
+//! key loosens a wire-format refusal instead of adding a capability. These
+//! tests fail on all three.
 //!
 //! The manifest arrives through `include_str!` and is parsed below, so this
-//! file needs no TOML dependency and no feature of its own: it reads text, and
-//! passes under `--no-default-features` like it does with the default feature
-//! set. It is the facade's counterpart to
-//! `crates/saci-service/tests/feature_bundles.rs`, which checks the host
-//! binary's `all` and `default` arrays, where every feature is listed directly
-//! and no group stands in between.
+//! file needs no TOML dependency, no Docker and no running service. It runs in
+//! the `default` nextest profile like any other fast test, next to
+//! `connector_matrix.rs`'s `dimensions_cover_the_registry`.
 //!
-//! The test does not assert `all`'s full contents in order. A test rewritten
-//! every time a feature moves inside the array teaches nothing and gets edited
-//! on autopilot.
+//! `all`'s asserted set is every key in `[features]` minus `default`, `all`
+//! and `conformance`, derived from the manifest rather than hand-listed, so it
+//! needs no list to maintain and covers a feature that does not exist yet.
 
 use std::collections::BTreeSet;
 
 /// `crates/saci/Cargo.toml` itself, read at compile time.
 const MANIFEST: &str = include_str!("../Cargo.toml");
 
-/// The two bundle keys, which are the question rather than part of the answer.
+/// The only connectors that may appear in `server`: each needs nothing
+/// installed and nothing already running.
 ///
-/// `all` cannot be required to reach itself, and `default` is deliberately a
-/// subset of it: the facade defaults to `engine` alone. Every other key in
-/// `[features]` is a capability `all` must carry, with no exception list.
+/// A channel lives inside the process, a file is local disk, a redb file is
+/// local disk with an embedded key/value store on top of it, HTTP is a client
+/// with no server of its own, TCP and UDP are raw sockets, and a `saci` peer
+/// is another saci-service: nothing to install, no toolchain, and its source
+/// half binds a socket the same way the TCP one does. HTTP, TCP, UDP and
+/// `saci` speak the network and qualify anyway, because they are generic
+/// primitives tied to no server product.
+///
+/// `server_bundle_requires_no_installed_service` asserts every `connector-*`
+/// feature reachable from `server` is one of these, rather than that a list
+/// of known-bad connectors is absent. Stated the other way round, a connector
+/// needing a broker fails the moment it lands in `server`, with no
+/// denylist to remember to extend; the burden is on the connector that wants
+/// to be in the bundle, which is where it belongs.
+const SELF_CONTAINED_CONNECTORS: [&str; 7] = [
+    "connector-channel",
+    "connector-file",
+    "connector-http",
+    "connector-redb",
+    "connector-saci",
+    "connector-tcp",
+    "connector-udp",
+];
+
+/// The two keys `all` is not asked to list.
+///
+/// `all` cannot be required to list itself, and `default` is the library
+/// default, which `all` reaches through `engine`.
 const BUNDLES: [&str; 2] = ["default", "all"];
+
+/// The one `[features]` key `all` neither carries nor is asked to carry.
+///
+/// `conformance` enables `arrow-ipc/lz4`, which makes the host accept a
+/// compressed record batch the wire format otherwise rejects, so it relaxes a
+/// refusal rather than adding a capability. The corpus generator in
+/// `examples/conformance/conformance_vectors.rs` is the only thing that needs
+/// it, and it asks for it by name. Two rules hang off this one key:
+/// `all_bundle_lists_every_feature` exempts it from `all`'s completeness
+/// check, and `all_bundle_excludes_the_conformance_switch` fails if it ever
+/// lands in `all`.
+const NOT_A_CAPABILITY: &str = "conformance";
 
 /// Every feature in the manifest's `[features]` section, as `(key, members)`
 /// in manifest order.
 ///
 /// Lines are classified by their first character once trimmed. A `#` line is
-/// a comment, and that section is heavily commented, between its arrays as
-/// well as inside them. A `"` line is one member of the array the preceding
-/// key opened. Anything else holding an `=` is a new feature key, whose
-/// members begin on that same line. A `]` line closes an array and carries
-/// nothing. That is the whole grammar this one section uses, so nothing here
-/// is a TOML parser.
+/// a comment, and that section is heavily commented, inside its arrays as well
+/// as between them. A `"` line is one member of the array the preceding key
+/// opened. Anything else holding an `=` is a new feature key, whose members
+/// begin on that same line. A `]` line closes an array and carries nothing.
+/// That is the whole grammar this one section uses, so nothing here is a TOML
+/// parser.
 ///
 /// # Panics
 ///
@@ -64,8 +89,8 @@ fn features() -> Vec<(&'static str, Vec<&'static str>)> {
     let mut lines = MANIFEST.lines();
     assert!(
         lines.any(|line| line.trim() == "[features]"),
-        "crates/saci/Cargo.toml has no [features] section; the parser in this file expects one \
-         table header on its own line",
+        "crates/saci/Cargo.toml has no [features] section; the parser in this file \
+         expects one table header on its own line",
     );
 
     let mut features: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -106,19 +131,20 @@ fn bundle<'a>(features: &'a [(&'static str, Vec<&'static str>)], name: &str) -> 
         .map(|(_, members)| members.as_slice())
         .unwrap_or_else(|| {
             panic!(
-                "crates/saci/Cargo.toml's [features] section declares no `{name}` feature, so the \
-                 bundle this test guards does not exist"
+                "crates/saci/Cargo.toml's [features] section declares no `{name}` \
+                 feature, so the bundle this test guards does not exist"
             )
         })
 }
 
-/// Everything enabling `root` turns on, following group features transitively.
+/// Everything enabling `root` turns on, following group features
+/// transitively.
 ///
 /// A worklist over the parsed `(key, members)` map. A name already in the
-/// result is skipped, which both keeps the walk linear and makes a group cycle
-/// terminate instead of hanging. A name that is not a feature key of this
-/// crate (`dep:saci-core`, `saci-core/io`, `saci-core?/windows`) has no
-/// members to expand, so it stays a leaf.
+/// result is skipped, which both keeps the walk linear and makes a group
+/// cycle terminate instead of hanging. A name that is not a feature key of
+/// this crate (`dep:axum`, `tokio/net`) has no members to expand, so it stays
+/// a leaf.
 fn reachable(features: &[(&'static str, Vec<&'static str>)], root: &str) -> BTreeSet<&'static str> {
     let mut reached = BTreeSet::new();
     let mut worklist: Vec<&'static str> = bundle(features, root).to_vec();
@@ -133,47 +159,131 @@ fn reachable(features: &[(&'static str, Vec<&'static str>)], root: &str) -> BTre
     reached
 }
 
-/// `all` means every capability the facade carries, so enabling it must reach
-/// every other feature the crate declares.
+/// `all` means every capability the crate carries, so every feature the
+/// manifest declares must be reachable from it, except the two bundle keys
+/// themselves and `conformance`.
 ///
-/// Nothing else enforces this, and the indirection is what hides the mistake:
-/// `all` names `connectors` and `transformers`, so a sixth connector left out
-/// of the `connectors` group is absent from `all` with no build error anywhere
-/// to say so, while the feature itself still builds and registers. A new
-/// capability feature alongside `processor` and `plugin` goes missing the same
-/// way, which is why the check is a set difference over every key rather than
-/// a filter on the connector and transformer names.
+/// Nothing else enforces this. A new connector registers its factories and
+/// runs from a config on its own feature, and `--features all` still builds a
+/// binary that rejects it, with no build error anywhere to say so. A new
+/// capability alongside `inspector`, `plugin-host` and `service-cluster` goes
+/// missing the same way, which is why the check is a set difference over every
+/// key rather than a filter on the connector and transformer names.
 #[test]
-fn all_bundle_reaches_every_feature() {
+fn all_bundle_lists_every_feature() {
     let features = features();
+    let all = reachable(&features, "all");
 
     let expected: Vec<&str> = features
         .iter()
         .map(|(key, _)| *key)
-        .filter(|key| !BUNDLES.contains(key))
+        .filter(|key| !BUNDLES.contains(key) && *key != NOT_A_CAPABILITY)
         .collect();
     assert!(
         !expected.is_empty(),
-        "parsed no feature key besides {BUNDLES:?} out of crates/saci/Cargo.toml's [features] \
-         section; this file's parser is what to fix, not the manifest",
+        "parsed no feature key besides {BUNDLES:?} and `{NOT_A_CAPABILITY}` out of \
+         crates/saci/Cargo.toml's [features] section; this file's parser is what to fix, \
+         not the manifest",
     );
 
-    let reached = reachable(&features, "all");
     let missing: Vec<&str> = expected
         .iter()
         .copied()
-        .filter(|key| !reached.contains(key))
+        .filter(|key| !all.contains(key))
         .collect();
     let present = expected.len() - missing.len();
     assert!(
         missing.is_empty(),
-        "crates/saci/Cargo.toml's `all` feature does not reach {missing:?}; it reaches {present} \
-         of the {} features the crate declares besides `default` and `all` themselves. A \
-         connector or transformer feature reaches `all` through its group, since `all` names \
-         `connectors` and `transformers` rather than each feature, so the fix for one of those is \
-         normally adding it to the `connectors = [...]` or `transformers = [...]` array in that \
-         file rather than to `all = [...]` directly. Any other capability feature goes into \
-         `all = [...]` itself.",
+        "crates/saci/Cargo.toml's `all` list does not reach {missing:?}; it reaches {present} \
+         of the {} features the crate declares besides `default`, `all` and \
+         `{NOT_A_CAPABILITY}`. `all` is the build that can run any config, so add each missing \
+         feature to the `all = [...]` array in that file.",
         expected.len(),
+    );
+}
+
+/// `all` must leave `conformance` out, because it relaxes a refusal rather
+/// than adding a capability.
+///
+/// Its own test rather than one more assert inside
+/// `all_bundle_lists_every_feature`: that rule fails when a feature is missing
+/// from `all`, this one fails when a feature is present, and a reader seeing
+/// which of the two went red should know which mistake was made without
+/// opening either body.
+#[test]
+fn all_bundle_excludes_the_conformance_switch() {
+    let features = features();
+    let all = reachable(&features, "all");
+
+    assert!(
+        features.iter().any(|(key, _)| *key == NOT_A_CAPABILITY),
+        "this test and `all_bundle_lists_every_feature` both name `{NOT_A_CAPABILITY}` exactly, \
+         and crates/saci/Cargo.toml's [features] section no longer declares it; rename it \
+         here too, or both rules stop covering that key",
+    );
+
+    assert!(
+        !all.contains(NOT_A_CAPABILITY),
+        "crates/saci/Cargo.toml's `all` list reaches `{NOT_A_CAPABILITY}`, so remove it \
+         from `all = [...]` and from every group it names. That feature enables \
+         `arrow-ipc/lz4`, which makes the host accept a compressed record batch the wire \
+         format otherwise rejects, and cargo features are additive: one crate asking for \
+         `saci/{NOT_A_CAPABILITY}` loosens every other consumer of saci in the same build. \
+         The corpus generator, the `conformance_vectors` example, is the only thing that \
+         needs it, and it asks for it by name. `--all-features` enables it whatever this list \
+         says, so this rule governs the `--features all` spelling and is no guarantee that \
+         the refusal cannot be switched off.",
+    );
+}
+
+/// A connector belongs in `server` only when nothing has to be installed or
+/// already running for it to work.
+///
+/// `cargo install saci --features server` must produce a binary that works on
+/// a bare machine, so every connector that needs a specific broker, database
+/// or object store is opt-in.
+///
+/// Asked as "is every connector `server` reaches self-contained", not as "is
+/// each known-bad connector absent". The denylist form passes for a new
+/// connector nobody has added to it yet, which is the one case where the
+/// rule has to hold on its own; the allowlist form fails until somebody
+/// justifies the newcomer by naming it in [`SELF_CONTAINED_CONNECTORS`]. It
+/// also reads `server`'s transitive closure rather than its literal array, so
+/// a connector arriving through `service` or through another `connector-*`
+/// key counts too.
+#[test]
+fn server_bundle_requires_no_installed_service() {
+    let features = features();
+
+    for connector in SELF_CONTAINED_CONNECTORS {
+        assert!(
+            features.iter().any(|(key, _)| *key == connector),
+            "this test allows `{connector}` into `server`, but \
+             crates/saci/Cargo.toml's [features] section no longer declares it; rename \
+             it here too, or the allowlist keeps blessing a feature that does not exist while \
+             saying nothing about the one that replaced it",
+        );
+    }
+
+    let reached = reachable(&features, "server");
+    let offenders: Vec<&str> = reached
+        .iter()
+        .copied()
+        .filter(|name| features.iter().any(|(key, _)| key == name))
+        .filter(|name| name.starts_with("connector-"))
+        .filter(|name| *name != "connector-contract")
+        .filter(|name| !SELF_CONTAINED_CONNECTORS.contains(name))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "crates/saci/Cargo.toml's `server` bundle reaches {offenders:?}. A connector \
+         may be in it only when nothing has to be installed or already running for it to \
+         work: `cargo install saci --features server` has to produce a working binary with no \
+         broker, database or object store to install and start first, and no extra build \
+         toolchain. Move it out of `server = [...]` and leave it opt-in through `all` or its \
+         own feature. If it genuinely needs nothing installed, add it to \
+         SELF_CONTAINED_CONNECTORS in this file and say in its doc comment why it qualifies. \
+         Note this reads the transitive closure, so the connector may have arrived through \
+         another feature's member list rather than through `server` directly.",
     );
 }

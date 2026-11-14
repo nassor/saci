@@ -76,8 +76,8 @@ only by a named branch.
 Six node kinds live inside `workflow`. Each but `link` opens with its id as the
 leading argument, unique across the whole process. Every node id, workflow id
 and branch name matches `^[A-Za-z0-9][A-Za-z0-9_-]*$` and is at most 64 bytes.
-Five of the six are in the default binary. A `plugin` node needs one built with
-`--features plugin`: the default build parses the file and then refuses it,
+Five of the six are in a `server` build. A `plugin` node needs one built with
+`--features server,plugin-host`: a build without it parses the file and then refuses it,
 naming that flag.
 
 | Node | Declares | Links |
@@ -85,7 +85,7 @@ naming that flag.
 | `transformer` | `format`, an optional `options` child | none: a source or sink names it |
 | `source` | `type`, `component`, optional `transformer`, optional `retry`, a `config` child | outbound only |
 | `wasm` | optional `module`, optional `sha3_256`, `config` and `window` children | inbound and outbound |
-| `plugin` | optional `library`, otherwise the same as `wasm`; needs a build with `--features plugin` | inbound and outbound |
+| `plugin` | optional `library`, otherwise the same as `wasm`; needs a build with `--features plugin-host` | inbound and outbound |
 | `sink` | `type`, `component`, optional `transformer`, optional `retry`, a `config` child | inbound only |
 | `link` | `from`, `to`, optional `branch` | it is the edge |
 

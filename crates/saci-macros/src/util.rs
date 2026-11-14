@@ -126,22 +126,22 @@ impl SystemImpl<'_> {
             impl #ty {
                 fn __saci_exec(
                     &self,
-                    __saci_data: &mut ::saci_processor::__rt::Dataset,
-                ) -> ::saci_processor::__rt::SaciResult<()> {
+                    __saci_data: &mut ::saci::processor::__rt::Dataset,
+                ) -> ::saci::processor::__rt::SaciResult<()> {
                     #body
                 }
             }
 
-            #[::saci_processor::__rt::async_trait]
-            impl ::saci_processor::__rt::System for #ty {
-                fn meta(&self) -> ::saci_processor::__rt::SystemMeta {
+            #[::saci::processor::__rt::async_trait]
+            impl ::saci::processor::__rt::System for #ty {
+                fn meta(&self) -> ::saci::processor::__rt::SystemMeta {
                     #meta
                 }
 
                 async fn run(
                     &self,
-                    __saci_data: &mut ::saci_processor::__rt::Dataset,
-                ) -> ::saci_processor::__rt::SaciResult<()> {
+                    __saci_data: &mut ::saci::processor::__rt::Dataset,
+                ) -> ::saci::processor::__rt::SaciResult<()> {
                     self.__saci_exec(__saci_data)
                 }
 
@@ -149,14 +149,14 @@ impl SystemImpl<'_> {
                 // never builds the boxed future `#[async_trait]` imposes.
                 fn run_sync(
                     &self,
-                    __saci_data: &mut ::saci_processor::__rt::Dataset,
-                ) -> ::core::option::Option<::saci_processor::__rt::SaciResult<()>> {
+                    __saci_data: &mut ::saci::processor::__rt::Dataset,
+                ) -> ::core::option::Option<::saci::processor::__rt::SaciResult<()>> {
                     ::core::option::Option::Some(self.__saci_exec(__saci_data))
                 }
             }
 
             #[doc = #ctor_doc]
-            #vis fn #ctor() -> impl ::saci_processor::__rt::System + 'static {
+            #vis fn #ctor() -> impl ::saci::processor::__rt::System + 'static {
                 #ty
             }
         }
@@ -172,25 +172,25 @@ pub(crate) fn decode_rows(component: &syn::Type, system_name: &str) -> TokenStre
         {
             let __saci_batch = __saci_data
                 .columns::<#component>()
-                .ok_or_else(|| ::saci_processor::__rt::SaciError::generic(format!(
+                .ok_or_else(|| ::saci::processor::__rt::SaciError::generic(format!(
                     "{}: component '{}' is not registered on the batch dataset",
                     #system_name,
-                    <#component as ::saci_processor::__rt::Component>::name(),
+                    <#component as ::saci::processor::__rt::Component>::name(),
                 )))?;
-            <#component as ::saci_processor::__rt::Component>::from_record_batch(__saci_batch)?
+            <#component as ::saci::processor::__rt::Component>::from_record_batch(__saci_batch)?
         }
     }
 }
 
-/// Map a `saci_processor::Error` out of an author-written function into a
-/// `saci_core::SaciError`.
+/// Map a `saci::processor::Error` out of an author-written function into a
+/// `saci::SaciError`.
 ///
 /// `SystemExecution`, not `Generic`: a failing transform or fold is by
 /// definition a failure inside a system's own processing logic, which is the
 /// variant `classify_run_error` reports to the host as `retryable`.
 pub(crate) fn map_user_error() -> TokenStream {
     quote! {
-        |__saci_err| ::saci_processor::__rt::SaciError::system_execution(__saci_err.into_message())
+        |__saci_err| ::saci::processor::__rt::SaciError::system_execution(__saci_err.into_message())
     }
 }
 

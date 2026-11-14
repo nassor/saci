@@ -5,7 +5,7 @@ template = "section.html"
 sort_by = "weight"
 aliases = ["/native/"]
 +++
-Your crate depends on `saci-core` or `saci-service` as a library, you own `main`,
+Your crate depends on `saci` as a library, you own `main`,
 and you call `pipeline.run().await`. No `.wasm` file is involved, and neither
 wasmtime nor the `saci-service` binary runs. The other way to use SACI is
 [the service](@/service/_index.md): one binary that reads a KDL config and runs
@@ -185,24 +185,23 @@ the component.
 7. [Distributed processing](@/library/distributed.md): the same Pipeline against claimed row
    ranges across nodes, with claims and checkpoints replicated by raft.
 
-## Which crates
+## Which features
 
-`saci-core` is the engine. `saci-service` adds the runners, the factory registry
-and the wasm and plugin hosts, and re-exports `saci-core`, so
-`saci_service::pipeline::Pipeline` and `saci_core::pipeline::Pipeline` are the same
-type.
+`saci` is one crate. Its default feature, `engine`, is the engine alone. The `service` feature adds
+the runners and the factory registry, and `wasm-host` and `plugin-host` add the processor hosts.
+All of them share one `saci::pipeline::Pipeline`.
 
 ```toml,name=Two dependency shapes
 # The engine alone: no wasmtime, no HTTP.
-saci-core = { git = "https://github.com/nassor/saci", features = ["io"] }
+saci = { git = "https://github.com/nassor/saci" }
 
-# The engine plus the runners, the registry and the hosts.
-saci-service = { git = "https://github.com/nassor/saci" }
+# The engine plus the runners, the registry and the wasm host.
+saci = { git = "https://github.com/nassor/saci", features = ["service", "wasm-host"] }
 ```
 
-Add `saci-connector-file` plus a `saci-transformer-*` crate for each format you
+Add `connector-file` plus a `transformer-*` feature for each format you
 read or write. [Crates and features](@/library/reference/crates.md) lists every
-crate and every feature flag.
+feature flag and the module behind it.
 
 <div class="note">
 <span class="note-label">Depending on SACI</span>

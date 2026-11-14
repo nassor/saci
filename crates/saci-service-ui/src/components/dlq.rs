@@ -24,7 +24,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::time::Duration;
 
-use saci_inspector_wire::{DlqGroup, DlqSummary};
+use crate::wire::{DlqGroup, DlqSummary};
 
 use crate::api;
 use crate::components::logs::format_clock;
@@ -368,7 +368,7 @@ fn schedule_phrase(at_unix_ms: u64) -> String {
 }
 
 /// What the last replay did, in one line.
-fn report_phrase(report: &saci_inspector_wire::DlqReplayReport) -> String {
+fn report_phrase(report: &crate::wire::DlqReplayReport) -> String {
     let mut line = format!(
         "{}: {} delivered, {} retained, {} purged",
         report.trigger.as_str(),

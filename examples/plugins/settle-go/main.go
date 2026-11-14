@@ -27,7 +27,7 @@
 // # The C boundary
 //
 // Four rules the host relies on, all of them from
-// crates/saci-plugin-abi/include/saci_plugin.h:
+// crates/saci/include/saci_plugin.h:
 //
 //   - Every buffer handed to the host is C.malloc'd with cap equal to len and
 //     comes back through saci_go_free_buffer. A Go pointer would let the
@@ -42,7 +42,7 @@
 package main
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../../crates/saci-plugin-abi/include
+#cgo CFLAGS: -I${SRCDIR}/../../../crates/saci/include
 
 #include <stdlib.h>
 #include <stdint.h>

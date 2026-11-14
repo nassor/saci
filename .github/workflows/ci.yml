@@ -22,11 +22,11 @@ jobs:
         toolchain: 1.99.0  # Rust minimum version
         components: rustfmt, clippy
 
-    # saci-connector-kafka vendors librdkafka via rdkafka-sys's `cmake-build`
-    # feature, and it compiles in every job that builds a saci-service test or
-    # example target, because saci-service's dev-dependencies include the
-    # connector crates; the distributed_chaos, wasm_processor and polyglot
-    # jobs install this same package. That build is configured with
+    # The kafka connector vendors librdkafka via rdkafka-sys's `cmake-build`
+    # feature, and it compiles in every job that builds a saci test or
+    # example target, because saci's dev-dependencies include rdkafka; the
+    # distributed_chaos, mariadb_servers, wasm_processor and polyglot jobs
+    # install this same package. That build is configured with
     # -DWITH_CURL=0, but the config.h cmake generates for POSIX targets uses
     # `#cmakedefine01 WITH_OAUTHBEARER_OIDC`, which defines the macro as 0
     # rather than leaving it undefined, and rdkafka_conf.c gates its
@@ -76,7 +76,7 @@ jobs:
     - name: Run clippy
       run: cargo clippy -q --all-targets --all-features -- -D warnings
 
-    # The default bundle carries only the connectors that need nothing
+    # The `server` bundle carries only the connectors that need nothing
     # installed or already running, so a reduced feature combination is a
     # normal way to build this binary rather than an edge case. The
     # --all-features gate above cannot see an item that is dead only when a
@@ -84,29 +84,30 @@ jobs:
     # reachable there. This step builds the narrowest runnable service and
     # fails on the warning that build emits.
     - name: Clippy, reduced build
-      run: cargo clippy -q -p saci-service --no-default-features --features service --all-targets -- -D warnings
+      run: cargo clippy -q -p saci --no-default-features --features service --all-targets -- -D warnings
 
-    # The same feature set, run rather than linted. It carries neither
-    # processor host and no windowing engine, so it is the only step where
+    # The same feature set plus the channel connector the service unit tests
+    # drive, run rather than linted. It carries neither processor host and no
+    # windowing engine, so it is the only step where
     # `test_wasm_node_without_the_host_parses_and_names_the_feature`
-    # (`#[cfg(not(feature = "wasm"))]`, and every other test rung in this job
-    # has `wasm`) and
+    # (`#[cfg(not(feature = "wasm-host"))]`, and every other test rung in this
+    # job has `wasm-host`) and
     # `test_a_missing_host_is_named_before_a_missing_windowing_engine`
-    # (`#[cfg(all(not(feature = "wasm"), not(feature = "windows")))]`) are
+    # (`#[cfg(all(not(feature = "wasm-host"), not(feature = "windows")))]`) are
     # compiled at all. The two other refusal tests this build runs,
     # `test_plugin_node_without_the_host_parses_and_names_the_feature` and
     # `test_cluster_mode_without_the_raft_stack_names_the_feature`, are not
-    # exclusive to it: neither `plugin` nor `service-cluster` is in the
-    # default bundle, so the default-bundle step below runs both too. This
-    # build is also the only one carrying no transformer and no opt-in
-    # connector, so it is where a missing-format or missing-factory message
-    # is produced by the real call path instead of by a direct call.
+    # exclusive to it: neither `plugin-host` nor `service-cluster` is in the
+    # `server` bundle, so the server-bundle step below runs both too. This
+    # build is also the only one carrying no transformer and one connector,
+    # so it is where a missing-format or missing-factory message is produced
+    # by the real call path instead of by a direct call.
     # `--lib` on purpose: the integration tests under `tests/` need
     # connectors or a wasm host this feature set deliberately excludes. Do
     # not fold this into the clippy step above; clippy proves the reduced
     # build compiles, not that it works.
     - name: Test, reduced build
-      run: cargo nextest run -p saci-service --no-default-features --features service --lib
+      run: cargo nextest run -p saci --no-default-features --features service,connector-channel --lib
 
     # Both processor hosts with no windowing engine, which is the only
     # configuration in which a `window` block can be declared on a node this
@@ -115,39 +116,41 @@ jobs:
     # `service::config::tests::test_window_block_without_the_engine_parses_and_names_the_feature`
     # and
     # `service::config::tests::test_plugin_window_block_without_the_engine_names_the_feature`
-    # (`#[cfg(all(not(feature = "windows"), feature = "wasm"))]` and the
-    # `plugin` counterpart), and
+    # (`#[cfg(all(not(feature = "windows"), feature = "wasm-host"))]` and the
+    # `plugin-host` counterpart), and
     # `service::builder::tests::test_a_window_block_without_the_engine_is_refused_by_the_builder`,
     # the embedder-facing half. No neighbouring rung reaches the combination:
-    # `--features service` above carries neither host, so the block has no
-    # node to sit on; the default bundle below and the `--all-features` suite
+    # the reduced build above carries neither host, so the block has no node
+    # to sit on; the `server` bundle below and the `--all-features` suite
     # both carry `windows`, so there is nothing to refuse. Without this step
     # the three compile in no CI configuration, and a refusal that names the
     # wrong feature, or stops naming one, goes unnoticed.
     - name: Test, host pair without the windowing engine
-      run: cargo nextest run -p saci-service --no-default-features --features service,wasm,plugin --lib
+      run: cargo nextest run -p saci --no-default-features --features service,wasm-host,plugin-host,connector-channel --lib
 
-    # The default bundle, which is what `cargo install saci-service` produces
-    # and what a contributor running bare `cargo test` gets. It registers 12 of
-    # the 28 connector type names in `BUILTIN_CONNECTOR_FEATURES` (the
-    # channel, file, HTTP, TCP, UDP, saci and redb connectors), a partial
-    # set neither neighbouring step reaches: the reduced build above registers
-    # none of the 28, the `--all-features` suite below all of them. A premise
-    # that holds at zero connectors and again at twenty-eight can still be false
-    # in between, and this is the only step in between.
+    # The library default, which is what a crate depending on `saci` with no
+    # feature named gets: the engine alone.
+    - name: Test, library default
+      run: cargo nextest run --workspace --lib
+
+    # The `server` bundle, which is what `cargo install saci --features
+    # server` produces. It registers 12 of the 28 connector type names in
+    # `BUILTIN_CONNECTOR_FEATURES` (the channel, file, HTTP, TCP, UDP, saci
+    # and redb connectors), a partial set neither neighbouring step reaches:
+    # the reduced build above registers only the channel connector, the
+    # `--all-features` suite below all of them. A premise that holds at one
+    # connector and again at twenty-eight can still be false in between, and
+    # this is the only step in between.
     # `service::topology::tests::every_allowlist_key_is_a_connector_type_this_crate_ships`
     # is the allowlist check that meets the partial registry here. The feature
-    # space is partial too: `RUNTIME_SOURCE_HELP`'s `wasm`-without-`plugin`
-    # arm in `service/builder.rs` is compiled by no other test run in this
-    # job, since the reduced build has neither host and `--all-features` has
-    # both.
-    # `--lib` and not every target: this builds no integration binary at all,
-    # and the `--all-features` suite below builds every integration target, so
-    # nothing goes uncovered. Why this is a `--workspace` resolve rather than
-    # `-p saci-service`, with the compile and test-count measurements:
-    # AGENTS.md, Testing.
-    - name: Test, default bundle
-      run: cargo nextest run --workspace --lib
+    # space is partial too: `RUNTIME_SOURCE_HELP`'s `wasm-host`-without-
+    # `plugin-host` arm in `service/builder.rs` is compiled by no other test
+    # run in this job, since the reduced build has neither host and
+    # `--all-features` has both.
+    # `--lib` and not every target: the `--all-features` suite below builds
+    # every integration target, so nothing goes uncovered.
+    - name: Test, server bundle
+      run: cargo nextest run -p saci --features server --lib
 
     - name: Build
       run: cargo build -q
@@ -208,7 +211,7 @@ jobs:
       with:
         toolchain: 1.99.0  # Rust minimum version
 
-    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
     # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
     # .agents/skills/saci-connectors/SKILL.md.
@@ -237,18 +240,18 @@ jobs:
     # faults for ~70-100s. Isolated in its own job so its runtime never sits
     # on the `test` job's critical path. `--test` scopes discovery to this
     # one binary so `--run-ignored ignored-only` can't pick up the other
-    # unrelated `#[ignore]`d tests: `saci-service`'s lib unit test
+    # unrelated `#[ignore]`d tests: `saci`'s lib unit test
     # `test_second_init_returns_error` (a global-tracing-subscriber race) and
     # the connector matrix's slices, run by the `connector_matrix` jobs below.
     - name: Full-stack distributed chaos test
-      run: cargo nextest run -p saci-service --features distributed-raft --test distributed_integration_chaos --run-ignored ignored-only
+      run: cargo nextest run -p saci --features distributed-raft --test distributed_integration_chaos --run-ignored ignored-only
 
   # The `test` job's `--profile ci` run already drives every
-  # saci-connector-mariadb suite against the harness defaults (mariadb:11.8
+  # MariaDB connector suite against the harness defaults (mariadb:11.8
   # and mysql:8.4). This job runs the same suites once per older or newer
   # server release: `SACI_MARIADB_TEST_ONLY` skips the other flavour's cases,
   # and the image variable of the flavour under test names the release. It
-  # builds only the connector crate, so it needs no librdkafka prerequisite.
+  # selects the connector's own binaries and unit tests with a filter.
   mariadb_servers:
     name: MariaDB servers (${{ matrix.image }})
     runs-on: ubuntu-latest
@@ -282,6 +285,12 @@ jobs:
         path: target
         key: ${{ runner.os }}-mariadb-servers-${{ hashFiles('**/Cargo.lock') }}
 
+    # saci's dev-dependencies pull in rdkafka, whose rdkafka-sys cmake build
+    # compiles rdkafka_conf.c's `#include <curl/curl.h>` on POSIX even with
+    # `-DWITH_CURL=0`; see .agents/skills/saci-connectors/SKILL.md.
+    - name: Install librdkafka build prerequisites
+      run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
     - name: Install cargo-nextest
       uses: taiki-e/install-action@v2
       with:
@@ -299,10 +308,10 @@ jobs:
         else
           export SACI_MARIADB_TEST_MYSQL_IMAGE="$SERVER_IMAGE"
         fi
-        cargo nextest run -p saci-connector-mariadb --profile ci
+        cargo nextest run -p saci --features connector-mariadb --profile ci -E 'binary(/^mariadb_/) or test(/^connector::mariadb::/)'
 
   # The connector matrix is one test per {source, processor, format} slice
-  # (`crates/saci-service/tests/connector_matrix.rs`). This job compiles them
+  # (`crates/saci/tests/connector_matrix.rs`). This job compiles them
   # once into a nextest archive, which also carries both processor fixtures
   # (`archive.include` in .config/nextest.toml), and lists the slice groups:
   # one per source connector, plus `maximal` for the maximal workflow.
@@ -319,7 +328,7 @@ jobs:
       with:
         toolchain: 1.99.0  # Rust minimum version
 
-    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
     # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
     # .agents/skills/saci-connectors/SKILL.md.
@@ -353,7 +362,7 @@ jobs:
       run: cargo build -p saci-plugin-smoketest
 
     - name: Archive the matrix
-      run: cargo nextest archive -p saci-service --all-features --profile matrix --test connector_matrix --archive-file connector-matrix.tar.zst
+      run: cargo nextest archive -p saci --all-features --profile matrix --test connector_matrix --archive-file connector-matrix.tar.zst
 
     # Test names are `live::<group>::...`, so the second path segment of
     # every test the `matrix` profile selects is its group. A connector added
@@ -421,7 +430,7 @@ jobs:
       with:
         toolchain: 1.99.0  # Rust minimum version
 
-    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
     # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
     # .agents/skills/saci-connectors/SKILL.md.
@@ -445,18 +454,18 @@ jobs:
       with:
         tool: wasm-tools@1.246.2
 
-    # cargo check of saci-core and the saci facade for wasm32-wasip2 with
-    # `--no-default-features --features processor`. The facade half protects the
-    # build instruction `crates/saci/src/lib.rs`'s crate docs and AGENTS.md give
-    # processor authors: `engine` forwards saci-core's `io`, which implies
-    # `runtime` (tokio and rayon), and tokio cannot target wasm32-wasip2, so a
-    # feature edge leaking tokio back into `processor` would make that
-    # instruction false. The task installs the target itself.
-    - name: Check saci-core and the facade for wasm32-wasip2
+    # cargo check of saci for wasm32-wasip2 with `--no-default-features
+    # --features processor`. It protects the build instruction
+    # `crates/saci/src/lib.rs`'s crate docs and AGENTS.md give processor
+    # authors: the default `engine` implies `runtime` (tokio and rayon), and
+    # tokio cannot target wasm32-wasip2, so a feature edge leaking tokio back
+    # into `processor` would make that instruction false. The task installs
+    # the target itself.
+    - name: Check saci for wasm32-wasip2
       run: cargo xtask check-wasm-processor
 
     # The arrow-ipc exact pin is load-bearing across the component boundary;
-    # crates/saci-processor/PINS.md forbids relaxing it without this gate.
+    # crates/saci/PINS.md forbids relaxing it without this gate.
     - name: Host-processor arrow-ipc round-trip
       run: cargo xtask processor-ipc-roundtrip
 
@@ -499,7 +508,7 @@ jobs:
       with:
         toolchain: 1.99.0  # Rust minimum version
 
-    # saci-service's dev-dependencies pull in saci-connector-kafka, whose
+    # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
     # <curl/curl.h>` on POSIX even with `-DWITH_CURL=0`; see
     # .agents/skills/saci-connectors/SKILL.md.
@@ -568,7 +577,7 @@ jobs:
     # flatbuffer-offset bug to one language before the wasm chain turns it into
     # an opaque byte diff.
     - name: Generate schema constants and fixtures
-      run: cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit
+      run: cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit
 
     # The conformance corpus is committed so a codec's suite runs without a Rust
     # toolchain. Regenerating it here proves the committed vectors still match
@@ -576,7 +585,7 @@ jobs:
     # format it is supposed to pin.
     - name: Conformance corpus is current
       run: |
-        cargo run -p saci-service --features conformance --example conformance_vectors -- emit
+        cargo run -p saci --features conformance --example conformance_vectors -- emit
         git diff --exit-code -- packages/arrow-ipc-conformance
 
     - name: Go SDK+codec tests
@@ -613,10 +622,10 @@ jobs:
       run: cargo xtask polyglot
 
     - name: Six-language chain regression
-      run: cargo nextest run -p saci-service --features wasm --test polyglot_chain --no-capture
+      run: cargo nextest run -p saci --features wasm-host --test polyglot_chain --no-capture
 
     - name: Run the polyglot driver
-      run: cargo run -p saci-service --features wasm,tracing --example polyglot_orders
+      run: cargo run -p saci --features wasm-host,tracing --example polyglot_orders
 
     # The Quick Start's C# stage is not built by any other job, so a WIT
     # world change here would break the tutorial silently. Every toolchain

@@ -8,13 +8,17 @@
 //! stays stateless, and one GET per second is cheaper than holding a stream
 //! open per viewer.
 //!
-//! The JSON shapes come from `saci-inspector-wire`, the same crate the server
-//! serializes from, so the contract cannot drift between the two halves.
+//! The JSON shapes are `crates/saci/src/inspector_wire.rs`, the same file
+//! the server serializes from, compiled in here by path so the contract
+//! cannot drift between the two halves. The `saci` crate itself does not
+//! build for wasm32-unknown-unknown, so it is not a dependency.
 
 mod api;
 mod app;
 mod components;
 mod ui;
+#[path = "../../saci/src/inspector_wire.rs"]
+pub mod wire;
 
 use leptos::mount::mount_to;
 use wasm_bindgen::prelude::*;
@@ -24,7 +28,7 @@ pub use app::App;
 /// Mount the dashboard into `#saci-app`.
 ///
 /// `#[wasm_bindgen(start)]` runs this on module instantiation, so
-/// `crates/saci-service/assets/ui/index.html` only has to `await init()`.
+/// `crates/saci/assets/ui/index.html` only has to `await init()`.
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();

@@ -25,8 +25,8 @@
 [profile.default]
 # Excluded whole binaries are entirely testcontainers-driven: every test in
 # the file starts a container (see docs/content/service/connectors/kafka.md and
-# nats.md, crates/saci-connector-postgresql/tests/common/mod.rs and
-# crates/saci-connector-mariadb/tests/common/mod.rs), or, for
+# nats.md, crates/saci/tests/common/postgresql.rs and
+# crates/saci/tests/common/mariadb.rs), or, for
 # the three Raft suites, a Toxiproxy container plus an N-node cluster.
 # Excluded test() clauses pick out the container-driven tests inside an
 # otherwise-fast file:
@@ -62,36 +62,36 @@
 # milliseconds.
 default-filter = '''
 not (
-    binary_id(=saci-connector-kafka::kafka_roundtrip)
-    or binary_id(=saci-connector-nats::nats_roundtrip)
-    or binary_id(=saci-connector-postgresql::sink)
-    or binary_id(=saci-connector-postgresql::source_cursor)
-    or binary_id(=saci-connector-postgresql::source_logical)
-    or binary_id(=saci-connector-postgresql::all_types)
-    or binary_id(=saci-connector-mariadb::sink)
-    or binary_id(=saci-connector-mariadb::source_polling)
-    or binary_id(=saci-connector-mariadb::source_trigger)
-    or binary_id(=saci-connector-mariadb::source_binlog)
-    or binary_id(=saci-connector-mariadb::all_types)
-    or binary_id(=saci-connector-mariadb::tls)
-    or binary_id(=saci-connector-s3::round_trip)
-    or binary_id(=saci-connector-turso::synced_roundtrip)
-    or binary_id(=saci-connector-clickhouse::roundtrip)
-    or (binary_id(=saci-service::connector_matrix) and test(/^live::/))
-    or binary_id(=saci-service::transport_chaos)
-    or binary_id(=saci-service::distributed_harness_smoke)
-    or (binary_id(=saci-service::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/)))
-    or (binary_id(=saci-service::kafka_service) and (test(=a_kafka_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_kafka_store_records_a_refused_batch_and_replays_it)))
-    or (binary_id(=saci-service::nats_service) and (test(=a_nats_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_jetstream_store_records_a_refused_batch_and_replays_it)))
-    or (binary_id(=saci-service::postgres_service) and test(=a_postgres_source_and_sink_move_rows_through_the_standalone_runner))
-    or (binary_id(=saci-service::s3_service) and test(=an_s3_source_and_sink_move_rows_through_the_standalone_runner))
-    or (binary_id(=saci-service::clickhouse_service) and test(=a_clickhouse_source_and_sink_move_rows_through_the_standalone_runner))
-    or (binary_id(=saci-service::mariadb_service) and (test(=a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes)))
+    binary_id(=saci::kafka_roundtrip)
+    or binary_id(=saci::nats_roundtrip)
+    or binary_id(=saci::postgresql_sink)
+    or binary_id(=saci::postgresql_source_cursor)
+    or binary_id(=saci::postgresql_source_logical)
+    or binary_id(=saci::postgresql_all_types)
+    or binary_id(=saci::mariadb_sink)
+    or binary_id(=saci::mariadb_source_polling)
+    or binary_id(=saci::mariadb_source_trigger)
+    or binary_id(=saci::mariadb_source_binlog)
+    or binary_id(=saci::mariadb_all_types)
+    or binary_id(=saci::mariadb_tls)
+    or binary_id(=saci::s3_round_trip)
+    or binary_id(=saci::turso_synced_roundtrip)
+    or binary_id(=saci::clickhouse_roundtrip)
+    or (binary_id(=saci::connector_matrix) and test(/^live::/))
+    or binary_id(=saci::transport_chaos)
+    or binary_id(=saci::distributed_harness_smoke)
+    or (binary_id(=saci::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/)))
+    or (binary_id(=saci::kafka_service) and (test(=a_kafka_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_kafka_store_records_a_refused_batch_and_replays_it)))
+    or (binary_id(=saci::nats_service) and (test(=a_nats_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_jetstream_store_records_a_refused_batch_and_replays_it)))
+    or (binary_id(=saci::postgres_service) and test(=a_postgres_source_and_sink_move_rows_through_the_standalone_runner))
+    or (binary_id(=saci::s3_service) and test(=an_s3_source_and_sink_move_rows_through_the_standalone_runner))
+    or (binary_id(=saci::clickhouse_service) and test(=a_clickhouse_source_and_sink_move_rows_through_the_standalone_runner))
+    or (binary_id(=saci::mariadb_service) and (test(=a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runner) or test(=a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes)))
 )
 '''
 
 [profile.ci]
-default-filter = "not (binary_id(=saci-service::connector_matrix) and test(/^live::/))"
+default-filter = "not (binary_id(=saci::connector_matrix) and test(/^live::/))"
 # The heaviest Docker chaos tests run past nextest's default 60s slow
 # threshold (transport_chaos's bandwidth test allows up to 60s for the
 # follower to reconverge on top of container startup, and
@@ -120,7 +120,7 @@ slow-timeout = "180s"
 # `Fixtures::resolve` finds them from the binary's own target directory. The
 # plugin's file name is per platform, hence three entries.
 [profile.matrix]
-default-filter = "binary_id(=saci-service::connector_matrix) and test(/^live::/)"
+default-filter = "binary_id(=saci::connector_matrix) and test(/^live::/)"
 fail-fast = false
 slow-timeout = { period = "120s", terminate-after = 5 }
 success-output = "final"
@@ -143,9 +143,9 @@ archive.include = [
 max-threads = 1
 
 [[profile.default.overrides]]
-filter = 'binary_id(=saci-service::transport_chaos) or (binary_id(=saci-service::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/))) or binary_id(=saci-service::distributed_harness_smoke) or binary_id(=saci-service::distributed_integration_chaos)'
+filter = 'binary_id(=saci::transport_chaos) or (binary_id(=saci::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/))) or binary_id(=saci::distributed_harness_smoke) or binary_id(=saci::distributed_integration_chaos)'
 test-group = "heavy-docker"
 
 [[profile.ci.overrides]]
-filter = 'binary_id(=saci-service::transport_chaos) or (binary_id(=saci-service::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/))) or binary_id(=saci-service::distributed_harness_smoke) or binary_id(=saci-service::distributed_integration_chaos)'
+filter = 'binary_id(=saci::transport_chaos) or (binary_id(=saci::raft_consensus_chaos) and not (test(/^unit::/) or test(/^idempotency::/))) or binary_id(=saci::distributed_harness_smoke) or binary_id(=saci::distributed_integration_chaos)'
 test-group = "heavy-docker"

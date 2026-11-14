@@ -217,7 +217,7 @@ A processor labels every outbound link or none; the load-time rules behind that 
 - Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`.
 - Docker for the NATS broker.
 - NATS is an opt-in connector too: the serve and validate commands
-  below pass `--features connector-file,connector-nats,transformer-csv,wasm,plugin`.
+  below pass `--features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host`.
 
 ## 1. Build the processors
 
@@ -244,7 +244,7 @@ A mislabelled graph is caught before anything runs. On macOS and Windows set
 Linux:
 
 ```bash,name=Validate the branching config
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- validate \
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate \
   --config examples/branching/branching.kdl --strict
 ```
 
@@ -252,7 +252,7 @@ macOS:
 
 ```bash,name=Validate with the dylib name
 SACI_PLUGIN_LIB=target/release/libbranching_plugin.dylib \
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- validate \
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate \
   --config examples/branching/branching.kdl --strict
 ```
 
@@ -260,7 +260,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/release/branching_plugin.dll"
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- validate --config examples/branching/branching.kdl --strict
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate --config examples/branching/branching.kdl --strict
 ```
 
 Expected output ends with `OK: all declared types resolved in built-in
@@ -287,7 +287,7 @@ Linux:
 mkdir -p /tmp/saci-branching
 
 SACI_OUT_DIR=/tmp/saci-branching \
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve \
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
   --config examples/branching/branching.kdl
 ```
 
@@ -298,7 +298,7 @@ mkdir -p /tmp/saci-branching
 
 SACI_OUT_DIR=/tmp/saci-branching \
 SACI_PLUGIN_LIB=target/release/libbranching_plugin.dylib \
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve \
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
   --config examples/branching/branching.kdl
 ```
 
@@ -309,7 +309,7 @@ mkdir C:\saci-branching
 
 $env:SACI_OUT_DIR = "C:/saci-branching"
 $env:SACI_PLUGIN_LIB = "target/release/branching_plugin.dll"
-cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve --config examples/branching/branching.kdl
+cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve --config examples/branching/branching.kdl
 ```
 
 The stream runner waits for messages, so no output files exist yet. Leave this
@@ -320,7 +320,7 @@ terminal running.
 In another terminal:
 
 ```bash,name=Run the publisher
-cargo run -p saci-service --features connector-nats --example branching_publish -- --rate 50
+cargo run -p saci --features connector-nats --example branching_publish -- --rate 50
 ```
 
 Runs the same on all three platforms. The publisher's flags: `--count` (0 runs
@@ -368,7 +368,7 @@ publisher and the service with Ctrl-C when you are done.
 | `examples/branching/branching.kdl` | the workflow: one source, two routers, five sinks, seven links |
 | `examples/branching/wasm/` | `branching-wasm`, the WebAssembly router (component) |
 | `examples/branching/plugin/` | `branching-plugin`, the native router (cdylib) |
-| `examples/branching/branching_publish.rs` | the publisher, a `saci-service` example |
+| `examples/branching/branching_publish.rs` | the publisher, a `saci` example |
 
 ## Next
 

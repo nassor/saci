@@ -4,7 +4,7 @@
 //! `String` because the only thing the UI does with one is show it: a typed
 //! error enum would carry no information a viewer can act on differently.
 
-use saci_inspector_wire::{
+use crate::wire::{
     DlqReplayReport, DlqReplayRequest, DlqSummary, LogRecord, ServiceLifecycleReport, Snapshot,
     Topology, TraceDetail, TraceSummary, WorkflowStatus,
 };

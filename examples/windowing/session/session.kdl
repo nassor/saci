@@ -23,9 +23,9 @@
 // then run the service and the publisher. The publisher's gap flags put a
 // silence in every symbol's stream at the same instant, so each burst's
 // sessions all close together and none outlives its burst:
-//   cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve \
+//   cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
 //     --config examples/windowing/session/session.kdl
-//   cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 \
+//   cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 \
 //     --gap-every 20 --gap-ms 30000
 
 mode "standalone"

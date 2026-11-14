@@ -20,7 +20,7 @@
     <dt>In one line</dt>
     <dd>Data plus systems plus the <strong>plan derived from both</strong></dd>
     <dt>You need</dt>
-    <dd>Nothing beyond <code>saci-core</code>. <code>ParallelSystem</code> stages need the default <code>runtime</code> feature; <code>run_with_io</code> needs <code>io</code></dd>
+    <dd>Nothing beyond <code>saci</code>. <code>ParallelSystem</code> stages need the <code>runtime</code> feature; <code>run_with_io</code> needs <code>io</code>. The default <code>engine</code> feature enables both</dd>
     <dt>Read this if</dt>
     <dd>You have written a few systems and want to know what order they will run in, and what happens to the batch when one of them fails</dd>
 </dl>
@@ -54,7 +54,7 @@
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>construct, then add systems in order</em></div>
-    <pre><code class="language-rust">use saci_core::prelude::*;
+    <pre><code class="language-rust">use saci::prelude::*;
 
 let mut pipeline = Pipeline::new("etl");
 
@@ -432,9 +432,9 @@ for mut batch in incoming_batches {
 <p>
     <code>run_with_io</code> drains every registered source into the dataset, calls
     <code>run()</code>, then drains the dataset to every sink and calls
-    <code>finish()</code> on each. <code>saci-core</code> ships the <code>Source</code> /
-    <code>Sink</code> traits. A connector like <code>saci-connector-file</code> moves bytes, a
-    transformer like <code>saci-transformer-csv</code> turns them into batches. See
+    <code>finish()</code> on each. <code>saci</code> ships the <code>Source</code> /
+    <code>Sink</code> traits. <code>FileSource</code> (<code>connector-file</code>) moves bytes,
+    <code>CsvTransformer</code> (<code>transformer-csv</code>) turns them into batches. See
     <a href="{{ get_url(path='@/library/io.md') }}">Sources &amp; Sinks</a>.
 </p>
 

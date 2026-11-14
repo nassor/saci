@@ -13,7 +13,7 @@
 //! tumbling windows close continuously while the publisher runs.
 //!
 //! ```text
-//! cargo run -p saci-service --features connector-nats --example multi_workflow_publish -- --rate 20 --ts-step-ms 2000
+//! cargo run -p saci --features connector-nats --example multi_workflow_publish -- --rate 20 --ts-step-ms 2000
 //! ```
 //!
 //! Flags: `--count` (default 0, runs until Ctrl-C), `--rate` messages per

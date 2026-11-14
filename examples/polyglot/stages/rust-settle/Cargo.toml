@@ -11,12 +11,12 @@ description = "Stage 6 of the polyglot example: the Rust processor that writes `
 
 # This is a processor pipeline component, NOT a binary. `cargo build --target wasm32-wasip2`
 # links the cdylib straight into a Component Model component exporting the
-# saci-pipeline world from saci-processor's WIT package.
+# saci-pipeline world from the WIT package of the `saci` crate.
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-saci-processor = { workspace = true }
+saci = { workspace = true, features = ["processor"] }
 # `#[derive(Component)]` requires `Serialize`/`Deserialize` alongside it, and
 # serde's own expansion names the literal `serde` crate at the call site, so it
 # is a direct dependency rather than a re-export.

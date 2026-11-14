@@ -254,24 +254,24 @@ link from="csv_orders" to="settle"
 link from="settle" to="csv_out"
 ```
 
-`plugin` is not in the default build, so the feature list gains it:
+`plugin-host` is not in the `server` feature, so the feature list gains it:
 
 Linux/macOS:
 
 ```bash,name=Validate then serve
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- validate \
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate \
   --config examples/configs/standalone_polyglot.kdl --strict
 
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- serve \
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve \
   --config examples/configs/standalone_polyglot.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
 
-cargo run -p saci-service --features connector-file,transformer-csv,plugin -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 The config runs once and writes `/tmp/saci-polyglot-out.csv`. The plugin's own log line reports

@@ -1,9 +1,9 @@
 // SACI standalone service configuration driving HTTP at both ends.
 //
 // Run:
-//   cargo run --features connector-http,transformer-csv,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-http,transformer-csv,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/http.kdl
-//   cargo run --features connector-http,transformer-csv,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-http,transformer-csv,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/http.kdl
 //
 // The source is one GET and the sink is one request per batch. Each request

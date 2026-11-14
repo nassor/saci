@@ -964,7 +964,7 @@ dependencies = [
 name = "branching-plugin"
 version = "0.1.0"
 dependencies = [
- "saci-plugin",
+ "saci",
  "serde",
 ]
 
@@ -972,7 +972,7 @@ dependencies = [
 name = "branching-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "wit-bindgen 0.62.0",
 ]
@@ -3807,7 +3807,7 @@ dependencies = [
 name = "integrity-aggregate-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "serde_arrow",
  "wit-bindgen 0.62.0",
@@ -3817,7 +3817,7 @@ dependencies = [
 name = "integrity-audit-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "wit-bindgen 0.62.0",
 ]
@@ -3826,7 +3826,7 @@ dependencies = [
 name = "integrity-classify-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "serde_arrow",
  "wit-bindgen 0.62.0",
@@ -4502,7 +4502,7 @@ dependencies = [
 name = "multi-workflow-router-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "wit-bindgen 0.62.0",
 ]
@@ -5024,7 +5024,7 @@ dependencies = [
 name = "order-processing-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "wit-bindgen 0.62.0",
 ]
@@ -5386,7 +5386,7 @@ name = "polyglot-settle-wasm"
 version = "0.1.0"
 dependencies = [
  "pollster 0.4.0",
- "saci-processor",
+ "saci",
  "serde",
  "wit-bindgen 0.62.0",
 ]
@@ -6224,420 +6224,97 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "saci"
 version = "0.1.0"
 dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "saci-connector-channel",
- "saci-connector-file",
- "saci-connector-http",
- "saci-connector-redb",
- "saci-connector-saci",
- "saci-connector-tcp",
- "saci-connector-udp",
- "saci-core",
- "saci-plugin",
- "saci-processor",
- "saci-transformer",
- "saci-transformer-arrow-ipc",
- "saci-transformer-avro",
- "saci-transformer-csv",
- "saci-transformer-ndjson",
- "saci-transformer-parquet",
- "serde",
- "tokio",
-]
-
-[[package]]
-name = "saci-config"
-version = "0.1.0"
-dependencies = [
- "kdl",
- "saci-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "saci-connector"
-version = "0.1.0"
-dependencies = [
- "arrow-schema",
- "saci-config",
- "saci-core",
- "saci-transformer",
-]
-
-[[package]]
-name = "saci-connector-channel"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "saci-connector",
- "saci-core",
- "tokio",
-]
-
-[[package]]
-name = "saci-connector-clickhouse"
-version = "0.1.0"
-dependencies = [
  "anyhow",
+ "arrow-arith",
  "arrow-array",
+ "arrow-avro",
+ "arrow-buffer",
  "arrow-cast",
+ "arrow-csv",
  "arrow-ipc",
+ "arrow-json",
+ "arrow-ord",
  "arrow-schema",
  "arrow-select",
+ "async-nats",
  "async-trait",
- "bytes",
- "clickhouse",
- "saci-connector",
- "saci-core",
- "serde",
- "serde_json",
- "tempfile",
- "testcontainers",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "saci-connector-file"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-csv",
- "saci-transformer-ndjson",
- "saci-transformer-parquet",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "saci-connector-http"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
+ "axum",
+ "base64 0.23.1",
  "brotli 9.0.0",
  "bytes",
+ "chrono",
+ "clap",
+ "clickhouse",
+ "criterion",
+ "datafusion",
+ "dotenvy",
  "flate2",
+ "fnv",
+ "futures",
  "futures-util",
  "h3",
  "h3-quinn",
+ "hex",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
- "opentelemetry",
- "quinn",
- "rcgen",
- "reqwest",
- "rustls",
- "rustls-pki-types",
- "rustls-platform-verifier",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-csv",
- "saci-transformer-ndjson",
- "saci-transformer-parquet",
- "subtle",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tracing",
- "zstd 0.14.2",
-]
-
-[[package]]
-name = "saci-connector-kafka"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "async-trait",
- "futures-util",
- "rdkafka",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-arrow-ipc",
- "saci-transformer-ndjson",
- "serde",
- "serde_json",
- "testcontainers",
- "tokio",
-]
-
-[[package]]
-name = "saci-connector-mariadb"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "futures-util",
+ "kdl",
+ "libc",
+ "libloading 0.9.0",
+ "mimalloc",
  "mysql_async",
  "mysql_common",
+ "num_cpus",
+ "object_store 0.14.2",
+ "openraft",
  "opentelemetry",
- "rand 0.10.3",
- "rcgen",
- "rustls",
- "saci-connector",
- "saci-core",
- "serde",
- "serde_json",
- "tempfile",
- "testcontainers",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "saci-connector-nats"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "async-nats",
- "async-trait",
- "bytes",
- "futures-util",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-arrow-ipc",
- "saci-transformer-ndjson",
- "serde",
- "serde_json",
- "testcontainers",
- "tokio",
-]
-
-[[package]]
-name = "saci-connector-opentelemetry"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "base64 0.23.1",
- "bytes",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
+ "opentelemetry-otlp",
+ "opentelemetry-prometheus",
  "opentelemetry-proto",
- "prost",
- "reqwest",
- "rustls",
- "saci-connector",
- "saci-core",
- "serde",
- "serde_json",
- "subtle",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "saci-connector-postgresql"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-buffer",
- "arrow-schema",
- "async-trait",
- "base64 0.23.1",
- "bytes",
- "futures-util",
- "opentelemetry",
+ "opentelemetry_sdk",
+ "parquet",
+ "pollster 1.0.1",
+ "postcard",
  "postgres-protocol",
+ "prometheus",
+ "prost",
+ "quinn",
  "rand 0.10.3",
+ "rayon",
+ "rcgen",
+ "rdkafka",
+ "redb",
+ "reqwest",
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
- "saci-connector",
- "saci-core",
+ "rustls-platform-verifier",
+ "saci-macros",
  "serde",
+ "serde_arrow",
+ "serde_bytes",
+ "serde_json",
+ "sha3",
+ "subtle",
  "tempfile",
  "testcontainers",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
- "tracing",
-]
-
-[[package]]
-name = "saci-connector-redb"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "redb",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-csv",
- "saci-transformer-parquet",
- "serde",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "saci-connector-s3"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "chrono",
- "futures-util",
- "object_store 0.14.2",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-csv",
- "saci-transformer-ndjson",
- "saci-transformer-parquet",
- "serde",
- "tempfile",
- "testcontainers",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "saci-connector-saci"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-ipc",
- "arrow-schema",
- "async-trait",
- "opentelemetry",
- "opentelemetry-prometheus",
- "opentelemetry_sdk",
- "prometheus",
- "saci-connector",
- "saci-core",
- "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tower-http 0.7.1",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "saci-connector-tcp"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-arrow-ipc",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "saci-connector-turso"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "base64 0.23.1",
- "dotenvy",
- "opentelemetry",
- "saci-connector",
- "saci-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
  "turso",
-]
-
-[[package]]
-name = "saci-connector-udp"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "futures",
- "saci-connector",
- "saci-core",
- "saci-transformer",
- "saci-transformer-arrow-ipc",
- "saci-transformer-ndjson",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "saci-core"
-version = "0.1.0"
-dependencies = [
- "arrow-arith",
- "arrow-array",
- "arrow-buffer",
- "arrow-cast",
- "arrow-ipc",
- "arrow-ord",
- "arrow-schema",
- "arrow-select",
- "async-trait",
- "criterion",
- "datafusion",
- "fnv",
- "futures",
- "mimalloc",
- "num_cpus",
- "pollster 1.0.1",
- "postcard",
- "rand 0.10.3",
- "rayon",
- "serde",
- "serde_arrow",
- "serde_json",
- "sha3",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "saci-inspector-wire"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
+ "url",
+ "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
+ "zstd 0.14.2",
 ]
 
 [[package]]
@@ -6646,226 +6323,24 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
- "saci-processor",
- "serde",
  "syn 3.0.7",
- "tokio",
 ]
-
-[[package]]
-name = "saci-plugin"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-ipc",
- "arrow-schema",
- "base64 0.23.1",
- "pollster 1.0.1",
- "saci-core",
- "saci-plugin-abi",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "saci-plugin-abi"
-version = "0.1.0"
 
 [[package]]
 name = "saci-plugin-smoketest"
 version = "0.1.0"
 dependencies = [
- "saci-plugin",
+ "saci",
  "serde",
-]
-
-[[package]]
-name = "saci-processor"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-ipc",
- "arrow-schema",
- "pollster 1.0.1",
- "saci-core",
- "saci-macros",
- "serde",
- "serde_arrow",
 ]
 
 [[package]]
 name = "saci-processor-smoketest"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "wit-bindgen 0.62.0",
-]
-
-[[package]]
-name = "saci-service"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-buffer",
- "arrow-ipc",
- "arrow-schema",
- "async-nats",
- "async-trait",
- "axum",
- "base64 0.23.1",
- "clap",
- "clickhouse",
- "criterion",
- "dotenvy",
- "fnv",
- "futures",
- "futures-util",
- "hex",
- "libc",
- "libloading 0.9.0",
- "mimalloc",
- "mysql_async",
- "num_cpus",
- "openraft",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-prometheus",
- "opentelemetry_sdk",
- "parquet",
- "postcard",
- "prometheus",
- "rand 0.10.3",
- "rayon",
- "rdkafka",
- "redb",
- "reqwest",
- "rustls",
- "saci-config",
- "saci-connector",
- "saci-connector-channel",
- "saci-connector-clickhouse",
- "saci-connector-file",
- "saci-connector-http",
- "saci-connector-kafka",
- "saci-connector-mariadb",
- "saci-connector-nats",
- "saci-connector-opentelemetry",
- "saci-connector-postgresql",
- "saci-connector-redb",
- "saci-connector-s3",
- "saci-connector-saci",
- "saci-connector-tcp",
- "saci-connector-turso",
- "saci-connector-udp",
- "saci-core",
- "saci-inspector-wire",
- "saci-plugin-abi",
- "saci-transformer",
- "saci-transformer-arrow-ipc",
- "saci-transformer-avro",
- "saci-transformer-csv",
- "saci-transformer-ndjson",
- "saci-transformer-parquet",
- "serde",
- "serde_arrow",
- "serde_bytes",
- "serde_json",
- "sha3",
- "tempfile",
- "testcontainers",
- "tokio",
- "tokio-postgres",
- "tokio-util",
- "tower",
- "tower-http 0.7.1",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "turso",
- "uuid",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
-name = "saci-transformer"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "saci-config",
- "saci-core",
- "tempfile",
-]
-
-[[package]]
-name = "saci-transformer-arrow-ipc"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-cast",
- "arrow-ipc",
- "arrow-schema",
- "arrow-select",
- "saci-core",
- "saci-transformer",
- "tempfile",
-]
-
-[[package]]
-name = "saci-transformer-avro"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-avro",
- "arrow-cast",
- "arrow-schema",
- "arrow-select",
- "saci-core",
- "saci-transformer",
- "tempfile",
-]
-
-[[package]]
-name = "saci-transformer-csv"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-csv",
- "arrow-schema",
- "arrow-select",
- "saci-core",
- "saci-transformer",
- "tempfile",
-]
-
-[[package]]
-name = "saci-transformer-ndjson"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-json",
- "arrow-schema",
- "saci-core",
- "saci-transformer",
- "tempfile",
-]
-
-[[package]]
-name = "saci-transformer-parquet"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "arrow-select",
- "bytes",
- "parquet",
- "saci-core",
- "saci-transformer",
- "tempfile",
 ]
 
 [[package]]
@@ -9186,7 +8661,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 name = "windowing-session-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "serde_arrow",
  "wit-bindgen 0.62.0",
@@ -9196,7 +8671,7 @@ dependencies = [
 name = "windowing-sliding-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "serde_arrow",
  "wit-bindgen 0.62.0",
@@ -9206,7 +8681,7 @@ dependencies = [
 name = "windowing-tumbling-plugin"
 version = "0.1.0"
 dependencies = [
- "saci-plugin",
+ "saci",
  "serde",
  "serde_arrow",
 ]
@@ -9215,7 +8690,7 @@ dependencies = [
 name = "windowing-tumbling-wasm"
 version = "0.1.0"
 dependencies = [
- "saci-processor",
+ "saci",
  "serde",
  "serde_arrow",
  "wit-bindgen 0.62.0",

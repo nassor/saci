@@ -14,8 +14,8 @@ value = "None: rows arrive already typed, so no transformer is named"
 label = "Run modes"
 value = "Any: every mode reaches EOF once it is caught up"
 [[extra.facts]]
-label = "In the default build"
-value = "no: build with <code>--features connector-mariadb</code>"
+label = "In the server build"
+value = "no: build with <code>--features server,connector-mariadb</code>"
 +++
 A workflow reads changes out of one table on a MariaDB or MySQL server, processes the rows, and
 writes the result into a table on the same or another server. One connector serves both products:
@@ -77,9 +77,9 @@ MySQL 8.4 and 9.
 
 ## What you need
 
-- A binary built with `--features connector-mariadb`; MariaDB and MySQL are one of eight
-  connectors that need a specific service installed and running, so they sit outside the default
-  build.
+- A binary built with `--features server,connector-mariadb`; MariaDB and MySQL are one of eight
+  connectors that need a specific service installed and running, so they sit outside the `server`
+  feature.
 - A reachable server. One in a container is enough. These commands start one of each, with the
   settings the `cdc_binlog` mode needs. Run one of them; they run the same on Linux, macOS and
   Windows (PowerShell):
@@ -420,7 +420,7 @@ Linux/macOS:
 
 ```bash
 export SACI_MARIADB_DSN='mysql://root:saci@127.0.0.1:3306/saci'
-cargo run -p saci-connector-mariadb --example mariadb_roundtrip
+cargo run -p saci --features connector-mariadb --example mariadb_roundtrip
 ```
 
 </div>
@@ -432,7 +432,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_MARIADB_DSN = "mysql://root:saci@127.0.0.1:3306/saci"
-cargo run -p saci-connector-mariadb --example mariadb_roundtrip
+cargo run -p saci --features connector-mariadb --example mariadb_roundtrip
 ```
 
 </div>
@@ -777,8 +777,7 @@ needs an IP subject alternative name. `verify_ca` is meant to check the chain on
 host-name skip does not work with the TLS library in this build, so today it checks the host name
 too and refuses a certificate that names another host, as `verify_identity` does. Connect by a name
 the certificate carries, or use `required` for an encrypted but unverified session.
-Anything but `disabled` needs the `tls` feature, which the
-`connector-mariadb` service feature turns on. A `reconnect` child takes `max_attempts` `3`,
+TLS is always compiled in. A `reconnect` child takes `max_attempts` `3`,
 `base_delay_ms` `100`, `multiplier` `2.0`, `max_delay_ms` `30000` and `jitter` `0.1`. Nothing in the
 connector logs a DSN, user or password: messages name the target as `host:port/db`.
 
@@ -971,7 +970,6 @@ refusals come when the node is built; the server refusals come on the first drai
 |---|---|
 | `connection.dsn must be a 'mysql://' or 'mariadb://' URL` | use one of those schemes |
 | `connection.dsn names no database, so mode.table '{t}' must be written schema.table` | write `schema.table`, or put a database in the DSN; the sink says `table '{t}'` |
-| `connection.ssl_mode '{mode}' needs the 'tls' feature of saci-connector-mariadb` | use a build carrying TLS, or set `ssl_mode "disabled"` |
 | `connection.reconnect.max_attempts must be at least 1` | raise it; `multiplier` must be at least `1.0` and `jitter` within `0.0` to `1.0` |
 | `schema_fields declares '{name}' more than once` | declare each column once |
 | `field '{name}': type "decimal128" requires 'precision'` | add `precision` and `scale` |

@@ -38,17 +38,17 @@ usage: cargo xtask bench <bench> [options] [-- <extra criterion args>]
 /// Each benchmark, the package whose `benches/` holds it, and the features that
 /// package needs for it to compile.
 const BENCHES: &[(&str, &str, &str)] = &[
-    ("tpch_q6", "saci-core", ""),
-    ("tpch_q1", "saci-core", ""),
-    ("parallelism", "saci-core", ""),
-    ("parallelism_compute", "saci-core", ""),
-    ("pipeline", "saci-core", ""),
-    ("ipc_checkpoint", "saci-core", ""),
-    ("batch_vs_stream", "saci-core", "io"),
-    ("vs_datafusion_q6", "saci-core", ""),
+    ("tpch_q6", "saci", ""),
+    ("tpch_q1", "saci", ""),
+    ("parallelism", "saci", ""),
+    ("parallelism_compute", "saci", ""),
+    ("pipeline", "saci", ""),
+    ("ipc_checkpoint", "saci", ""),
+    ("batch_vs_stream", "saci", "io"),
+    ("vs_datafusion_q6", "saci", ""),
     // Needs the smoketest component on disk first:
     // `cargo build --release -p saci-processor-smoketest --target wasm32-wasip2`.
-    ("wasm_roundtrip", "saci-service", "service,wasm"),
+    ("wasm_roundtrip", "saci", "service,wasm-host"),
 ];
 
 /// The published numbers are taken with these flags; changing them invalidates
@@ -354,7 +354,7 @@ mod tests {
     /// harness appends another: the last one is the binary that was just built.
     #[test]
     fn harness_path_takes_the_last_executable_line() {
-        let log = "   Compiling saci-core v0.1.0\n\
+        let log = "   Compiling saci v0.1.0\n\
              Executable benches/tpch_q6.rs (target/release/deps/tpch_q6-aaaa.exe)\n\
              Executable benches/tpch_q6.rs (target/release/deps/tpch_q6-bbbb.exe)\n";
         assert_eq!(

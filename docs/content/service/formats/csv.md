@@ -17,7 +17,7 @@ value = "One message per row"
 label = "Needs schema_fields"
 value = "Required reading a stream, and on messages"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 Comma separated text, on files and on messages alike. The format carries no types of its own, so

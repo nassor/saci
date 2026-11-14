@@ -1,9 +1,9 @@
 // SACI standalone service configuration driving TCP at both ends.
 //
 // Run:
-//   cargo run --features connector-tcp,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-tcp,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/tcp.kdl
-//   cargo run --features connector-tcp,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-tcp,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/tcp.kdl
 //
 // The source listens and the sink dials: `bind` is an address this process

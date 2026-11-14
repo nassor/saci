@@ -4,25 +4,25 @@
 //
 // Validate, without starting a cluster:
 //   SACI_NODE_ID=1 SACI_DATA_DIR=/tmp/saci-node-1 \
-//   cargo run --features service-cluster,wasm --bin saci-service -- validate \
+//   cargo run --features server,service-cluster,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/cluster.kdl
 //
 // Run three nodes, one per terminal or process-manager entry:
 //   Terminal 1:
 //     SACI_NODE_ID=1 SACI_BOOTSTRAP=true SACI_DATA_DIR=/tmp/saci-node-1 \
-//     cargo run --features service-cluster,wasm --bin saci-service -- serve \
+//     cargo run --features server,service-cluster,wasm-host --bin saci-service -- serve \
 //       --config examples/configs/cluster.kdl
 //   Terminal 2:
 //     SACI_NODE_ID=2 SACI_DATA_DIR=/tmp/saci-node-2 \
-//     cargo run --features service-cluster,wasm --bin saci-service -- serve \
+//     cargo run --features server,service-cluster,wasm-host --bin saci-service -- serve \
 //       --config examples/configs/cluster.kdl
 //   Terminal 3:
 //     SACI_NODE_ID=3 SACI_DATA_DIR=/tmp/saci-node-3 \
-//     cargo run --features service-cluster,wasm --bin saci-service -- serve \
+//     cargo run --features server,service-cluster,wasm-host --bin saci-service -- serve \
 //       --config examples/configs/cluster.kdl
 //
 // Components and systems have no configuration representation: the processor
-// declares them through `describe()`. See crates/saci-service/src/service/registry.rs.
+// declares them through `describe()`. See crates/saci/src/service/registry.rs.
 
 // Cluster mode runs the distributed Raft runner.
 mode "cluster"

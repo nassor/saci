@@ -1,6 +1,6 @@
 +++
 title = "A Rust processor"
-description = "The only language with an SDK: a plain wasm32-wasip2 cargo build, saci-processor, export_pipeline!, and a real component running under saci-service at the end."
+description = "The only language with an SDK: a plain wasm32-wasip2 cargo build, the saci processor feature, export_pipeline!, and a real component running under saci-service at the end."
 template = "page.html"
 weight = 1
 aliases = ["/processors/rust/", "/guests/rust/"]
@@ -90,7 +90,7 @@ rustup target add wasm32-wasip2
 ```
 Runs the same on Linux, macOS and Windows (PowerShell).
 
-Rust needs no separate SDK package. `saci-processor` 0.1.0 is the one dependency:
+Rust needs no separate SDK package. The `saci` crate with its `processor` feature is the one dependency:
 it carries the Arrow handling itself, re-exports `arrow_array` and
 `arrow_schema` at the version the host uses, and provides the four authoring
 macros. The other five languages install a `saci-sdk-*` package for exactly this.
@@ -112,7 +112,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-saci-processor = "0.1.0"
+saci = { version = "0.1", default-features = false, features = ["processor"] }
 # `#[derive(Component)]` requires `Serialize`/`Deserialize` alongside it, and
 # serde's own expansion names the literal `serde` crate at the call site, so it
 # is a direct dependency rather than a re-export.
@@ -125,9 +125,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 wit-bindgen = "0.62.0"
 ```
 
-The in-repo stage points `saci-processor` at
-`../../../../crates/saci-processor` by path instead of by version. Everything
-else is identical.
+The in-repo stage points `saci` at `../../../../crates/saci` by path through the workspace
+dependency instead of by version. Everything else is identical.
 
 ## 2. Declare the row type
 
@@ -135,7 +134,7 @@ The row type is the schema. `#[derive(Component)]` traces the Arrow schema off
 the Rust types, so nothing declares a field twice and nothing can drift.
 
 ```rust,name=The Order row in src/lib.rs
-use saci_processor::prelude::*;
+use saci::processor::prelude::*;
 
 #[derive(Component, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Order {
@@ -274,17 +273,17 @@ ingested.
 Run it from the repository root:
 
 ```bash,name=Validate the config then serve it
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate \
   --config examples/configs/standalone_polyglot.kdl --strict
 
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve \
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve \
   --config examples/configs/standalone_polyglot.kdl
 ```
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate --config examples/configs/standalone_polyglot.kdl --strict
-cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_polyglot.kdl
 ```
 
 `validate` reads the config, compiles the component and checks that every source

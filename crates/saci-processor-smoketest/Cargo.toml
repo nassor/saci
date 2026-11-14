@@ -6,12 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 # CI fixture, not a library a downstream consumer would depend on.
 publish = false
-description = "Minimal saci-processor consumer used as a build fixture and Arrow IPC round-trip fixture."
+description = "Minimal processor SDK consumer used as a build fixture and Arrow IPC round-trip fixture."
 
 # This crate exists to verify:
 #   1. `cargo build -p saci-processor-smoketest --target wasm32-wasip2`
 #      produces a valid WebAssembly component against the saci-pipeline world.
-#   2. The `export_pipeline!` macro in saci-processor expands cleanly against
+#   2. The `export_pipeline!` macro in `saci::processor` expands cleanly against
 #      `wit_bindgen::generate!`-generated `crate::bindings`.
 #   3. arrow-ipc stays pinned at the exact workspace version between host and
 #      processor. This crate is a workspace member, so the pin propagates through
@@ -25,7 +25,7 @@ description = "Minimal saci-processor consumer used as a build fixture and Arrow
 crate-type = ["cdylib"]
 
 [dependencies]
-saci-processor = { workspace = true }
+saci = { workspace = true, features = ["processor"] }
 serde          = { workspace = true }
 
 # The bindings generator. Gated on wasm32 because `src/lib.rs` gates the

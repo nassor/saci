@@ -19,7 +19,7 @@
     <dt>In one line</dt>
     <dd>The container that holds your data as <strong>columns, not rows</strong></dd>
     <dt>You need</dt>
-    <dd>Nothing beyond <code>saci-core</code>. No feature flag.</dd>
+    <dd>Nothing beyond the default <code>engine</code> feature of <code>saci</code>.</dd>
     <dt>Read this if</dt>
     <dd>You are about to define your first component, or you want to know why a <code>Row</code> index stops being valid</dd>
 </dl>
@@ -164,7 +164,7 @@
     <div class="code-cap"><span>Rust</span><em>a component is a struct plus a schema</em></div>
     <pre><code class="language-rust">use std::sync::Arc;
 use arrow_schema::{DataType, Field, Schema};
-use saci_core::prelude::*;
+use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]

@@ -39,7 +39,7 @@ Commands
   ui                        Rebuild the /ui dashboard bundle
   bench <name> [options]    Run a criterion benchmark through the harness
   pack-sdk                  Pack the five saci-sdk packages
-  check-wasm-processor      cargo check saci-core and the facade for wasm32-wasip2
+  check-wasm-processor      cargo check saci with --features processor for wasm32-wasip2
   processor-ipc-roundtrip   Host-to-processor Arrow IPC round-trip gate
   validate [--only=LIST]    Validate every runnable example config
   demo <name>               Build and run an example pipeline

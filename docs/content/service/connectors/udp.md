@@ -14,7 +14,7 @@ value = "Required on both halves; one message per datagram"
 label = "Run modes"
 value = "Stream for the source, any for the sink"
 [[extra.facts]]
-label = "In the default build"
+label = "In the server build"
 value = "yes"
 +++
 A workflow receives datagrams on a bound port, processes each as it arrives, and sends every result

@@ -20,9 +20,9 @@
 //
 // Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
 // then run the service and the publisher:
-//   cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve \
+//   cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
 //     --config examples/windowing/sliding/sliding.kdl
-//   cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+//   cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 
 mode "standalone"
 

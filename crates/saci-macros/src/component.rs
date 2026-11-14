@@ -44,13 +44,13 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     );
 
     Ok(quote! {
-        impl ::saci_processor::__rt::Component for #ident {
+        impl ::saci::processor::__rt::Component for #ident {
             fn name() -> &'static str {
                 #component_name
             }
 
-            fn schema() -> ::std::sync::Arc<::saci_processor::arrow_schema::Schema> {
-                use ::saci_processor::__rt::serde_arrow::schema::{SchemaLike as _, TracingOptions};
+            fn schema() -> ::std::sync::Arc<::saci::processor::arrow_schema::Schema> {
+                use ::saci::processor::__rt::serde_arrow::schema::{SchemaLike as _, TracingOptions};
 
                 // The three overrides are load-bearing, not stylistic.
                 // serde_arrow's defaults trace `String` to `LargeUtf8`,
@@ -62,12 +62,12 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     .bytes_as_large_binary(false);
 
                 let __saci_fields =
-                    ::std::vec::Vec::<::saci_processor::arrow_schema::FieldRef>::from_type::<Self>(
+                    ::std::vec::Vec::<::saci::processor::arrow_schema::FieldRef>::from_type::<Self>(
                         __saci_opts,
                     )
                     .expect(#expect_msg);
 
-                ::std::sync::Arc::new(::saci_processor::arrow_schema::Schema::new(__saci_fields))
+                ::std::sync::Arc::new(::saci::processor::arrow_schema::Schema::new(__saci_fields))
             }
         }
     })

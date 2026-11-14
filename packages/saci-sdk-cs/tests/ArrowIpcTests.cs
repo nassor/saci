@@ -17,7 +17,7 @@ public class ArrowIpcTests
     /// <summary>The command that produces the fixtures. They are gitignored, so
     /// tests that need them skip rather than fail when they are absent.</summary>
     private const string EmitHint =
-        "run `cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit` first";
+        "run `cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit` first";
 
     private const string Component = "Order";
     private const string AliveComponent = "__alive";
@@ -64,7 +64,7 @@ public class ArrowIpcTests
     {
         for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
         {
-            if (File.Exists(Path.Combine(dir.FullName, "crates", "saci-processor", "wit", "pipeline.wit")))
+            if (File.Exists(Path.Combine(dir.FullName, "crates", "saci", "wit", "pipeline.wit")))
             {
                 return dir.FullName;
             }

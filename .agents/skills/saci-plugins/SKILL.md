@@ -1,45 +1,43 @@
 ---
 name: saci-plugins
-description: Use when writing, building, hosting, testing or documenting a SACI native plugin: the saci-plugin SDK and export_plugin!, the saci-plugin-abi C ABI and its vtables, the NativePluginRuntime host behind saci-service's plugin feature, the saci-plugin-smoketest fixture, or examples/plugins/.
+description: Use when writing, building, hosting, testing or documenting a SACI native plugin: the saci::plugin SDK and export_plugin!, the saci::plugin_abi C ABI and its vtables, the NativePluginRuntime host behind the saci crate's plugin-host feature, the saci-plugin-smoketest fixture, or examples/plugins/.
 ---
 
 # SACI native plugins
 
 ## SDK and ABI
 
-- `saci-plugin`: the native plugin SDK. Wires a `Pipeline` to the `saci-plugin-abi` C ABI through
-  `export_plugin!`. An rlib; the plugin crate is the cdylib, and the host is `saci-service`'s
-  `plugin` feature.
-- `saci-plugin-abi`: the C ABI itself, the `saci_abi_version` and `saci_plugin_v1` exports, plus
-  the `SaciPluginV1` vtable (`describe`, `run_batch`, `free_buffer`, `destroy`) and the
-  `SaciHostV1` callback vtable.
+- `saci::plugin` (feature `plugin` of the `saci` crate): the native plugin SDK. Wires a `Pipeline`
+  to the C ABI in `saci::plugin_abi` through `saci::export_plugin!`. A plugin crate sets
+  `crate-type = ["cdylib"]` and depends on `saci = { workspace = true, features = ["plugin"] }`;
+  outside this repository, `saci = { version = "0.1", default-features = false, features =
+  ["plugin"] }`. The host is the `plugin-host` feature.
+- `saci::plugin_abi` (compiled for `plugin` or `plugin-host`; C header
+  `crates/saci/include/saci_plugin.h`): the C ABI itself, the `saci_abi_version` and
+  `saci_plugin_v1` exports, plus the `SaciPluginV1` vtable (`describe`, `run_batch`,
+  `free_buffer`, `destroy`) and the `SaciHostV1` callback vtable.
 - `saci-plugin-smoketest`: a minimal native plugin used as a CI fixture. cdylib only.
 
-The `saci` facade's `plugin` feature carries the authoring surface:
-
-- `plugin`: `Pipeline`, `System`, `Component`, `ProcessorState`, `RouteDecision` and
-  `export_plugin!`, for a native plugin: a cdylib the host `dlopen`s.
-
-`engine`, `processor` and `plugin` each enable `dep:saci-core` directly, so every name they
-share is one `pub use` in `crates/saci/src/lib.rs`, not three with a precedence rule between
-them: the types are identical regardless of which of saci-core's own `runtime`/`processor`
-features produced them. The three are still not meant to be enabled together: each authors a
-different artifact, a host binary, a wasm component, or a native shared library. Doing so is
-redundant, not ambiguous.
+`plugin` carries the authoring surface: `Pipeline`, `System`, `Component`, `ProcessorState`,
+`RouteDecision` and `export_plugin!`, for a native plugin: a cdylib the host `dlopen`s. `engine`,
+`processor` and `plugin` each author a different artifact, a host binary, a wasm component, or a
+native shared library. The types they share are one `pub use` in `crates/saci/src/lib.rs`, so
+enabling several together is redundant, not ambiguous.
 
 ## Host
 
-The host is `crates/saci-service/src/plugin/` (`mod.rs`, `loader.rs`, `manifest.rs`, `runtime.rs`,
-`host_impl.rs`) plus `crates/saci-service/src/service/plugin_loader.rs`, the builder-side loader
-`ServiceBuilder` calls for a `plugin` node. `saci-service`'s feature gate:
+The host is `crates/saci/src/plugin_host/` (`mod.rs`, `loader.rs`, `manifest.rs`, `runtime.rs`,
+`host_impl.rs`) plus `crates/saci/src/service/plugin_loader.rs`, the builder-side loader
+`ServiceBuilder` calls for a `plugin` node. The `saci` crate's feature gate:
 
-- `plugin`: native plugin host. `NativePluginRuntime` dlopens a shared library exporting the
-  `saci-plugin-abi` C ABI, validates its manifest, and runs each batch through its `run_batch` slot.
+- `plugin-host`: native plugin host, `saci::plugin_host`. `NativePluginRuntime` dlopens a shared
+  library exporting the `saci::plugin_abi` C ABI, validates its manifest, and runs each batch
+  through its `run_batch` slot.
 
-`plugin` is not in `saci-service`'s default bundle, so a stock
-`cargo install saci-service` binary cannot host a `plugin` node. It still parses one: the
-config schema is the same in every build, and `validate_build_capabilities`
-(skill `saci-service`) refuses the file naming `--features plugin`.
+`plugin-host` is not in the `server` bundle, so a stock `cargo install saci --features server`
+binary cannot host a `plugin` node. It still parses one: the config schema is the same in every
+build, and `validate_build_capabilities` (skill `saci-service`) refuses the file naming
+`--features plugin-host`.
 
 `NativePluginRuntime` maps its validated manifest into `RuntimeDescriptorInfo`, so a `plugin` node
 reports the plugin manifest's name as `name()`. Metric attribution rides
@@ -59,7 +57,7 @@ reports such a workflow as `restartable: false` and the control plane answers 40
 
 `crates/saci-plugin-smoketest` is a `cdylib`, so `cargo test --workspace` does not build it: a
 cdylib-only member has no test target for cargo to reach.
-`crates/saci-service/tests/{plugin_roundtrip,plugin_branching,plugin_metrics}.rs` assert the
+`crates/saci/tests/{plugin_roundtrip,plugin_branching,plugin_metrics}.rs` assert the
 artifact exists and `connector_matrix.rs` resolves it through `Fixtures::resolve`, so build it
 first:
 
@@ -75,23 +73,24 @@ The artifact name is platform specific: `target/debug/libsaci_plugin_smoketest.s
 
 ## Examples
 
-- `examples/plugins/`: native-plugin proofs, `native_plugin.rs` (a `saci-service` example loading
-  the `saci-plugin-smoketest` fixture) plus `settle-go/`, the Go cross-language plugin
-  `cargo xtask plugins` builds.
+- `examples/plugins/`: native-plugin proofs, `native_plugin.rs` (a `saci` example, feature
+  `plugin-host`, loading the `saci-plugin-smoketest` fixture) plus `settle-go/`, the Go
+  cross-language plugin `cargo xtask plugins` builds.
 - `examples/branching/plugin/`: `branching-plugin`, running the same logic as its wasm twin.
 - `examples/windowing/tumbling/plugin/`: `windowing-tumbling-plugin`, running the same logic as its
   wasm twin. Skill `saci-service` describes both workflows.
 
 ## Tests
 
-`crates/saci-service/tests/{plugin_roundtrip,plugin_branching,plugin_metrics}.rs` assert the
+`crates/saci/tests/{plugin_roundtrip,plugin_branching,plugin_metrics}.rs` assert the
 artifact exists; `connector_matrix.rs` runs the native plugin as one of its three processor
 runtimes and resolves the artifact through `Fixtures::resolve`.
 
 ## Changing a plugin
 
-1. An ABI change touches `saci-plugin-abi` (`saci_abi_version`, `SaciPluginV1`, `SaciHostV1`),
-   `saci-plugin`'s `export_plugin!`, the host's manifest validation in `NativePluginRuntime`,
+1. An ABI change touches `crates/saci/src/plugin_abi.rs` and `crates/saci/include/saci_plugin.h`
+   (`saci_abi_version`, `SaciPluginV1`, `SaciHostV1`), `export_plugin!` in
+   `crates/saci/src/plugin.rs`, the host's manifest validation in `NativePluginRuntime`,
    `saci-plugin-smoketest`, and `examples/plugins/settle-go`, in one change.
 2. A behaviour visible to the matrix (a new runtime kind, a new rejection) updates
    `connector_matrix.rs` (skill `saci-connectors`).

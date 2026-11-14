@@ -16,11 +16,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arrow_array::{ArrayRef, Float64Array, RecordBatch, StringArray};
 use async_trait::async_trait;
 
-use saci_service::SaciError;
-use saci_service::SystemConfig;
-use saci_service::dataset::Dataset;
-use saci_service::pipeline::Pipeline;
-use saci_service::system::{ParallelSystem, System, SystemMeta, WriteSet};
+use saci::SaciError;
+use saci::SystemConfig;
+use saci::dataset::Dataset;
+use saci::pipeline::Pipeline;
+use saci::system::{ParallelSystem, System, SystemMeta, WriteSet};
 
 use crate::components::{Invoice, Order};
 use crate::resources::{FxRateTable, InventoryCatalog, NodeId, TaxRateTable};

@@ -132,11 +132,11 @@ The config file reads the environment too, through `${VAR}` and
 The repository ships runnable configs under `examples/configs/`. Each names one
 system, so copy the one nearest your own and edit its `config` blocks.
 
-| Config | What it runs | In the default build |
+| Config | What it runs | In the server build |
 |---|---|---|
 | `standalone.kdl` | CSV in, one processor, CSV out: [File](@/service/connectors/file.md) | yes |
 | `standalone_wasm.kdl` | the order-processing component over CSV: [File](@/service/connectors/file.md) | yes |
-| `standalone_plugin.kdl` | the same shape with a native plugin: [Plugins in a workflow](@/service/plugins/_index.md) | no: `--features plugin` |
+| `standalone_plugin.kdl` | the same shape with a native plugin: [Plugins in a workflow](@/service/plugins/_index.md) | no: `--features plugin-host` |
 | `standalone_polyglot.kdl` | a processor built from another language: [Build your own processor](@/service/processors/build/_index.md) | yes, once the component is built |
 | `nats.kdl` | JetStream at both ends: [NATS](@/service/connectors/nats.md) | no: `--features connector-nats` |
 | `postgresql.kdl` | logical replication into a sink table: [PostgreSQL](@/service/connectors/postgresql.md) | no: `--features connector-postgresql` |
@@ -151,7 +151,7 @@ system, so copy the one nearest your own and edit its `config` blocks.
 | `turso.kdl` | rows read and written in an embedded or synced database: [Turso](@/service/connectors/turso.md) | no: `--features connector-turso` |
 | `redb.kdl` | a stream run persisting its cursors and priors: [Run modes and persistence](@/service/config/run-modes.md) | yes |
 | `cluster.kdl` | a three-node cluster template: [Running a cluster](@/service/operate/cluster.md) | no: `--features service-cluster` |
-| `extension_example.kdl` | the template for your own source and sink factories: [Embedding saci-service](@/library/service/_index.md) | no: `MongoSource` and `ClickHouseSink` come from no connector crate, so the stock binary cannot run it at any feature level |
+| `extension_example.kdl` | the template for your own source and sink factories: [Embedding saci-service](@/library/service/_index.md) | no: `MongoSource` and `ClickHouseSink` are no built-in connector, so the stock binary cannot run it at any feature level; a custom server registers them with `saci::service::cli::main_with` |
 
 Validate one, then serve it:
 

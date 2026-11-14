@@ -13,7 +13,7 @@
 //! buffer, and the RecordBatch flatbuffer that describes their lengths, so it
 //! needs a real Arrow writer. `settlement` is the schema's only
 //! variable-length output, so it is the only column that needs one. This stage
-//! has one, via `saci-processor` and arrow-rs.
+//! has one, via `saci::processor` and arrow-rs.
 //!
 //! Running last also makes the ledger a cross-language check. Its total nets
 //! the Kotlin stage's `fee` out of the Python stage's `usd_amount`, over the
@@ -52,7 +52,7 @@
 
 #![deny(missing_docs)]
 
-use saci_processor::prelude::*;
+use saci::processor::prelude::*;
 
 /// Settlement outcome for a row the Go stage rejected.
 const REJECTED: &str = "REJECTED";
@@ -263,7 +263,7 @@ pub fn build() -> Pipeline {
 mod tests {
     use super::*;
     use pollster::block_on;
-    use saci_processor::arrow_schema::{DataType, Field, Schema};
+    use saci::processor::arrow_schema::{DataType, Field, Schema};
 
     fn order(id: i64, valid: bool, review_tier: i64) -> Order {
         Order {
@@ -426,7 +426,7 @@ mod tests {
             order(5, false, TIER_CLEAR),
         ])
         .expect("append rows");
-        data.insert_resource(saci_processor::ProcessorState::<Ledger>::default());
+        data.insert_resource(saci::processor::ProcessorState::<Ledger>::default());
 
         block_on(build().run_on(&mut data)).expect("run the pipeline");
 
@@ -440,7 +440,7 @@ mod tests {
         // `ledger` runs in a later stage than `settle`, so it saw the written
         // column rather than the empty one the batch arrived with.
         let state = data
-            .get_resource::<saci_processor::ProcessorState<Ledger>>()
+            .get_resource::<saci::processor::ProcessorState<Ledger>>()
             .expect("state resource");
         assert_eq!(
             state.rows,

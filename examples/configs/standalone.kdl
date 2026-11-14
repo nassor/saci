@@ -1,9 +1,9 @@
 // SACI standalone service configuration, built-in factories only.
 //
 // Run:
-//   cargo run --features connector-file,transformer-csv,wasm --bin saci-service -- validate \
+//   cargo run --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/standalone.kdl
-//   cargo run --features connector-file,transformer-csv,wasm --bin saci-service -- serve \
+//   cargo run --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/standalone.kdl
 //
 // The pipeline reads examples/configs/fixtures/orders.csv, runs a WASM processor
@@ -11,7 +11,7 @@
 // path, create the parent directory first.
 //
 // Components and systems have no configuration representation: the processor
-// declares them through `describe()`. See crates/saci-service/src/service/registry.rs.
+// declares them through `describe()`. See crates/saci/src/service/registry.rs.
 
 // Single process, no distributed coordination.
 mode "standalone"

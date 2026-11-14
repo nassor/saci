@@ -3,7 +3,7 @@
 Six processor components, each with its own language and componentization
 toolchain. These are the versions CI installs in the `Polyglot Processors` job
 and the versions `cargo xtask polyglot` is written against.
-`crates/saci-processor/PINS.md` covers the Rust-side and host-side pins; this
+`crates/saci/PINS.md` covers the Rust-side and host-side pins; this
 file covers everything the five non-Rust stages need.
 
 ## Required tools
@@ -171,7 +171,7 @@ seventh stage needs no host changes.
   directly, so `score.ts` holds one import, the bare `@nassor/saci-sdk`
   specifier. No polyglot stage consumes `examples/polyglot/generated/`; the
   Quick Start and native-plugin builds are its only consumers, and `cargo run
-  -p saci-service --features wasm --example polyglot_schema_emit -- emit`
+  -p saci --features wasm-host --example polyglot_schema_emit -- emit`
   regenerates it. `erasableSyntaxOnly` applies: no enums, no namespaces, no
   parameter properties.
 - **The codec compiles into the SDK's `dist/`, not as a bare specifier.** The
@@ -284,4 +284,4 @@ implementation, and the byte layout the five `saci-sdk` packages' codecs target.
 A patch bump there can change the buffer layout the Go, Python, TypeScript,
 Kotlin and C# stages walk. The `polyglot_chain` integration test is the
 regression gate: it asserts exact per-column values produced by all six
-processors. See `crates/saci-processor/PINS.md` for the full upgrade policy.
+processors. See `crates/saci/PINS.md` for the full upgrade policy.

@@ -391,7 +391,7 @@ func firstSegment(t *testing.T, stream []byte) []byte {
 // cannot be shared. A rename of the emitter has to land in both.
 const (
 	fixtureDir  = "../../../examples/polyglot/generated"
-	fixtureHint = "run `cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit` first"
+	fixtureHint = "run `cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit` first"
 )
 
 // readFixture reads a generated file, skipping when the emitter has not run.

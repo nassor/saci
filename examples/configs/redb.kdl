@@ -1,9 +1,9 @@
 // SACI standalone service configuration backed by a local redb store.
 //
 // Run:
-//   cargo run --features connector-file,transformer-csv --bin saci-service -- validate \
+//   cargo run --features server,connector-file,transformer-csv --bin saci-service -- validate \
 //     --config examples/configs/redb.kdl
-//   cargo run --features connector-file,transformer-csv --bin saci-service -- serve \
+//   cargo run --features server,connector-file,transformer-csv --bin saci-service -- serve \
 //     --config examples/configs/redb.kdl
 //
 // With the `store` block present, `serve` persists the raw config file to the

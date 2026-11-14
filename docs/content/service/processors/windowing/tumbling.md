@@ -209,8 +209,8 @@ Every key of the block is listed under
 - A clone of the repository, from the root of which every command runs.
 - Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`.
 - Docker for NATS and PostgreSQL.
-- NATS and PostgreSQL are opt-in connectors, and this config also needs `plugin`: the commands
-  below pass `--features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin`.
+- NATS and PostgreSQL are opt-in connectors, and this config also needs `plugin-host`: the commands
+  below pass `--features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host`.
 
 ## 1. Build the processors
 
@@ -237,7 +237,7 @@ Both `window` blocks are checked at load time. On macOS and Windows set
 Linux:
 
 ```bash,name=Validate the tumbling config
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate \
   --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 
@@ -245,7 +245,7 @@ macOS:
 
 ```bash,name=Validate with the dylib name
 SACI_PLUGIN_LIB=target/release/libwindowing_tumbling_plugin.dylib \
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate \
   --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 
@@ -253,7 +253,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/release/windowing_tumbling_plugin.dll"
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- validate --config examples/windowing/tumbling/tumbling.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 
 Expected output ends with `OK: all declared types resolved in built-in
@@ -290,7 +290,7 @@ Get-Content examples/windowing/schema.sql | docker compose -f examples/windowing
 Linux/macOS:
 
 ```bash,name=Start the service
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve \
   --config examples/windowing/tumbling/tumbling.kdl
 ```
 
@@ -298,7 +298,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/release/windowing_tumbling_plugin.dll"
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm,plugin -- serve --config examples/windowing/tumbling/tumbling.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve --config examples/windowing/tumbling/tumbling.kdl
 ```
 
 This config enables the inspector and binds `127.0.0.1:8080`, so the startup
@@ -310,7 +310,7 @@ until the publisher runs. Leave this terminal running.
 In another terminal:
 
 ```bash,name=Run the publisher
-cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
+cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 ```
 
 Runs the same on all three platforms. The publisher takes `--count` (0 runs

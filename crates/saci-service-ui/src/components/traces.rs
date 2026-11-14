@@ -30,9 +30,9 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
+use crate::wire::{LogRecord, SpanRecord, Topology, TraceDetail, TraceSummary};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use saci_inspector_wire::{LogRecord, SpanRecord, Topology, TraceDetail, TraceSummary};
 
 use crate::api;
 use crate::components::Swatch;

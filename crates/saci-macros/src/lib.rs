@@ -1,7 +1,7 @@
 //! Derive and attribute macros for the SACI processor SDK.
 //!
-//! Re-exported from `saci-processor`; a processor crate depends on that and
-//! never on this crate directly. Four macros cover a whole processor:
+//! Re-exported from `saci::processor`; a processor crate depends on `saci` with
+//! `features = ["processor"]` and never on this crate directly. Four macros cover a whole processor:
 //!
 //! | Macro                    | Applies to                                        | Generates                                              |
 //! |--------------------------|---------------------------------------------------|--------------------------------------------------------|
@@ -15,13 +15,13 @@
 //!
 //! # Paths in the expansions
 //!
-//! Generated code names `::saci_processor::...`, so `saci-processor` must be a
+//! Generated code names `::saci::processor::...`, so `saci` must be a
 //! direct dependency of the crate using these macros. Two references are
 //! deliberately unqualified instead:
 //!
 //! - `crate::bindings`, the `wit_bindgen::generate!` module `#[processor]`
 //!   emits. WIT bindings are caller-side, so this must resolve to the processor
-//!   crate, not to `saci-processor`.
+//!   crate, not to `saci`.
 //! - `crate::saci_config_get`, which `#[processor]` emits for the same reason
 //!   and a two-parameter `#[transform]` reads.
 //!
@@ -38,14 +38,14 @@ mod processor;
 mod system;
 mod util;
 
-/// The `saci:pipeline@0.3.0` world text, vendored from `saci-processor`.
+/// The `saci:pipeline@0.3.0` world text, vendored from `saci`.
 ///
 /// `#[processor]` splices it into `wit_bindgen::generate!({ inline: ... })`,
 /// whose `path:` alternative would resolve against each processor crate's
 /// own manifest directory and force every one of them to hand-write a
 /// `../../..` walk. Read from this crate's own `wit/` directory, not
-/// `saci-processor`'s: `cargo package`/`publish` never includes files that
-/// live outside the package being packaged, so a `../../saci-processor`
+/// `saci`'s: `cargo package`/`publish` never includes files that
+/// live outside the package being packaged, so a `../../saci`
 /// reference would silently drop out of a published `saci-macros` tarball
 /// and fail to compile from it. `wit/README.md` and
 /// `tests/wit_vendored.rs` keep the two copies from drifting.
@@ -98,7 +98,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[transform(component = Order)]
-/// pub fn settle(row: &mut Order) -> saci_processor::Result<()> {
+/// pub fn settle(row: &mut Order) -> saci::processor::Result<()> {
 ///     row.settlement = if row.valid { "SETTLED" } else { "REJECTED" }.to_string();
 ///     Ok(())
 /// }
@@ -113,7 +113,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[transform(component = Order)]
-/// pub fn settle(row: &mut Order, config: &saci_processor::Config) -> saci_processor::Result<()> {
+/// pub fn settle(row: &mut Order, config: &saci::processor::Config) -> saci::processor::Result<()> {
 ///     let floor = config.get("min_amount", 0.0)?;
 ///     # let _ = floor;
 ///     Ok(())
@@ -153,7 +153,7 @@ pub fn transform(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[fold(reads = Order, state = Ledger)]
-/// pub fn ledger(rows: &[Order], state: &mut Ledger) -> saci_processor::Result<()> {
+/// pub fn ledger(rows: &[Order], state: &mut Ledger) -> saci::processor::Result<()> {
 ///     state.settled_count += rows.len() as i64;
 ///     Ok(())
 /// }

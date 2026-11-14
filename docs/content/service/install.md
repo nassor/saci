@@ -1,6 +1,6 @@
 +++
 title = "Install saci-service"
-description = "Build the binary from a checkout with no feature flags, add the wasm32-wasip2 target, and confirm the version."
+description = "Install the binary with the server feature, add the wasm32-wasip2 target, and confirm the version."
 template = "page.html"
 weight = 1
 aliases = ["/quickstart/installation/"]
@@ -40,7 +40,7 @@ aliases = ["/quickstart/installation/"]
             <rect class="hd hd-ctl" x="160" y="28" width="190" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="160" y="40" width="190" height="8"/>
             <text class="t-lbl t-ctl" x="172" y="43">cargo install --path</text>
-            <text class="t-sm" x="172" y="70">the default bundle, no flags</text>
+            <text class="t-sm" x="172" y="70">the server feature bundle</text>
             <path class="arw arw-ctl" d="M350 54 H386" marker-end="url(#svc-inst-c)"/>
         </g>
         <g class="anim anim-3">
@@ -74,20 +74,23 @@ aliases = ["/quickstart/installation/"]
 
 ## 1. Install the binary
 
-The crates are not published to crates.io, so install from a checkout. The three
-commands run the same on Linux, macOS and Windows (PowerShell):
+The binary is the `saci-service` target of the `saci` crate, built with the `server`
+feature. Install it from a checkout, which the tutorial also needs. The three commands run
+the same on Linux, macOS and Windows (PowerShell):
 
 ```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
 git clone https://github.com/nassor/saci
 cd saci
-cargo install --path crates/saci-service
+cargo install --path crates/saci --features server
 ```
 
-No feature flags. The default build is what a running service needs on a machine with nothing
-else installed: the WebAssembly component runtime, seven connectors, five formats and windowed
+Without a checkout, `cargo install saci --features server` installs the same binary.
+
+The `server` feature is what a running service needs on a machine with nothing else
+installed: the WebAssembly component runtime, seven connectors, five formats and windowed
 aggregation.
 
-| Capability | In the default build |
+| Capability | In the `server` feature |
 |---|---|
 | Sources and sinks | File, redb, HTTP, TCP, UDP, SACI and in-process channels |
 | Formats | csv, ndjson, parquet, avro and arrow-ipc |
@@ -100,7 +103,7 @@ aggregation.
 | Turso | no: opt in with `--features connector-turso` |
 | ClickHouse | no: opt in with `--features connector-clickhouse` |
 | OpenTelemetry | no: opt in with `--features connector-opentelemetry` |
-| Native plugins | no: opt in with `--features plugin` |
+| Native plugins | no: opt in with `--features plugin-host` |
 | Cluster mode | no: opt in with `--features service-cluster` |
 
 `cargo install` writes the binary into the cargo bin directory, which the Rust
@@ -140,11 +143,11 @@ A `command not found` here means the cargo bin directory is not on your PATH.
 
 ## What stays opt-in
 
-A connector ships by default only when nothing has to be installed or already running for it to
+A connector ships in `server` only when nothing has to be installed or already running for it to
 work. PostgreSQL, MariaDB, NATS, S3, Kafka, Turso, ClickHouse and OpenTelemetry each need their own database,
 broker, object store or OTLP endpoint running before the connector does anything, so each sits
-outside the default build alongside native plugins and cluster mode. Add one by reinstalling with
-its flag, from the same checkout:
+outside `server` alongside native plugins and cluster mode. Add one by reinstalling with
+its flag after `server`, from the same checkout:
 
 - PostgreSQL: `--features connector-postgresql`.
 - MariaDB and MySQL: `--features connector-mariadb`.
@@ -160,7 +163,7 @@ its flag, from the same checkout:
 - OpenTelemetry needs a running OTLP endpoint. Install with `--features connector-opentelemetry`
   when you need [OpenTelemetry](@/service/connectors/opentelemetry.md).
 - Native plugins replace the sandbox with a shared library, so opting in is an
-  explicit choice. Install with `--features plugin`, then follow
+  explicit choice. Install with `--features plugin-host`, then follow
   [A Rust plugin](@/service/plugins/rust.md).
 - Cluster mode carries the replication stack, so a cluster node is a
   deliberate deployment choice. Install with `--features service-cluster`, then
@@ -171,10 +174,10 @@ cluster mode. It excludes only `conformance`, the Arrow IPC conformance corpus g
 switch, not a capability a running service needs.
 
 ```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
-cargo install --path crates/saci-service --features connector-kafka
+cargo install --path crates/saci --features server,connector-kafka
 ```
 
-`cargo install` replaces whatever it installed before, so the flag is the whole
+`cargo install` replaces whatever it installed before, so the feature list is the whole
 difference and the command is the same on every platform.
 
 ## Next

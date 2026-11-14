@@ -3,9 +3,9 @@
 //
 // The paths below are CWD-relative, so run from the repository root:
 //   cargo build --release -p order-processing-wasm --target wasm32-wasip2
-//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- validate \
+//   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate \
 //     --config examples/configs/standalone_wasm.kdl --strict
-//   cargo run -p saci-service --features connector-file,transformer-csv,wasm -- serve \
+//   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve \
 //     --config examples/configs/standalone_wasm.kdl
 //
 // It reads examples/configs/fixtures/order_processing_input.csv, runs the processor,

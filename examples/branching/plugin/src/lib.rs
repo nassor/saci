@@ -29,10 +29,10 @@
 
 use std::sync::Arc;
 
-use saci_plugin::RouteDecision;
-use saci_plugin::arrow_array::StringArray;
-use saci_plugin::arrow_schema::{DataType, Field, Schema};
-use saci_plugin::prelude::*;
+use saci::plugin::RouteDecision;
+use saci::plugin::arrow_array::StringArray;
+use saci::plugin::arrow_schema::{DataType, Field, Schema};
+use saci::plugin::prelude::*;
 
 /// A row of the demo workload: an id plus the priority that selects the branch.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -107,4 +107,4 @@ pub fn build() -> Pipeline {
     pipeline
 }
 
-saci_plugin::export_plugin!(build);
+saci::export_plugin!(build);

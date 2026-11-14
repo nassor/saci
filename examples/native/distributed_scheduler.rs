@@ -18,14 +18,14 @@ use arrow_array::{Float64Array, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use saci_service::SaciError;
-use saci_service::component::Component;
-use saci_service::dataset::Dataset;
-use saci_service::distributed::RedbSharedStore;
-use saci_service::distributed::runner::{DistributedRunner, RunnerConfig};
-use saci_service::distributed::strategy::CheckpointStrategy;
-use saci_service::pipeline::Pipeline;
-use saci_service::system::{SystemMeta, system_fn};
+use saci::SaciError;
+use saci::component::Component;
+use saci::dataset::Dataset;
+use saci::distributed::RedbSharedStore;
+use saci::distributed::runner::{DistributedRunner, RunnerConfig};
+use saci::distributed::strategy::CheckpointStrategy;
+use saci::pipeline::Pipeline;
+use saci::system::{SystemMeta, system_fn};
 
 /// A sales order with an amount and currency.
 #[derive(Debug, Serialize, Deserialize)]

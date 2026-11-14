@@ -8,7 +8,7 @@
 //! docker run -d --name saci-mariadb -p 3306:3306 -e MARIADB_ROOT_PASSWORD=saci \
 //!     -e MARIADB_DATABASE=saci mariadb:11.8
 //! export SACI_MARIADB_DSN='mysql://root:saci@127.0.0.1:3306/saci'
-//! cargo run -p saci-connector-mariadb --example mariadb_roundtrip
+//! cargo run -p saci --features connector-mariadb --example mariadb_roundtrip
 //! ```
 //!
 //! Any MariaDB or MySQL DSN works. Exits non-zero when the row counts or the
@@ -19,11 +19,13 @@ use std::process::ExitCode;
 use arrow_array::{Array, Decimal128Array, Int64Array, StringArray};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts};
-use saci_connector::from_kdl_str;
-use saci_connector_mariadb::{MariadbSink, MariadbSinkConfig, MariadbSource, MariadbSourceConfig};
-use saci_core::dataset::Dataset;
-use saci_core::io::sink::Sink;
-use saci_core::io::source::{Source, drain_into_dataset};
+use saci::connector::from_kdl_str;
+use saci::connector::mariadb::{
+    MariadbSink, MariadbSinkConfig, MariadbSource, MariadbSourceConfig,
+};
+use saci::dataset::Dataset;
+use saci::io::sink::Sink;
+use saci::io::source::{Source, drain_into_dataset};
 
 /// Rows inserted into the input table.
 const ROWS: i64 = 250;

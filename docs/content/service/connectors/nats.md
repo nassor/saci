@@ -14,8 +14,8 @@ value = "Required on both halves; one message per row, or per batch"
 label = "Run modes"
 value = "Stream, or any run mode with <code>stop_at_end</code>"
 [[extra.facts]]
-label = "In the default build"
-value = "no: build with <code>--features connector-nats</code>"
+label = "In the server build"
+value = "no: build with <code>--features server,connector-nats</code>"
 +++
 A workflow pulls messages off a JetStream stream, processes the rows, and publishes the result to
 another stream.
@@ -74,8 +74,8 @@ another stream.
 
 ## What you need
 
-- A binary built with `--features connector-nats`; NATS is one of eight connectors that need a
-  specific service installed and running, so it sits outside the default build.
+- A binary built with `--features server,connector-nats`; NATS is one of eight connectors that need a
+  specific service installed and running, so it sits outside the `server` feature.
 - A reachable NATS server with JetStream enabled. One in a container is enough:
 
 Runs the same on Linux, macOS and Windows (PowerShell):

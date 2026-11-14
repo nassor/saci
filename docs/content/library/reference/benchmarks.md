@@ -40,7 +40,7 @@ cargo xtask bench vs_datafusion_q6
 # Service-level per-item latency, native and WASM
 cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
 RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1" \
-  cargo run --release -p saci-service --features service,wasm --example stream_latency
+  cargo run --release -p saci --features service,wasm-host,connector-channel --example stream_latency
 ```
 
 The `cargo xtask bench` commands above run the same on Linux, macOS and
@@ -52,11 +52,11 @@ Windows (PowerShell):
 ```powershell
 cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
 $env:RUSTFLAGS = "-C target-cpu=native -C opt-level=3 -C codegen-units=1"
-cargo run --release -p saci-service --features service,wasm --example stream_latency
+cargo run --release -p saci --features service,wasm-host,connector-channel --example stream_latency
 ```
 
 The harness knows each benchmark's package and features, so do not pass your
-own. `batch_vs_stream` needs `saci-core`'s `io` feature, while `tpch_q6`,
+own. `batch_vs_stream` needs the `io` feature, while `tpch_q6`,
 `tpch_q1`, `vs_datafusion_q6`, `parallelism_compute` and `ipc_checkpoint` are
 built with no extra features. Cargo's metadata hash encodes the feature set, so
 a different `--features` list produces a *different binary*.
@@ -89,7 +89,7 @@ each. The systems, the DAG and the stage plan are identical. This benchmark
 holds the total at 100 000 rows of Q6-shaped work (a filter-and-compute
 `ParallelSystem` plus a sequential accumulator) and sweeps k through
 `Pipeline::run_stream`, so item size is the only variable. Source:
-`crates/saci-core/benches/batch_vs_stream.rs`.
+`crates/saci/benches/batch_vs_stream.rs`.
 
 <!-- fig:item-size -->
 <div class="dgm animate-in">
@@ -324,7 +324,7 @@ inline, one after another, or dispatch one `spawn_blocking` each. SACI gates tha
 choice on row count with `STAGE_INLINE_THRESHOLD`, which is 100 000. This
 benchmark sweeps a two-system stage across row counts. Neither system implements
 `run_slice`, so slice parallelism never applies and stage dispatch is isolated.
-Source: `crates/saci-core/benches/batch_vs_stream.rs`, the `stage_dispatch`
+Source: `crates/saci/benches/batch_vs_stream.rs`, the `stage_dispatch`
 group.
 
 <!-- fig:stage-cost -->
@@ -429,7 +429,7 @@ curve.
 ## TPC-H Q1: aggregation
 
 Aggregation over a 12-column lineitem batch with `GROUP BY (returnflag,
-linestatus)`. Source: `crates/saci-core/benches/tpch_q1.rs`.
+linestatus)`. Source: `crates/saci/benches/tpch_q1.rs`.
 
 <!-- fig:q1 -->
 <div class="dgm animate-in">
@@ -509,7 +509,7 @@ bar, longer on its own than the entire scalar baseline.
 
 Sum of revenue behind three compound predicates. Run twice: once on the
 12-column schema, once on a 30-column schema where 18 columns are never read.
-Source: `crates/saci-core/benches/tpch_q6.rs`.
+Source: `crates/saci/benches/tpch_q6.rs`.
 
 <!-- fig:q6 -->
 <div class="dgm animate-in">
@@ -602,7 +602,7 @@ not: `narrow_saci` is 910.2 µs. See the open items below.
 ## Slice parallelism
 
 SHA3-256 over 128-byte blobs, CPU-bound. 1M rows, 128 MB of input, 32 logical
-CPUs. Source: `crates/saci-core/benches/parallelism_compute.rs`.
+CPUs. Source: `crates/saci/benches/parallelism_compute.rs`.
 
 <!-- fig:slices -->
 <div class="dgm animate-in">
@@ -678,7 +678,7 @@ and the time returns to sequential, so the threshold gate does what it claims.
 
 Checkpoint encode and decode across 10 columns: three `i64`, three `f64`, two
 strings with 100 distinct values, one `bool`, one `Option<f64>`. Source:
-`crates/saci-core/benches/ipc_checkpoint.rs`. The 1-row and 1 000-row sizes
+`crates/saci/benches/ipc_checkpoint.rs`. The 1-row and 1 000-row sizes
 matter because stream mode round-trips one checkpoint *per item*.
 
 <!-- fig:ipc -->
@@ -810,7 +810,7 @@ that carries no state should return `None` rather than an empty dataset.
 ## Against DataFusion
 
 The same Q6 revenue sum, narrow schema, run through DataFusion 55 as SQL over a
-`MemTable`. Source: `crates/saci-core/benches/vs_datafusion_q6.rs`.
+`MemTable`. Source: `crates/saci/benches/vs_datafusion_q6.rs`.
 
 <!-- fig:datafusion -->
 <div class="dgm animate-in">
@@ -1013,7 +1013,7 @@ are where it does not.
   floor.
 
 The per-system tracing span costs **0.65%** of `stream_items_of_1` when
-`saci-core/tracing` is compiled in without an active subscriber, because
+the `tracing` feature is compiled in without an active subscriber, because
 `tracing` checks a global level filter before doing any work. A build with a
 subscriber attached pays for what it asked to record, which is an operator
 choice rather than framework overhead.

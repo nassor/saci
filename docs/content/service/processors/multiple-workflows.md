@@ -211,14 +211,14 @@ Validate the config. The channel pairing is checked here, before any connector o
 Linux/macOS:
 
 ```bash,name=Validate the two-workflow config
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate \
   --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 
 ```text,name=What validate prints
@@ -231,18 +231,18 @@ Then serve it, and publish into both subjects from a second terminal:
 Linux/macOS:
 
 ```bash,name=Serve the config
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
   --config examples/multi_workflow/multi_workflow.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve --config examples/multi_workflow/multi_workflow.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/multi_workflow/multi_workflow.kdl
 ```
 
 ```bash,name=Publish into both subjects
-cargo run -p saci-service --features connector-nats --example multi_workflow_publish -- --rate 20 --ts-step-ms 2000
+cargo run -p saci --features connector-nats --example multi_workflow_publish -- --rate 20 --ts-step-ms 2000
 ```
 
 Runs the same on all three platforms. The publisher sends `timestamp_ms`, `symbol` (AAPL, GOOG

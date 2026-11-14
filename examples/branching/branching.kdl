@@ -20,9 +20,9 @@
 //
 // Start NATS, then run the service and the publisher:
 //   docker run -d --name saci-nats -p 4222:4222 nats:2.11-alpine
-//   cargo run -p saci-service --features connector-file,connector-nats,transformer-csv,wasm,plugin -- serve \
+//   cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
 //     --config examples/branching/branching.kdl
-//   cargo run -p saci-service --features connector-nats --example branching_publish -- --rate 50
+//   cargo run -p saci --features connector-nats --example branching_publish -- --rate 50
 //
 // Every message lands in out-mirror.csv (source multicast), and each router
 // appends to exactly one of its branch files: priority "high" goes to

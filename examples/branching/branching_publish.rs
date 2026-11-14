@@ -8,7 +8,7 @@
 //! and each batch goes to exactly one branch.
 //!
 //! ```text
-//! cargo run -p saci-service --features connector-nats --example branching_publish -- --rate 50
+//! cargo run -p saci --features connector-nats --example branching_publish -- --rate 50
 //! ```
 //!
 //! Flags: `--count` (default 0, runs until Ctrl-C), `--rate` messages per

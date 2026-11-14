@@ -21,7 +21,7 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci-processor/wit`. The
+// The bindings are generated in place from `crates/saci/wit`. The
 // module and the `export_pipeline!` invocation below are gated on
 // `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
 // `component-type` custom section, neither of which the host target can link.
@@ -29,7 +29,7 @@
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        path: "../../../../crates/saci-processor/wit",
+        path: "../../../../crates/saci/wit",
         world: "saci-pipeline",
         generate_all,
     });
@@ -37,11 +37,11 @@ mod bindings {
 
 use std::sync::Arc;
 
-use saci_processor::ProcessorState;
-use saci_processor::arrow_array::{Float64Array, Int64Array, StringArray};
-use saci_processor::arrow_schema::{DataType, Field, FieldRef, Schema};
-use saci_processor::prelude::*;
-use saci_processor::windows::WindowSpec;
+use saci::processor::ProcessorState;
+use saci::processor::arrow_array::{Float64Array, Int64Array, StringArray};
+use saci::processor::arrow_schema::{DataType, Field, FieldRef, Schema};
+use saci::processor::prelude::*;
+use saci::processor::windows::WindowSpec;
 
 /// One row of the demo workload: a sale at an instant in time.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -350,12 +350,12 @@ pub fn build() -> Pipeline {
 }
 
 #[cfg(target_arch = "wasm32")]
-saci_processor::export_pipeline!(build, state = WindowState);
+saci::export_pipeline!(build, state = WindowState);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci_processor::__rt::{ProcessorStateSpec, Stateful};
+    use saci::processor::__rt::{ProcessorStateSpec, Stateful};
 
     fn geo() -> WindowGeometry {
         WindowGeometry {

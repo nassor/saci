@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use rand::RngExt;
 
-use saci_service::Dataset;
+use saci::Dataset;
 
 use crate::components::Order;
 use crate::store::FulfillmentStore;
@@ -113,7 +113,7 @@ fn random_order(rng: &mut impl rand::Rng) -> Order {
 }
 
 /// Serialise a batch of `Order` rows to Arrow IPC bytes via a `Dataset`.
-fn serialise_orders(orders: &[Order]) -> saci_service::SaciResult<Vec<u8>> {
+fn serialise_orders(orders: &[Order]) -> saci::SaciResult<Vec<u8>> {
     let mut dataset = Dataset::new();
     dataset.register_component::<Order>()?;
     dataset.append::<Order>(orders)?;

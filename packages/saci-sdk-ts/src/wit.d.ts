@@ -8,7 +8,7 @@
 // sees it.
 //
 // The three functions and the enum are the whole `host-io` interface of
-// `crates/saci-processor/wit/pipeline.wit`. `core.ts` restates their shape as
+// `crates/saci/wit/pipeline.wit`. `core.ts` restates their shape as
 // `HostIo`, and `index.ts` is the one place the two meet, so a drift in the WIT
 // package shows up as a type error there rather than as a trap inside a
 // component.

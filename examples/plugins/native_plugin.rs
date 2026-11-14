@@ -1,9 +1,9 @@
 //! Drive a SACI workload through a native plugin: a shared library the host
-//! opens with `dlopen`, talking the `saci-plugin-abi` C ABI.
+//! opens with `dlopen`, talking the `saci::plugin_abi` C ABI.
 //!
 //! ```bash
 //! cargo build -p saci-plugin-smoketest
-//! cargo run -p saci-service --features plugin --example native_plugin
+//! cargo run -p saci --features plugin-host --example native_plugin
 //! ```
 //!
 //! The fixture registers one `Counter` component with `id` and `seen`, and its
@@ -21,9 +21,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch};
-use saci_core::runtime::PipelineRuntime;
-use saci_service::dataset::Dataset;
-use saci_service::plugin::NativePluginRuntime;
+use saci::dataset::Dataset;
+use saci::plugin_host::NativePluginRuntime;
+use saci::runtime::PipelineRuntime;
 
 /// The component the smoketest fixture registers.
 const COMPONENT: &str = "Counter";
@@ -37,7 +37,7 @@ const IDS: [i64; 3] = [1, 2, 3];
 #[cfg(feature = "tracing")]
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,saci_service::plugin=trace"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,saci::plugin_host=trace"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .without_time()

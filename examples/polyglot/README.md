@@ -76,14 +76,14 @@ cargo xtask polyglot --only=kotlin,csharp
    `tracing` makes the processor host-io metrics visible:
 
 ```text
-cargo run -p saci-service --features wasm,tracing --example polyglot_orders
+cargo run -p saci --features wasm-host,tracing --example polyglot_orders
 ```
 
 3. Run the same assertions as an automated regression test. It soft-skips when
    `build/` is absent:
 
 ```text
-cargo test -p saci-service --features wasm --test polyglot_chain -- --nocapture
+cargo test -p saci --features server,wasm-host --test polyglot_chain -- --nocapture
 ```
 
 Each missing tool has its own exit code: 3 wasm-tools, 4 Go, 5
@@ -100,7 +100,7 @@ gitignored `examples/polyglot/generated/`, which also holds the WASI adapter
 builds consume those constants; no polyglot stage does. Regenerate them with:
 
 ```text
-cargo run -p saci-service --features wasm --example polyglot_schema_emit -- emit
+cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit
 ```
 
 | file | consumed by |
@@ -124,7 +124,7 @@ structurally or the load fails.
 | File / directory | What it is |
 |------------------|------------|
 | `PINS.md` | pinned toolchain versions and the platform caveats |
-| `polyglot_orders.rs` | the `saci-service` example that drives the chain |
+| `polyglot_orders.rs` | the `saci` example that drives the chain |
 | `schema_emit.rs` | the example that regenerates `generated/` |
 | `stages/go-validate/` | stage 1, Go, writes `valid` |
 | `stages/python-enrich/` | stage 2, Python, writes `usd_amount` and `usd_amount_display` |

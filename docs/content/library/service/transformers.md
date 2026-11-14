@@ -6,7 +6,7 @@ weight = 2
 +++
 # Writing a transformer
 
-A connector moves bytes and a transformer gives them meaning. `saci-transformer`
+A connector moves bytes and a transformer gives them meaning. `saci::transformer`
 holds five traits and one enum. Four of them are below, and
 `TransformerFactory` is under [Writing your own](#writing-your-own). Only
 `format` has no default: a transformer implements the surfaces it has, inherits
@@ -17,7 +17,7 @@ async plumbing.
 ## The traits
 
 ```rust,name=Every defaulted method returns unsupported or None
-// saci-transformer
+// saci::transformer
 pub trait Transformer: Send + Sync + 'static {
     fn format(&self) -> &'static str;
     fn open_reader(&self, input: std::fs::File, declared: Option<Arc<Schema>>)
@@ -57,16 +57,16 @@ decoder, so one decoder serves a whole TCP connection or Kafka consumer.
 
 ## The five built-ins
 
-One crate per format, each registering its factory under the name a `format` key
-selects.
+One module per format under `saci::transformer`, each behind its own feature and each
+registering its factory under the name a `format` key selects.
 
-| `format` | Struct | Crate |
-|---|---|---|
-| `csv` | `CsvTransformer` | `saci-transformer-csv` |
-| `ndjson` | `NdjsonTransformer` | `saci-transformer-ndjson` |
-| `parquet` | `ParquetTransformer` | `saci-transformer-parquet` |
-| `avro` | `AvroTransformer` | `saci-transformer-avro` |
-| `arrow-ipc` | `ArrowIpcTransformer` | `saci-transformer-arrow-ipc` |
+| `format` | Struct | Module | Feature |
+|---|---|---|---|
+| `csv` | `CsvTransformer` | `saci::transformer::csv` | `transformer-csv` |
+| `ndjson` | `NdjsonTransformer` | `saci::transformer::ndjson` | `transformer-ndjson` |
+| `parquet` | `ParquetTransformer` | `saci::transformer::parquet` | `transformer-parquet` |
+| `avro` | `AvroTransformer` | `saci::transformer::avro` | `transformer-avro` |
+| `arrow-ipc` | `ArrowIpcTransformer` | `saci::transformer::arrow_ipc` | `transformer-arrow-ipc` |
 
 `csv`, `ndjson` and `avro` answer `PerRow` to `message_shape`, one message per
 row; `parquet` and `arrow-ipc` answer `PerBatch`, one message per batch. A
@@ -75,13 +75,16 @@ neither.
 
 ## Writing your own
 
-An out-of-tree transformer is a crate that depends on `saci-core` for `SaciError`
-and `saci-transformer` for the traits, and on nothing else of SACI: no connector,
-no host. Implement `Transformer` for the codec and `TransformerFactory` for the
-name a `format` key selects it with.
+A format in this repository is a module in `crates/saci/src/transformer/<name>.rs` (with
+`transformer/<name>/transformer.rs` for the codec), declared in
+`crates/saci/src/transformer.rs` and enabled by a `transformer-<name>` entry in the `[features]`
+table of `crates/saci/Cargo.toml`. A transformer outside the repository is a crate that depends
+on `saci` with `transformer-contract`, which brings `SaciError` and the traits, and on nothing
+else of SACI: no connector, no host. Implement `Transformer` for the codec and
+`TransformerFactory` for the name a `format` key selects it with.
 
 ```rust,name=The factory reads options, the transformer it builds is shared
-// saci-transformer
+// saci::transformer
 pub trait TransformerFactory: Send + Sync + 'static {
     fn format_name(&self) -> &'static str;
     fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError>;
@@ -99,7 +102,7 @@ so a custom `csv` can stand in for the built-in one.
 
 ## Features
 
-On `saci-service`, one feature per transformer decides what
+With `service` on, one feature per transformer decides what
 `register_builtin_factories` installs: `transformer-csv`, `transformer-ndjson`,
 `transformer-parquet`, `transformer-avro` and `transformer-arrow-ipc`.
 `connector-kafka`, `connector-nats` and `connector-udp` each imply
@@ -107,7 +110,7 @@ On `saci-service`, one feature per transformer decides what
 any one of the four is runnable on its own.
 
 ```bash,name=connector-file implies no transformer, so pick one
-cargo build --features connector-file,transformer-csv,wasm
+cargo build -p saci --bin saci-service --no-default-features --features service,connector-file,transformer-csv,wasm-host
 ```
 
 <div class="note note-warn">

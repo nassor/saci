@@ -101,8 +101,8 @@ pub(crate) fn expand(args: ProcessorArgs, func: ItemFn) -> syn::Result<TokenStre
     let ProcessorArgs { name, state } = &args;
 
     let spec = match state {
-        Some(state) => quote! { ::saci_processor::__rt::Stateful<#state> },
-        None => quote! { ::saci_processor::__rt::NoState },
+        Some(state) => quote! { ::saci::processor::__rt::Stateful<#state> },
+        None => quote! { ::saci::processor::__rt::NoState },
     };
 
     let bindings = bindings_module();
@@ -122,7 +122,7 @@ pub(crate) fn expand(args: ProcessorArgs, func: ItemFn) -> syn::Result<TokenStre
 /// The world text is embedded via `inline:` rather than `path:`. A `path:` is
 /// resolved against the *calling* crate's `CARGO_MANIFEST_DIR`, so every
 /// processor crate would have to hand-write its own `../../..` walk to
-/// `crates/saci-processor/wit`. Inlining the text this crate already embedded at
+/// `crates/saci/wit`. Inlining the text this crate already embedded at
 /// its own compile time removes that per-crate path entirely.
 ///
 /// `default_bindings_module` is required, not decorative: `export!` expands to
@@ -203,17 +203,17 @@ fn host_io_shims() -> TokenStream {
 /// The `Guest` impl covering the two WIT exports, plus the `export!`
 /// handshake.
 ///
-/// A straight port of `saci_processor::export_pipeline!`: same descriptor
+/// A straight port of `saci::export_pipeline!`: same descriptor
 /// assembly, same state hooks, same error classification, same `RunMetrics`
 /// arithmetic, same `RouteDecision` read-back.
 fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStream {
     quote! {
         #[cfg(target_arch = "wasm32")]
         const _: () = {
-            use ::saci_processor::__rt::ProcessorStateSpec as _;
+            use ::saci::processor::__rt::ProcessorStateSpec as _;
 
-            static __SACI_PIPELINE: ::saci_processor::__rt::PipelineSlot =
-                ::saci_processor::__rt::PipelineSlot::new();
+            static __SACI_PIPELINE: ::saci::processor::__rt::PipelineSlot =
+                ::saci::processor::__rt::PipelineSlot::new();
 
             struct __SaciComponent;
 
@@ -235,7 +235,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                     // deterministic across runs and across host and processor.
                     let mut __saci_entries: Vec<(
                         &'static str,
-                        ::std::sync::Arc<::saci_processor::__rt::Schema>,
+                        ::std::sync::Arc<::saci::processor::__rt::Schema>,
                     )> = __saci_registry
                         .iter()
                         .map(|(name, entry)| (*name, entry.schema.clone()))
@@ -250,7 +250,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                             // load-time validation rejects zero-length schema
                             // bytes with a clean error.
                             let arrow_schema_ipc =
-                                ::saci_processor::__rt::schema_to_ipc_bytes(&schema)
+                                ::saci::processor::__rt::schema_to_ipc_bytes(&schema)
                                     .unwrap_or_default();
                             ComponentDescriptor {
                                 name: name.to_string(),
@@ -260,7 +260,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                         .collect();
 
                     let fingerprint =
-                        ::saci_processor::__rt::fingerprint_hex(__saci_registry.fingerprint());
+                        ::saci::processor::__rt::fingerprint_hex(__saci_registry.fingerprint());
 
                     PipelineDescriptor {
                         name: #name.to_string(),
@@ -287,7 +287,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                     let start = ::std::time::Instant::now();
 
                     let mut reader: &[u8] = &input[..];
-                    let mut dataset = ::saci_processor::__rt::Dataset::read_ipc(&mut reader)
+                    let mut dataset = ::saci::processor::__rt::Dataset::read_ipc(&mut reader)
                         .map_err(|e| RunError::Permanent(format!("ipc decode: {e}")))?;
 
                     // Measured before the state blob is merged, so `rows_in`
@@ -298,7 +298,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                         .map_err(|e| RunError::Permanent(format!("state restore: {e}")))?;
 
                     let pipeline = __SACI_PIPELINE.pipeline(#build_fn);
-                    let run_result = ::saci_processor::__rt::pollster::block_on(
+                    let run_result = ::saci::processor::__rt::pollster::block_on(
                         pipeline.run_on_with_stats(&mut dataset),
                     );
 
@@ -306,7 +306,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                         Ok(stats) => stats,
                         Err(err) => {
                             let (is_retryable, msg) =
-                                ::saci_processor::__rt::classify_run_error(&err);
+                                ::saci::processor::__rt::classify_run_error(&err);
                             return Err(if is_retryable {
                                 RunError::Retryable(msg)
                             } else {
@@ -320,7 +320,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                     let checkpoint = <#spec>::capture(&dataset)
                         .map_err(|e| RunError::Permanent(format!("state capture: {e}")))?;
                     let routes: Option<Vec<String>> = dataset
-                        .get_resource::<::saci_processor::__rt::RouteDecision>()
+                        .get_resource::<::saci::processor::__rt::RouteDecision>()
                         .map(|decision| decision.0.clone());
 
                     let mut output: Vec<u8> = Vec::new();

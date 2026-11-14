@@ -22,7 +22,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::time::Duration;
 
-use saci_inspector_wire::{Snapshot, Topology, WorkflowStatus};
+use crate::wire::{Snapshot, Topology, WorkflowStatus};
 
 use crate::api;
 use crate::components::{DlqView, LogsView, PipelinesView, TracesView};
@@ -318,7 +318,7 @@ fn Rail(
     let buffers = move || snapshot.get().map(|s| s.buffers);
     // One accessor for four counters of two widths: `BufferStats` counts
     // occupancy as `usize` and the drop total as `u64`.
-    let count = move |pick: fn(&saci_inspector_wire::BufferStats) -> u64| {
+    let count = move |pick: fn(&crate::wire::BufferStats) -> u64| {
         buffers().map_or_else(|| "…".to_string(), |b| pick(&b).to_string())
     };
 

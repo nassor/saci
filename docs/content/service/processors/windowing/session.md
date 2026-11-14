@@ -186,7 +186,7 @@ Every key of the block is listed under
 - Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`.
 - Docker for NATS and PostgreSQL.
 - NATS and PostgreSQL are both opt-in connectors: the commands below pass
-  `--features connector-nats,connector-postgresql,transformer-ndjson,wasm`.
+  `--features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host`.
 
 ## 1. Build the processor
 
@@ -202,7 +202,7 @@ The `window` block is checked at load time, and so is the agreement between the
 processor's `SessionTotal` schema and the sink's declared fields.
 
 ```bash,name=Validate the session config
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- validate --config examples/windowing/session/session.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate --config examples/windowing/session/session.kdl --strict
 ```
 
 Runs the same on all three platforms. Expected output ends with `OK: all
@@ -238,7 +238,7 @@ Get-Content examples/windowing/schema.sql | docker compose -f examples/windowing
 ## 4. Start the service
 
 ```bash,name=Start the service
-cargo run -p saci-service --features connector-nats,connector-postgresql,transformer-ndjson,wasm -- serve --config examples/windowing/session/session.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/windowing/session/session.kdl
 ```
 
 Runs the same on all three platforms. This config enables the inspector and
@@ -258,14 +258,14 @@ and one run of 400 messages produced a 130-second session. `--gap-every` and
 Linux/macOS:
 
 ```bash,name=Run the publisher with event-time gaps
-cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 \
+cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 \
   --gap-every 20 --gap-ms 30000
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci-service --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 --gap-every 20 --gap-ms 30000
+cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 --gap-every 20 --gap-ms 30000
 ```
 
 Twenty messages 2000 ms apart is one burst spanning 38 000 ms of event time.

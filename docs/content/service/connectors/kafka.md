@@ -14,8 +14,8 @@ value = "Required on both halves; one message per row, or per batch"
 label = "Run modes"
 value = "Stream, or any run mode with <code>stop_at_end</code> or <code>compacted</code>"
 [[extra.facts]]
-label = "In the default build"
-value = "no: build with <code>--features connector-kafka</code>"
+label = "In the server build"
+value = "no: build with <code>--features server,connector-kafka</code>"
 +++
 A workflow drains one topic, processes the rows, and produces the result to another topic.
 
@@ -73,8 +73,8 @@ A workflow drains one topic, processes the rows, and produces the result to anot
 
 ## What you need
 
-- A binary built with `--features connector-kafka`; Kafka is one of eight connectors that need a
-  specific service installed and running, so it sits outside the default build, alongside NATS,
+- A binary built with `--features server,connector-kafka`; Kafka is one of eight connectors that need a
+  specific service installed and running, so it sits outside the `server` feature, alongside NATS,
   PostgreSQL, MariaDB, S3, Turso, ClickHouse and OpenTelemetry.
 - A reachable broker. One in a container is enough:
 
