@@ -192,7 +192,7 @@ This is a playground project exploring two things:
    maintenance and review.
 2. The design space of a Rust-native batch engine with WebAssembly extensibility.
 
-It is not production-ready. Contributions and feedback are welcome.
+Contributions and feedback are welcome.
 
 ## License
 
