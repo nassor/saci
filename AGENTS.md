@@ -472,16 +472,17 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   whatever the enabled `processor`, `connector-*` and `transformer-*` features add.
   `saci::processor::prelude` and `saci::plugin::prelude` are the narrower preludes of the two
   authoring SDKs.
-- Every runnable example lives under the top-level `examples/` directory, grouped by topic
-  (`examples/native/`, `examples/connectors/`, `examples/plugins/`, `examples/conformance/`,
-  `examples/configs/`, plus the end-to-end demo directories `examples/quickstart/`,
-  `examples/polyglot/`, `examples/distributed_fulfillment/`, `examples/wasm/`,
-  `examples/branching/`, `examples/windowing/`). A crate's `Cargo.toml` still declares the
-  `[[example]]` target, which is
-  what makes `cargo run -p <crate> --example <name>` work and lets `required-features` gate it,
-  but its `path` always points into `examples/...` rather than a `<crate>/examples/` subtree, so
-  the example's source never spreads across crates. Add a new example under the topic directory it
-  belongs to (or a new one), never back under a crate's own directory.
+- An example that needs nothing outside the `saci` crate (no processor component, plugin, config
+  file or external service) lives in `crates/saci/examples/`, so the published package carries
+  it. Every other runnable example lives under the top-level `examples/` directory, grouped by
+  topic (`examples/native/`,
+  `examples/connectors/`, `examples/plugins/`, `examples/conformance/`, `examples/configs/`, plus
+  the end-to-end demo directories `examples/quickstart/`, `examples/polyglot/`,
+  `examples/distributed_fulfillment/`, `examples/wasm/`, `examples/branching/`,
+  `examples/windowing/`), and its `[[example]]` target in `crates/saci/Cargo.toml` sets a `path`
+  into it; `cargo package` leaves those out, since it cannot reach outside the crate. Either way
+  the `[[example]]` target is what makes `cargo run -p saci --example <name>` work and lets
+  `required-features` gate it.
 - Tests live in `#[cfg(test)]` modules within each source file; integration tests are in each crate's
   `tests/`, run through `cargo nextest`. See "Testing" for the fast/full profile split, the
   Docker soft-skip convention, and why testcontainers-backed tests are safe to run in parallel.

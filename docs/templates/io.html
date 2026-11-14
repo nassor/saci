@@ -592,7 +592,7 @@ let src = CastingSource::new(file, target, CastOptions::default());</code></pre>
         A cast adapts <b>types</b>, never <b>shape</b>. If the component declares a column the
         file does not contain, no <code>CastingSource</code> configuration will help. Write a
         small wrapping <code>Source</code> that builds the missing array and re-assembles the
-        batch. <code>examples/connectors/scheduler_parquet_etl.rs</code> does exactly
+        batch. <code>crates/saci/examples/scheduler_parquet_etl.rs</code> does exactly
         that to pad a zero-filled output column.
     </p>
 </div>

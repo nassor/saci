@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
 description = "SACI: a batch processing engine on Apache Arrow. The columnar engine, connectors, byte formats, the wasm processor and native plugin SDKs, and the service host, each behind its own feature."
+readme = "../../README.md"
+keywords = ["arrow", "etl", "dataflow", "wasm", "batch"]
+categories = ["database", "wasm", "asynchronous", "concurrency"]
 
 [features]
 default = ["engine"]
@@ -64,7 +67,7 @@ io = ["runtime"]
 # Source/Sink traits.
 engine = ["io"]
 # Beam-style windowed aggregation.
-windows = []
+windows = ["dep:arrow-arith", "dep:fnv"]
 tracing = ["dep:tracing"]
 # OpenTelemetry instruments: the service's own series and the connectors'.
 metrics = ["dep:opentelemetry"]
@@ -135,7 +138,7 @@ connector-s3 = [
     "dep:tempfile", "dep:object_store", "dep:chrono",
 ]
 connector-tcp = ["connector-contract", "tokio/net", "tokio/io-util", "transformer-arrow-ipc"]
-connector-udp = ["connector-contract", "tokio/net", "transformer-ndjson"]
+connector-udp = ["connector-contract", "tokio/net", "transformer-ndjson", "dep:futures"]
 connector-redb = ["connector-contract", "dep:tempfile", "dep:redb"]
 connector-saci = ["connector-contract", "tokio/net", "tokio/io-util"]
 
@@ -147,7 +150,7 @@ connector-saci = ["connector-contract", "tokio/net", "tokio/io-util"]
 inspector = ["runtime", "tracing", "metrics", "dep:tracing-subscriber", "dep:opentelemetry_sdk"]
 distributed = [
     "runtime", "dep:redb", "dep:uuid", "dep:serde_json", "dep:serde_bytes", "dep:hex",
-    "tokio/net", "tokio/io-util", "dep:tokio-util",
+    "tokio/net", "tokio/io-util", "dep:tokio-util", "dep:fnv",
 ]
 distributed-raft = ["distributed", "dep:openraft", "dep:futures-util", "dep:postcard"]
 # Archival Parquet checkpoint store.
@@ -170,7 +173,7 @@ service = [
     "dep:axum", "dep:tower", "dep:tower-http", "dep:tokio-util", "dep:tracing-subscriber",
     "dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry", "dep:prometheus", "dep:serde_json", "dep:postcard",
-    "dep:clap", "dep:reqwest", "reqwest/json", "dep:rustls", "dep:dotenvy",
+    "dep:clap", "dep:reqwest", "reqwest/json", "dep:rustls", "dep:dotenvy", "dep:futures",
 ]
 service-cluster = ["service", "distributed-raft"]
 mimalloc = ["dep:mimalloc"]
@@ -181,14 +184,14 @@ arrow-schema  = { workspace = true }
 arrow-buffer  = { workspace = true }
 arrow-select  = { workspace = true }
 arrow-cast    = { workspace = true }
-arrow-arith   = { workspace = true }
+arrow-arith   = { workspace = true, optional = true }
 arrow-ord     = { workspace = true }
 arrow-ipc     = { workspace = true }
 serde_arrow   = { workspace = true }
 async-trait   = { workspace = true }
-futures       = { workspace = true }
+futures       = { workspace = true, optional = true }
 serde         = { workspace = true }
-fnv           = { workspace = true }
+fnv           = { workspace = true, optional = true }
 rand          = { workspace = true }
 
 # Engine and SDKs
@@ -293,6 +296,7 @@ criterion     = { workspace = true }
 # The reference engine the `vs_datafusion_q6` bench measures against.
 datafusion    = { version = "55", default-features = false, features = ["sql", "parquet"] }
 dotenvy       = { workspace = true }
+futures       = { workspace = true }
 libc          = { workspace = true }
 mimalloc      = "0.1.52"
 mysql_async   = { workspace = true }
@@ -373,44 +377,40 @@ harness = false
 # match what the shipped binary pays.
 required-features = ["service", "wasm-host"]
 
+# The examples that need nothing outside this crate live in its own `examples/`
+# directory, so the published package carries them. The rest load processor
+# components, configs or services from the repository and stay under its
+# top-level `examples/`, which `cargo package` cannot reach.
 [[example]]
 name = "first_pipeline"
-path = "../../examples/native/first_pipeline.rs"
 required-features = ["engine"]
 
 [[example]]
 name = "scheduler_etl"
-path = "../../examples/native/scheduler_etl.rs"
 required-features = ["engine"]
 
 [[example]]
 name = "scheduler_etl_parallel"
-path = "../../examples/native/scheduler_etl_parallel.rs"
 required-features = ["engine"]
 
 [[example]]
 name = "scheduler_dag"
-path = "../../examples/native/scheduler_dag.rs"
 required-features = ["engine"]
 
 [[example]]
 name = "distributed_scheduler"
-path = "../../examples/native/distributed_scheduler.rs"
 required-features = ["distributed"]
 
 [[example]]
 name = "window_aggregation"
-path = "../../examples/native/window_aggregation.rs"
 required-features = ["windows"]
 
 [[example]]
 name = "distributed_windowed"
-path = "../../examples/native/distributed_windowed.rs"
 required-features = ["distributed", "windows"]
 
 [[example]]
 name = "windowed_fan_in"
-path = "../../examples/native/windowed_fan_in.rs"
 # Two ChannelSources merged into one windowed processor: the fan-in merge and
 # the host-side watermark both live in the service runner.
 required-features = ["service", "windows", "connector-channel"]
@@ -482,7 +482,6 @@ required-features = [
 
 [[example]]
 name = "scheduler_parquet_etl"
-path = "../../examples/connectors/scheduler_parquet_etl.rs"
 required-features = ["connector-file", "transformer-csv", "transformer-ndjson", "transformer-parquet"]
 
 [[example]]

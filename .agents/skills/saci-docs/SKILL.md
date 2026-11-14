@@ -94,7 +94,10 @@ A page diagram is inline SVG inside the site's diagram frame:
 - Author at `viewBox` width 660; `.dgm-scroll` holds that as a minimum, so a wider drawing scrolls.
 - Wrap each step in `<g class="anim anim-1">` through `anim-4` for the reveal animation.
 - README figures are standalone files in `docs/static/*.svg`, referenced as
-  `<img src="docs/static/NAME.svg" alt="...">`.
+  `<img src="https://raw.githubusercontent.com/nassor/saci/main/docs/static/NAME.svg" alt="...">`.
+- Every README link and image uses an absolute URL. `README.md` is also the `saci` crate's
+  readme, and crates.io resolves a relative link against `crates/saci/`, where the target is
+  missing.
 
 ## Key lists
 

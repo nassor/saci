@@ -17,7 +17,7 @@ aliases = ["/native/tutorial/", "/getting-started/"]
 </dl>
 
 Every piece of code below is quoted from
-`examples/native/first_pipeline.rs`, which CI compiles. The last steps run it
+`crates/saci/examples/first_pipeline.rs`, which CI compiles. The last steps run it
 and show the real output.
 
 ## 1. Create the project
@@ -443,7 +443,7 @@ Stage 1:  [ValidateSystem, EnrichSystem]  write "valid" and "usd_amount"
 Stage 2:  [ReportSystem]                  reads both
 ```
 
-The full file, quoted from `examples/native/scheduler_etl.rs`, is the same
+The full file, quoted from `crates/saci/examples/scheduler_etl.rs`, is the same
 primitives you already used, plus `Dataset::replace_batch` for the
 column swaps. Run the shipped example to see it:
 

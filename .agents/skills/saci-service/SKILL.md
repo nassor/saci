@@ -873,13 +873,16 @@ both sides on the next `cargo xtask ui`.
 
 ## Examples
 
-- `examples/native/`: single-file `saci` tutorials and feature demos,
-  `first_pipeline`, `scheduler_etl(_parallel|_dag)`, `window_aggregation`,
-  `distributed_scheduler`, `distributed_windowed`, `windowed_fan_in`, `stream_latency`. The two
-  `distributed_*` demos run on a local redb store, so they need no external service. Declared as
-  `[[example]]` targets of `saci`, each with the `required-features` it needs.
-  `first_pipeline` needs only the default `engine` feature: it backs the embedding tutorial, so it
-  builds with the same dependency line the tutorial tells the reader to add.
+- `crates/saci/examples/`: the single-file `saci` tutorials and feature demos that need nothing
+  outside the crate, so the published package carries them: `first_pipeline`,
+  `scheduler_etl(_parallel|_dag)`, `distributed_scheduler`, `window_aggregation`,
+  `distributed_windowed`, `windowed_fan_in`, plus the connector example `scheduler_parquet_etl`.
+  `first_pipeline` needs only the default `engine` feature: it backs the embedding tutorial, so
+  it builds with the same dependency line the tutorial tells the reader to add. The two
+  `distributed_*` demos run on a local redb store, so they need no external service.
+- `examples/native/stream_latency.rs`: stream-mode latency demo; it loads the
+  `saci-processor-smoketest` component, so it stays outside the package.
+- Every example is an `[[example]]` target of `saci`, each with the `required-features` it needs.
 - `examples/distributed_fulfillment/`: a 3-node SACI Raft cluster demo, field-granular DAG
   scheduling, checkpointing into the raft-replicated `cluster-app.redb`, Docker Compose deployment
   of the three nodes. One `[[example]]` target of `saci`.

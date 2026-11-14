@@ -523,8 +523,9 @@ any of these.
 
 ## Examples and configs
 
-- `examples/connectors/`: one-off connector examples, `postgres_roundtrip.rs`,
-  `mariadb_roundtrip.rs` and `scheduler_parquet_etl.rs`.
+- `examples/connectors/`: one-off connector examples, `postgres_roundtrip.rs` and
+  `mariadb_roundtrip.rs`. `crates/saci/examples/scheduler_parquet_etl.rs` is the file connector
+  example; it needs no external service, so it ships in the published package.
 - `examples/configs/`: runnable KDL configs for the `saci-service` binary itself (not
   `[[example]]` targets), one per connector plus standalone and cluster templates. See its own
   `README.md` for the feature-to-config table.

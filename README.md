@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/static/logo.png" alt="SACI Logo" width="180">
+  <img src="https://raw.githubusercontent.com/nassor/saci/main/docs/static/logo.png" alt="SACI Logo" width="180">
 
   <h1>SACI</h1>
 
@@ -7,7 +7,7 @@
 
 [![Website](https://img.shields.io/badge/docs-nassor.github.io%2Fsaci-2f81f7)](https://nassor.github.io/saci/)
 [![CI](https://github.com/nassor/saci/actions/workflows/ci.yml/badge.svg)](https://github.com/nassor/saci/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](https://github.com/nassor/saci/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-orange)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-experimental-yellow)](#project-status)
 
@@ -54,7 +54,7 @@ SACI is service-first. You deploy `saci-service` once and hand it WebAssembly co
 pipeline ships separately from the binary that runs it.
 
 <p align="center">
-  <img src="docs/static/end-to-end.svg" width="880"
+  <img src="https://raw.githubusercontent.com/nassor/saci/main/docs/static/end-to-end.svg" width="880"
        alt="End to end: you write Component, System, and Pipeline structs; cargo build produces pipeline.wasm, a wasm32-wasip2 component; saci-service loads the component named in saci.kdl and drives Arrow IPC from sources through the host to sinks; optionally the host coordinates a Raft cluster with row-range leases and checkpoints.">
 </p>
 
@@ -115,7 +115,7 @@ world.
 
 Building the six stages needs the Rust wasm target and `wasm-tools`, plus five language
 toolchains and curl, which `cargo xtask polyglot` uses once to fetch the WASI preview 1 adapter
-the Kotlin stage needs. [`examples/polyglot/PINS.md`](./examples/polyglot/PINS.md) carries every
+the Kotlin stage needs. [`examples/polyglot/PINS.md`](https://github.com/nassor/saci/blob/main/examples/polyglot/PINS.md) carries every
 version and the platform caveats:
 
 ```bash
@@ -152,12 +152,14 @@ build page has the byte-level contract and a recipe per language, including the
 | [Tracing & metrics](https://nassor.github.io/saci/library/tracing/) | Spans, metrics, and the Prometheus endpoint |
 | [The SDK packages](https://nassor.github.io/saci/library/reference/sdk-packages/) | One `saci-sdk` per language, the Arrow codec inside each |
 
-Also in this repo: the [WASM processor example](./examples/wasm/), the [polyglot
-example](./examples/polyglot/), [Rust-native examples](./examples/native/), the
-[branching example](./examples/branching/), the
-Apache-2.0 [SDK packages](./packages/), and toolchain pins for [Rust
-processors](./crates/saci/PINS.md) and [the other
-languages](./examples/polyglot/PINS.md).
+Also in the repository: the [WASM processor example](https://github.com/nassor/saci/tree/main/examples/wasm),
+the [polyglot example](https://github.com/nassor/saci/tree/main/examples/polyglot), Rust-native
+examples in [`crates/saci/examples`](https://github.com/nassor/saci/tree/main/crates/saci/examples)
+and [`examples/native`](https://github.com/nassor/saci/tree/main/examples/native), the
+[branching example](https://github.com/nassor/saci/tree/main/examples/branching), the Apache-2.0
+[SDK packages](https://github.com/nassor/saci/tree/main/packages), and toolchain pins for
+[Rust processors](https://github.com/nassor/saci/blob/main/crates/saci/PINS.md) and
+[the other languages](https://github.com/nassor/saci/blob/main/examples/polyglot/PINS.md).
 
 ## Crates
 
@@ -174,7 +176,7 @@ languages](./examples/polyglot/PINS.md).
 `cargo install saci --features server` installs the binary, and `cargo xtask server` builds one
 from a checkout with only the connectors, formats and processor hosts you name. `saci-macros`
 holds the processor SDK's derive macros. The workspace map and the build and test commands live
-in [`AGENTS.md`](./AGENTS.md); the per-area reference sits beside it under `.agents/skills/`.
+in [`AGENTS.md`](https://github.com/nassor/saci/blob/main/AGENTS.md); the per-area reference sits beside it under `.agents/skills/`.
 
 ## Project status
 
@@ -185,10 +187,10 @@ This is a playground project exploring two things:
    maintenance and review.
 2. The design space of a Rust-native batch engine with WebAssembly extensibility.
 
-It is not production-ready and the crates are not published to crates.io. Contributions and
-feedback are welcome.
+It is not production-ready. Contributions and feedback are welcome.
 
 ## License
 
-Licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE). The `packages/`
-subtree is Apache-2.0, see [packages/LICENSE-APACHE](packages/LICENSE-APACHE).
+Licensed under the GNU Affero General Public License v3.0. See
+[LICENSE](https://github.com/nassor/saci/blob/main/LICENSE). The `packages/` subtree is Apache-2.0,
+see [packages/LICENSE-APACHE](https://github.com/nassor/saci/blob/main/packages/LICENSE-APACHE).

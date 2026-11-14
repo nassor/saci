@@ -2,7 +2,7 @@
 //!
 //! A 2-stage field-granular DAG (Validate and Enrich in parallel, then Report)
 //! running inside a WASM processor via `saci::processor`. It mirrors
-//! `examples/native/scheduler_etl.rs`, with two differences the
+//! `crates/saci/examples/scheduler_etl.rs`, with two differences the
 //! WASM model forces:
 //!
 //! - No ingest system. Data arrives in the host's `run-batch` Arrow IPC

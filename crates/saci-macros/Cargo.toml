@@ -9,6 +9,8 @@ homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
 description = "Derive and attribute macros for the SACI processor SDK: #[derive(Component)], #[transform], #[fold] and #[processor]."
+keywords = ["saci", "arrow", "wasm", "proc-macro", "derive"]
+categories = ["wasm", "development-tools::procedural-macro-helpers"]
 
 # A host proc-macro crate. It never compiles for wasm32-wasip2: cargo builds it
 # for the host even when the crate that invokes the macros is a wasm target, so
