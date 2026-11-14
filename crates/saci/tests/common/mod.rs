@@ -174,8 +174,11 @@ enum Req {
 
 impl ToxiproxyClient {
     pub fn new(api_port: u16) -> Self {
-        #[cfg(feature = "service")]
-        saci::service::install_ring_provider();
+        // reqwest's `rustls-no-provider` refuses to build a client until a
+        // crypto provider is installed. The chaos binaries also build without
+        // `service`, so `saci::service::install_ring_provider` is not always
+        // there; a second install is a no-op.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Self { api_port }
     }
 

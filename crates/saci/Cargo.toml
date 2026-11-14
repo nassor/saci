@@ -312,6 +312,9 @@ rcgen         = { version = "0.14", default-features = false, features = ["crypt
 rdkafka       = { version = "0.39", features = ["cmake-build"] }
 redb          = { workspace = true }
 reqwest       = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider", "blocking"] }
+# The provider the dev-dependency reqwest needs: `rustls-no-provider` refuses
+# to build a client until one is installed, whatever features the build names.
+rustls        = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde         = { workspace = true }
 serde_arrow   = { workspace = true }
 serde_json    = { workspace = true }
