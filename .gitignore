@@ -2,6 +2,7 @@
 /tmp
 /docs/public
 **/.DS_Store
+Cargo.lock
 
 # The dashboard crate is outside the workspace, so it has its own target dir,
 # and `cargo xtask ui` caches the Tailwind standalone binary next to it. The
