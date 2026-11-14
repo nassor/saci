@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "branching-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "branching-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -3922,7 +3922,7 @@ dependencies = [
 
 [[package]]
 name = "integrity-aggregate-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -3932,7 +3932,7 @@ dependencies = [
 
 [[package]]
 name = "integrity-audit-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -3941,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "integrity-classify-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -4581,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "multi-workflow-router-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -5108,7 +5108,7 @@ dependencies = [
 
 [[package]]
 name = "order-processing-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -5489,7 +5489,7 @@ checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
 
 [[package]]
 name = "polyglot-settle-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pollster",
  "saci",
@@ -6328,7 +6328,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "saci"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arrow-arith 60.1.0",
@@ -6425,7 +6425,7 @@ dependencies = [
 
 [[package]]
 name = "saci-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6434,7 +6434,7 @@ dependencies = [
 
 [[package]]
 name = "saci-plugin-smoketest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -6442,7 +6442,7 @@ dependencies = [
 
 [[package]]
 name = "saci-processor-smoketest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -8743,7 +8743,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windowing-session-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -8753,7 +8753,7 @@ dependencies = [
 
 [[package]]
 name = "windowing-sliding-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -8763,7 +8763,7 @@ dependencies = [
 
 [[package]]
 name = "windowing-tumbling-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -8772,7 +8772,7 @@ dependencies = [
 
 [[package]]
 name = "windowing-tumbling-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saci",
  "serde",
@@ -9217,7 +9217,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "yasna"

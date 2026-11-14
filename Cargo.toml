@@ -28,7 +28,7 @@ exclude = ["crates/saci-service-ui"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 rust-version = "1.99.0"
 edition = "2024"
 license = "AGPL-3.0-only"
@@ -54,8 +54,8 @@ authors = ["Nassor Frazier-Silva <nassor@gmail.com>"]
 # `default-features = false` when the workspace dependency does not set one,
 # which would leave that exclusion silently undone. A member asks for what it
 # needs by name: `features = ["processor"]` or `features = ["plugin"]`.
-saci        = { path = "crates/saci", version = "0.1.0", default-features = false }
-saci-macros = { path = "crates/saci-macros", version = "0.1.0" }
+saci        = { path = "crates/saci", version = "0.1.1", default-features = false }
+saci-macros = { path = "crates/saci-macros", version = "0.1.1" }
 
 # Arrow core sub-crates, exact-pinned at workspace level. `arrow-ipc` defines the
 # on-disk checkpoint format, so bump it only after validating round-trip reads
