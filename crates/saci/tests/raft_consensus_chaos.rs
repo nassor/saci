@@ -441,6 +441,12 @@ async fn isolate_leader_elects_new() -> anyhow::Result<()> {
     let Some(harness) = RaftClusterHarness::try_start(3).await else {
         return Ok(());
     };
+    harness.await_leader().await?;
+    // A node reports itself leader as soon as it wins the first vote, before
+    // its first append reaches the others. Until it does they hold no
+    // membership and cannot campaign, so isolating the leader then strands
+    // the majority. Every node applying the leader's entry closes that window.
+    harness.await_convergence(Duration::from_secs(10)).await?;
     let leader_id = harness.await_leader().await?;
     let term_before = harness.max_term();
 

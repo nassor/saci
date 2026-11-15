@@ -151,7 +151,13 @@ async fn bidi_partition_elects_and_rejoins() -> anyhow::Result<()> {
     };
     let toxi = harness.toxiproxy();
 
-    let first_leader = await_leader_within(&harness, Duration::from_secs(10)).await?;
+    await_leader_within(&harness, Duration::from_secs(10)).await?;
+    // A node reports itself leader as soon as it wins the first vote, before
+    // its first append reaches the others. Until it does they hold no
+    // membership and cannot campaign, so isolating the leader then strands
+    // the majority. Every node applying the leader's entry closes that window.
+    harness.await_convergence(Duration::from_secs(10)).await?;
+    let first_leader = harness.await_leader().await?;
     let leader_idx = (first_leader - 1) as usize;
     let term_before = harness.max_term();
 
