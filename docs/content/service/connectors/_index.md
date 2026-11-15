@@ -12,78 +12,90 @@ transports ship with `saci-service`, and the pages below walk each one from an e
 running pipeline.
 
 <div class="dgm animate-in">
-    <div class="dgm-scroll"><svg viewBox="0 0 1570 168" role="img" aria-labelledby="cx-t cx-d">
-        <title id="cx-t">The fifteen transports a workflow can name on a source or a sink node</title>
-        <desc id="cx-d">Fifteen boxes across the top name the transports: file, http, kafka, nats, postgres, turso, clickhouse, redb, s3, tcp, udp, saci, opentelemetry, channel and mariadb. Each one drops into a shared line, and that line feeds a single workflow box below. One workflow may name any mix of them, one node per source or sink.</desc>
+    <div class="dgm-scroll"><svg viewBox="0 0 660 242" role="img" aria-labelledby="cx-t cx-d">
+        <title id="cx-t">A source node turns a transport into rows for the workflow, and a sink node turns rows back into a transport</title>
+        <desc id="cx-d">Two lanes run left to right. In the top lane, a byte transport (file, http, kafka, nats, redb, s3, tcp or udp) hands bytes to a transformer, which decodes them into rows for the workflow. In the bottom lane, a row transport (postgres, mariadb, turso, clickhouse, saci, channel or opentelemetry) hands rows to the workflow directly, with no format. The right half mirrors the left: the workflow's rows pass through a transformer to a byte transport, or go straight to a row transport. A bracket over the left half names it the source node, and one over the right half the sink node.</desc>
         <g class="anim anim-1">
-            <rect class="blk blk-data" x="0" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="6" y="33">file</text>
-            <rect class="blk blk-data" x="105" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="111" y="33">http</text>
-            <rect class="blk blk-data" x="210" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="216" y="33">kafka</text>
-            <rect class="blk blk-data" x="315" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="321" y="33">nats</text>
-            <rect class="blk blk-data" x="420" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="426" y="33">postgres</text>
-            <rect class="blk blk-data" x="525" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="531" y="33">turso</text>
-            <rect class="blk blk-data" x="630" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="636" y="33">clickhouse</text>
-            <rect class="blk blk-data" x="735" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="741" y="33">redb</text>
-            <rect class="blk blk-data" x="840" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="846" y="33">s3</text>
-            <rect class="blk blk-data" x="945" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="951" y="33">tcp</text>
-            <rect class="blk blk-data" x="1050" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="1056" y="33">udp</text>
-            <rect class="blk blk-data" x="1155" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="1161" y="33">saci</text>
-            <rect class="blk blk-data" x="1260" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="1266" y="33">opentelemetry</text>
-            <rect class="blk blk-data" x="1365" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="1371" y="33">channel</text>
-            <rect class="blk blk-data" x="1470" y="8" width="100" height="40" rx="8"/>
-            <text class="t-lbl" x="1476" y="33">mariadb</text>
+            <text class="t-lbl t-data t-mid" x="126" y="14">source node</text>
+            <text class="t-sm t-mid" x="126" y="28">a type, plus a transformer for bytes</text>
+            <path class="ln" d="M0 42 V36 H252 V42"/>
+            <rect class="blk blk-data" x="0" y="52" width="140" height="74" rx="8"/>
+            <rect class="hd hd-data" x="0" y="52" width="140" height="18" rx="8"/>
+            <rect class="hd hd-data" x="0" y="64" width="140" height="6"/>
+            <text class="t-lbl" x="10" y="66">byte transports</text>
+            <text class="t-sm" x="10" y="86">file  http  kafka</text>
+            <text class="t-sm" x="10" y="100">nats  redb  s3</text>
+            <text class="t-sm" x="10" y="114">tcp  udp</text>
+            <rect class="blk blk-data" x="0" y="146" width="140" height="88" rx="8"/>
+            <rect class="hd hd-data" x="0" y="146" width="140" height="18" rx="8"/>
+            <rect class="hd hd-data" x="0" y="158" width="140" height="6"/>
+            <text class="t-lbl" x="10" y="160">row transports</text>
+            <text class="t-sm" x="10" y="180">postgres  mariadb</text>
+            <text class="t-sm" x="10" y="194">turso  clickhouse</text>
+            <text class="t-sm" x="10" y="208">saci  channel</text>
+            <text class="t-sm" x="10" y="222">opentelemetry</text>
+            <path class="arw arw-data" d="M140 89 H158" marker-end="url(#cx-a)"/>
+            <rect class="blk blk-bnd" x="162" y="52" width="90" height="74" rx="8"/>
+            <rect class="hd hd-bnd" x="162" y="52" width="90" height="18" rx="8"/>
+            <rect class="hd hd-bnd" x="162" y="64" width="90" height="6"/>
+            <text class="t-lbl" x="170" y="66">transformer</text>
+            <text class="t-sm t-bnd" x="170" y="86">csv ndjson</text>
+            <text class="t-sm t-bnd" x="170" y="100">avro parquet</text>
+            <text class="t-sm t-bnd" x="170" y="114">arrow-ipc</text>
+            <path class="arw arw-data" d="M252 89 H270" marker-end="url(#cx-a)"/>
+            <text class="t-sm t-mid" x="207" y="184">no format</text>
+            <path class="arw arw-data" d="M140 190 H270" marker-end="url(#cx-a)"/>
         </g>
         <g class="anim anim-2">
-            <path class="arw arw-data" d="M50 48 V72"/>
-            <path class="arw arw-data" d="M155 48 V72"/>
-            <path class="arw arw-data" d="M260 48 V72"/>
-            <path class="arw arw-data" d="M365 48 V72"/>
-            <path class="arw arw-data" d="M470 48 V72"/>
-            <path class="arw arw-data" d="M575 48 V72"/>
-            <path class="arw arw-data" d="M680 48 V72"/>
-            <path class="arw arw-data" d="M785 48 V72"/>
-            <path class="arw arw-data" d="M890 48 V72"/>
-            <path class="arw arw-data" d="M995 48 V72"/>
-            <path class="arw arw-data" d="M1100 48 V72"/>
-            <path class="arw arw-data" d="M1205 48 V72"/>
-            <path class="arw arw-data" d="M1310 48 V72"/>
-            <path class="arw arw-data" d="M1415 48 V72"/>
-            <path class="arw arw-data" d="M1520 48 V72"/>
-            <path class="ln" d="M50 72 H1520"/>
-            <text class="t-sm t-data" x="58" y="88">rows in, rows out</text>
+            <rect class="blk blk-ctl" x="274" y="52" width="112" height="182" rx="8"/>
+            <rect class="hd hd-ctl" x="274" y="52" width="112" height="18" rx="8"/>
+            <rect class="hd hd-ctl" x="274" y="64" width="112" height="6"/>
+            <text class="t-lbl" x="284" y="66">workflow</text>
+            <text class="t-lbl t-mid" x="330" y="138">processors</text>
+            <text class="t-sm t-ctl t-mid" x="330" y="154">rows in, rows out</text>
         </g>
         <g class="anim anim-3">
-            <path class="arw arw-data" d="M784 72 V104" marker-end="url(#cx-d1)"/>
-            <rect class="blk blk-ctl" x="694" y="108" width="180" height="52" rx="8"/>
-            <rect class="hd hd-ctl" x="694" y="108" width="180" height="20" rx="8"/>
-            <rect class="hd hd-ctl" x="694" y="120" width="180" height="8"/>
-            <text class="t-lbl" x="706" y="123">workflow</text>
-            <text class="t-sm" x="706" y="146">source, sink, link</text>
+            <text class="t-lbl t-data t-mid" x="534" y="14">sink node</text>
+            <text class="t-sm t-mid" x="534" y="28">a type, plus a transformer for bytes</text>
+            <path class="ln" d="M408 42 V36 H660 V42"/>
+            <path class="arw arw-data" d="M386 89 H404" marker-end="url(#cx-a)"/>
+            <rect class="blk blk-bnd" x="408" y="52" width="90" height="74" rx="8"/>
+            <rect class="hd hd-bnd" x="408" y="52" width="90" height="18" rx="8"/>
+            <rect class="hd hd-bnd" x="408" y="64" width="90" height="6"/>
+            <text class="t-lbl" x="416" y="66">transformer</text>
+            <text class="t-sm t-bnd" x="416" y="86">csv ndjson</text>
+            <text class="t-sm t-bnd" x="416" y="100">avro parquet</text>
+            <text class="t-sm t-bnd" x="416" y="114">arrow-ipc</text>
+            <path class="arw arw-data" d="M498 89 H516" marker-end="url(#cx-a)"/>
+            <rect class="blk blk-data" x="520" y="52" width="140" height="74" rx="8"/>
+            <rect class="hd hd-data" x="520" y="52" width="140" height="18" rx="8"/>
+            <rect class="hd hd-data" x="520" y="64" width="140" height="6"/>
+            <text class="t-lbl" x="530" y="66">byte transports</text>
+            <text class="t-sm" x="530" y="86">file  http  kafka</text>
+            <text class="t-sm" x="530" y="100">nats  redb  s3</text>
+            <text class="t-sm" x="530" y="114">tcp  udp</text>
+            <text class="t-sm t-mid" x="453" y="184">no format</text>
+            <path class="arw arw-data" d="M386 190 H516" marker-end="url(#cx-a)"/>
+            <rect class="blk blk-data" x="520" y="146" width="140" height="88" rx="8"/>
+            <rect class="hd hd-data" x="520" y="146" width="140" height="18" rx="8"/>
+            <rect class="hd hd-data" x="520" y="158" width="140" height="6"/>
+            <text class="t-lbl" x="530" y="160">row transports</text>
+            <text class="t-sm" x="530" y="180">postgres  mariadb</text>
+            <text class="t-sm" x="530" y="194">turso  clickhouse</text>
+            <text class="t-sm" x="530" y="208">saci  channel</text>
+            <text class="t-sm" x="530" y="222">opentelemetry</text>
         </g>
         <defs>
-            <marker id="cx-d1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+            <marker id="cx-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
                 <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
             </marker>
         </defs>
     </svg>
     </div>
     <div class="dgm-key">
-        <span class="k-data"><i></i> transports</span>
-        <span class="k-control"><i></i> the config</span>
+        <span class="k-data"><i></i> transports and rows</span>
+        <span class="k-boundary"><i></i> transformers</span>
+        <span class="k-control"><i></i> the workflow</span>
     </div>
 </div>
 
