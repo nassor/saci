@@ -69,10 +69,18 @@ call.
 
 ## A fresh Store per call
 
-The host builds a new wasmtime `Store` for every `run-batch` call. Nothing a
-processor keeps in a global or a struct field survives to the next call, only
-what it puts in `checkpoint`. The host persists that blob verbatim and hands it
-back as the next call's `prior`.
+By default the host builds a new wasmtime `Store` for every `run-batch` call.
+Nothing a processor keeps in a global or a struct field survives to the next
+call, only what it puts in `checkpoint`. The host persists that blob verbatim
+and hands it back as the next call's `prior`.
+
+An embedder that builds a `WasmPipelineRuntime` itself can opt out with
+`with_warm_instances(max_idle)`, which keeps up to `max_idle` instantiated
+processors between calls. A processor's memory is then a cache only: calls
+that overlap use different instances, an instance is dropped after a trap or a
+`run-error`, and any call may land on a fresh one, so durable state still
+travels only through `checkpoint` and `prior`. The service builder never turns
+it on.
 
 A wasmtime epoch deadline bounds the call. `PipelineRuntimeLoader` sets 100
 ticks of 100 ms, so a component that will not return is interrupted after ten

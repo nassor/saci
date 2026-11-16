@@ -12,17 +12,27 @@ use super::bindings::{PipelineDescriptor, RunError, SaciPipeline, SaciPipelinePr
 use super::engine::WasmEngine;
 use super::host_impl::HostState;
 
+/// One instantiated processor a runtime keeps between calls.
+type Warm = (Store<HostState>, SaciPipeline);
+
+/// Locks through poison: a panic while an instance was being put back must not fail every later call.
+fn idle(warm: &Mutex<Vec<Warm>>) -> std::sync::MutexGuard<'_, Vec<Warm>> {
+    warm.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Host-side WASM pipeline runtime implementing [`crate::runtime::PipelineRuntime`].
 ///
 /// Each `run_on` call serialises the dataset to Arrow IPC bytes, calls the
-/// processor's `run-batch` export via wasmtime on a fresh `Store`, then reads the
-/// output IPC bytes back over the dataset contents.
+/// processor's `run-batch` export via wasmtime, then reads the output IPC bytes
+/// back over the dataset contents. By default the call runs on a fresh `Store`;
+/// [`with_warm_instances`](Self::with_warm_instances) keeps instances between calls.
 ///
 /// Linking (WASI-p2 plus host-io) and instantiation planning happen once, at
 /// load time, producing a reusable `SaciPipelinePre`; a call then costs store
-/// creation plus instantiation from that plan. Processor linear memory never
-/// survives a batch, so the checkpoint blob is the only channel for processor
-/// state.
+/// creation plus instantiation from that plan. Unless warm instances are on,
+/// processor linear memory never survives a batch, so the checkpoint blob is
+/// the only channel for processor state.
 ///
 /// Processor traps are mapped to `SaciError::SystemExecution`. The epoch deadline
 /// (100 ms ticks) limits runaway processor execution.
@@ -59,6 +69,10 @@ pub struct WasmPipelineRuntime {
     /// `Vec::new()` would pay. Relaxed because a stale or racing value only
     /// costs one resize.
     last_ipc_len: std::sync::atomic::AtomicUsize,
+    /// Instantiated processors kept between calls, at most `warm_limit`; always empty while
+    /// `warm_limit` is 0.
+    warm: Arc<Mutex<Vec<Warm>>>,
+    warm_limit: usize,
 }
 
 /// Everything one processor call needs from a [`WasmPipelineRuntime`], owned so
@@ -104,6 +118,8 @@ impl WasmPipelineRuntime {
             descriptor: Mutex::new(None),
             component_names: OnceLock::new(),
             last_ipc_len: std::sync::atomic::AtomicUsize::new(0),
+            warm: Arc::new(Mutex::new(Vec::new())),
+            warm_limit: 0,
         })
     }
 
@@ -118,6 +134,24 @@ impl WasmPipelineRuntime {
     pub fn with_identity(mut self, workflow_id: String, processor_id: String) -> Self {
         self.workflow_id = workflow_id;
         self.processor_id = processor_id;
+        self
+    }
+
+    /// Keep up to `max_idle` instantiated processors between calls.
+    ///
+    /// - With `max_idle > 0` a call reuses an instance left by an earlier call, so the
+    ///   processor's linear memory survives between calls of that instance.
+    /// - That memory is a cache only: a runtime holds several instances when calls overlap,
+    ///   an instance is dropped after a trap or a `run-error`, and any call may land on a
+    ///   fresh instance. Durable state still travels only through `checkpoint` and `prior`.
+    /// - The config is fixed for the life of the runtime, so anything a processor derives
+    ///   from its config alone is safe to cache.
+    /// - An idle instance keeps its pool slot (128 per engine) and its linear memory at its
+    ///   high-water mark.
+    /// - `0`, the default, builds a fresh `Store` for every call.
+    #[must_use]
+    pub fn with_warm_instances(mut self, max_idle: usize) -> Self {
+        self.warm_limit = max_idle;
         self
     }
 
@@ -225,6 +259,8 @@ impl WasmPipelineRuntime {
         // prior state has to be owned for the call.
         let prior_owned = prior.map(<[u8]>::to_vec);
         let parts = self.call_parts();
+        let warm = Arc::clone(&self.warm);
+        let (warm_limit, epoch_deadline) = (self.warm_limit, self.epoch_deadline);
 
         // `spawn_blocking` runs outside the task-local context, so the span is
         // moved into the closure and entered there. That is what puts the
@@ -246,11 +282,33 @@ impl WasmPipelineRuntime {
             // The closure body has no `.await`, so a plain guard is correct.
             #[cfg(feature = "tracing")]
             let _call_guard = call_span.enter();
-            let (mut store, instance) = Self::make_store_and_instance(parts)?;
-            instance
+            // The guard is a temporary: nothing is locked while instantiating or calling.
+            let kept = if warm_limit > 0 {
+                idle(&warm).pop()
+            } else {
+                None
+            };
+            let (mut store, instance) = match kept {
+                Some(kept) => kept,
+                None => Self::make_store_and_instance(parts)?,
+            };
+            // Relative to the engine's current epoch: a kept store's previous deadline has passed.
+            store.set_epoch_deadline(epoch_deadline);
+            let result = instance
                 .saci_pipeline_pipeline()
                 .call_run_batch(&mut store, &ipc_bytes, prior_owned.as_ref())
-                .map_err(|e| SaciError::SystemExecution(format!("processor trap (run-batch): {e}")))
+                .map_err(|e| {
+                    SaciError::SystemExecution(format!("processor trap (run-batch): {e}"))
+                })?;
+            // Only an instance whose batch succeeded is kept: wasmtime refuses to re-enter one that
+            // trapped, and after a `run-error` its memory may hold a half-finished batch.
+            if warm_limit > 0 && result.is_ok() {
+                let mut idle = idle(&warm);
+                if idle.len() < warm_limit {
+                    idle.push((store, instance));
+                }
+            }
+            Ok(result)
         })
         .await
         .map_err(|e| SaciError::SystemExecution(format!("processor task join failed: {e}")))?;

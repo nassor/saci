@@ -8,8 +8,9 @@
 //!
 //! ## Store-per-call semantics (WASM runtimes)
 //!
-//! With a `WasmPipelineRuntime`, every `run_on` call creates a fresh wasmtime
-//! `Store` and resets processor linear memory. In-processor state that must
+//! A `WasmPipelineRuntime` creates a fresh wasmtime `Store` for every `run_on` call and
+//! resets processor linear memory, unless its embedder opted in with `with_warm_instances`;
+//! the service builder never does. In-processor state that must
 //! survive iterations (accumulators, window buffers, caches) has to travel
 //! through the host as the `prior`/`run-result.checkpoint` blob
 //! `run_on_with_state` threads, or it is silently lost.

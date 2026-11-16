@@ -3,6 +3,13 @@
 `saci` and `saci-macros` share one version. The release process is in `AGENTS.md`, under
 "Releases".
 
+## Unreleased
+
+### Added
+
+- `wasm-host`: `WasmPipelineRuntime::with_warm_instances(max_idle)` keeps instantiated processors
+  between calls, so a processor can cache what it derives from its config.
+
 ## 0.1.1 - 2026-11-14
 
 ### Added

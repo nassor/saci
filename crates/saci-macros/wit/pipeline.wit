@@ -109,9 +109,11 @@ interface pipeline {
     /// `prior` is `none` on the first batch after a cold start. Whatever the
     /// processor returns in `run-result.checkpoint` is persisted verbatim by the
     /// host and handed back as the next call's `prior`; a stateless processor
-    /// returns `none`. This is the only channel for processor state: the host
-    /// creates a fresh wasmtime Store per call, so processor linear memory never
-    /// survives a batch boundary.
+    /// returns `none`. This is the only channel for durable processor state: by
+    /// default the host creates a fresh wasmtime Store per call, so processor
+    /// linear memory never survives a batch boundary. A host may keep instances
+    /// warm between calls; linear memory is then a cache only, and any call may
+    /// land on a fresh instance.
     ///
     /// Invariant: run-batch MUST NOT return run-error::schema-mismatch. A
     /// mismatch surfacing mid-batch is a processor bug and folds into `permanent`.

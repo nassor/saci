@@ -152,13 +152,14 @@ impl WasmEngine {
         config.wasm_component_model(true);
         config.epoch_interruption(true);
 
-        // The WIT contract makes a fresh `Store` per call mandatory
+        // By default the WIT contract gives every call a fresh `Store`
         // (`crates/saci/wit/pipeline.wit`), so instantiation is on
         // the per-batch path: the default on-demand allocator maps a fresh
         // linear memory for every batch and hands it back to the OS when the
         // store drops. The pooling allocator keeps that same fresh store and
         // fresh instance per call; the contract does not change. It only
         // recycles a pre-reserved slot instead of asking the OS each time.
+        // A runtime that keeps warm instances holds their slots while idle.
         let mut pool = wasmtime::PoolingAllocationConfig::new();
         pool.total_component_instances(POOL_CALLS);
         pool.total_core_instances(POOL_CALLS * POOL_CORE_INSTANCES_PER_CALL);

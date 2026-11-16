@@ -44,8 +44,13 @@ channel: the macro reads it after the systems run and reports its branch names i
 `run-result.routes`, which the host uses to deliver the output only to the links whose `branch`
 names one of them (absent = legacy multicast).
 
-The host creates a fresh wasmtime `Store` per call, so `prior`/`checkpoint` is the only channel by
-which processor state survives a batch boundary.
+By default the host creates a fresh wasmtime `Store` per call, so `prior`/`checkpoint` is the only
+channel by which processor state survives a batch boundary. `WasmPipelineRuntime::with_warm_instances(max_idle)`
+keeps instantiated processors between calls (default 0 = off; the service builder never sets it): a
+call pops an idle instance or builds one, and puts it back only after a successful `run-batch`, so a
+trap or a `run-error` drops the instance. Guest linear memory is then a cache only, safe for what
+derives from config alone. An idle instance keeps its pool slot. The smoketest's `count = instance`
+config key counts batches in guest memory, which is how `wasm_roundtrip` observes instance reuse.
 
 ## Host (`crates/saci/src/wasm_host/`, `wasm-host` feature)
 
@@ -55,14 +60,14 @@ the 4 MB smoketest, so `WasmEngine::program` does it once per distinct set of by
 load of the same module is a `memcmp` plus an `Arc` clone, about 0.1 ms. The engine is shareable:
 `ServiceBuilder::with_wasm_engine` hands one engine to several builders, and the ticker stops with
 the last clone rather than outliving it. Its `Config` uses wasmtime's pooling instance allocator,
-because the WIT contract puts a fresh `Store` and a fresh instantiation on every batch: the pool
+because the WIT contract puts a fresh `Store` and a fresh instantiation on every batch by default: the pool
 recycles pre-reserved slots instead of asking the OS for a linear memory per call, and
 `table_keep_resident` stops the recycled tables being decommitted and faulted straight back in.
 The `POOL_*` constants in `engine.rs` size it for 128 concurrent processor calls; exceeding that
 is a `PoolConcurrencyLimitError` at instantiate, not a queue, and each engine reserves 1 TiB of
 address space, which bounds how many engines one process can hold. `WasmPipelineRuntime` implements
 `saci::runtime::PipelineRuntime`: it serializes the dataset to Arrow IPC, calls the processor's
-`run-batch` on a fresh `Store`, and reads the result back. `bindings.rs` is a
+`run-batch` on a fresh `Store` (a kept one when warm instances are on), and reads the result back. `bindings.rs` is a
 `wasmtime::component::bindgen!` pointed at `crates/saci/wit`, so host bindings cannot drift.
 `host_impl.rs` implements the `host-io` imports (`log`, `metric`, `get-config`); `metric` records
 the `saci_processor_metric` histogram, and `runner.rs` records the five `run-metrics` numbers off
@@ -243,5 +248,6 @@ changes the smoketest fixture or its build; changes the conformance corpus gener
 or re-pins an SDK under `packages/`; adds or removes a processor example; changes
 `rebuild_blocker`'s `restartable` rule for a `wasm` node with no `module` (also check skill
 `saci-service`'s Service layer section, the canonical copy); changes
+`WasmPipelineRuntime::with_warm_instances` or the smoketest's `count` config key; changes
 `WasmPipelineRuntime::with_identity` or how a processor's metrics or spans are attributed (also
 update skill `saci-service`'s Observability and In-process inspector sections, the canonical copy).

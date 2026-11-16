@@ -40,6 +40,7 @@ use saci::processor::arrow_schema::{DataType, Field, Schema};
 use saci::processor::prelude::*;
 use saci::processor::{ProcessorState, RouteDecision};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A single no-op component so `describe()` has a schema to emit: one `u64`
 /// field, with the serde round-trip handled by the default `Component` impl.
@@ -85,6 +86,13 @@ impl Component for Counter {
     }
 }
 
+/// Set by `build()` from the `count` config key: `instance` makes `count_batches` count the
+/// batches this instance has run instead of threading the count through `prior`.
+static COUNT_BY_INSTANCE: AtomicBool = AtomicBool::new(false);
+
+/// Batches this instance has run, kept in the processor's linear memory.
+static INSTANCE_BATCHES: AtomicU64 = AtomicU64::new(0);
+
 /// Increment the batch counter, seeding it on the first batch.
 ///
 /// The state resource is installed by the macro before any system runs, so its
@@ -103,9 +111,18 @@ fn count_batches(data: &mut Dataset) -> Result<(), SaciError> {
         .get_resource_mut::<ProcessorState<Counter>>()
         .ok_or_else(|| SaciError::generic("smoketest: ProcessorState<Counter> resource missing"))?;
 
-    match state.rows.first_mut() {
-        Some(counter) => counter.count += 1,
-        None => state.rows.push(Counter { count: 1 }),
+    if COUNT_BY_INSTANCE.load(Ordering::Relaxed) {
+        // Counts this instance's batches from its own memory, not from `prior`, so a test sees
+        // whether the host kept the instance.
+        state.rows.clear();
+        state.rows.push(Counter {
+            count: INSTANCE_BATCHES.fetch_add(1, Ordering::Relaxed) + 1,
+        });
+    } else {
+        match state.rows.first_mut() {
+            Some(counter) => counter.count += 1,
+            None => state.rows.push(Counter { count: 1 }),
+        }
     }
 
     let count = state.rows.first().map_or(0, |c| c.count);
@@ -126,6 +143,11 @@ pub fn build() -> Pipeline {
     let greeting = saci_config_get("greeting");
     #[cfg(not(target_arch = "wasm32"))]
     let greeting: Option<String> = None;
+    #[cfg(target_arch = "wasm32")]
+    COUNT_BY_INSTANCE.store(
+        saci_config_get("count").as_deref() == Some("instance"),
+        Ordering::Relaxed,
+    );
 
     let name = match greeting {
         Some(g) => format!("smoketest-{g}"),

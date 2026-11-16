@@ -62,8 +62,9 @@
 //!
 //! # State across batches
 //!
-//! The host creates a fresh wasmtime `Store` per call, so processor linear memory
-//! never survives a batch boundary. A processor that needs state declares exactly
+//! By default the host creates a fresh wasmtime `Store` per call, so processor linear memory
+//! never survives a batch boundary; an embedder may keep instances warm, and linear memory is
+//! then a cache only. A processor that needs state declares exactly
 //! one state component:
 //!
 //! ```ignore

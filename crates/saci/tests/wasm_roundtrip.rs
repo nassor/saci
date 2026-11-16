@@ -19,8 +19,9 @@
 //!   `describe()` reports whether `[pipeline.wasm.config]` reached the processor.
 //! - **State across batches.** The processor is exported with
 //!   `export_pipeline!(build, state = Counter)`. The host creates a fresh
-//!   wasmtime Store per call, so the counter can only reach 1, 2, 3 by threading
-//!   each `run-batch` checkpoint back in as the next `prior`.
+//!   wasmtime Store per call by default, so the counter can only reach 1, 2, 3 by threading
+//!   each `run-batch` checkpoint back in as the next `prior`. A runtime built with
+//!   `with_warm_instances` keeps instances, which `count = instance` makes visible.
 
 #![cfg(feature = "wasm-host")]
 
@@ -148,7 +149,7 @@ async fn processor_reads_host_injected_config() {
 }
 
 /// Threading `run-result.checkpoint` back in as the next `prior` is the only way
-/// processor state survives: the host builds a fresh wasmtime Store, and so fresh
+/// processor state survives: by default the host builds a fresh wasmtime Store, and so fresh
 /// processor linear memory, for every call.
 #[tokio::test(flavor = "current_thread")]
 async fn processor_state_survives_across_batches() {
@@ -197,6 +198,31 @@ async fn processor_state_resets_when_prior_is_dropped() {
             Some(1),
             "with no prior, every batch is the processor's first"
         );
+    }
+}
+
+/// With `count = instance` the processor counts in its own linear memory, so the blob reads 1, 2, 3
+/// only when the host hands the same instance to every call.
+#[tokio::test(flavor = "current_thread")]
+async fn a_warm_instance_keeps_processor_memory_between_calls() {
+    let config = HashMap::from([("count".to_string(), "instance".to_string())]);
+    let warm = load_runtime(config.clone()).with_warm_instances(1);
+    let cold = load_runtime(config);
+
+    for expected in 1..=3u64 {
+        for (runtime, want, label) in [(&warm, expected, "warm"), (&cold, 1, "cold")] {
+            let mut dataset = seeded_dataset(runtime, 4);
+            let blob = runtime
+                .run_on_with_state(&mut dataset, None)
+                .await
+                .expect("processor run_on_with_state success")
+                .expect("a stateful processor must return a checkpoint blob");
+            assert_eq!(
+                counter_in_blob(&blob),
+                Some(want),
+                "{label} runtime, call {expected}"
+            );
+        }
     }
 }
 
