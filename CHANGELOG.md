@@ -3,7 +3,7 @@
 `saci` and `saci-macros` share one version. The release process is in `AGENTS.md`, under
 "Releases".
 
-## Unreleased
+## 0.1.2 - 2026-11-16
 
 ### Added
 
