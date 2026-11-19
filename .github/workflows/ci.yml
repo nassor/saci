@@ -555,7 +555,9 @@ jobs:
         git diff --exit-code -- packages/arrow-ipc-conformance
 
     - name: Generate schema constants and fixtures
-      run: cargo run -p saci --features plugin-host --example plugin_schema_emit -- emit
+      run: |
+        cargo run -p saci --features plugin-host --example plugin_schema_emit -- emit
+        cp examples/plugins/generated/schema_gen.go examples/plugins/settle-go/schema_gen.go
 
     - name: Go wire codec and conformance tests
       working-directory: examples/plugins/settle-go
