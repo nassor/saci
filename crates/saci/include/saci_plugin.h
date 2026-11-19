@@ -110,6 +110,9 @@
 extern "C" {
 #endif
 
+/* ABI version: major in the high 16 bits, minor in the low 16. The major must
+ * match the host's; the plugin's minor must not exceed the host's. A plugin
+ * built against minor 0 or 1 still loads and
  * behaves exactly as before. Minor 2 appended routes/has_routes to
  * SaciRunResult; a minor-1 plugin leaves them zeroed, which the host reads as
  * "no routing decision", so it loads and behaves exactly as before. */
