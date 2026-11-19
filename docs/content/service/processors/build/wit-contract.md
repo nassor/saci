@@ -17,7 +17,7 @@ SACI ships one world. The whole file is
 `crates/saci/wit/pipeline.wit`, 124 lines, and it ends with this:
 
 ```wit,name=The world pipeline.wit ends with
-package saci:pipeline@0.3.0;
+package saci:pipeline@0.4.0;
 
 world saci-pipeline {
     import host-io;
@@ -145,13 +145,10 @@ record pipeline-descriptor {
 | `stateful` | `bool` | Declares that the processor intends to return a `checkpoint`. A stateless processor returns `none` |
 | `schema-fingerprint` | `string` | Compared against the fingerprint this node's persisted checkpoints were written with. A mismatch refuses the start rather than mixing layouts |
 
-Do not hand-roll this by copying another schema's value. Each of the five
-non-Rust polyglot processors implements the FNV-1a algorithm in its own SDK and
-derives the fingerprint from the row type it declares, not from a shared
-constant. [The SDK packages](@/library/reference/sdk-packages.md) already do
-that, so your processor does not have to. [The wire
-format](@/library/reference/wire-format.md) gives the algorithm for the case
-where you have to write it yourself.
+Do not hand-roll this by copying another schema's value. Derive the
+fingerprint from the declared row type at build or init time, using the FNV-1a
+algorithm specified in [The wire format](@/library/reference/wire-format.md).
+Rust's `saci::processor` SDK computes it automatically from `#[derive(Component)]`.
 
 ### run-metrics and run-result
 
@@ -251,12 +248,13 @@ writes to standard output or standard error is discarded.
 
 ```wit,name=The pipeline interface
 describe: func() -> pipeline-descriptor;
-run-batch: func(input: ipc-bytes, prior: option<checkpoint>)
+run-batch: async func(input: ipc-bytes, prior: option<checkpoint>)
     -> result<run-result, run-error>;
 ```
 
-`describe` runs once, at load. `run-batch` runs once per batch, and `prior` is the only state
-that reaches it from the previous call. `prior` is `none` on the first batch after a cold start.
+`describe` runs synchronously once, at load. `run-batch` is Component Model Async
+(`async func`) and runs once per batch, where `prior` is the only state that reaches
+it from the previous call. `prior` is `none` on the first batch after a cold start.
 
 `describe` is the easy one to get wrong, because nothing local catches it. Every
 `run-batch` still succeeds with a wrong component list or a stale fingerprint;
@@ -272,32 +270,33 @@ Two commands, and neither needs the host:
 Linux/macOS:
 
 ```bash,name=Verify the world your component exports
-wasm-tools validate --features component-model my-processor.wasm
+wasm-tools validate --features cm-async my-processor.wasm
 wasm-tools component wit my-processor.wasm | grep 'saci:pipeline'
 ```
 
 Windows (PowerShell):
 
 ```powershell
-wasm-tools validate --features component-model my-processor.wasm
+wasm-tools validate --features cm-async my-processor.wasm
 wasm-tools component wit my-processor.wasm | Select-String 'saci:pipeline'
 ```
 
-The second must print both halves of the world:
+The second must print both halves of the world with `@0.4.0`:
 
 ```text,name=Expected wasm-tools output
-  import saci:pipeline/host-io@0.3.0;
-  import saci:pipeline/types@0.3.0;
-  export saci:pipeline/pipeline@0.3.0;
-package saci:pipeline@0.3.0 {
+  import saci:pipeline/host-io@0.4.0;
+  import saci:pipeline/types@0.4.0;
+  export saci:pipeline/pipeline@0.4.0;
+package saci:pipeline@0.4.0 {
 ```
 
-If it does not, stop. Nothing downstream will work, and the fix is almost
-always the bindings step rather than the processor code.
+If it does not, or if `wasm-tools component wit` shows any `@0.2.` WASI import,
+stop and check that your bindings and toolchain target pure WASI 0.3 and
+Component Model Async.
 
 ## Next
 
-- [Build your own processor](@/service/processors/build/_index.md): the six languages that
-  already have an SDK, and the build loop every recipe shares.
+- [Build your own processor](@/service/processors/build/_index.md): WASI 0.3 authoring paths and
+  the build verification loop.
 - [Processors in a workflow](@/service/processors/_index.md): the node that runs the component
   you just verified.

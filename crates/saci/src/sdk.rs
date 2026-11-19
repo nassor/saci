@@ -1,9 +1,9 @@
 //! Glue for SDKs that drive a [`Pipeline`] across a foreign function boundary.
 //!
 //! Two SDKs sit on top of this module. `crate::processor` wires a pipeline to the
-//! `saci:pipeline@0.3.0` WIT world for a WebAssembly component, and `crate::plugin`
+//! `saci:pipeline@0.4.0` WIT world for a WebAssembly component, and `crate::plugin`
 //! wires the same pipeline to the C ABI of a native shared library. Both face
-//! the same four problems: hold the pipeline behind a sync entry point, move
+//! the same four problems: hold the pipeline behind the boundary entry point, move
 //! state across a batch boundary that resets memory, classify a [`SaciError`]
 //! for the caller's error type, and report schemas the way the host expects.
 //!
@@ -11,7 +11,7 @@
 //! rather than keeping a copy.
 
 use std::marker::PhantomData;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::OnceLock;
 
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema;
@@ -23,11 +23,16 @@ use crate::{Component, Dataset, Pipeline, SaciError, SaciResult};
 /// An SDK creates exactly one static instance per exported component. The
 /// pipeline is built on the first call to any entry point, then reused.
 ///
+/// Entry points get a shared reference, not a lock: the run method they call
+/// takes `&self`, and a guard held across the `.await` of an async export would
+/// block, or trap on single-threaded wasm, any call that entered the instance
+/// while the first was suspended.
+///
 /// `OnceLock` rather than `LazyLock`: the initializer is the caller's `build`
 /// function, handed to [`PipelineSlot::pipeline`] per call, so there is nothing
 /// for a `LazyLock` to store at declaration time.
 pub struct PipelineSlot {
-    pipeline: OnceLock<Mutex<Pipeline>>,
+    pipeline: OnceLock<Pipeline>,
 }
 
 impl Default for PipelineSlot {
@@ -44,24 +49,23 @@ impl PipelineSlot {
         }
     }
 
-    /// Lock and return the pipeline, initialising via `build` on first use.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the inner `Mutex` is poisoned, which needs a panic while the
-    /// lock is held. A WebAssembly processor traps before reaching this path; a
-    /// native plugin catches the unwind at its boundary and reports a permanent
-    /// error, so the poisoned lock surfaces on the next call instead.
-    pub fn pipeline<F>(&self, build: F) -> MutexGuard<'_, Pipeline>
+    /// Return the pipeline, initialising via `build` on first use.
+    pub fn pipeline<F>(&self, build: F) -> &Pipeline
     where
         F: FnOnce() -> Pipeline,
     {
-        self.pipeline
-            .get_or_init(|| Mutex::new(build()))
-            .lock()
-            .expect("saci sdk: pipeline mutex poisoned")
+        self.pipeline.get_or_init(build)
     }
 }
+
+// A processor keeps its slot in a `static`, which needs `Pipeline: Send + Sync`. A processor builds without `io`; with
+// it a pipeline owns boxed sources and sinks, which are `Send` only (a native plugin keeps its slot in a heap
+// instance, not a static, so it does not need this).
+#[cfg(not(feature = "io"))]
+const _: () = {
+    const fn assert_sync<T: Sync>() {}
+    assert_sync::<PipelineSlot>();
+};
 
 /// How an SDK moves processor state across a batch boundary.
 ///
@@ -292,6 +296,14 @@ impl<C> Default for ProcessorState<C> {
 mod tests {
     use super::*;
 
+    /// A processor keeps its slot in a `static`, so a slot must be `Sync` when built without `io`.
+    #[cfg(not(feature = "io"))]
+    #[test]
+    fn a_pipeline_slot_is_a_sync_static_without_io() {
+        static SLOT: PipelineSlot = PipelineSlot::new();
+        assert_eq!(SLOT.pipeline(|| Pipeline::new("static")).name(), "static");
+    }
+
     #[test]
     fn fingerprint_hex_is_lowercase_and_zero_padded_to_eight() {
         assert_eq!(fingerprint_hex(0), "00000000");
@@ -323,17 +335,19 @@ mod tests {
         const { assert!(!NoState::STATEFUL) };
     }
 
+    /// The slot builds the pipeline once and hands every caller the same shared reference, with nothing locked.
     #[test]
     fn a_pipeline_slot_builds_once() {
-        static SLOT: PipelineSlot = PipelineSlot::new();
-        {
-            let pipeline = SLOT.pipeline(|| Pipeline::new("first"));
-            assert_eq!(pipeline.name(), "first");
-        }
+        let slot = PipelineSlot::new();
+        let first = slot.pipeline(|| Pipeline::new("first"));
+        assert_eq!(first.name(), "first");
         // The second call must not rebuild, so the name from the first build
         // survives even though this closure would produce a different one.
-        let pipeline = SLOT.pipeline(|| Pipeline::new("second"));
-        assert_eq!(pipeline.name(), "first");
+        let second = slot.pipeline(|| Pipeline::new("second"));
+        assert_eq!(second.name(), "first");
+        assert!(std::ptr::eq(first, second));
+        // Both shared borrows are live at once: nothing is locked while a run is in flight.
+        assert_eq!(first.last_stats().systems_run, second.last_stats().systems_run);
     }
 
     /// A single-row state component, as `#[fold]` expects.

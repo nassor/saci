@@ -16,7 +16,7 @@
 // windowing sheet section.
 //
 // Build the processor first, from the repository root:
-//   cargo build --release -p windowing-sliding-wasm --target wasm32-wasip2
+//   cargo build --release -p windowing-sliding-wasm --target wasm32-wasip3
 //
 // Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
 // then run the service and the publisher:
@@ -94,7 +94,7 @@ workflow "windowing_sliding" {
     // four distinct windows: `assign_sliding` returns duplicate ids when it is
     // not.
 
-    wasm "window_sliding" module="target/wasm32-wasip2/release/windowing_sliding_wasm.wasm" {
+    wasm "window_sliding" module="target/wasm32-wasip3/release/windowing_sliding_wasm.wasm" {
         window kind="sliding" size_ms=60000 slide_ms=15000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
             key_field "symbol"
         }

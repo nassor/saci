@@ -14,7 +14,7 @@ Both workflows use the same `Sale` schema (`timestamp_ms`, `symbol`, `amount`), 
 ## Prerequisites
 
 - A clone of the repository. Every command runs from its root.
-- Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
+- Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`
 - A Docker daemon, for NATS and PostgreSQL.
 
 ## 1. Build the processors
@@ -22,8 +22,8 @@ Both workflows use the same `Sale` schema (`timestamp_ms`, `symbol`, `amount`), 
 The router is this example's own crate. The windowed half reuses the tumbling windowing example's component. Runs the same on Linux, macOS and Windows (PowerShell):
 
 ```text
-cargo build --release -p multi-workflow-router-wasm --target wasm32-wasip2
-cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip2
+cargo build --release -p multi-workflow-router-wasm --target wasm32-wasip3
+cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip3
 ```
 
 ## 2. Start the containers
@@ -125,4 +125,4 @@ docker compose -f examples/multi_workflow/docker-compose.yml down -v
 | `multi_workflow_publish.rs` | the `multi_workflow_publish` example that feeds both subjects |
 | `schema.sql` | the `rush_sales` and `window_totals` tables |
 | `docker-compose.yml` | NATS 2.11 and PostgreSQL 18 |
-| `wasm/` | `multi-workflow-router-wasm`, the router (cdylib, `wasm32-wasip2`) |
+| `wasm/` | `multi-workflow-router-wasm`, the router (cdylib, `wasm32-wasip3`) |

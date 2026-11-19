@@ -72,7 +72,7 @@ authoring SDK.
 
 - `engine` (**default**): `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, the
   `Source`/`Sink` traits. Implies `io`, which implies `runtime`.
-- `runtime`: tokio and rayon stage parallelism. A `wasm32-wasip2` build leaves it off.
+- `runtime`: tokio and rayon stage parallelism. A `wasm32-wasip3` build leaves it off.
 - `io`: the `Source` and `Sink` traits and the schema cast helpers (implies `runtime`).
 - `windows`: windowed aggregation. `WindowedSystem`, watermarks, `WindowAccumulator`. The
   `WindowSpec` geometry enum is outside the feature, so a host parses a `window` declaration in
@@ -83,9 +83,8 @@ authoring SDK.
 - `metrics`: the OpenTelemetry instruments in `src/metrics.rs` and the `inspector_wire` types.
   Stands alone, so a library embedder can compile the writers without the HTTP control plane.
 - `trace-context`: trace context carried across a `connector-saci` link (implies `tracing`).
-- `processor`: the wasm processor SDK. Sequential-only execution driven by the `pollster` sync
-  executor. A processor targets `wasm32-wasip2` and must not pull tokio in, so build with
-  `--no-default-features --features processor`.
+- `processor`: the wasm processor SDK targeting WASI 0.3 (`wasm32-wasip3`) and Component Model
+  Async. Build with `--no-default-features --features processor` so tokio stays out.
 - `plugin`: the native plugin SDK (implies `runtime`).
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`,
   `connector-kafka`, `connector-mariadb`, `connector-nats`, `connector-opentelemetry`,

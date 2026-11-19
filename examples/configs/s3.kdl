@@ -66,9 +66,8 @@ workflow "orders" {
                 allow_http #true
             }
 
-            // The twelve-field Order the polyglot stages declare, so this
-            // config pairs with `cargo xtask polyglot`'s processors. The
-            // schema must match the processor's declared component field for
+            // The twelve-field Order schema shared with `examples/wasm/settle/`.
+            // The schema must match the processor's declared component field for
             // field, in order.
             schema_fields "id" type="int64" nullable=#false
             schema_fields "region" type="utf8" nullable=#false

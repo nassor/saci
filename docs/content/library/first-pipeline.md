@@ -565,13 +565,13 @@ with `data.apply_write_set` instead of returning a `WriteSet`. Build it for the
 wasm target, from inside the crate:
 
 ```bash,name=Build the component
-rustup target add wasm32-wasip2
-cargo build --release --target wasm32-wasip2
+rustup target add wasm32-wasip3
+cargo build --release --target wasm32-wasip3
 ```
 
 Runs the same on all three platforms. The artifact takes the crate name with
 hyphens turned to underscores, so step 8 is done when
-`target/wasm32-wasip2/release/order_pipeline_processor.wasm` exists.
+`target/wasm32-wasip3/release/order_pipeline_processor.wasm` exists.
 `saci-service` loads that file through a `wasm` node in a KDL config, with
 sources and sinks declared around it; `examples/configs/standalone_wasm.kdl`
 is the shape. [The Rust processor page](@/service/processors/build/rust.md) walks the

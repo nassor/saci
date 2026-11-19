@@ -125,7 +125,7 @@ fail-fast = false
 slow-timeout = { period = "120s", terminate-after = 5 }
 success-output = "final"
 archive.include = [
-    { path = "wasm32-wasip2/release/saci_processor_smoketest.wasm", relative-to = "target", on-missing = "error" },
+    { path = "wasm32-wasip3/release/saci_processor_smoketest.wasm", relative-to = "target", on-missing = "error" },
     { path = "debug/libsaci_plugin_smoketest.so", relative-to = "target", on-missing = "ignore" },
     { path = "debug/libsaci_plugin_smoketest.dylib", relative-to = "target", on-missing = "ignore" },
     { path = "debug/saci_plugin_smoketest.dll", relative-to = "target", on-missing = "ignore" },

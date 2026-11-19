@@ -14,11 +14,11 @@
 //! # Build
 //!
 //! ```bash
-//! cargo build --release -p integrity-audit-wasm --target wasm32-wasip2
+//! cargo build --release -p integrity-audit-wasm --target wasm32-wasip3
 //! ```
 //!
 //! The output component lands at
-//! `target/wasm32-wasip2/release/integrity_audit_wasm.wasm`.
+//! `target/wasm32-wasip3/release/integrity_audit_wasm.wasm`.
 
 #![deny(missing_docs)]
 

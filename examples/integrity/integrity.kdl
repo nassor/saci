@@ -49,7 +49,7 @@
 //
 // Build the three processors first, from the repository root:
 //   cargo build --release -p integrity-classify-wasm -p integrity-aggregate-wasm \
-//     -p integrity-audit-wasm --target wasm32-wasip2
+//     -p integrity-audit-wasm --target wasm32-wasip3
 //
 // Start Kafka, NATS and PostgreSQL (docker compose -f examples/integrity/docker-compose.yml up -d),
 // then the publisher/verifier, then both services. That order is enforced:
@@ -195,7 +195,7 @@ workflow "ingest" name="Order ingest and classification" {
     // the stream runner delivers one source's batch per item and clears the
     // dataset afterwards, so the other component is simply empty that pass.
 
-    wasm "classify" module="target/wasm32-wasip2/release/integrity_classify_wasm.wasm"
+    wasm "classify" module="target/wasm32-wasip3/release/integrity_classify_wasm.wasm"
 
     // ----------------------------------------------------------------- sinks
     //
@@ -382,7 +382,7 @@ workflow "settle" name="Windowed settlement" {
     // a credit-sized slice would let a throughput measurement choose the
     // boundaries at which the node observes event time. Arrivals stay whole,
     // sized by each connector's own `batch_size`.
-    wasm "aggregate" module="target/wasm32-wasip2/release/integrity_aggregate_wasm.wasm" {
+    wasm "aggregate" module="target/wasm32-wasip3/release/integrity_aggregate_wasm.wasm" {
         window kind="tumbling" size_ms=10000 time_field="event_ms" allowed_lateness_ms=2000 {
             key_field "region"
         }

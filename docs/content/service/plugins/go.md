@@ -14,10 +14,10 @@ settlement tier into every row of an `Order` batch.
     <div class="dgm-scroll"><svg viewBox="0 0 660 168" role="img" aria-labelledby="pgo-title pgo-desc">
         <title id="pgo-title">A Go plugin between a CSV source and a CSV sink</title>
         <desc id="pgo-desc">
-            The source csv_orders reads polyglot_orders.csv and hands each batch to the plugin
+            The source csv_orders reads settle_orders.csv and hands each batch to the plugin
             node settle, which is the shared library built from Go with cgo. The node writes
             the review_tier column and its output goes on to the sink csv_out, which writes
-            saci-polyglot-out.csv. The plugin runs in the service's own process: the Go runtime
+            saci-settle-out.csv. The plugin runs in the service's own process: the Go runtime
             starts when the library loads, and no sandbox stands between the two.
         </desc>
         <g class="anim anim-1">
@@ -25,7 +25,7 @@ settlement tier into every row of an `Order` batch.
             <rect class="hd hd-data" x="0" y="46" width="150" height="20" rx="8"/>
             <rect class="hd hd-data" x="0" y="58" width="150" height="8"/>
             <text class="t-lbl" x="12" y="61">csv_orders</text>
-            <text class="t-sm" x="12" y="84">polyglot_orders.csv</text>
+            <text class="t-sm" x="12" y="84">settle_orders.csv</text>
         </g>
         <g class="anim anim-2">
             <path class="arw arw-data" d="M150 74 H210" marker-end="url(#pgo-d)"/>
@@ -42,7 +42,7 @@ settlement tier into every row of an `Order` batch.
             <rect class="hd hd-data" x="470" y="46" width="190" height="20" rx="8"/>
             <rect class="hd hd-data" x="470" y="58" width="190" height="8"/>
             <text class="t-lbl" x="482" y="61">csv_out</text>
-            <text class="t-sm" x="482" y="84">saci-polyglot-out.csv</text>
+            <text class="t-sm" x="482" y="84">saci-settle-out.csv</text>
         </g>
         <g class="anim anim-4">
             <path class="ln" d="M0 134 H654"/>
@@ -69,8 +69,9 @@ settlement tier into every row of an `Order` batch.
   `xcode-select --install`. Windows: mingw-w64 gcc or clang, because cgo does not support MSVC,
   and a machine with only Visual Studio has no usable compiler here.
 - **cargo**, because the build regenerates the `Order` schema constants the plugin compiles in.
-- **`saci-sdk-go`**, whose `arrowipc` subpackage reads and mutates batches with nothing but the
-  Go standard library. [The SDK packages](@/library/reference/sdk-packages.md) lists its API.
+- **`internal/arrowipc`**, an internal Go package inside `examples/plugins/settle-go/` that reads
+  and mutates batches using only the Go standard library. [The wire format](@/library/reference/wire-format.md)
+  documents the framing it implements.
 
 Check the compiler before anything else:
 
@@ -83,18 +84,13 @@ installed, is the failure the last section of this page describes.
 
 ## 1. Create the module
 
-A plugin is `package main` built as a shared library, so the module needs nothing but the SDK.
-A filesystem `replace` resolves it from this repository, and the SDK has no dependencies of its
-own, so there is no `go.sum`.
+A plugin is `package main` built as a shared library. The wire codec sits in
+`internal/arrowipc` with no external dependencies, so there is no `go.sum`:
 
 ```go,name=go.mod for a Go plugin
 module github.com/nassor/saci/examples/plugins/settle-go
 
 go 1.25
-
-require github.com/nassor/saci/packages/saci-sdk-go v0.0.0
-
-replace github.com/nassor/saci/packages/saci-sdk-go => ../../../packages/saci-sdk-go
 ```
 
 Nothing rewrites this file, because a cgo build never touches `go.mod`.
@@ -241,11 +237,11 @@ go build -buildmode=c-shared -o settle_go.dll .
 
 ## 5. Run it under saci-service
 
-The plugin works on the same `Order` rows the polyglot example uses, so
-`examples/configs/standalone_polyglot.kdl` runs it with two changes. Its `wasm` node becomes a
+The plugin works on the same `Order` rows as `examples/wasm/settle/`, so
+`examples/configs/standalone_settle.kdl` runs it with two changes. Its `wasm` node becomes a
 `plugin` node naming the library, and the two `link` lines name the new node.
 
-```kdl,name=The polyglot config, with a plugin node instead
+```kdl,name=The standalone settle config, with a plugin node instead
 plugin "settle" library="examples/plugins/settle-go/libsettle_go.so" {
     config "settle.rate_JPY"="0.0068"
 }
@@ -260,21 +256,21 @@ Linux/macOS:
 
 ```bash,name=Validate then serve
 cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate \
-  --config examples/configs/standalone_polyglot.kdl --strict
+  --config examples/configs/standalone_settle.kdl --strict
 
 cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve \
-  --config examples/configs/standalone_polyglot.kdl
+  --config examples/configs/standalone_settle.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate --config examples/configs/standalone_polyglot.kdl --strict
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate --config examples/configs/standalone_settle.kdl --strict
 
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve --config examples/configs/standalone_polyglot.kdl
+cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve --config examples/configs/standalone_settle.kdl
 ```
 
-The config runs once and writes `/tmp/saci-polyglot-out.csv`. The plugin's own log line reports
+The config runs once and writes `/tmp/saci-settle-out.csv`. The plugin's own log line reports
 what it did, and the `review_tier` column holds its decisions:
 
 ```text,name=The plugin's log line

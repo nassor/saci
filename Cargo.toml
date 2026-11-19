@@ -5,7 +5,9 @@ members = [
     "crates/saci-processor-smoketest",
     "crates/saci-plugin-smoketest",
     "examples/wasm/order_processing",
-    "examples/polyglot/stages/rust-settle",
+    "examples/wasm/settle",
+    "examples/quickstart/stages/validate",
+    "examples/quickstart/stages/settle",
     "examples/branching/wasm",
     "examples/branching/plugin",
     "examples/windowing/tumbling/wasm",
@@ -29,13 +31,13 @@ resolver = "3"
 
 [workspace.package]
 version = "0.1.2"
-rust-version = "1.99.0"
+rust-version = "1.100.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 # Two crates publish to crates.io: `saci` and `saci-macros`. The members that
 # are CI fixtures or samples override this back to `false` in their own
 # manifest: saci-processor-smoketest, saci-plugin-smoketest, xtask, and the
-# twelve example crates under examples/.
+# fourteen example crates under examples/.
 publish = true
 repository = "https://github.com/nassor/saci"
 homepage = "https://nassor.github.io/saci/"
@@ -49,7 +51,7 @@ authors = ["Nassor Frazier-Silva <nassor@gmail.com>"]
 # version.
 #
 # `saci` is declared `default-features = false`. Its default is `engine`, whose
-# `runtime` (tokio and rayon) cannot target wasm32-wasip2, so the processor
+# `runtime` (tokio and rayon) cannot target wasm32-wasip3, so the processor
 # crates must not receive it; cargo ignores a member's own
 # `default-features = false` when the workspace dependency does not set one,
 # which would leave that exclusion silently undone. A member asks for what it
@@ -146,22 +148,22 @@ mysql_async   = { version = "0.37.1", default-features = false, features = ["min
 mysql_common  = { version = "0.37.1", default-features = false, features = ["binlog"] }
 
 # WASM component model host
-wasmtime      = { version = "50.0.1", features = ["component-model"] }
-wasmtime-wasi = { version = "50.0.1" }
+wasmtime      = { version = "50.0.1", features = ["component-model", "component-model-async", "async"] }
+wasmtime-wasi = { version = "50.0.1", default-features = false, features = ["p3"] }
 sha3          = { version = "0.12.0" }
 
 # WASM component model guest. Every Rust processor component invokes
 # `wit_bindgen::generate!` against `crates/saci/wit`, so the generator
-# and its runtime support are one dependency pinned in one place. The five
+# and its runtime support are one dependency pinned in one place. The
 # processor crates take it as a `cfg(target_arch = "wasm32")` dependency: the
 # generated module is gated on wasm32, so a host build needs neither the crate
 # nor its proc-macro tree.
-wit-bindgen   = { version = "0.63.0" }
+wit-bindgen   = { version = "0.63.0", features = ["async"] }
 
 # Native plugin host. `libloading` is the dlopen/LoadLibrary wrapper the plugin
 # runtime loads a shared library with. `base64` decodes the schema bytes a
 # plugin's `describe` manifest carries; the encoding matches the generated
-# constants the polyglot processors already embed, and an audited decoder beats
+# Go schema constants, and an audited decoder beats
 # hand-rolling alphabet and padding validation over plugin-supplied input.
 libloading    = { version = "0.9.1" }
 base64        = { version = "0.23.1" }

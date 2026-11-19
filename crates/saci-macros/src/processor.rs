@@ -271,7 +271,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                     }
                 }
 
-                fn run_batch(
+                async fn run_batch(
                     input: Vec<u8>,
                     prior: Option<Vec<u8>>,
                 ) -> Result<
@@ -298,9 +298,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                         .map_err(|e| RunError::Permanent(format!("state restore: {e}")))?;
 
                     let pipeline = __SACI_PIPELINE.pipeline(#build_fn);
-                    let run_result = ::saci::processor::__rt::pollster::block_on(
-                        pipeline.run_on_with_stats(&mut dataset),
-                    );
+                    let run_result = pipeline.run_on_with_stats(&mut dataset).await;
 
                     let stats = match run_result {
                         Ok(stats) => stats,
@@ -360,9 +358,9 @@ mod tests {
 
     #[test]
     fn the_embedded_wit_is_the_pipeline_world_saci_processor_owns() {
-        assert!(PIPELINE_WIT.starts_with("package saci:pipeline@0.3.0;"));
+        assert!(PIPELINE_WIT.starts_with("package saci:pipeline@0.4.0;"));
         assert!(PIPELINE_WIT.contains("world saci-pipeline {"));
-        assert!(PIPELINE_WIT.contains("run-batch: func("));
+        assert!(PIPELINE_WIT.contains("run-batch: async func("));
     }
 
     #[test]

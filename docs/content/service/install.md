@@ -1,6 +1,6 @@
 +++
 title = "Install saci-service"
-description = "Install the binary with the server feature, add the wasm32-wasip2 target, and confirm the version."
+description = "Install the binary with the server feature, add the wasm32-wasip3 target, and confirm the version."
 template = "page.html"
 weight = 1
 aliases = ["/quickstart/installation/"]
@@ -11,12 +11,12 @@ aliases = ["/quickstart/installation/"]
 <dt>In one line</dt>
 <dd>One build from a checkout, then <code>saci-service serve</code> reads <code>saci.kdl</code></dd>
 <dt>You need</dt>
-<dd>Rust 1.95 or newer, and <code>git</code></dd>
+<dd>Rust 1.100 or newer, and <code>git</code></dd>
 <dt>Read this if</dt>
 <dd>You want the binary on your PATH before running the tutorial</dd>
 </dl>
 
-`saci-service` on your PATH and the `wasm32-wasip2` target are everything
+`saci-service` on your PATH and the `wasm32-wasip3` target are everything
 [Your first pipeline](@/service/first-pipeline.md) needs.
 
 <div class="dgm animate-in">
@@ -25,7 +25,7 @@ aliases = ["/quickstart/installation/"]
         <desc id="svc-inst-d">
             A git checkout of the repository feeds one cargo install, which puts the
             saci-service binary in the cargo bin directory that is already on the PATH, so
-            the binary answers everywhere. Alongside it, rustup adds the wasm32-wasip2
+            the binary answers everywhere. Alongside it, rustup adds the wasm32-wasip3
             target, which is what compiles the WebAssembly processor the first pipeline
             runs. Both arrows end at one ready state: the binary answers its version flag.
         </desc>
@@ -51,7 +51,7 @@ aliases = ["/quickstart/installation/"]
         <g class="anim anim-4">
             <rect class="blk blk-bnd" x="160" y="102" width="190" height="46" rx="8"/>
             <text class="t-lbl t-bnd" x="172" y="124">rustup target add</text>
-            <text class="t-sm" x="172" y="142">wasm32-wasip2</text>
+            <text class="t-sm" x="172" y="142">wasm32-wasip3</text>
             <path class="arw arw-bnd" d="M350 125 H386" marker-end="url(#svc-inst-b)"/>
             <text class="t-sm" x="390" y="121">compiles the processor</text>
             <text class="t-sm" x="390" y="139">the first pipeline runs</text>
@@ -114,21 +114,21 @@ A checkout can also build a binary with only the parts a deployment uses, for ex
 [Which feature adds which node](@/library/reference/crates.md#which-feature-adds-which-node) lists
 the options.
 
-## 2. Add wasm32-wasip2
+## 2. Add wasm32-wasip3
 
 A processor is a WebAssembly component, and `rustc` builds one only when the
 target is installed. [Your first pipeline](@/service/first-pipeline.md) compiles
 one, so add it now:
 
 ```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
-rustup target add wasm32-wasip2
+rustup target add wasm32-wasip3
 ```
 
 The command downloads and installs the standard library for that target, and
 exits 0. Run it a second time to see it confirm the target is present:
 
 ```text
-info: component rust-std for target wasm32-wasip2 is up to date
+info: component rust-std for target wasm32-wasip3 is up to date
 ```
 
 ## 3. Check it

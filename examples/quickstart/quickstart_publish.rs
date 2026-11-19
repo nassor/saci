@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use rand::{RngExt as _, SeedableRng as _};
 use tokio_util::sync::CancellationToken;
 
-/// Regions the generator draws from, matching the polyglot fixture's vocabulary.
+/// Regions the generator draws from, matching the sample order schema vocabulary.
 const REGIONS: [&str; 4] = ["emea", "apac", "amer", "latam"];
 
 /// Currencies the generator draws from.
@@ -35,7 +35,7 @@ const CURRENCIES: [&str; 3] = ["USD", "EUR", "GBP"];
 ///
 /// | share | range | what it exercises |
 /// |---|---|---|
-/// | 2% | 0.01 to 0.49 | below `quickstart.kdl`'s `min_amount="0.50"`: the Go stage marks it invalid and the C# stage rejects it (`review_tier = 2`) |
+/// | 2% | 0.01 to 0.49 | below `quickstart.kdl`'s `min_amount="0.50"`: the validate stage marks it invalid and the settle stage rejects it (`review_tier = 2`) |
 /// | 78% | 1.00 to 250.00 | ordinary spend: settles (`review_tier = 0`) |
 /// | 20% | 250.00 to 5000.00 | partly above `quickstart.kdl`'s `hold_above="1000"`: held for review (`review_tier = 1`) |
 ///

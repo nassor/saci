@@ -14,7 +14,7 @@
 //! The WASM half needs the smoketest component:
 //!
 //! ```text
-//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 //! ```
 
 use std::sync::Arc;
@@ -248,7 +248,7 @@ mod wasm_probe {
             .expect("workspace root above crates/saci");
         workspace_root
             .join("target")
-            .join("wasm32-wasip2")
+            .join("wasm32-wasip3")
             .join("release")
             .join("saci_processor_smoketest.wasm")
     }
@@ -258,8 +258,8 @@ mod wasm_probe {
         let path = smoketest_wasm_path();
         if !path.exists() {
             println!(
-                "wasm half skipped: {} not found — run \
-                 `cargo build --release -p saci-processor-smoketest --target wasm32-wasip2`",
+                "wasm half skipped: {} not found -- run \
+                 `cargo build --release -p saci-processor-smoketest --target wasm32-wasip3`",
                 path.display()
             );
             return None;

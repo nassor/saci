@@ -1746,7 +1746,7 @@ fn s3_from_env() -> Option<S3Resource> {
 /// The two processor artifacts, resolved once, and the one engine every wasm
 /// case compiles the component against.
 pub struct Fixtures {
-    /// `<target>/wasm32-wasip2/release/saci_processor_smoketest.wasm`.
+    /// `<target>/wasm32-wasip3/release/saci_processor_smoketest.wasm`.
     pub wasm: PathBuf,
     /// The `saci-plugin-smoketest` cdylib under the running profile.
     pub plugin: PathBuf,
@@ -1792,13 +1792,13 @@ impl Fixtures {
             .ok_or_else(|| format!("no target directory above {}", profile.display()))?;
 
         let wasm = target
-            .join("wasm32-wasip2")
+            .join("wasm32-wasip3")
             .join("release")
             .join("saci_processor_smoketest.wasm");
         if !wasm.exists() {
             return Err(format!(
                 "smoketest component not found at {}; run `cargo build --release \
-                 -p saci-processor-smoketest --target wasm32-wasip2` first",
+                 -p saci-processor-smoketest --target wasm32-wasip3` first",
                 wasm.display()
             ));
         }

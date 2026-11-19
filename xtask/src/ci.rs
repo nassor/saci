@@ -1,7 +1,7 @@
 //! The two processor-target gates CI runs on every push.
 //!
 //! Both exist to catch drift that a host-only build cannot see: `saci` has
-//! to keep compiling for `wasm32-wasip2` without its default features, and
+//! to keep compiling for `wasm32-wasip3` without its default features, and
 //! the `arrow-ipc` pin has to keep meaning the same bytes on both sides of
 //! the component boundary.
 
@@ -20,11 +20,11 @@ const ROUNDTRIP_USAGE: &str = "usage: cargo xtask processor-ipc-roundtrip";
 /// and a failure ends the task with cargo's own exit code. That combination is
 /// a documented promise: `crates/saci/src/lib.rs` and AGENTS.md hand a
 /// processor author exactly it, because the default `engine` implies
-/// `runtime` (tokio and rayon), and tokio cannot target wasm32-wasip2. Nothing
+/// `runtime` (tokio and rayon), and tokio cannot target wasm32-wasip3. Nothing
 /// in a host build compiles the crate that way, so a feature edge leaking
 /// tokio back in would falsify the instruction silently.
 ///
-/// It installs the `wasm32-wasip2` target first, as
+/// It installs the `wasm32-wasip3` target first, as
 /// [`processor_ipc_roundtrip`] does.
 pub fn check_wasm_processor(args: &[String]) -> Result<()> {
     let ctx = Ctx::new("check-wasm-processor");
@@ -33,24 +33,24 @@ pub fn check_wasm_processor(args: &[String]) -> Result<()> {
     }
 
     ctx.cmd("rustup")?
-        .args(["target", "add", "wasm32-wasip2"])
+        .args(["target", "add", "wasm32-wasip3"])
         .run()?;
 
-    ctx.log("checking saci for wasm32-wasip2...");
+    ctx.log("checking saci for wasm32-wasip3...");
     ctx.cargo()?
         .args([
             "check",
             "--manifest-path",
             "crates/saci/Cargo.toml",
             "--target",
-            "wasm32-wasip2",
+            "wasm32-wasip3",
             "--no-default-features",
             "--features",
             "processor",
         ])
         .run()?;
 
-    ctx.log("PASS: saci builds for wasm32-wasip2");
+    ctx.log("PASS: saci builds for wasm32-wasip3");
     Ok(())
 }
 
@@ -61,14 +61,14 @@ pub fn check_wasm_processor(args: &[String]) -> Result<()> {
 ///
 /// Steps:
 ///
-/// 1. Ensure the `wasm32-wasip2` toolchain target is installed.
+/// 1. Ensure the `wasm32-wasip3` toolchain target is installed.
 /// 2. Build the `saci-processor-smoketest` component, release profile.
 /// 3. Run the host-side `wasm_roundtrip` integration test, which loads the
 ///    `.wasm` through `WasmPipelineRuntime`, drives a `RecordBatch` through
 ///    `run-batch`, and asserts byte-exact IPC equality on the round-trip.
 ///
-/// `rustc` links a `wasm32-wasip2` cdylib into a Component Model component
-/// itself, so the artifact under `target/wasm32-wasip2/release/` is the finished
+/// `rustc` links a `wasm32-wasip3` cdylib into a Component Model component
+/// itself, so the artifact under `target/wasm32-wasip3/release/` is the finished
 /// component: no preview1 core module and no adapter step in between.
 ///
 /// The fixture is deliberately trivial: one component, a single u64 field, zero
@@ -76,7 +76,7 @@ pub fn check_wasm_processor(args: &[String]) -> Result<()> {
 /// before and after IPC snapshots therefore means `arrow-ipc` drift, not a
 /// processor logic bug.
 ///
-/// Cold runs are slow: the first `wasm32-wasip2` build of `arrow-ipc`,
+/// Cold runs are slow: the first `wasm32-wasip3` build of `arrow-ipc`,
 /// `saci` and the `wit-bindgen` generator. CI should cache `target/` and
 /// `~/.cargo/registry` between runs.
 ///
@@ -89,9 +89,9 @@ pub fn processor_ipc_roundtrip(args: &[String]) -> Result<()> {
 
     ctx.log(format!("repo: {}", ctx.root().display()));
 
-    ctx.log("ensuring wasm32-wasip2 target is installed...");
+    ctx.log("ensuring wasm32-wasip3 target is installed...");
     ctx.cmd("rustup")?
-        .args(["target", "add", "wasm32-wasip2"])
+        .args(["target", "add", "wasm32-wasip3"])
         .run()?;
 
     // Release profile: the test asserts the canonical release output path.
@@ -103,11 +103,11 @@ pub fn processor_ipc_roundtrip(args: &[String]) -> Result<()> {
             "-p",
             "saci-processor-smoketest",
             "--target",
-            "wasm32-wasip2",
+            "wasm32-wasip3",
         ])
         .run()?;
 
-    let artifact = ctx.path("target/wasm32-wasip2/release/saci_processor_smoketest.wasm");
+    let artifact = ctx.path("target/wasm32-wasip3/release/saci_processor_smoketest.wasm");
     ctx.expect_artifact(&artifact, 3)?;
     ctx.log(format!("smoketest built: {} bytes", ctx.size(&artifact)?));
 

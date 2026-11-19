@@ -2,7 +2,7 @@
 // ABI, a shared library the host loads with dlopen instead of a WebAssembly
 // component it instantiates.
 //
-// It operates on the same `Order` component the polyglot WASM example uses, so
+// It operates on the same `Order` component used in `examples/wasm/settle/`, so
 // the two processor paths are directly comparable. It reads `amount` and
 // `currency`, converts each order through a host supplied rate, and writes
 // `review_tier`, the settlement disposition:
@@ -116,7 +116,7 @@ import (
 	"time"
 	"unsafe"
 
-	arrowipc "github.com/nassor/saci/packages/saci-sdk-go/arrowipc"
+	"github.com/nassor/saci/examples/plugins/settle-go/internal/arrowipc"
 )
 
 const (

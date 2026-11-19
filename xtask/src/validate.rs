@@ -16,9 +16,8 @@
 //! Per selected config:
 //!
 //! 1. Build the processor components it loads (wasm components, native
-//!    plugins; the quickstart and polyglot builds run their own tasks). A
-//!    config whose toolchains are missing is recorded as failed and does not
-//!    stop the rest.
+//!    plugins; the quickstart build runs its own task). A config whose
+//!    toolchains are missing is recorded as failed and does not stop the rest.
 //! 2. Build `saci-service` once with the union of features the configs whose
 //!    artifacts built need: each entry names the processor host it loads from
 //!    and every opt-in connector its config declares.
@@ -79,8 +78,8 @@ usage: cargo xtask validate [--only=LIST]
                 windowing_tumbling load both tumbling processors
                 windowing_sliding load the sliding processor
                 windowing_session load the session processor
-                quickstart        load the Go + C# Quick Start components
-                standalone_polyglot  load the Python stage
+                quickstart        load the Rust Quick Start components
+                standalone_settle load the stateful settlement component
                 integrity         load the integrity demo's stream half
                 integrity_audit   load the integrity demo's PostgreSQL CDC half
 

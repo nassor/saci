@@ -509,7 +509,7 @@ impl Pipeline {
     /// Run all systems against `self.data` (processor/sequential path).
     ///
     /// `ParallelSystem` entries are not supported here: register only `System`
-    /// impls when targeting wasm32-wasip2.
+    /// impls when targeting wasm32-wasip3.
     #[cfg(not(feature = "runtime"))]
     pub async fn run(&mut self) -> SaciResult<()> {
         self.ensure_plan(self.data.schemas())?;

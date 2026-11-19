@@ -69,13 +69,16 @@ The artifact name is platform specific: `target/debug/libsaci_plugin_smoketest.s
 `.dylib` on macOS, `saci_plugin_smoketest.dll` on Windows. Each test resolves it through
 `std::env::consts::DLL_PREFIX` and `DLL_SUFFIX`, so it follows whichever profile the test ran under.
 
-`cargo xtask plugins` builds `examples/plugins/settle-go`, the Go cross-language plugin.
+`cargo xtask plugins` builds `examples/plugins/settle-go`, the Go cross-language plugin (after
+running `examples/plugins/schema_emit.rs` to refresh `examples/plugins/generated/`). The Go plugin
+bundles its Arrow IPC wire codec in `examples/plugins/settle-go/internal/arrowipc/`.
 
 ## Examples
 
 - `examples/plugins/`: native-plugin proofs, `native_plugin.rs` (a `saci` example, feature
-  `plugin-host`, loading the `saci-plugin-smoketest` fixture) plus `settle-go/`, the Go
-  cross-language plugin `cargo xtask plugins` builds.
+  `plugin-host`, loading the `saci-plugin-smoketest` fixture), `schema_emit.rs` (`plugin_schema_emit`
+  example emitting `examples/plugins/generated/`), and `settle-go/` with its internal `arrowipc`
+  package (`cargo xtask plugins` builds it).
 - `examples/branching/plugin/`: `branching-plugin`, running the same logic as its wasm twin.
 - `examples/windowing/tumbling/plugin/`: `windowing-tumbling-plugin`, running the same logic as its
   wasm twin. Skill `saci-service` describes both workflows.

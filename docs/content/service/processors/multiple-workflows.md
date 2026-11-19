@@ -111,7 +111,7 @@ run_mode kind="stream"
 
 workflow "route" {
     source "orders_in" type="NatsSource" component="Sale" transformer="ndjson_fmt" { /* ... */ }
-    wasm "router" module="target/wasm32-wasip2/release/multi_workflow_router_wasm.wasm"
+    wasm "router" module="target/wasm32-wasip3/release/multi_workflow_router_wasm.wasm"
     sink "rush_sales" type="PostgresSink" component="Sale" { /* ... */ }
 
     link from="orders_in" to="router"
@@ -120,7 +120,7 @@ workflow "route" {
 
 workflow "settle" {
     source "offsets_in" type="NatsSource" component="Sale" transformer="settle_ndjson" { /* ... */ }
-    wasm "window_sales" module="target/wasm32-wasip2/release/windowing_tumbling_wasm.wasm" {
+    wasm "window_sales" module="target/wasm32-wasip3/release/windowing_tumbling_wasm.wasm" {
         window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
             key_field "symbol"
         }
@@ -175,8 +175,8 @@ Build the two processors first. The router is this example's own crate; the wind
 the tumbling windowing example's component unchanged.
 
 ```bash,name=Build both processors
-cargo build --release -p multi-workflow-router-wasm --target wasm32-wasip2
-cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip2
+cargo build --release -p multi-workflow-router-wasm --target wasm32-wasip3
+cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip3
 ```
 
 Runs the same on Linux, macOS and Windows (PowerShell).

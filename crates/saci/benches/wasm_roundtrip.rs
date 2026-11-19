@@ -2,7 +2,7 @@
 //
 // Run through the harness, never bare `cargo bench`:
 //
-//   cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+//   cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 //   cargo xtask bench wasm_roundtrip --build-only
 //   cargo xtask bench wasm_roundtrip
 //
@@ -118,7 +118,7 @@ fn smoketest_wasm_path() -> PathBuf {
         .expect("workspace root above crates/saci");
     workspace_root
         .join("target")
-        .join("wasm32-wasip2")
+        .join("wasm32-wasip3")
         .join("release")
         .join("saci_processor_smoketest.wasm")
 }
@@ -131,7 +131,7 @@ fn smoketest_bytes() -> Vec<u8> {
     assert!(
         path.exists(),
         "smoketest .wasm not found at {}; \
-         run `cargo build --release -p saci-processor-smoketest --target wasm32-wasip2` first",
+         run `cargo build --release -p saci-processor-smoketest --target wasm32-wasip3` first",
         path.display()
     );
     std::fs::read(&path).unwrap_or_else(|e| panic!("read smoketest wasm: {e}"))

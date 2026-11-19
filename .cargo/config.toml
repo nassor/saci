@@ -5,7 +5,7 @@
 [alias]
 xtask = "run --package xtask --"
 
-# Every Rust processor component is built for `wasm32-wasip2`, and the host
+# Every Rust processor component is built for `wasm32-wasip3`, and the host
 # (wasmtime) enables the SIMD proposal by default, so the vector instructions
 # cost nothing to emit. They pay off in guest-side columnar arithmetic, where
 # LLVM widens an `f64` loop to `f64x2`. Arrow encode and decode spend their time
@@ -16,7 +16,7 @@ xtask = "run --package xtask --"
 # This is config-file `rustflags`, which an exported `RUSTFLAGS` would replace
 # wholesale rather than extend. Nothing in this repository exports it for a wasm
 # build; `cargo xtask bench` sets it for host benchmark builds only.
-[target.wasm32-wasip2]
+[target.wasm32-wasip3]
 rustflags = ["-C", "target-feature=+simd128"]
 # MSVC's `link.exe` caps the number of modules a `/DEBUG` PDB can carry
 # (LNK1140). Once the all-features dependency graph passed ~200 objects per

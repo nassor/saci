@@ -17,7 +17,7 @@
 // windowing sheet section.
 //
 // Build the processor first, from the repository root:
-//   cargo build --release -p windowing-session-wasm --target wasm32-wasip2
+//   cargo build --release -p windowing-session-wasm --target wasm32-wasip3
 //
 // Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
 // then run the service and the publisher. The publisher's gap flags put a
@@ -95,7 +95,7 @@ workflow "windowing_session" {
     // processor reads back through get-config. One source of truth. A session
     // block declares a gap and nothing else: there is no size to declare.
 
-    wasm "window_session" module="target/wasm32-wasip2/release/windowing_session_wasm.wasm" {
+    wasm "window_session" module="target/wasm32-wasip3/release/windowing_session_wasm.wasm" {
         window kind="session" gap_ms=10000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
             key_field "symbol"
         }

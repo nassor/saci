@@ -1,7 +1,5 @@
-# Copied in by `cargo xtask plugins` from examples/polyglot/generated/, which
-# the emit command regenerates from the canonical Rust Order definition. Only the
-# package clause is rewritten on the way in, because a c-shared plugin is
-# package main.
+# Copied in by `cargo xtask plugins` from examples/plugins/generated/, which
+# the emit command regenerates from the canonical Rust Order definition.
 /schema_gen.go
 
 # Build output. `go build -buildmode=c-shared` writes the library and a C header

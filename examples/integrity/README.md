@@ -21,7 +21,7 @@ A Kafka consumer, a JetStream consumer and a `ChannelSource` never report EOF, s
 
 ## Prerequisites
 
-- Rust 1.99 or newer, plus the WASI target: `rustup target add wasm32-wasip2`
+- Rust 1.100 or newer, plus the WASI target: `rustup target add wasm32-wasip3`
 - A running Docker daemon, for the Kafka, NATS and PostgreSQL containers
 - `cmake` and a C toolchain on `PATH`: `connector-kafka` vendors librdkafka
 
@@ -34,10 +34,10 @@ Use three terminals for steps 3 to 5, and keep the order.
 1. Build the three processors:
 
    ```text
-   cargo build --release -p integrity-classify-wasm -p integrity-aggregate-wasm -p integrity-audit-wasm --target wasm32-wasip2
+   cargo build --release -p integrity-classify-wasm -p integrity-aggregate-wasm -p integrity-audit-wasm --target wasm32-wasip3
    ```
 
-   Three `.wasm` files appear under `target/wasm32-wasip2/release/`.
+   Three `.wasm` files appear under `target/wasm32-wasip3/release/`.
 
 2. Start the containers:
 

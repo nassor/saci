@@ -18,7 +18,7 @@ saci = { version = "0.1", default-features = false, features = ["processor"] }
 serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = "0.63.0"
+wit-bindgen = { version = "0.63.0", features = ["async"] }
 ```
 
 ## Macros
@@ -56,7 +56,7 @@ pub fn build() -> Pipeline {
 }
 ```
 
-`cargo build --release --target wasm32-wasip2` turns that crate into a component `saci-service`
+`cargo build --release --target wasm32-wasip3` turns that crate into a component `saci-service`
 loads. [Build a Rust processor](https://nassor.github.io/saci/service/processors/build/rust/) walks
 through a complete one.
 

@@ -49,7 +49,7 @@ warning. Nothing about your processor is touched until gate 2.
             <rect class="hd hd-bnd" x="0" y="150" width="430" height="8"/>
             <text class="t-lbl t-bnd" x="12" y="151">2 &nbsp;load the processor</text>
             <text class="t-sm" x="12" y="172">read the module bytes, check the optional sha3_256</text>
-            <text class="t-sm" x="12" y="186">compile, then instantiate against saci:pipeline@0.3.0</text>
+            <text class="t-sm" x="12" y="186">compile, then instantiate against saci:pipeline@0.4.0</text>
             <text class="t-sm" x="12" y="200">describe() is called once here, not at the first batch</text>
             <text class="t-lbl t-bnd" x="448" y="151">rejects</text>
             <text class="t-sm" x="448" y="172">a digest mismatch</text>

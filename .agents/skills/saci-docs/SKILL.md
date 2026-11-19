@@ -109,7 +109,7 @@ A page diagram is inline SVG inside the site's diagram frame:
   `crates/<crate>/` on GitHub, so a link that leaves the crate directory is an absolute URL.
   `crates/saci/src/lib.rs` compiles the `saci` README's Rust blocks as a doc test
   (`ReadmeDoctests`), so `cargo test -p saci --doc` fails when the example drifts; the
-  `saci-macros` example is `rust,ignore` because it needs the wasm32-wasip2 target.
+  `saci-macros` example is `rust,ignore` because it needs the wasm32-wasip3 target.
 
 ## Key lists
 

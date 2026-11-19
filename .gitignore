@@ -24,5 +24,8 @@ performance-improvement.md
 .agents/skills/*
 !.agents/skills/saci-*/
 
+# Generated Order schema constants and wire fixtures for the Go plugin
+/examples/plugins/generated/
+
 # Local secrets (cloud-service credentials; never commit)
 .env

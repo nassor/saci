@@ -103,7 +103,7 @@ workflow "orders" name="Orders" {
         config path="/data/in/orders.parquet"
     }
 
-    // A wasm32-wasip2 component implementing the SACI world.
+    // A wasm32-wasip3 component implementing the SACI world.
     wasm "enrich" name="Order enrichment" module="pipelines/orders.wasm" {
         // Optional integrity check, verified before the component is compiled.
         // A leading "sha3-256:" prefix is accepted.

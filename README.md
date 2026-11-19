@@ -9,7 +9,7 @@
 [![Website](https://img.shields.io/badge/docs-nassor.github.io%2Fsaci-2f81f7)](https://nassor.github.io/saci/)
 [![CI](https://github.com/nassor/saci/actions/workflows/ci.yml/badge.svg)](https://github.com/nassor/saci/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.99%2B-orange)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.100%2B-orange)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-experimental-yellow)](#project-status)
 
 </div>
@@ -45,7 +45,7 @@ Entity Component System pattern in game engines.
 
 ## As a library
 
-You need git and a Rust 1.99 toolchain installed through rustup. These commands run the same on
+You need git and a Rust 1.100 toolchain installed through rustup. These commands run the same on
 Linux, macOS and Windows (PowerShell):
 
 ```bash
@@ -66,7 +66,7 @@ step.
 
 ## As a server
 
-<img src="docs/static/end-to-end.svg" width="660" alt="End to end: you write Component, System, and Pipeline structs; cargo build produces pipeline.wasm, a wasm32-wasip2 component; saci-service loads the component named in saci.kdl and drives Arrow IPC from sources through the host to sinks; optionally the host coordinates a Raft cluster with row-range leases and checkpoints.">
+<img src="docs/static/end-to-end.svg" width="660" alt="End to end: you write Component, System, and Pipeline structs; cargo build produces pipeline.wasm, a wasm32-wasip3 component; saci-service loads the component named in saci.kdl and drives Arrow IPC from sources through the host to sinks; optionally the host coordinates a Raft cluster with row-range leases and checkpoints.">
 
 The processor owns the stage plan and retry. The host owns IO, checkpointing, distribution, the
 HTTP control plane and a `/ui` dashboard. Data crosses between them as Arrow IPC bytes and nothing
@@ -75,7 +75,7 @@ host.
 
 From the clone, this builds the order-processing component and `saci-service`, then runs one
 config end to end: a CSV file source, the component, a CSV file sink. You also need the WebAssembly
-target, `rustup target add wasm32-wasip2`. The command runs the same on Linux, macOS and Windows
+target, `rustup target add wasm32-wasip3`. The command runs the same on Linux, macOS and Windows
 (PowerShell):
 
 ```bash
@@ -89,37 +89,29 @@ To install the binary on its own, `cargo install saci --features server`; `saci-
 confirms it. [Your first pipeline](https://nassor.github.io/saci/service/first-pipeline/) writes a
 config and a processor from scratch.
 
-### Processors in six languages
+### WASI 0.3 processors and native plugins
 
-The pipeline contract is the `saci:pipeline@0.3.0` WIT world, so any language that compiles to a
-WASI 0.2 component can implement a processor. `examples/polyglot/` splits one `Order` workload into
-six components, chained through the same host `saci-service` uses:
-
-| # | stage | language | toolchain | writes |
-|---|-------|----------|-----------|--------|
-| 1 | `validate-go` | Go | `componentize-go` | `valid` |
-| 2 | `enrich-py` | Python | `componentize-py` | `usd_amount`, `usd_amount_display` |
-| 3 | `score-ts` | TypeScript | `jco` | `risk_score`, `flagged` |
-| 4 | `fee-kt` | Kotlin | Gradle plus `wit-bindgen` and `wasm-tools` | `fee` |
-| 5 | `tier-cs` | C# | `componentize-dotnet` | `review_tier` |
-| 6 | `settle-rs` | Rust | `cargo build --target wasm32-wasip2` | `settlement` plus a cross-batch ledger |
-
-Building them needs the five language toolchains, `wasm-tools`, and curl, which
-`cargo xtask polyglot` uses once to fetch the WASI preview 1 adapter the Kotlin stage needs.
-[`examples/polyglot/PINS.md`](./examples/polyglot/PINS.md) carries every version. These commands run
-the same on Linux, macOS and Windows (PowerShell):
+The pipeline contract is the `saci:pipeline@0.4.0` WIT world (`run-batch: async func(...)`).
+Rust processors compile directly to pure WASI 0.3 (`wasm32-wasip3`) components with
+`cargo build --target wasm32-wasip3`:
 
 ```bash
-rustup target add wasm32-wasip2
+rustup target add wasm32-wasip3
 cargo install wasm-tools --locked --version 1.246.2
-cargo xtask polyglot
-cargo run -p saci --features wasm-host,tracing --example polyglot_orders
+cargo xtask quickstart
 ```
 
-[Build a processor](https://nassor.github.io/saci/service/processors/build/) has the byte-level
-contract and a recipe per language. A processor that needs native threads or libraries can be a
+`examples/quickstart/` chains two Rust WASI 0.3 stages (`validate.wasm` and `settle.wasm`) between
+NATS and PostgreSQL, and `examples/wasm/settle/` demonstrates stateful settlement over the same
+12-column `Order` schema.
+
+A processor written in another language or requiring native threads runs as a
 [native plugin](https://nassor.github.io/saci/service/plugins/) instead: a shared library the
-service opens without a sandbox.
+service loads through the C ABI in `crates/saci/include/saci_plugin.h` (see
+`examples/plugins/settle-go/`).
+
+[Build a processor](https://nassor.github.io/saci/service/processors/build/) has the byte-level
+contract and the Rust recipe.
 
 ## When SACI fits
 
@@ -168,14 +160,13 @@ Numbers and method: [benchmark results](https://nassor.github.io/saci/library/re
 | [Build your first pipeline](https://nassor.github.io/saci/library/first-pipeline/) | A native pipeline in nine steps, from the component to the stage plan |
 | [Tracing & metrics](https://nassor.github.io/saci/library/tracing/) | Spans, metrics, and the Prometheus endpoint |
 | [Crates and features](https://nassor.github.io/saci/library/reference/crates/) | Every feature flag and the module behind it |
-| [The SDK packages](https://nassor.github.io/saci/library/reference/sdk-packages/) | One `saci-sdk` per language, the Arrow codec inside each |
 
-The repository also holds the [WASM processor example](./examples/wasm/), the
+The repository also holds the [WASM processor examples](./examples/wasm/), the
 [branching](./examples/branching/), [windowing](./examples/windowing/) and
 [cluster](./examples/distributed_fulfillment/) examples, Rust examples in
 [`crates/saci/examples`](./crates/saci/examples/) and [`examples/native`](./examples/native/), the
-Apache-2.0 [SDK packages](./packages/), and toolchain pins for
-[Rust processors](./crates/saci/PINS.md).
+Apache-2.0 [Arrow IPC conformance corpus](./packages/arrow-ipc-conformance/), and toolchain pins
+for [Rust processors](./crates/saci/PINS.md).
 
 ## Crates
 
@@ -190,7 +181,7 @@ Two crates are on crates.io:
 |---|---|
 | `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits |
 | `connector-<name>`, `transformer-<format>` | One transport or one byte format each, in `saci::connector` and `saci::transformer` |
-| `processor` | The processor SDK and the canonical `saci:pipeline@0.3.0` WIT world |
+| `processor` | The processor SDK and the canonical `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |
 | `server` | The `saci-service` binary: wasmtime, KDL config, HTTP control plane, distributed runner |
 

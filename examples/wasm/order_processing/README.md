@@ -1,6 +1,6 @@
 # Order Processing: a WASM processor pipeline
 
-A processor component for `wasm32-wasip2`, written in Rust with the `saci`
+A processor component for `wasm32-wasip3`, written in Rust with the `saci`
 crate's `processor` feature and the `export_pipeline!` macro. The host hands it
 one Arrow IPC payload per batch and takes one back. Inside the component, the
 DAG build, stage execution and retries run as native Rust.
@@ -25,7 +25,7 @@ CAD 0.74. Any other currency converts at 1.0.
 
 ## Prerequisites
 
-- Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
+- Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`
 - `wasm-tools`, only for the optional checks in step 2
 
 Run every command from the repository root. They are the same on Linux, macOS
@@ -33,21 +33,21 @@ and Windows (PowerShell) unless a block says otherwise.
 
 ## Build and run
 
-1. Build the component. `rustc` links a `wasm32-wasip2` cdylib into a
+1. Build the component. `rustc` links a `wasm32-wasip3` cdylib into a
    Component Model component itself, so plain `cargo build` is the whole
    toolchain:
 
    ```text
-   cargo build --release -p order-processing-wasm --target wasm32-wasip2
+   cargo build --release -p order-processing-wasm --target wasm32-wasip3
    ```
 
-   The result is `target/wasm32-wasip2/release/order_processing_wasm.wasm`.
+   The result is `target/wasm32-wasip3/release/order_processing_wasm.wasm`.
 
 2. Optional: check the component and print its exported world.
 
    ```text
-   wasm-tools validate --features component-model target/wasm32-wasip2/release/order_processing_wasm.wasm
-   wasm-tools component wit target/wasm32-wasip2/release/order_processing_wasm.wasm
+   wasm-tools validate --features cm-async target/wasm32-wasip3/release/order_processing_wasm.wasm
+   wasm-tools component wit target/wasm32-wasip3/release/order_processing_wasm.wasm
    ```
 
    `validate` exits 0. The exported world is `saci-pipeline`.

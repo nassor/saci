@@ -13,12 +13,10 @@
 //! Steps:
 //!
 //! 1. `cargo build -p saci-plugin-smoketest`.
-//! 2. Regenerate `examples/polyglot/generated/` with the `polyglot_schema_emit`
-//!    emitter and copy `schema_gen.go` into the Go plugin, rewriting its package
-//!    clause. The Go plugin embeds the `Order` schema bytes and fingerprint as
-//!    constants, so they must come from that emitter. (The six polyglot stages
-//!    derive their own schemas and no longer consume these constants; the Quick
-//!    Start and the plugin builds still do.)
+//! 2. Regenerate `examples/plugins/generated/` with the `plugin_schema_emit`
+//!    emitter and copy `schema_gen.go` into the Go plugin. The Go plugin embeds
+//!    the `Order` schema bytes and fingerprint as constants, so they must come
+//!    from that emitter.
 //! 3. `go build -buildmode=c-shared` the Go plugin, in place.
 //!
 //! Toolchain versions are pinned in `examples/plugins/settle-go/PINS.md`. Every
@@ -107,15 +105,9 @@ pub fn run(args: &[String]) -> Result<()> {
     )?;
 
     if build_go {
-        // The generated file names the package the WASM stage's binding
-        // directory needs. A c-shared plugin is package main, so the clause is
-        // rewritten and nothing else is.
         ctx.log("copying Order schema constants into the Go plugin...");
         let generated = ctx.read(&generated::dir(&ctx).join("schema_gen.go"))?;
-        ctx.write(
-            &go_plugin.join("schema_gen.go"),
-            &as_package_main(&generated),
-        )?;
+        ctx.write(&go_plugin.join("schema_gen.go"), &generated)?;
 
         ctx.log("building Go plugin (settle-go)...");
         ctx.cmd("go")?
@@ -186,27 +178,6 @@ fn require_cgo(ctx: &Ctx) -> Result<()> {
     )
 }
 
-/// The emitted `schema_gen.go` with its package clause rewritten to
-/// `package main`.
-///
-/// A line rewrite, not a parse: the plugin compiles the emitted schema bytes
-/// and fingerprint in as constants, so every other byte has to survive the
-/// copy unchanged.
-fn as_package_main(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    for line in source.split_inclusive('\n') {
-        if line.starts_with("package ") {
-            out.push_str("package main");
-            if line.ends_with('\n') {
-                out.push('\n');
-            }
-        } else {
-            out.push_str(line);
-        }
-    }
-    out
-}
-
 /// Report a built shared library, or refuse to continue when the build left
 /// none behind.
 fn artifact(ctx: &Ctx, path: &Path) -> Result<()> {
@@ -222,25 +193,6 @@ fn artifact(ctx: &Ctx, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Only the package clause changes: the schema bytes and the fingerprint
-    /// below it are what the plugin compiles in.
-    #[test]
-    fn as_package_main_rewrites_only_the_clause() {
-        let source = "package export_saci_pipeline_pipeline\n\nconst Fingerprint = \"8c0a76ff\"\n";
-        assert_eq!(
-            as_package_main(source),
-            "package main\n\nconst Fingerprint = \"8c0a76ff\"\n"
-        );
-    }
-
-    /// The clause is a line, not a word: an identifier that merely starts with
-    /// `package` stays put, and a file without a trailing newline keeps that.
-    #[test]
-    fn as_package_main_matches_whole_lines() {
-        assert_eq!(as_package_main("packageName := 1"), "packageName := 1");
-        assert_eq!(as_package_main("package x"), "package main");
-    }
 
     /// `--only` is a set of names, so a prefix is not a member.
     #[test]

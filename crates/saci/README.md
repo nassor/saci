@@ -29,7 +29,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 async-trait = "0.1"
 ```
 
-Rust 1.99 or newer. One component and one system: `ToUsd` reads `amount` and writes `usd_amount`,
+Rust 1.100 or newer. One component and one system: `ToUsd` reads `amount` and writes `usd_amount`,
 and that declaration is the only scheduling input the pipeline needs.
 
 ```rust
@@ -120,7 +120,7 @@ saci-service --version
 
 `saci-service` reads a KDL config that names sources, a processor and sinks, moves Arrow batches
 through them, and serves an HTTP control plane with a `/ui` dashboard. The processor is your
-pipeline built for wasm32-wasip2 against the `processor` feature, which leaves tokio out:
+pipeline built for wasm32-wasip3 against the `processor` feature, which leaves tokio out:
 
 ```toml
 [dependencies]
@@ -138,7 +138,7 @@ processor and runs them end to end.
 | `windows` | Tumbling, sliding and session windows with watermarks |
 | `connector-<name>` | One transport in `saci::connector`; `connectors` enables the seven that need no external service |
 | `transformer-<format>` | One byte format in `saci::transformer`; `transformers` enables all five |
-| `processor` | The wasm32-wasip2 processor SDK and the `saci:pipeline@0.3.0` WIT world |
+| `processor` | The wasm32-wasip3 processor SDK and the `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |
 | `service`, `wasm-host`, `plugin-host` | The host: KDL config, runners, HTTP control plane, the two processor hosts |
 | `server` | The `saci-service` binary with the self-contained connectors and every format |

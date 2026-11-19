@@ -2,7 +2,7 @@
  * saci_plugin.h -- the C ABI a SACI native plugin exports.
  *
  * A native plugin is a shared library the host loads with dlopen or
- * LoadLibrary. It mirrors the saci:pipeline@0.3.0 WIT world a WebAssembly processor
+ * LoadLibrary. It mirrors the saci:pipeline@0.4.0 WIT world a WebAssembly processor
  * implements: two entry points, four vtable calls, three host callbacks, Arrow
  * IPC bytes as the data plane, one opaque checkpoint blob for state that
  * crosses a batch boundary.

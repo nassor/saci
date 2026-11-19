@@ -38,7 +38,7 @@ cargo xtask bench batch_vs_stream
 cargo xtask bench vs_datafusion_q6
 
 # Service-level per-item latency, native and WASM
-cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1" \
   cargo run --release -p saci --features service,wasm-host,connector-channel --example stream_latency
 ```
@@ -50,7 +50,7 @@ environment instead:
 Windows (PowerShell):
 
 ```powershell
-cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 $env:RUSTFLAGS = "-C target-cpu=native -C opt-level=3 -C codegen-units=1"
 cargo run --release -p saci --features service,wasm-host,connector-channel --example stream_latency
 ```

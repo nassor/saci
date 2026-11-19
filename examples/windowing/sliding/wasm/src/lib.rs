@@ -13,11 +13,11 @@
 //! # Build
 //!
 //! ```bash
-//! cargo build --release -p windowing-sliding-wasm --target wasm32-wasip2
+//! cargo build --release -p windowing-sliding-wasm --target wasm32-wasip3
 //! ```
 //!
 //! The output component lands at
-//! `target/wasm32-wasip2/release/windowing_sliding_wasm.wasm`.
+//! `target/wasm32-wasip3/release/windowing_sliding_wasm.wasm`.
 
 #![deny(missing_docs)]
 

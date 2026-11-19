@@ -1,0 +1,14 @@
+# Keep the Docker build context small: another workspace names this checkout as a build context
+# (`additional_contexts`) so that its `path = "../saci/crates/saci"` dependency resolves.
+# The workspace manifests under `examples/` and `xtask/` stay: cargo loads every member of a path dependency's
+# workspace, so a missing one fails the build.
+target
+**/target
+.git
+.env
+.env.*
+!.env.example
+*.redb
+**/*.redb
+# cached tool binaries (the Tailwind standalone CLI of `cargo xtask ui`)
+**/.tools

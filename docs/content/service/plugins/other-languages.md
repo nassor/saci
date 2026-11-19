@@ -74,8 +74,9 @@ author a plugin, and `saci-service` never learns which toolchain did.
 | **C#** | NativeAOT, `[UnmanagedCallersOnly(EntryPoint = "saci_abi_version")]` | `dotnet publish -r linux-x64 -c Release` |
 | **Kotlin** | GraalVM, `@CEntryPoint(name = "saci_abi_version")` | `native-image --shared` |
 
-Python and TypeScript cannot export a C ABI, so both stay on the
-[WebAssembly processor](@/service/processors/build/_index.md) path instead.
+| **C / C++** | `saci_plugin.h`, `SACI_EXPORT uint32_t saci_abi_version(void)` | `cc -shared -fPIC` |
+
+Languages that cannot export a C shared-library ABI cannot implement a native plugin.
 
 `saci_plugin.h`, the plugin ABI header that ships in this repository, is the authority outside
 Rust. It declares every struct and both entry points, and its contract comment carries the

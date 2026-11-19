@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" role="img" aria-labelledby="e2e-title e2e-desc">
   <title id="e2e-title">SACI end to end: write, build, run, scale</title>
   <desc id="e2e-desc">
-    You write Component, System, and Pipeline structs. A wasm32-wasip2 cargo build turns the
-    pipeline into pipeline.wasm, a wasm32-wasip2 component. saci-service loads the component
+    You write Component, System, and Pipeline structs. A wasm32-wasip3 cargo build turns the
+    pipeline into pipeline.wasm, a wasm32-wasip3 component. saci-service loads the component
     named in saci.kdl and drives Arrow IPC batches from sources through the host to
     sinks. Optionally the host coordinates a Raft cluster with row-range leases and
     checkpoints.
@@ -125,7 +125,7 @@
 
   <!-- build edge -->
   <path class="arw s-d" d="M444 150 H634" marker-end="url(#m-d)"/>
-  <text class="t-lab t-mid" x="540" y="138">cargo build (wasip2)</text>
+  <text class="t-lab t-mid" x="540" y="138">cargo build (wasip3)</text>
 
   <!-- ============ 2 · YOU BUILD ============ -->
   <rect class="panel" x="620" y="28" width="232" height="212" rx="12"/>
@@ -133,15 +133,15 @@
   <text class="t-num f-b" x="656" y="62">2</text>
   <text class="t-step f-b" x="676" y="62">YOU BUILD</text>
 
-  <text class="t-lab" x="644" y="92">built from any language</text>
-  <text class="t-lab" x="644" y="108">that targets WASI 0.2</text>
+  <text class="t-lab" x="644" y="92">compiled with Rust</text>
+  <text class="t-lab" x="644" y="108">targeting WASI 0.3</text>
 
   <g>
     <rect class="blk blk-b" x="644" y="118" width="184" height="64" rx="8"/>
     <rect class="hd-b" x="644" y="118" width="184" height="22" rx="8"/>
     <rect class="hd-b" x="644" y="132" width="184" height="8"/>
     <text class="t-ttl" x="656" y="134">pipeline.wasm</text>
-    <text class="t-sub" x="656" y="160">wasm32-wasip2 component</text>
+    <text class="t-sub" x="656" y="160">wasm32-wasip3 component</text>
   </g>
 
   <!-- boundary crossing: wasm → host -->

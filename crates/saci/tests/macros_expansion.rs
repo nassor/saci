@@ -3,11 +3,10 @@
 //! The unit tests inside `saci-macros` inspect generated tokens; these compile
 //! the generated code against the real SDK and run it. `#[processor]` is not
 //! exercised here: its output is `#[cfg(target_arch = "wasm32")]`, so the gate
-//! that proves it is the `wasm32-wasip2` build of a processor crate.
+//! that proves it is the `wasm32-wasip3` build of a processor crate.
 
 #![cfg(feature = "processor")]
 
-use saci::processor::__rt::pollster;
 use saci::processor::arrow_schema::{DataType, Field, Schema};
 use saci::processor::prelude::*;
 
@@ -22,7 +21,7 @@ pub fn saci_config_get(key: &str) -> Option<String> {
     }
 }
 
-/// One row, covering the four Arrow types the polyglot schema uses.
+/// One row covering the four Arrow types the wire format carries.
 #[derive(Component, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Row {
     pub id: i64,
@@ -80,16 +79,9 @@ fn rows_of(data: &Dataset) -> Vec<Row> {
         .expect("decode rows")
 }
 
-/// Drive a pipeline whose systems are going to fail.
-///
-/// `Pipeline::run_on` retries a failed system through `saci::retry`, which
-/// waits on `tokio::time::sleep` in every host build of the engine — its
-/// `runtime` feature is on here. The `wasm32-wasip2` processor build has no
-/// timer and retries immediately, which is why the happy paths above can use
-/// `pollster` exactly as `#[processor]` does; an error path cannot, because
-/// `pollster` supplies no reactor for that sleep. The backoff between attempts
-/// is real time, which is why only the two failing cases pay for a runtime.
-fn block_on_retrying<T>(fut: impl Future<Output = T>) -> T {
+/// Drive a pipeline future to completion on a current-thread Tokio runtime
+/// with timer support for retry backoffs on failing systems.
+fn block_on<T>(fut: impl Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -114,7 +106,7 @@ fn a_string_field_traces_to_utf8_not_large_utf8() {
     assert_eq!(
         schema.field_with_name("label").unwrap().data_type(),
         &DataType::Utf8,
-        "serde_arrow's default is LargeUtf8, which no non-Rust SACI codec reads"
+        "serde_arrow defaults String to LargeUtf8; Component requires Utf8"
     );
 }
 
@@ -157,7 +149,7 @@ fn a_transform_rewrites_every_row_in_place() {
         .with::<Row>()
         .with_system(stamp_system())
         .build();
-    pollster::block_on(pipeline.run_on(&mut data)).expect("run");
+    block_on(pipeline.run_on(&mut data)).expect("run");
 
     let labels: Vec<String> = rows_of(&data).into_iter().map(|r| r.label).collect();
     assert_eq!(labels, ["id-1", "id-2"]);
@@ -176,7 +168,7 @@ fn a_two_parameter_transform_reads_the_host_config() {
         .with::<Row>()
         .with_system(apply_fee_system())
         .build();
-    pollster::block_on(pipeline.run_on(&mut data)).expect("run");
+    block_on(pipeline.run_on(&mut data)).expect("run");
 
     assert_eq!(rows_of(&data)[0].amount, 180.0);
 }
@@ -194,7 +186,7 @@ fn a_transform_error_fails_the_batch_as_a_retryable_system_execution() {
         .with::<Row>()
         .with_system(reject_invalid_system())
         .build();
-    let err = block_on_retrying(pipeline.run_on(&mut data)).expect_err("invalid row");
+    let err = block_on(pipeline.run_on(&mut data)).expect_err("invalid row");
 
     let (retryable, message) = saci::processor::__rt::classify_run_error(&err);
     assert!(retryable, "a failing transform releases the claim: {err}");
@@ -221,7 +213,7 @@ fn a_fold_accumulates_into_the_processor_state_across_batches() {
         .expect("append");
         data.insert_resource(state);
 
-        pollster::block_on(pipeline.run_on(&mut data)).expect("run");
+        block_on(pipeline.run_on(&mut data)).expect("run");
         // Stands in for the checkpoint the `#[processor]` expansion captures
         // and the host hands back as the next batch's `prior`.
         let rows = std::mem::take(
@@ -258,7 +250,7 @@ fn a_fold_without_the_state_resource_is_an_error_not_silent_accumulation() {
         .with::<Row>()
         .with_system(totals_system())
         .build();
-    let err = block_on_retrying(pipeline.run_on(&mut data)).expect_err("no state resource");
+    let err = block_on(pipeline.run_on(&mut data)).expect_err("no state resource");
     assert!(err.message().contains("Totals"), "got: {err}");
 }
 

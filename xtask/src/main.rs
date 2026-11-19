@@ -17,9 +17,7 @@ mod demo;
 mod examples;
 mod generated;
 mod matrix;
-mod pack;
 mod plugins;
-mod polyglot;
 mod quickstart;
 mod server;
 mod sh;
@@ -35,12 +33,10 @@ cargo xtask <command> [options]
 
 Commands
   quickstart                Build the two Quick Start processor components
-  polyglot [--only=LIST]    Build the six polyglot processor components
   plugins [--only=LIST]     Build the two native plugin fixtures
   ui                        Rebuild the /ui dashboard bundle
   bench <name> [options]    Run a criterion benchmark through the harness
-  pack-sdk                  Pack the five saci-sdk packages
-  check-wasm-processor      cargo check saci with --features processor for wasm32-wasip2
+  check-wasm-processor      cargo check saci with --features processor for wasm32-wasip3
   processor-ipc-roundtrip   Host-to-processor Arrow IPC round-trip gate
   validate [--only=LIST]    Validate every runnable example config
   demo <name>               Build and run an example pipeline
@@ -67,11 +63,9 @@ fn main() -> ExitCode {
 
     let result = match command.as_str() {
         "quickstart" => quickstart::run(rest),
-        "polyglot" => polyglot::run(rest),
         "plugins" => plugins::run(rest),
         "ui" => ui::run(rest),
         "bench" => bench::run(rest),
-        "pack-sdk" => pack::run(rest),
         "check-wasm-processor" => ci::check_wasm_processor(rest),
         "processor-ipc-roundtrip" => ci::processor_ipc_roundtrip(rest),
         "validate" => validate::run(rest),

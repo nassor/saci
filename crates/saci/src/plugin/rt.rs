@@ -299,7 +299,7 @@ pub unsafe fn describe_impl<S: ProcessorStateSpec>(
         let _scope = HostScope::enter(&instance.host);
         let pipeline = instance.slot.pipeline(build);
 
-        match manifest_json::<S>(&pipeline, version) {
+        match manifest_json::<S>(pipeline, version) {
             Ok(json) => {
                 unsafe { *manifest_json_out = vec_into_buffer(json.into_bytes()) };
                 SaciStatus::OK

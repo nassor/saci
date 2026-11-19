@@ -26,7 +26,7 @@ five transformers. The table lists what to enable beside it:
 
 | Config | Features |
 |--------|----------|
-| `standalone.kdl`, `standalone_wasm.kdl`, `standalone_polyglot.kdl` | `connector-file,transformer-csv,wasm-host` |
+| `standalone.kdl`, `standalone_wasm.kdl`, `standalone_settle.kdl` | `connector-file,transformer-csv,wasm-host` |
 | `extension_example.kdl` | a custom binary: no feature registers `MongoSource` or `ClickHouseSink`, and `wasm-host` is all `validate` needs to show the warning |
 | `standalone_plugin.kdl` | `connector-file,transformer-csv,plugin-host` |
 | `postgresql.kdl` | `connector-postgresql,wasm-host` |
@@ -72,10 +72,10 @@ the pipeline is built, so the output directory must exist first.
 1. Build the processor component. Runs the same on Linux, macOS and Windows (PowerShell):
 
    ```text
-   cargo build --release -p order-processing-wasm --target wasm32-wasip2
+   cargo build --release -p order-processing-wasm --target wasm32-wasip3
    ```
 
-   It writes `target/wasm32-wasip2/release/order_processing_wasm.wasm`, the module the config names.
+   It writes `target/wasm32-wasip3/release/order_processing_wasm.wasm`, the module the config names.
 
 2. On Windows, create the output directory. `/tmp` in the config resolves to `\tmp` on the current
    drive. Linux and macOS already have `/tmp`.
@@ -380,7 +380,7 @@ it exits 1.
 | `cluster.kdl` | runnable cluster template; needs `service-cluster` |
 | `standalone_wasm.kdl` | standalone config that loads a WASM processor pipeline |
 | `extension_example.kdl` | non-runnable template showing user-defined types |
-| `standalone_polyglot.kdl` | runs the Python processor from `examples/polyglot/` |
+| `standalone_settle.kdl` | runs the stateful settlement WASM processor from `examples/wasm/settle/` |
 | `standalone_plugin.kdl` | runs the native plugin fixture |
 | `postgresql.kdl` | runnable config driving PostgreSQL at both ends |
 | `mariadb.kdl` | runnable config replicating a MariaDB or MySQL table through the binlog with an initial snapshot, needs a server |

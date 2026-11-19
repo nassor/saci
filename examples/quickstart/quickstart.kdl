@@ -3,7 +3,7 @@
 //   publisher --NDJSON--> authorizations.raw
 //                            |
 //                            v  this service
-//                         [ validate-go.wasm ] --> [ settle-cs.wasm ]
+//                         [ validate.wasm ] --> [ settle.wasm ]
 //                            |
 //                            v
 //                         public.settlements
@@ -82,28 +82,27 @@ workflow "quickstart" {
     // ---------------------------------------------------------------- stages
     //
     // Two `wasm` nodes, linked in sequence below, run two processors against
-    // the same in-memory dataset: the Go stage writes `valid`, then the C#
-    // stage reads it and writes `fee` and `review_tier`. Nothing is
+    // the same in-memory dataset: the validate stage writes `valid`, then the
+    // settle stage reads it and writes `fee` and `review_tier`. Nothing is
     // re-encoded between them; each stage is one Arrow IPC round-trip across
     // the host to guest boundary and no transport at all.
     //
     // Every stage must declare the same components and report the same schema
-    // fingerprint: each stage's SDK derives it from that stage's own `Order`
-    // declaration, and the loader compares the two rather than generating both
-    // from one canonical schema. A disagreement fails the load.
+    // fingerprint: each stage derives it from its own `Order` declaration, and
+    // the loader compares the two. A disagreement fails the load.
     //
     // Each processor's own `describe()` supplies the component list, so
     // `component` on the source above and the sink below must name what they
     // declare: `Order`, and only `Order`.
 
-    wasm "validate" module="examples/quickstart/build/validate-go.wasm" {
+    wasm "validate" module="examples/quickstart/build/validate.wasm" {
         // An authorisation below this amount is a card-testing probe, not a
         // purchase. The WIT contract hands config over as strings; the
         // processor parses.
         config min_amount="0.50"
     }
 
-    wasm "settle" module="examples/quickstart/build/settle-cs.wasm" {
+    wasm "settle" module="examples/quickstart/build/settle.wasm" {
         // Fee in basis points of the authorised amount, plus a flat component.
         // A valid authorisation above hold_above is held for manual review
         // (review_tier 1) rather than settled (review_tier 0).

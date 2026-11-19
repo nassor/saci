@@ -53,7 +53,7 @@ peer id=3 addr="10.0.0.3:9000"
 // sink or link: the distributed runner ingests through `PartitionSource` and
 // drives this one runtime per node, checkpointing its output rather than
 // draining it into a locally-declared sink. Build the module with
-// `cargo build --release --target wasm32-wasip2`.
+// `cargo build --release --target wasm32-wasip3`.
 workflow "events" {
     wasm "process_events" module="pipelines/events.wasm"
 }

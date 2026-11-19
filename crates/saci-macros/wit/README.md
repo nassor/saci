@@ -1,7 +1,7 @@
 # Vendored WIT package
 
 `pipeline.wit` here is a byte-for-byte copy of `crates/saci/wit/pipeline.wit`, the canonical
-`saci:pipeline@0.3.0` WIT package that the `saci` crate owns.
+`saci:pipeline@0.4.0` WIT package that the `saci` crate owns.
 
 The copy exists because `#[processor]` in `../src/lib.rs` embeds the WIT text with `include_str!`
 and splices it into `wit_bindgen::generate!({ inline: ... })` in the caller's crate. `cargo

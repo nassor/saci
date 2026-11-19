@@ -513,7 +513,7 @@ workflow holding one as `restartable: false`.
 `cmake` and a C toolchain (MSVC Build Tools on Windows) must be on `PATH` before `cargo build`
 reaches it. On POSIX targets that build also needs libcurl's development headers
 (`libcurl4-openssl-dev` on Debian/Ubuntu, the equivalent elsewhere; CI installs them in the `test`,
-`distributed_chaos`, `wasm_processor` and `polyglot` jobs, every job that compiles a `saci`
+`distributed_chaos`, `wasm_processor` and `plugins_and_quickstart` jobs, every job that compiles a `saci`
 test or example target): the `config.h` cmake generates defines `WITH_OAUTHBEARER_OIDC` as `0`
 rather than leaving it undefined, and `rdkafka_conf.c` gates its `#include <curl/curl.h>` on
 `#ifdef`, so that header is
