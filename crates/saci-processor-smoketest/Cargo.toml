@@ -9,7 +9,7 @@ publish = false
 description = "Minimal processor SDK consumer used as a build fixture and Arrow IPC round-trip fixture."
 
 # This crate exists to verify:
-#   1. `cargo build -p saci-processor-smoketest --target wasm32-wasip2`
+#   1. `cargo build -p saci-processor-smoketest --target wasm32-wasip3`
 #      produces a valid WebAssembly component against the saci-pipeline world.
 #   2. The `export_pipeline!` macro in `saci::processor` expands cleanly against
 #      `wit_bindgen::generate!`-generated `crate::bindings`.

@@ -28,7 +28,7 @@ fn idle(warm: &Mutex<Vec<Warm>>) -> std::sync::MutexGuard<'_, Vec<Warm>> {
 /// back over the dataset contents. By default the call runs on a fresh `Store`;
 /// [`with_warm_instances`](Self::with_warm_instances) keeps instances between calls.
 ///
-/// Linking (WASI-p2 plus host-io) and instantiation planning happen once, at
+/// Linking (WASI 0.3 plus host-io) and instantiation planning happen once, at
 /// load time, producing a reusable `SaciPipelinePre`; a call then costs store
 /// creation plus instantiation from that plan. Unless warm instances are on,
 /// processor linear memory never survives a batch, so the checkpoint blob is
@@ -175,7 +175,7 @@ impl WasmPipelineRuntime {
         let mut store = Store::new(&engine.engine, host);
         store.set_epoch_deadline(epoch_deadline);
 
-        let instance = pre.instantiate(&mut store).map_err(|e| {
+        let instance = pollster::block_on(pre.instantiate_async(&mut store)).map_err(|e| {
             SaciError::SystemExecution(format!("processor trap (instantiate): {e}"))
         })?;
 
@@ -208,8 +208,7 @@ impl WasmPipelineRuntime {
 
         let (mut store, instance) = Self::make_store_and_instance(self.call_parts())?;
         let iface = instance.saci_pipeline_pipeline();
-        let desc = iface
-            .call_describe(&mut store)
+        let desc = pollster::block_on(iface.call_describe(&mut store))
             .map_err(|e| SaciError::SystemExecution(format!("processor trap (describe): {e}")))?;
 
         let names: Vec<String> = desc.components.iter().map(|c| c.name.clone()).collect();
@@ -255,8 +254,8 @@ impl WasmPipelineRuntime {
         self.last_ipc_len
             .store(ipc_bytes.len(), std::sync::atomic::Ordering::Relaxed);
 
-        // `bindgen!` lowers `option<list<u8>>` to `Option<&Vec<u8>>`, so the
-        // prior state has to be owned for the call.
+        // Component Model Async bindings take owned `Vec<u8>` and
+        // `Option<Vec<u8>>` parameters by value.
         let prior_owned = prior.map(<[u8]>::to_vec);
         let parts = self.call_parts();
         let warm = Arc::clone(&self.warm);
@@ -268,16 +267,12 @@ impl WasmPipelineRuntime {
         #[cfg(feature = "tracing")]
         let call_span = batch_span.clone();
 
-        // The processor is linked against the synchronous WASI implementation
-        // (`add_to_linker_sync`), so any WASI import it touches routes through
-        // `wasmtime_wasi::runtime::in_tokio`, which calls `Handle::block_on`.
-        // That panics outright on a thread already driving a tokio runtime, so
-        // awaiting the call inline would kill the service on the first batch of
-        // any processor that writes to stdout.
-        //
-        // `spawn_blocking` threads are not async execution contexts, so
-        // `block_on` is legal there. Nothing borrowed from `data` crosses the
-        // boundary: IPC bytes in, IPC bytes out.
+        // Guest Arrow compute and runaway loops run synchronous Wasm bytecode
+        // between host yields. Driving `run-batch` on `spawn_blocking` keeps
+        // CPU-bound batches off Tokio's worker pool so the `WasmEngine` epoch
+        // ticker is never starved when interrupting a spinning guest. Nothing
+        // borrowed from `data` crosses the boundary: IPC bytes in, IPC bytes
+        // out.
         let joined = tokio::task::spawn_blocking(move || -> SaciResult<_> {
             // The closure body has no `.await`, so a plain guard is correct.
             #[cfg(feature = "tracing")]
@@ -294,12 +289,14 @@ impl WasmPipelineRuntime {
             };
             // Relative to the engine's current epoch: a kept store's previous deadline has passed.
             store.set_epoch_deadline(epoch_deadline);
-            let result = instance
-                .saci_pipeline_pipeline()
-                .call_run_batch(&mut store, &ipc_bytes, prior_owned.as_ref())
-                .map_err(|e| {
-                    SaciError::SystemExecution(format!("processor trap (run-batch): {e}"))
-                })?;
+            let result = pollster::block_on(store.run_concurrent(async |accessor| {
+                instance
+                    .saci_pipeline_pipeline()
+                    .call_run_batch(accessor, ipc_bytes, prior_owned)
+                    .await
+            }))
+            .and_then(|inner| inner)
+            .map_err(|e| SaciError::SystemExecution(format!("processor trap (run-batch): {e}")))?;
             // Only an instance whose batch succeeded is kept: wasmtime refuses to re-enter one that
             // trapped, and after a `run-error` its memory may hold a half-finished batch.
             if warm_limit > 0 && result.is_ok() {

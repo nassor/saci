@@ -1,11 +1,11 @@
 //! Host↔processor contract tests against the saci-processor-smoketest WebAssembly
 //! component. `cargo xtask processor-ipc-roundtrip` runs the two steps:
 //!
-//! 1. `cargo build --release -p saci-processor-smoketest --target wasm32-wasip2`
+//! 1. `cargo build --release -p saci-processor-smoketest --target wasm32-wasip3`
 //! 2. `cargo test --test wasm_roundtrip -p saci --features server,wasm-host`
 //!
 //! `rustc` links the cdylib into a component directly for that target, so the
-//! artifact under `target/wasm32-wasip2/release/` is the one the host loads: no
+//! artifact under `target/wasm32-wasip3/release/` is the one the host loads: no
 //! preview1 core module and no adapter anywhere in the pipeline.
 //!
 //! Three properties are covered:

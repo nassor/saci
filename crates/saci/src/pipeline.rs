@@ -2,8 +2,7 @@
 
 pub(crate) use dag::SystemEntry;
 
-use std::cell::Cell;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::dataset::{Dataset, DatasetBuilder};
 use crate::error::SaciError;
@@ -30,6 +29,31 @@ pub struct RunStats {
     pub retries_this_batch: u32,
 }
 
+/// Holder of the last run's [`RunStats`], used like a `Cell` (`get` and `set` copy the value) but `Sync`, so a
+/// [`Pipeline`] can sit in a static that an SDK's exports share.
+#[derive(Debug, Default)]
+struct StatsCell(Mutex<RunStats>);
+
+impl StatsCell {
+    fn new(stats: RunStats) -> Self {
+        Self(Mutex::new(stats))
+    }
+
+    fn get(&self) -> RunStats {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set(&self, stats: RunStats) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stats;
+    }
+}
+
 /// A self-contained workload: columnar data, systems, DAG plan, and optional
 /// IO sources/sinks.
 ///
@@ -46,7 +70,7 @@ pub struct Pipeline {
     stages: OnceLock<Result<Vec<Vec<usize>>, SaciError>>,
     expanded_metas: OnceLock<Result<Vec<ExpandedMeta>, SaciError>>,
     configs: OnceLock<Vec<SystemConfig>>,
-    last_stats: Cell<RunStats>,
+    last_stats: StatsCell,
     #[cfg(feature = "io")]
     sources: Vec<(&'static str, Box<dyn Source>)>,
     #[cfg(feature = "io")]
@@ -63,7 +87,7 @@ impl Pipeline {
             stages: OnceLock::new(),
             expanded_metas: OnceLock::new(),
             configs: OnceLock::new(),
-            last_stats: Cell::new(RunStats::default()),
+            last_stats: StatsCell::new(RunStats::default()),
             #[cfg(feature = "io")]
             sources: Vec::new(),
             #[cfg(feature = "io")]

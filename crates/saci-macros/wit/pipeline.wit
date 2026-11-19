@@ -1,7 +1,7 @@
-package saci:pipeline@0.3.0;
+package saci:pipeline@0.4.0;
 
 // No `required-host-io-version` field on pipeline-descriptor: the WIT package
-// version (`@0.3.0`) already signals host-io compatibility.
+// version (`@0.4.0`) already signals host-io compatibility.
 
 /// Types shared by the pipeline interface.
 interface types {
@@ -91,8 +91,9 @@ interface host-io {
     get-config: func(key: string) -> option<string>;
 }
 
-/// The sole processor export. All functions are sync from the WIT perspective;
-/// the host wraps each call in spawn_blocking + epoch interruption.
+/// The sole processor export. `describe` is queried once on load, while
+/// `run-batch` uses Component Model Async (`async func`), bounded by Wasmtime
+/// epoch interruption on the host.
 interface pipeline {
     use types.{pipeline-descriptor, ipc-bytes, checkpoint, run-result, run-error};
 
@@ -117,7 +118,7 @@ interface pipeline {
     ///
     /// Invariant: run-batch MUST NOT return run-error::schema-mismatch. A
     /// mismatch surfacing mid-batch is a processor bug and folds into `permanent`.
-    run-batch: func(input: ipc-bytes, prior: option<checkpoint>) -> result<run-result, run-error>;
+    run-batch: async func(input: ipc-bytes, prior: option<checkpoint>) -> result<run-result, run-error>;
 }
 
 world saci-pipeline {

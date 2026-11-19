@@ -20,11 +20,11 @@
 //! # Build
 //!
 //! ```bash
-//! cargo build --release -p branching-wasm --target wasm32-wasip2
+//! cargo build --release -p branching-wasm --target wasm32-wasip3
 //! ```
 //!
 //! The output component lands at
-//! `target/wasm32-wasip2/release/branching_wasm.wasm`.
+//! `target/wasm32-wasip3/release/branching_wasm.wasm`.
 
 #![deny(missing_docs)]
 

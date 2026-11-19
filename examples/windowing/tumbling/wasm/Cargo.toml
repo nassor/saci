@@ -9,7 +9,7 @@ license.workspace = true
 publish = false
 description = "Windowing tumbling demo processor component: merges two NATS streams into tumbling windows and emits per-window totals."
 
-# A processor pipeline component, NOT a binary. `cargo build --target wasm32-wasip2`
+# A processor pipeline component, NOT a binary. `cargo build --target wasm32-wasip3`
 # links the cdylib straight into a Component Model component exporting the
 # saci-pipeline world from the WIT package of the `saci` crate.
 [lib]

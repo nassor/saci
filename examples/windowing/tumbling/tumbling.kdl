@@ -16,7 +16,7 @@
 // window chips and the windowing sheet section.
 //
 // Build the two processors first, from the repository root:
-//   cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip2
+//   cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip3
 //   cargo build --release -p windowing-tumbling-plugin
 //
 // Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
@@ -97,7 +97,7 @@ workflow "windowing" {
     // `config` as `window.*` keys, which the processor reads back through
     // get-config. One source of truth.
 
-    wasm "window_wasm" module="target/wasm32-wasip2/release/windowing_tumbling_wasm.wasm" {
+    wasm "window_wasm" module="target/wasm32-wasip3/release/windowing_tumbling_wasm.wasm" {
         window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
             key_field "symbol"
         }

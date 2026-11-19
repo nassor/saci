@@ -110,8 +110,8 @@ string, and the processor parses it: an FX rate is `"1.10"`, a threshold is `"25
 whatever spelling the processor documents.
 
 ```kdl,name=Configuration the processor parses itself
-wasm "enrich" module="examples/polyglot/build/enrich-py.wasm" {
-    config fx_eur="1.10" fx_gbp="1.30" fx_jpy="0.0068"
+wasm "settle" module="examples/quickstart/build/settle.wasm" {
+    config fee_bps="290" fee_fixed="0.30" hold_above="1000"
 }
 ```
 

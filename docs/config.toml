@@ -164,22 +164,7 @@ path = "@/service/processors/build/_index.md"
 title = "Rust"
 path = "@/service/processors/build/rust.md"
 [[extra.areas.nav.items.children]]
-title = "Go"
-path = "@/service/processors/build/go.md"
-[[extra.areas.nav.items.children]]
-title = "Python"
-path = "@/service/processors/build/python.md"
-[[extra.areas.nav.items.children]]
-title = "TypeScript"
-path = "@/service/processors/build/typescript.md"
-[[extra.areas.nav.items.children]]
-title = "Kotlin"
-path = "@/service/processors/build/kotlin.md"
-[[extra.areas.nav.items.children]]
-title = "C#"
-path = "@/service/processors/build/csharp.md"
-[[extra.areas.nav.items.children]]
-title = "Any other language"
+title = "The WIT contract"
 path = "@/service/processors/build/wit-contract.md"
 
 [[extra.areas.nav]]
@@ -303,9 +288,6 @@ path = "@/library/reference/crates.md"
 [[extra.areas.nav.items]]
 title = "Host to processor wire format"
 path = "@/library/reference/wire-format.md"
-[[extra.areas.nav.items]]
-title = "The SDK packages"
-path = "@/library/reference/sdk-packages.md"
 [[extra.areas.nav.items]]
 title = "Benchmarks"
 path = "@/library/reference/benchmarks.md"

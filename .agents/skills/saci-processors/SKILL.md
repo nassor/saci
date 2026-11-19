@@ -1,6 +1,6 @@
 ---
 name: saci-processors
-description: Use when writing, building, hosting, testing or documenting a SACI wasm processor: the saci::processor SDK and saci-macros, the saci:pipeline WIT package and its vendored copy, the wasmtime host under crates/saci/src/wasm_host/, the Arrow IPC wire format and conformance corpus, the polyglot SDKs under packages/, or the wasm, polyglot and quickstart examples.
+description: Use when writing, building, hosting, testing or documenting a SACI wasm processor: the saci::processor SDK and saci-macros, the saci:pipeline WIT package and its vendored copy, the wasmtime host under crates/saci/src/wasm_host/, the Arrow IPC wire format and conformance corpus under packages/arrow-ipc-conformance/, or the wasm, quickstart and conformance examples.
 ---
 
 # SACI processors
@@ -23,17 +23,19 @@ description: Use when writing, building, hosting, testing or documenting a SACI 
   `#[processor]`, re-exported through `saci::processor`, so a processor crate never depends on it
   directly.
 
-`crates/saci/wit/pipeline.wit` is the canonical `saci:pipeline@0.3.0` WIT package. The processor
-exports exactly two functions:
+`crates/saci/wit/pipeline.wit` is the canonical `saci:pipeline@0.4.0` WIT package. The processor
+exports two functions:
 
-- `describe()`: name, version, component schemas, schema fingerprint, stateful flag.
-- `run-batch(input, prior)`: Arrow IPC in, Arrow IPC out, plus metrics and an updated state blob.
+- `describe()`: synchronous export reporting name, version, component schemas, schema fingerprint,
+  stateful flag.
+- `run-batch(input, prior)`: `async func` (Component Model Async) taking Arrow IPC input and optional
+  prior checkpoint bytes, returning Arrow IPC output plus metrics and an updated state blob.
 
 The `#[processor]` attribute macro (`saci-macros`, re-exported through `saci::processor`) is the
 zero-ceremony path: it embeds the WIT, auto-cfgs the wasm32 target, and emits the log/metric/config
-helpers, and is what `examples/polyglot/stages/rust-settle` uses. `export_pipeline!` is the
-explicit wiring macro, used by `examples/wasm/order_processing`, `examples/branching`,
-`examples/windowing`, `examples/multi_workflow` and the smoketest fixture.
+helpers, and is what `examples/wasm/settle` and `examples/quickstart/stages/{validate,settle}` use.
+`export_pipeline!` is the explicit wiring macro, used by `examples/wasm/order_processing`,
+`examples/branching`, `examples/windowing`, `examples/multi_workflow` and the smoketest fixture.
 `export_pipeline!(build)` wires a `fn() -> Pipeline` to those exports and emits `saci_config_get` and
 `saci_config_parse` into the caller's crate. The WIT bindings are caller-side, so the accessors must
 be too. `export_pipeline!(build, state = C)` also installs a `ProcessorState<C>` resource on the
@@ -54,10 +56,12 @@ config key counts batches in guest memory, which is how `wasm_roundtrip` observe
 
 ## Host (`crates/saci/src/wasm_host/`, `wasm-host` feature)
 
-`WasmEngine` owns the wasmtime `Engine`, the epoch ticker, and the compiled programs. Compiling,
-linking and pre-instantiating a component is synchronous and costs about 1.7 s of one fast core for
-the 4 MB smoketest, so `WasmEngine::program` does it once per distinct set of bytes and every later
-load of the same module is a `memcmp` plus an `Arc` clone, about 0.1 ms. The engine is shareable:
+`WasmEngine` owns the wasmtime `Engine` (configured with `wasm_component_model(true)`,
+`wasm_component_model_async(true)`, `epoch_interruption(true)`), the epoch ticker, and the compiled
+programs. Compiling, linking (`wasmtime_wasi::p3::add_to_linker` + `SaciPipeline::add_to_linker`) and
+pre-instantiating a component is synchronous and costs about 1.7 s of one fast core for the 4 MB
+smoketest, so `WasmEngine::program` does it once per distinct set of bytes and every later load of
+the same module is a `memcmp` plus an `Arc` clone, about 0.1 ms. The engine is shareable:
 `ServiceBuilder::with_wasm_engine` hands one engine to several builders, and the ticker stops with
 the last clone rather than outliving it. Its `Config` uses wasmtime's pooling instance allocator,
 because the WIT contract puts a fresh `Store` and a fresh instantiation on every batch by default: the pool
@@ -66,9 +70,12 @@ recycles pre-reserved slots instead of asking the OS for a linear memory per cal
 The `POOL_*` constants in `engine.rs` size it for 128 concurrent processor calls; exceeding that
 is a `PoolConcurrencyLimitError` at instantiate, not a queue, and each engine reserves 1 TiB of
 address space, which bounds how many engines one process can hold. `WasmPipelineRuntime` implements
-`saci::runtime::PipelineRuntime`: it serializes the dataset to Arrow IPC, calls the processor's
-`run-batch` on a fresh `Store` (a kept one when warm instances are on), and reads the result back. `bindings.rs` is a
-`wasmtime::component::bindgen!` pointed at `crates/saci/wit`, so host bindings cannot drift.
+`saci::runtime::PipelineRuntime`: it drives `instantiate_async` and `describe` through
+`pollster::block_on`, serializes the dataset to Arrow IPC, drives Component Model Async
+`call_run_batch` inside `store.run_concurrent` via `pollster::block_on` on `spawn_blocking` (keeping
+CPU-bound guest compute off Tokio's worker pool so the epoch ticker cannot starve), and reads the
+result back. `bindings.rs` is a `wasmtime::component::bindgen!` pointed at `crates/saci/wit` with
+`exports: { default: async }`, so host bindings cannot drift.
 `host_impl.rs` implements the `host-io` imports (`log`, `metric`, `get-config`); `metric` records
 the `saci_processor_metric` histogram, and `runner.rs` records the five `run-metrics` numbers off
 every `run-result`.
@@ -108,23 +115,24 @@ fails naming the build command. `cargo xtask bench wasm_roundtrip` needs the sam
 refuses the same way.
 
 ```bash
-rustup target add wasm32-wasip2
-cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+rustup target add wasm32-wasip3
+cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 ```
 
-No `cargo-component`: `rustc` links a `wasm32-wasip2` cdylib into a Component Model component
-itself, so plain `cargo build` writes the finished component to
-`target/wasm32-wasip2/release/saci_processor_smoketest.wasm` with no preview1 core module and no
+No `cargo-component`: `rustc` links a `wasm32-wasip3` cdylib into a WASI 0.3 Component Model
+component itself, so plain `cargo build` writes the finished component to
+`target/wasm32-wasip3/release/saci_processor_smoketest.wasm` with no preview1 core module and no
 adapter step. `.cargo/config.toml` adds `-C target-feature=+simd128` for that target only, so
 every processor's core module ships the SIMD proposal; wasmtime enables it by default.
 
 `saci`'s Arrow crates, serde_arrow, serde, futures, async-trait, fnv and rand are unconditional;
-the default `engine` feature adds `runtime` (tokio, rayon, num_cpus), so a wasm32-wasip2 processor
-build takes `default-features = false, features = ["processor"]`. The `processor` feature is the
-wasm32-wasip2 target, sequential-only execution driven by the `pollster` sync executor. It exposes
-`Pipeline`, `System`, `Component` (the trait), `Config`, `Error`, `Result`, `export_pipeline!` and
-the four macros, and never needs tokio. The macro expansions name `::saci::processor::...`, which
-resolves through the one direct `saci` dependency.
+the default `engine` feature adds `runtime` (tokio, rayon, num_cpus), so a `wasm32-wasip3` processor
+build takes `default-features = false, features = ["processor"]`. The `processor` feature targets
+WASI 0.3 Component Model Async (requiring `wit-bindgen = { workspace = true }` with
+`features = ["async"]`) and exposes `Pipeline`, `System`, `Component` (the trait), `Config`,
+`Error`, `Result`, `export_pipeline!` and the four macros without pulling tokio or `pollster`. The
+macro expansions name `::saci::processor::...`, which resolves through the one direct `saci`
+dependency.
 
 ## Bindings convention
 
@@ -139,9 +147,10 @@ which has no extern crate of its own name. A processor crate does depend on `sac
 
 ## Wire format and conformance
 
-`packages/arrow-ipc-conformance/` pins all five Arrow IPC codecs to one answer about which streams
-are valid. Vectors and manifest are committed, so a codec's suite needs no Rust toolchain.
-Regenerate after any wire format or `Order` schema change, then commit the result:
+`packages/arrow-ipc-conformance/` holds the Arrow IPC stream conformance corpus. Vectors and
+manifest are committed, so consumers (such as `examples/plugins/settle-go/internal/arrowipc`)
+need no Rust toolchain. Regenerate after any wire format or `Order` schema change, then commit the
+result:
 
 ```bash
 cargo run -p saci --features conformance --example conformance_vectors -- emit
@@ -152,65 +161,41 @@ build still cannot write a compressed record batch and must reject one.
 
 `arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide. It is the host to processor wire format and
 the on-disk checkpoint format. See `crates/saci/PINS.md` before touching it. A bump of that pin
-regenerates the corpus above and reruns all five SDK suites: arrow-rs writes a zero-length validity
-buffer for a column with no nulls, and each SDK writer matches arrow-rs's buffer lengths slot for
-slot (Python's `ArrowRsLayoutTest` compares them against an arrow-rs fixture), so a layout change
-in arrow-rs is a change in all five writers.
+regenerates the corpus above and reruns the Go plugin's `arrowipc` suite (`examples/plugins/settle-go`):
+arrow-rs writes a zero-length validity buffer for a column with no nulls, so an independent writer
+must match arrow-rs's buffer lengths slot for slot.
 
 The wasm host/processor boundary's instrument is `cargo xtask bench wasm_roundtrip`
 (`crates/saci/benches/wasm_roundtrip.rs`), which reports store lifecycle, host IPC encode,
 host IPC decode and the full `run_on_with_state` round trip as separate groups, since a change
 there routinely moves cost between phases while leaving the total flat.
 
-## Polyglot SDKs
+## Quick Start and xtask commands
 
-`packages/` is an Apache-2.0 subtree, unlike the rest of the repository. One SDK package per
-language, released as `saci-sdk`; each SDK carries its Arrow IPC codec internally, so the five
-non-Rust polyglot stages consume one package apiece.
-
-- `saci-sdk-go`: module `github.com/nassor/saci/packages/saci-sdk-go`, package `saci`, codec
-  subpackage `arrowipc`.
-- `saci-sdk-py`: `saci-sdk`, import `saci_sdk`, codec submodule `saci_sdk.arrow_ipc`.
-- `saci-sdk-ts`: `@nassor/saci-sdk`, codec module `src/arrow_ipc.ts`.
-- `saci-sdk-kt`: `io.github.nassor:saci-sdk-kt`, wasmWasi and jvm targets, codec package
-  `io.github.nassor.saci.arrowipc`.
-- `saci-sdk-kt-ksp`: `io.github.nassor:saci-sdk-kt-ksp`, the JVM-only KSP export-glue processor.
-- `saci-sdk-cs`: `Saci.Sdk`, codec namespace `Saci.ArrowIpc`; `generator/` is its Roslyn source
-  generator for the export glue.
-- `packages/VERSION`: the one version all five declare. `cargo xtask pack-sdk` asserts every
-  manifest matches it.
-
-### Quick Start component prerequisites
-
-`examples/quickstart/` needs two components that `cargo xtask quickstart` produces into the
-gitignored `examples/quickstart/build/`: `validate-go.wasm` (the unmodified
-`examples/polyglot/stages/go-validate`) and `settle-cs.wasm`
-(`examples/quickstart/stages/csharp-settle`). Three toolchains, all pinned in
-`examples/polyglot/PINS.md`: `componentize-go` 0.4.1 with Go 1.25.5+, .NET SDK 10, and `wasm-tools`
-1.246.2. Nothing in `cargo test` depends on either artifact.
+`examples/quickstart/` needs two Rust WASI 0.3 components that `cargo xtask quickstart` builds for
+`wasm32-wasip3`, copies into the gitignored `examples/quickstart/build/` as `validate.wasm`
+(`examples/quickstart/stages/validate`, crate `quickstart-validate-wasm`) and `settle.wasm`
+(`examples/quickstart/stages/settle`, crate `quickstart-settle-wasm`), and validates with
+`wasm-tools` (`1.246.2`, pinned in `crates/saci/PINS.md`). Nothing in `cargo test` depends on either
+artifact.
 
 The xtask commands that build and check a processor:
 
-- `cargo xtask polyglot`: build the six polyglot processors.
-- `cargo xtask quickstart`: build the two Quick Start processors.
-- `cargo xtask pack-sdk`: package the SDKs under `packages/`, asserting every manifest matches
-  `packages/VERSION`.
-- `cargo xtask check-wasm-processor`: `cargo check` `saci` for wasm32-wasip2 with
+- `cargo xtask quickstart`: install `wasm32-wasip3` if absent, build both Quick Start processors in
+  release mode into `examples/quickstart/build/`, and validate both with `wasm-tools`.
+- `cargo xtask check-wasm-processor`: `cargo check` `saci` for `wasm32-wasip3` with
   `--no-default-features --features processor`, the combination that keeps tokio out of the
   build and the one the crate docs hand a processor author. It installs the target first.
 - `cargo xtask processor-ipc-roundtrip`: drive one Arrow IPC round trip through a component.
 
 ## Examples
 
-- `examples/wasm/order_processing/`: a realistic processor pipeline, built for wasm32-wasip2.
-- `examples/polyglot/`: six processor components (Go, Python, TypeScript, Kotlin, C#, Rust)
-  against one WIT world. Each of the six declares its own `Order` row type on its language SDK (Go
-  struct tags, Python dataclass, TS schema builder, Kotlin data class, C# class, Rust derive).
-  `generated/` is regenerated by the `polyglot_schema_emit` example for the Quick Start and plugin
-  builds only; the driver asserts the six fingerprints agree pairwise. See `PINS.md` there.
-- `examples/quickstart/`: the runnable Quick Start, NATS to PostgreSQL through the reused Go stage
-  and a purpose-built C# stage, one `saci-service` process chaining them, compose file and
-  `schema.sql`. Built by `cargo xtask quickstart` into the gitignored `build/`.
+- `examples/wasm/order_processing/`: a realistic processor pipeline, built for `wasm32-wasip3`.
+- `examples/wasm/settle/`: the standalone settlement processor stage (`settle-wasm`), paired with
+  `examples/configs/standalone_settle.kdl`.
+- `examples/quickstart/`: the runnable Quick Start, NATS to PostgreSQL through two Rust WASI 0.3
+  stages (`validate` and `settle`), one `saci-service` process chaining them, compose file and
+  `schema.sql`. Built by `cargo xtask quickstart` into the gitignored `examples/quickstart/build/`.
 - `examples/conformance/`: `conformance_vectors.rs`, the `saci` example (feature `conformance`)
   that regenerates `packages/arrow-ipc-conformance/`'s corpus.
 
@@ -226,26 +211,23 @@ in-memory store fixture and needs no daemon.
 
 1. A WIT change edits `crates/saci/wit/pipeline.wit` and the byte-identical copy at
    `crates/saci-macros/wit/pipeline.wit` (`crates/saci-macros/tests/wit_vendored.rs` checks the
-   two match), then every SDK under `packages/` and the six polyglot stages.
+   two match).
 2. A wire format or `Order` schema change regenerates `packages/arrow-ipc-conformance/` (command
    above) and commits the result.
 3. A new processor runtime kind is added to the connector matrix's runtime dimension (skill
    `saci-connectors`).
-4. An SDK change bumps `packages/VERSION`; every manifest must match, and `cargo xtask pack-sdk`
-   asserts it.
-5. A change at the host/processor boundary is measured with `cargo xtask bench wasm_roundtrip`
+4. A change at the host/processor boundary is measured with `cargo xtask bench wasm_roundtrip`
    before and after.
-6. A page under `docs/content/service/processors/` or `processors/build/<language>` (skill
-   `saci-docs`).
-7. Update this skill.
+5. A page under `docs/content/service/processors/` (skill `saci-docs`).
+6. Update this skill.
 
 ## Keep this skill current
 
 Update this file in the same change that: changes the WIT package or its exports; changes
 `export_pipeline!`, `#[processor]`, `#[derive(Component)]`, `#[transform]` or `#[fold]`; changes
 `WasmEngine`, `WasmPipelineRuntime`, `HostState`, the pooling constants or the `host-io` imports;
-changes the smoketest fixture or its build; changes the conformance corpus generator; adds, removes
-or re-pins an SDK under `packages/`; adds or removes a processor example; changes
+changes the smoketest fixture or its build; changes the conformance corpus generator or
+`packages/arrow-ipc-conformance/`; adds or removes a processor example; changes
 `rebuild_blocker`'s `restartable` rule for a `wasm` node with no `module` (also check skill
 `saci-service`'s Service layer section, the canonical copy); changes
 `WasmPipelineRuntime::with_warm_instances` or the smoketest's `count` config key; changes

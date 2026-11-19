@@ -110,9 +110,9 @@ pub fn run(args: &[String]) -> Result<()> {
 /// Build the wasm component and the native plugin the slices load.
 fn build_fixtures(ctx: &Ctx) -> Result<()> {
     ctx.cmd("rustup")?
-        .args(["target", "add", "wasm32-wasip2"])
+        .args(["target", "add", "wasm32-wasip3"])
         .run()?;
-    ctx.log("building saci-processor-smoketest (wasm32-wasip2, release)...");
+    ctx.log("building saci-processor-smoketest (wasm32-wasip3, release)...");
     ctx.cargo()?
         .args([
             "build",
@@ -120,7 +120,7 @@ fn build_fixtures(ctx: &Ctx) -> Result<()> {
             "-p",
             "saci-processor-smoketest",
             "--target",
-            "wasm32-wasip2",
+            "wasm32-wasip3",
         ])
         .run()?;
     ctx.log("building saci-plugin-smoketest...");

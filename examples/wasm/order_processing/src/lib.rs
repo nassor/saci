@@ -17,13 +17,13 @@
 //! # Build
 //!
 //! ```bash
-//! cargo build --release -p order-processing-wasm --target wasm32-wasip2
+//! cargo build --release -p order-processing-wasm --target wasm32-wasip3
 //! ```
 //!
 //! The output component is at:
 //!
 //! ```text
-//! target/wasm32-wasip2/release/order_processing_wasm.wasm
+//! target/wasm32-wasip3/release/order_processing_wasm.wasm
 //! ```
 //!
 //! # Run via saci-service

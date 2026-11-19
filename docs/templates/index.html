@@ -17,8 +17,8 @@
         Each transform says which columns it reads and writes, and
         <strong>SACI derives the execution plan</strong> and runs independent work
         concurrently. Link it into your own Rust binary as a library, or run the
-        <code>saci-service</code> server and hand it the pipeline as a WebAssembly component
-        written in Rust, Go, Python, TypeScript, Kotlin or C#.
+        <code>saci-service</code> server and hand it the pipeline as a WASI 0.3
+        WebAssembly component or a native C ABI plugin.
     </p>
 
     <div class="hero-actions">
@@ -28,7 +28,7 @@
 
     <div class="badges">
         <span class="badge">License <b>AGPL-3.0-only</b></span>
-        <span class="badge">Rust <b>1.99+</b></span>
+        <span class="badge">Rust <b>1.100+</b></span>
         <span class="badge badge-accent">Status <b>experimental</b></span>
     </div>
 </section>

@@ -13,7 +13,7 @@
 //! bind the instruments to the no-op default provider instead.
 //!
 //! ```bash
-//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 //! cargo test --test workflow_metrics -p saci --features server,wasm-host,service
 //! ```
 

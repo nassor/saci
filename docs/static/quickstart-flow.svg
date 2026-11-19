@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 374" role="img" aria-labelledby="qs-flow-title qs-flow-desc">
   <title id="qs-flow-title">Quick Start: NATS in, two WebAssembly stages, PostgreSQL out</title>
   <desc id="qs-flow-desc">
-    The quickstart_publish example sends NDJSON authorisations to the authorizations.raw subject on NATS. A saci-service process running quickstart.kdl reads that subject with a NatsSource, passes the rows to the Go stage validate-go.wasm, which writes valid, then to the C# stage settle-cs.wasm, which writes fee and review_tier, and a PostgresSink upserts them by id into the public.settlements table in PostgreSQL. NATS and PostgreSQL run in docker compose.
+    The quickstart_publish example sends NDJSON authorisations to the authorizations.raw subject on NATS. A saci-service process running quickstart.kdl reads that subject with a NatsSource, passes the rows to the Rust validate stage validate.wasm, which writes valid, then to the Rust settle stage settle.wasm, which writes fee and review_tier, and a PostgresSink upserts them by id into the public.settlements table in PostgreSQL. NATS and PostgreSQL run in docker compose.
   </desc>
 
   <style>
@@ -117,16 +117,16 @@
     <rect class="blk blk-b" x="189" y="154" width="132" height="80" rx="8"/>
     <rect class="hd-b" x="189" y="154" width="132" height="22" rx="8"/>
     <rect class="hd-b" x="189" y="168" width="132" height="8"/>
-    <text class="t-ttl" x="201" y="170">Go stage</text>
-    <text class="t-sub" x="201" y="194">validate-go.wasm</text>
+    <text class="t-ttl" x="201" y="170">Validate stage</text>
+    <text class="t-sub" x="201" y="194">validate.wasm</text>
     <text class="t-sub" x="201" y="210">writes valid</text>
   </g>
   <g>
     <rect class="blk blk-b" x="339" y="154" width="132" height="80" rx="8"/>
     <rect class="hd-b" x="339" y="154" width="132" height="22" rx="8"/>
     <rect class="hd-b" x="339" y="168" width="132" height="8"/>
-    <text class="t-ttl" x="351" y="170">C# stage</text>
-    <text class="t-sub" x="351" y="194">settle-cs.wasm</text>
+    <text class="t-ttl" x="351" y="170">Settle stage</text>
+    <text class="t-sub" x="351" y="194">settle.wasm</text>
     <text class="t-sub" x="351" y="210">writes fee,</text>
     <text class="t-sub" x="351" y="226">review_tier</text>
   </g>

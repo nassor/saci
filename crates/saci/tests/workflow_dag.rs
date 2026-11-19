@@ -6,7 +6,7 @@
 //! Needs the smoketest artifact:
 //!
 //! ```bash
-//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 //! cargo test --test workflow_dag -p saci --features server,wasm-host
 //! ```
 
@@ -95,7 +95,7 @@ async fn a_two_processor_link_runs_two_real_wasmtime_instances() {
     assert!(
         wasm_path.exists(),
         "smoketest .wasm not found at {}; run \
-         `cargo build --release -p saci-processor-smoketest --target wasm32-wasip2` first",
+         `cargo build --release -p saci-processor-smoketest --target wasm32-wasip3` first",
         wasm_path.display()
     );
 

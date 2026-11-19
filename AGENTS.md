@@ -5,7 +5,7 @@ Guidance for coding agents working in this repository.
 ## Project
 
 SACI is a distributed batch processing engine for Rust built on Apache Arrow. Pipelines compile to
-WebAssembly components; a host binary loads them at runtime. Edition 2024, MSRV 1.99.0.
+WebAssembly components; a host binary loads them at runtime. Edition 2024, MSRV 1.100.0.
 
 Two crates publish: `saci`, which carries the engine, every connector and byte format, both
 authoring SDKs and the `saci-service` host as feature-gated modules, and `saci-macros`, the proc
@@ -24,7 +24,7 @@ user-level skills under `~/.agents/skills/`, shared by every project.
 |---|---|
 | `saci-connectors` | touching `crates/saci/src/connector.rs` or anything under `crates/saci/src/connector/`, a `SourceFactory`/`SinkFactory` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
 | `saci-transformers` | touching `crates/saci/src/transformer.rs` or anything under `crates/saci/src/transformer/`, a `format` registration, or a transformer option |
-| `saci-processors` | touching `crates/saci/src/processor.rs` or `processor/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/`, or `examples/{wasm,polyglot,quickstart,conformance}/` |
+| `saci-processors` | touching `crates/saci/src/processor.rs` or `processor/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/arrow-ipc-conformance/`, or `examples/{wasm,quickstart,conformance}/` |
 | `saci-plugins` | touching `crates/saci/src/{plugin.rs,plugin/,plugin_abi.rs}`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
 | `saci-service` | touching `crates/saci/src/{service,distributed,inspector,bin}/`, `src/metrics.rs`, `src/inspector_wire.rs`, `crates/saci-service-ui`, or `examples/{native,branching,windowing,multi_workflow,integrity,distributed_fulfillment}/` |
 | `technical-writer`, then `saci-docs` | writing or editing any `//`, `///` or `//!` comment, anything under `docs/`, `README.md`, a skill, or any other prose: the first holds the writing rules, the second the SACI surfaces, site layout, diagram classes and docs build commands |
@@ -55,7 +55,7 @@ cargo nextest run -p saci --no-default-features --features service,connector-cha
 cargo nextest run -p saci --no-default-features --features service,wasm-host,plugin-host,connector-channel --lib  # Both hosts, no windowing engine; the only place the three window-block refusal tests execute
 cargo nextest run --workspace --lib                          # The library default: the engine alone
 cargo nextest run -p saci --features server --lib            # The `server` bundle; `ci.yml`'s "Test, server bundle" step says what only this configuration reaches
-cargo xtask check-wasm-processor                             # saci still builds for wasm32-wasip2 with --features processor, without tokio
+cargo xtask check-wasm-processor                             # saci still builds for wasm32-wasip3 with --features processor, without tokio
 cargo xtask bench tpch_q6                                    # Benchmarks, always via the harness
 cargo check --examples --all-features                        # Verify examples compile; --all-features keeps connector-gated examples compiled
 cargo build -p saci --features server --bin saci-service     # The server binary
@@ -65,7 +65,6 @@ cargo run -p saci --example first_pipeline                   # The native tutori
 cargo run -p saci --example distributed_scheduler --features distributed  # No external service
 cargo run -p saci --example scheduler_etl_parallel
 cargo audit                                                  # Security audit (needs cargo-audit)
-cargo xtask polyglot                                         # Build the six polyglot processors
 cargo xtask quickstart                                       # Build the two Quick Start processors
 cargo xtask ui                                               # Rebuild the /ui dashboard bundle
 cargo xtask validate                                         # Validate example configs: build+run the registry, parse-check the rest
@@ -82,8 +81,8 @@ command.
 Two fixtures must exist before `cargo nextest run` reaches `crates/saci/tests/`:
 
 ```bash
-rustup target add wasm32-wasip2
-cargo build --release -p saci-processor-smoketest --target wasm32-wasip2   # skill saci-processors
+rustup target add wasm32-wasip3
+cargo build --release -p saci-processor-smoketest --target wasm32-wasip3   # skill saci-processors
 cargo build -p saci-plugin-smoketest                                      # skill saci-plugins
 ```
 
@@ -161,7 +160,7 @@ is off that line entirely: both processor hosts with no `windows`, the only conf
 `window` block sits on a node the build can host and finds no engine, which is what the three
 window-block refusal tests need. A unit test that drives a connector or a byte format through a
 module other than its own is gated on that feature, so each rung compiles. Current scale at the
-four `--lib` rungs is 415, 801, 1338 and 890 tests. Every count here is what nextest runs under
+four `--lib` rungs is 419, 801, 1338 and 890 tests. Every count here is what nextest runs under
 the `default` profile, which `cargo nextest list` reports too; the profile's excluded tests are
 in neither.
 
@@ -251,18 +250,18 @@ examples/
 │                             # End-to-end service workflows. skill saci-service
 ├── connectors/, configs/     # Connector examples and runnable KDL configs, including `dlq.kdl`
 │                             # and its `fixtures/dlq_collector.py`. skill saci-connectors
-├── wasm/, polyglot/, quickstart/, conformance/
+├── wasm/, quickstart/, conformance/
 │                             # Processor examples and the corpus generator. skill saci-processors
 └── plugins/                  # Native plugin proofs. skill saci-plugins
-packages/                     # Apache-2.0 subtree: one SDK per language plus the Arrow IPC
-                              # conformance corpus. skill saci-processors
+packages/                     # Apache-2.0 subtree: the Arrow IPC conformance corpus
+                              # (`arrow-ipc-conformance/`). skill saci-processors
 docs/                         # Zola site in two areas, service and library. skill saci-docs
 xtask/                        # The task runner behind `cargo xtask <command>`: quickstart,
-                              # polyglot, plugins, ui, bench, pack-sdk, validate, demo, matrix, server,
+                              # plugins, ui, bench, validate, demo, matrix, server,
                               # check-wasm-processor, processor-ipc-roundtrip. One module per
-                              # command, zero dependencies, so it drives Go, .NET, npm, Gradle
-                              # and wasm-tools identically on Windows, Linux and macOS. Exit
-                              # codes are documented per module and CI reads them.
+                              # command, zero dependencies, so it drives Go and wasm-tools
+                              # identically on Windows, Linux and macOS. Exit codes are
+                              # documented per module and CI reads them.
                               # validate and demo (examples.rs) inject a `variables` block
                               # into example configs, so they run with no OS env export.
                               # validate also parses every examples/configs/*.kdl file
@@ -278,7 +277,7 @@ The **default** is `engine` alone.
 Engine:
 
 - `engine` (**default**): the columnar engine plus the `Source`/`Sink` traits (implies `io`).
-- `runtime`: tokio and rayon stage parallelism. Cannot target wasm32-wasip2.
+- `runtime`: tokio and rayon stage parallelism. Cannot target wasm32-wasip3.
 - `io`: the `Source`/`Sink` traits and the schema cast helpers (implies `runtime`).
 - `windows`: windowed aggregation. `WindowedSystem`, watermarks, `WindowAccumulator`. The
   `WindowSpec` geometry enum sits outside the feature, in `window_spec.rs`, so a host parses a
@@ -290,9 +289,9 @@ Engine:
 
 Authoring SDKs, each for a different artifact:
 
-- `processor`: the wasm32-wasip2 processor SDK in `saci::processor`, sequential execution driven
-  by the `pollster` executor, the `#[derive(Component)]`/`#[transform]`/`#[fold]`/`#[processor]`
-  macros and `export_pipeline!`. A processor crate depends on `saci` with
+- `processor`: the wasm32-wasip3 processor SDK in `saci::processor`, Component Model Async
+  execution, the `#[derive(Component)]`/`#[transform]`/`#[fold]`/`#[processor]` macros and
+  `export_pipeline!`. A processor crate depends on `saci` with
   `default-features = false, features = ["processor"]`, so tokio stays out.
 - `plugin`: the native plugin SDK in `saci::plugin` and `export_plugin!`, for a cdylib the host
   `dlopen`s.
@@ -477,7 +476,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   it. Every other runnable example lives under the top-level `examples/` directory, grouped by
   topic (`examples/native/`,
   `examples/connectors/`, `examples/plugins/`, `examples/conformance/`, `examples/configs/`, plus
-  the end-to-end demo directories `examples/quickstart/`, `examples/polyglot/`,
+  the end-to-end demo directories `examples/quickstart/`,
   `examples/distributed_fulfillment/`, `examples/wasm/`, `examples/branching/`,
   `examples/windowing/`), and its `[[example]]` target in `crates/saci/Cargo.toml` sets a `path`
   into it; `cargo package` leaves those out, since it cannot reach outside the crate. Either way
@@ -520,7 +519,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   crate version therefore covers the whole workspace, declared in `[workspace.package] version`
   with the matching requirement in that table. An inherited dependency may add only `features`
   and `optional`; `default-features` is not a legal key there, so `saci`'s
-  `default-features = false` (its default is `engine`, which cannot target wasm32-wasip2) sits
+  `default-features = false` (its default is `engine`, which cannot target wasm32-wasip3) sits
   in the workspace entry and a member asks for the feature it needs, `features = ["processor"]`
   or `features = ["plugin"]`. `crates/saci-service-ui` is excluded from the workspace,
   so it inherits nothing and repeats every field itself.

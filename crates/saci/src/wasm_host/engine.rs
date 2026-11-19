@@ -38,10 +38,10 @@ const POOL_CALLS: u32 = 128;
 // Core instances, memories and tables reserved per concurrent processor call.
 //
 // One component instance expands into several core instances, and the
-// component model's adapter modules carry their own tables. The smoketest
-// fixture needs 3 core instances, 1 memory and 2 tables per call; components
-// built with other toolchains, such as the polyglot Go and C# processors,
-// split into more, so these leave room rather than tracking one fixture.
+// component model's async and adapter modules carry their own tables. The
+// smoketest fixture needs 3 core instances, 1 memory and 2 tables per call;
+// larger components split into more, so these leave room rather than tracking
+// one fixture.
 //
 // Memories are the expensive one, and they are what caps `POOL_CALLS`. Every
 // memory slot reserves a full `Config::memory_reservation` (4 GiB by default
@@ -150,6 +150,7 @@ impl WasmEngine {
     pub fn new() -> wasmtime::Result<Self> {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
+        config.wasm_component_model_async(true);
         config.epoch_interruption(true);
 
         // By default the WIT contract gives every call a fresh `Store`
@@ -181,7 +182,7 @@ impl WasmEngine {
     /// The linked, pre-instantiated program `wasm_bytes` yields, prepared at
     /// most once per engine.
     ///
-    /// Three synchronous steps: Cranelift compiles the component, the WASI-p2
+    /// Three synchronous steps: Cranelift compiles the component, the WASI 0.3
     /// and host-io imports are linked, and the instantiation is planned. The
     /// 4 MB smoketest component costs about 1.7 s of one fast core, nearly all
     /// of it Cranelift, so a config naming one module from several processor
@@ -211,7 +212,7 @@ impl WasmEngine {
 
         let component = Component::from_binary(&self.engine, wasm_bytes)?;
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        wasmtime_wasi::p3::add_to_linker(&mut linker)
             .map_err(|e| wasmtime::Error::msg(format!("wasi linker error: {e}")))?;
         SaciPipeline::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
             .map_err(|e| wasmtime::Error::msg(format!("host linker error: {e}")))?;

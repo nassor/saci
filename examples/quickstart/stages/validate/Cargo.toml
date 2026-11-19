@@ -1,0 +1,22 @@
+[package]
+name = "quickstart-validate-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Quick Start stage 1: validates incoming orders against a configurable minimum amount."
+
+# Processor pipeline component built for wasm32-wasip3.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+saci = { workspace = true, features = ["processor"] }
+serde = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { workspace = true }
+
+[dev-dependencies]
+pollster = "1.0"

@@ -18,7 +18,7 @@
 //!
 //! On the host target the `export_pipeline!` invocation is gated out, so the
 //! crate compiles as an empty cdylib. The WebAssembly build is `cargo build
-//! --release -p saci-processor-smoketest --target wasm32-wasip2`.
+//! --release -p saci-processor-smoketest --target wasm32-wasip3`.
 
 #![deny(missing_docs)]
 

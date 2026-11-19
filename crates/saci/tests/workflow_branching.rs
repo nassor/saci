@@ -8,7 +8,7 @@
 //! process-global one-shot; the same reason `workflow_metrics.rs` lives alone.
 //!
 //! ```bash
-//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+//! cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 //! cargo test --test workflow_branching -p saci --features server,wasm-host,service
 //! ```
 

@@ -47,7 +47,7 @@ const BENCHES: &[(&str, &str, &str)] = &[
     ("batch_vs_stream", "saci", "io"),
     ("vs_datafusion_q6", "saci", ""),
     // Needs the smoketest component on disk first:
-    // `cargo build --release -p saci-processor-smoketest --target wasm32-wasip2`.
+    // `cargo build --release -p saci-processor-smoketest --target wasm32-wasip3`.
     ("wasm_roundtrip", "saci", "service,wasm-host"),
 ];
 

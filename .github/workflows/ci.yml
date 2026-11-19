@@ -19,13 +19,13 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
         components: rustfmt, clippy
 
     # The kafka connector vendors librdkafka via rdkafka-sys's `cmake-build`
     # feature, and it compiles in every job that builds a saci test or
     # example target, because saci's dev-dependencies include rdkafka; the
-    # distributed_chaos, mariadb_servers, wasm_processor and polyglot jobs
+    # distributed_chaos, mariadb_servers, wasm_processor and plugins_and_quickstart jobs
     # install this same package. That build is configured with
     # -DWITH_CURL=0, but the config.h cmake generates for POSIX targets uses
     # `#cmakedefine01 WITH_OAUTHBEARER_OIDC`, which defines the macro as 0
@@ -59,8 +59,8 @@ jobs:
     # has to be produced on disk before `cargo fmt`. The one wasm build this job
     # still needs is the smoketest artifact, which `tests/wasm_roundtrip.rs`
     # hard-asserts exists.
-    - name: Install wasm32-wasip2 target
-      run: rustup target add wasm32-wasip2
+    - name: Install wasm32-wasip3 target
+      run: rustup target add wasm32-wasip3
 
     - name: Install cargo-nextest
       uses: taiki-e/install-action@v2
@@ -68,7 +68,7 @@ jobs:
         tool: cargo-nextest@0.9.143
 
     - name: Build smoketest WASM component
-      run: cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+      run: cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 
     - name: Check formatting
       run: cargo fmt -q --all -- --check
@@ -166,10 +166,7 @@ jobs:
       run: cargo check -q --examples --all-features
 
     # Registry pass builds and runs the runnable example configs
-    # (examples.rs); a missing toolchain (Go/dotnet for quickstart, Gradle
-    # for polyglot) is recorded as a failure for that one config and does not
-    # stop the rest, so this runs unconditionally alongside the Rust-only
-    # ones. Config-only pass then parses every examples/configs/*.kdl file
+    # (examples.rs). Config-only pass then parses every examples/configs/*.kdl file
     # through every built-in connector's factory with `--all-features`,
     # which is why this job's librdkafka prerequisite above has to run
     # before this step.
@@ -209,7 +206,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
 
     # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
@@ -271,7 +268,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
 
     - name: Cache cargo registry
       uses: actions/cache@v5
@@ -326,7 +323,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
 
     # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
@@ -347,8 +344,8 @@ jobs:
         path: target
         key: ${{ runner.os }}-connector-matrix-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install wasm32-wasip2 target
-      run: rustup target add wasm32-wasip2
+    - name: Install wasm32-wasip3 target
+      run: rustup target add wasm32-wasip3
 
     - name: Install cargo-nextest
       uses: taiki-e/install-action@v2
@@ -356,7 +353,7 @@ jobs:
         tool: cargo-nextest@0.9.143
 
     - name: Build smoketest WASM component
-      run: cargo build --release -p saci-processor-smoketest --target wasm32-wasip2
+      run: cargo build --release -p saci-processor-smoketest --target wasm32-wasip3
 
     - name: Build smoketest native plugin
       run: cargo build -p saci-plugin-smoketest
@@ -399,7 +396,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
 
     - name: Cache cargo registry
       uses: actions/cache@v5
@@ -420,7 +417,7 @@ jobs:
       run: cargo xtask matrix --archive-file connector-matrix.tar.zst -E 'test(/^live::${{ matrix.group }}::/)'
 
   wasm_processor:
-    name: WASM Processor (wasm32-wasip2)
+    name: WASM Processor (wasm32-wasip3)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
@@ -428,7 +425,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
 
     # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
@@ -454,14 +451,14 @@ jobs:
       with:
         tool: wasm-tools@1.246.2
 
-    # cargo check of saci for wasm32-wasip2 with `--no-default-features
+    # cargo check of saci for wasm32-wasip3 with `--no-default-features
     # --features processor`. It protects the build instruction
     # `crates/saci/src/lib.rs`'s crate docs and AGENTS.md give processor
     # authors: the default `engine` implies `runtime` (tokio and rayon), and
-    # tokio cannot target wasm32-wasip2, so a feature edge leaking tokio back
+    # tokio cannot target wasm32-wasip3, so a feature edge leaking tokio back
     # into `processor` would make that instruction false. The task installs
     # the target itself.
-    - name: Check saci for wasm32-wasip2
+    - name: Check saci for wasm32-wasip3
       run: cargo xtask check-wasm-processor
 
     # The arrow-ipc exact pin is load-bearing across the component boundary;
@@ -471,10 +468,19 @@ jobs:
 
     # Produced by the round-trip task above.
     - name: Validate smoketest component
-      run: wasm-tools validate --features component-model target/wasm32-wasip2/release/saci_processor_smoketest.wasm
+      run: wasm-tools validate --features cm-async target/wasm32-wasip3/release/saci_processor_smoketest.wasm
 
-    - name: Print smoketest component world
-      run: wasm-tools component wit target/wasm32-wasip2/release/saci_processor_smoketest.wasm
+    - name: Check smoketest WIT exports and WASI 0.3 imports
+      run: |
+        WASM=target/wasm32-wasip3/release/saci_processor_smoketest.wasm
+        WIT=$(wasm-tools component wit "$WASM")
+        printf '%s\n' "$WIT"
+        echo "$WIT" | grep -q 'saci:pipeline/pipeline@0.4.0'
+        echo "$WIT" | grep -q 'run-batch: async func('
+        if echo "$WIT" | grep -q '@0\.2\.'; then
+          echo "::error::component imports WASI 0.2 interface(s)"
+          exit 1
+        fi
 
     # The processors are built with `-C target-feature=+simd128` from
     # .cargo/config.toml, and a silently dropped rustflag costs real throughput
@@ -486,7 +492,7 @@ jobs:
     # without it, so the `-eq 0` threshold has no flake margin to worry about.
     - name: Assert simd128 in the core module
       run: |
-        WASM=target/wasm32-wasip2/release/saci_processor_smoketest.wasm
+        WASM=target/wasm32-wasip3/release/saci_processor_smoketest.wasm
         wasm-tools objdump "$WASM" | grep -q 'custom "target_features"'
         grep -qa simd128 "$WASM"
         vec=$(wasm-tools print "$WASM" \
@@ -497,8 +503,8 @@ jobs:
           exit 1
         fi
 
-  polyglot:
-    name: Polyglot Processors
+  plugins_and_quickstart:
+    name: Plugins, Conformance and Quick Start
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
@@ -506,7 +512,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
 
     # saci's dev-dependencies pull in rdkafka, whose
     # rdkafka-sys cmake build compiles rdkafka_conf.c's `#include
@@ -525,112 +531,45 @@ jobs:
       uses: actions/cache@v5
       with:
         path: target
-        key: ${{ runner.os }}-polyglot-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-plugins-quickstart-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install wasm32-wasip2 target
-      run: rustup target add wasm32-wasip2
+    - name: Install wasm32-wasip3 target
+      run: rustup target add wasm32-wasip3
 
     - name: Install component tooling
       uses: taiki-e/install-action@v2
       with:
         tool: wasm-tools@1.246.2,cargo-nextest@0.9.143
 
-    # Versions are pinned in examples/polyglot/PINS.md; keep the two in sync.
+    # Go version pinned in examples/plugins/settle-go/PINS.md.
     - uses: actions/setup-go@v6
       with:
         go-version: '1.25.5'
 
-    # Node 24. The TypeScript stage needs 22.18 for type stripping in
-    # `node --test` and 24.12 for jco's `@napi-rs/lzma`; 24 clears both.
-    - uses: actions/setup-node@v6
-      with:
-        node-version: '24'
-
-    - uses: actions/setup-python@v6
-      with:
-        python-version: '3.12'
-
-    - uses: actions/setup-java@v5
-      with:
-        distribution: 'temurin'
-        java-version: '21'
-
-    - uses: gradle/actions/setup-gradle@v4
-      with:
-        gradle-version: '8.14.4'
-
-    - uses: actions/setup-dotnet@v5
-      with:
-        dotnet-version: '10.0.x'
-
-    - name: Install processor componentizers
-      run: |
-        go install github.com/bytecodealliance/componentize-go@v0.4.1
-        pip install componentize-py==0.25.0 build
-        npm install -g @bytecodealliance/jco@1.30.0
-        # Kotlin has no released WIT binding generator. JetBrains maintains a
-        # wit-bindgen fork with a Kotlin backend, built from the branch.
-        cargo install wit-bindgen-cli --git https://github.com/Kotlin/wit-bindgen --branch kotlin
-
-    # The five SDK test suites (each now also carrying its codec) need the
-    # generated fixtures, and they are the tests that localise a
-    # flatbuffer-offset bug to one language before the wasm chain turns it into
-    # an opaque byte diff.
-    - name: Generate schema constants and fixtures
-      run: cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit
-
-    # The conformance corpus is committed so a codec's suite runs without a Rust
+    # The conformance corpus is committed so wire codecs run without a Rust
     # toolchain. Regenerating it here proves the committed vectors still match
-    # what the generator produces, so the corpus cannot drift from the wire
-    # format it is supposed to pin.
+    # what the generator produces.
     - name: Conformance corpus is current
       run: |
         cargo run -p saci --features conformance --example conformance_vectors -- emit
         git diff --exit-code -- packages/arrow-ipc-conformance
 
-    - name: Go SDK+codec tests
-      working-directory: packages/saci-sdk-go
+    - name: Generate schema constants and fixtures
+      run: |
+        cargo run -p saci --features plugin-host --example plugin_schema_emit -- emit
+        cp examples/plugins/generated/schema_gen.go examples/plugins/settle-go/schema_gen.go
+
+    - name: Go wire codec and conformance tests
+      working-directory: examples/plugins/settle-go
       run: go test ./...
 
-    - name: Python SDK+codec tests
-      working-directory: packages/saci-sdk-py
-      run: PYTHONPATH=src python -m unittest discover -s tests
+    - name: Build native plugins
+      run: cargo xtask plugins
 
-    - name: TypeScript SDK+codec tests
-      working-directory: packages/saci-sdk-ts
-      run: |
-        npm ci
-        npm run typecheck
-        npm run build
-        npm test
+    - name: Native plugin round-trip tests
+      run: cargo nextest run -p saci --features plugin-host --test plugin_roundtrip
 
-    - name: Kotlin SDK+codec tests
-      working-directory: packages/saci-sdk-kt
-      run: gradle jvmTest
-
-    - name: C# SDK+codec tests
-      working-directory: packages/saci-sdk-cs
-      run: dotnet test tests
-
-    # Keeps the packaging honest between releases: every manifest still agrees
-    # with packages/VERSION and every artifact still builds. Every toolchain it
-    # needs is already installed above.
-    - name: Pack the SDK packages
-      run: cargo xtask pack-sdk
-
-    - name: Build all six components
-      run: cargo xtask polyglot
-
-    - name: Six-language chain regression
-      run: cargo nextest run -p saci --features wasm-host --test polyglot_chain --no-capture
-
-    - name: Run the polyglot driver
-      run: cargo run -p saci --features wasm-host,tracing --example polyglot_orders
-
-    # The Quick Start's C# stage is not built by any other job, so a WIT
-    # world change here would break the tutorial silently. Every toolchain
-    # it needs is already installed above.
-    - name: Build the Quick Start components
+    - name: Build and validate Quick Start components
       run: cargo xtask quickstart
 
   security_audit:
@@ -642,7 +581,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.99.0  # Rust minimum version
+        toolchain: 1.100.0  # Rust minimum version
     
     - name: Install cargo-audit
       uses: taiki-e/install-action@cargo-audit

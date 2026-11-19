@@ -13,7 +13,7 @@ Both routers read the first row's `priority` and insert a `RouteDecision`. The p
 ## Prerequisites
 
 - A clone of the repository. Every command runs from its root.
-- Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
+- Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`
 - A Docker daemon, for NATS.
 
 ## 1. Build the processors
@@ -21,11 +21,11 @@ Both routers read the first row's `priority` and insert a `RouteDecision`. The p
 Runs the same on Linux, macOS and Windows (PowerShell):
 
 ```text
-cargo build --release -p branching-wasm --target wasm32-wasip2
+cargo build --release -p branching-wasm --target wasm32-wasip3
 cargo build --release -p branching-plugin
 ```
 
-This writes `target/wasm32-wasip2/release/branching_wasm.wasm` and the plugin library. The config's default plugin path is the Linux name, so macOS and Windows point `SACI_PLUGIN_LIB` at theirs in step 3:
+This writes `target/wasm32-wasip3/release/branching_wasm.wasm` and the plugin library. The config's default plugin path is the Linux name, so macOS and Windows point `SACI_PLUGIN_LIB` at theirs in step 3:
 
 | Platform | Plugin artifact |
 |----------|-----------------|
@@ -138,5 +138,5 @@ docker rm -f saci-nats
 |------|------------|
 | `branching.kdl` | the stream workflow with all three splits |
 | `branching_publish.rs` | the `branching_publish` example that feeds the subject |
-| `wasm/` | `branching-wasm`, the WASM router (cdylib, `wasm32-wasip2`) |
+| `wasm/` | `branching-wasm`, the WASM router (cdylib, `wasm32-wasip3`) |
 | `plugin/` | `branching-plugin`, the native router (cdylib) |

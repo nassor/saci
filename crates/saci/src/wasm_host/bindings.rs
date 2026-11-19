@@ -3,6 +3,7 @@
 wasmtime::component::bindgen!({
     world: "saci-pipeline",
     path: "wit",
+    exports: { default: async },
 });
 
 // Convenience re-exports used across the wasm module. `self::` because the

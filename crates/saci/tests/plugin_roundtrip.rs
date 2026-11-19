@@ -5,7 +5,7 @@
 //! 2. `cargo test --test plugin_roundtrip -p saci --features server,plugin-host`
 //!
 //! `cargo test -p saci --features server` does not build unrelated workspace members, so
-//! step 1 is a prerequisite exactly as the wasip2 fixture is for
+//! step 1 is a prerequisite exactly as the wasip3 fixture is for
 //! `wasm_roundtrip`. `cargo test --workspace` builds both in one invocation.
 //!
 //! Four properties are covered:

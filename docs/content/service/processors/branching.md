@@ -214,7 +214,7 @@ A processor labels every outbound link or none; the load-time rules behind that 
 ## Prerequisites
 
 - A clone of the repository, from the root of which every command runs.
-- Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`.
+- Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`.
 - Docker for the NATS broker.
 - NATS is an opt-in connector too: the serve and validate commands
   below pass `--features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host`.
@@ -222,7 +222,7 @@ A processor labels every outbound link or none; the load-time rules behind that 
 ## 1. Build the processors
 
 ```bash,name=Build both processors
-cargo build --release -p branching-wasm --target wasm32-wasip2
+cargo build --release -p branching-wasm --target wasm32-wasip3
 cargo build --release -p branching-plugin
 ```
 

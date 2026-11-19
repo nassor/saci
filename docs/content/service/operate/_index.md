@@ -137,7 +137,7 @@ system, so copy the one nearest your own and edit its `config` blocks.
 | `standalone.kdl` | CSV in, one processor, CSV out: [File](@/service/connectors/file.md) | yes |
 | `standalone_wasm.kdl` | the order-processing component over CSV: [File](@/service/connectors/file.md) | yes |
 | `standalone_plugin.kdl` | the same shape with a native plugin: [Plugins in a workflow](@/service/plugins/_index.md) | no: `--features plugin-host` |
-| `standalone_polyglot.kdl` | a processor built from another language: [Build your own processor](@/service/processors/build/_index.md) | yes, once the component is built |
+| `standalone_settle.kdl` | the stateful settlement WASI 0.3 processor: [Build your own processor](@/service/processors/build/_index.md) | yes, once the component is built |
 | `nats.kdl` | JetStream at both ends: [NATS](@/service/connectors/nats.md) | no: `--features connector-nats` |
 | `postgresql.kdl` | logical replication into a sink table: [PostgreSQL](@/service/connectors/postgresql.md) | no: `--features connector-postgresql` |
 | `mariadb.kdl` | binlog replication with an initial snapshot into a sink table: [MariaDB](@/service/connectors/mariadb.md) | no: `--features connector-mariadb` |

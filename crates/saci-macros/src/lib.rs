@@ -38,7 +38,7 @@ mod processor;
 mod system;
 mod util;
 
-/// The `saci:pipeline@0.3.0` world text, vendored from `saci`.
+/// The `saci:pipeline@0.4.0` world text, vendored from `saci`.
 ///
 /// `#[processor]` splices it into `wit_bindgen::generate!({ inline: ... })`,
 /// whose `path:` alternative would resolve against each processor crate's
@@ -188,12 +188,12 @@ pub fn fold(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Export a pipeline as a `saci:pipeline@0.3.0` WebAssembly component.
+/// Export a pipeline as a `saci:pipeline@0.4.0` WebAssembly component.
 ///
 /// ```ignore
-/// #[processor(name = "polyglot-settle-rs", state = Ledger)]
+/// #[processor(name = "settle", state = Ledger)]
 /// pub fn build() -> Pipeline {
-///     Pipeline::builder("polyglot-settle-rs")
+///     Pipeline::builder("settle")
 ///         .with::<Order>()
 ///         .with_system(settle_system())
 ///         .with_system(ledger_system())
@@ -232,8 +232,9 @@ pub fn fold(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// - Apply it to a `fn` at the crate root: the expansion names
 ///   `crate::bindings`.
-/// - The crate needs `wit-bindgen` as a `cfg(target_arch = "wasm32")`
-///   dependency, and is built with `cargo build --target wasm32-wasip2`.
+/// - The crate needs `wit-bindgen` with the `async` feature enabled as a
+///   `cfg(target_arch = "wasm32")` dependency, and is built with
+///   `cargo build --target wasm32-wasip3`.
 /// - The crate must not carry a `wit/` directory of its own.
 ///   `wit_bindgen::generate!` parses `<crate>/wit` when it exists even
 ///   alongside `inline:`, and a second copy of `saci:pipeline` there would

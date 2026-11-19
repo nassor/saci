@@ -17,7 +17,7 @@ Every mode keys on `symbol` with 5 000 ms of allowed lateness. All three read th
 ## Prerequisites
 
 - A clone of the repository. Every command runs from its root.
-- Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
+- Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`
 - A Docker daemon, for NATS and PostgreSQL.
 
 ## 1. Start the containers
@@ -62,7 +62,7 @@ Both subjects feed two processors with the same logic, one WASM and one native p
 Build. Runs the same on all three platforms:
 
 ```text
-cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip2
+cargo build --release -p windowing-tumbling-wasm --target wasm32-wasip3
 cargo build --release -p windowing-tumbling-plugin
 ```
 
@@ -110,7 +110,7 @@ Both subjects feed one processor, `window_sliding`. Each row lands in four overl
 Build, serve and publish. The commands run the same on all three platforms; publish from a second terminal:
 
 ```text
-cargo build --release -p windowing-sliding-wasm --target wasm32-wasip2
+cargo build --release -p windowing-sliding-wasm --target wasm32-wasip3
 cargo run -p saci --features server,connector-nats,connector-postgresql -- serve --config examples/windowing/sliding/sliding.kdl
 cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 ```
@@ -132,7 +132,7 @@ With a steady clock a symbol goes quiet only by chance, and nothing bounds a ses
 Build, serve and publish. The commands run the same on all three platforms; publish from a second terminal:
 
 ```text
-cargo build --release -p windowing-session-wasm --target wasm32-wasip2
+cargo build --release -p windowing-session-wasm --target wasm32-wasip3
 cargo run -p saci --features server,connector-nats,connector-postgresql -- serve --config examples/windowing/session/session.kdl
 cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 --gap-every 20 --gap-ms 30000
 ```
@@ -183,7 +183,7 @@ docker compose -f examples/windowing/docker-compose.yml down -v
 | Path | What it is |
 |------|------------|
 | `tumbling/tumbling.kdl` | the workflow with both tumbling processors |
-| `tumbling/wasm/`, `tumbling/plugin/` | `windowing-tumbling-wasm` (cdylib, `wasm32-wasip2`) and `windowing-tumbling-plugin` (cdylib) |
+| `tumbling/wasm/`, `tumbling/plugin/` | `windowing-tumbling-wasm` (cdylib, `wasm32-wasip3`) and `windowing-tumbling-plugin` (cdylib) |
 | `sliding/sliding.kdl`, `sliding/wasm/` | the sliding workflow and `windowing-sliding-wasm` |
 | `session/session.kdl`, `session/wasm/` | the session workflow and `windowing-session-wasm` |
 | `windowed_publish.rs` | the `windowed_publish` example that feeds both subjects |

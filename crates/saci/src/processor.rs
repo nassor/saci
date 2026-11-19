@@ -1,6 +1,6 @@
 //! The processor SDK for SACI WebAssembly Component Model pipelines.
 //!
-//! The `saci` crate owns the `saci:pipeline@0.3.0` WIT package (`wit/pipeline.wit`).
+//! The `saci` crate owns the `saci:pipeline@0.4.0` WIT package (`wit/pipeline.wit`).
 //! Processor crates that export a SACI pipeline as a WebAssembly component point
 //! their `wit_bindgen::generate!` at the `wit/` directory of `saci`.
 //!
@@ -42,7 +42,7 @@
 //! }
 //! ```
 //!
-//! `cargo build --target wasm32-wasip2` on that crate produces a
+//! `cargo build --target wasm32-wasip3` on that crate produces a
 //! WebAssembly component implementing the `saci-pipeline` world. The host loads
 //! it via `wasmtime` and drives the two processor exports, `describe` and
 //! `run-batch`. Nothing in the source above is target-gated: every
@@ -168,7 +168,6 @@ pub mod __rt {
     pub use crate::{
         Component, Dataset, Pipeline, RunStats, SaciError, SaciResult, System, SystemMeta,
     };
-    pub use pollster;
     pub use std::sync::{Mutex, MutexGuard, OnceLock};
 
     pub use arrow_ipc::writer::StreamWriter;
@@ -210,11 +209,11 @@ pub use crate::sdk::RouteDecision;
 ///
 /// # Requirements
 ///
-/// - Build the downstream crate with `cargo build --target wasm32-wasip2`; the
+/// - Build the downstream crate with `cargo build --target wasm32-wasip3`; the
 ///   expansion targets its `crate::bindings` module.
 /// - That module must be a `wit_bindgen::generate!` against
 ///   `crates/saci/wit/`, which defines world `saci-pipeline` of
-///   `saci:pipeline@0.3.0`:
+///   `saci:pipeline@0.4.0`:
 ///
 /// ```ignore
 /// #[cfg(target_arch = "wasm32")]
@@ -336,7 +335,7 @@ macro_rules! export_pipeline {
                     }
                 }
 
-                fn run_batch(
+                async fn run_batch(
                     input: Vec<u8>,
                     prior: Option<Vec<u8>>,
                 ) -> Result<
@@ -363,9 +362,7 @@ macro_rules! export_pipeline {
                         .map_err(|e| RunError::Permanent(format!("state restore: {e}")))?;
 
                     let pipeline = __SACI_PIPELINE.pipeline($build_fn);
-                    let run_result = $crate::processor::__rt::pollster::block_on(
-                        pipeline.run_on_with_stats(&mut dataset),
-                    );
+                    let run_result = pipeline.run_on_with_stats(&mut dataset).await;
 
                     let stats = match run_result {
                         Ok(stats) => stats,

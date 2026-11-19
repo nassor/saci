@@ -1,11 +1,11 @@
-//! Component validation, shared by the `quickstart` and `polyglot` builds.
+//! Component validation for built WASI 0.3 processor artifacts.
 
 use std::path::{Path, PathBuf};
 
 use crate::sh::{Ctx, Result};
 
 /// The interface every processor component must export.
-const EXPORT: &str = "saci:pipeline/pipeline@0.3.0";
+const EXPORT: &str = "saci:pipeline/pipeline@0.4.0";
 
 /// The pinned validator, whose install line is the same wherever it is needed.
 pub const WASM_TOOLS_HINT: &str = "cargo install wasm-tools --locked --version 1.246.2";
@@ -38,7 +38,7 @@ pub fn validate_dir(ctx: &Ctx, dir: &Path, missing: u8) -> Result<()> {
             .into_owned();
 
         ctx.cmd("wasm-tools")?
-            .args(["validate", "--features", "component-model"])
+            .args(["validate", "--features", "cm-async"])
             .arg(path)
             .run()?;
 
@@ -47,10 +47,19 @@ pub fn validate_dir(ctx: &Ctx, dir: &Path, missing: u8) -> Result<()> {
             .args(["component", "wit"])
             .arg(path)
             .output_status()?;
-        if !ok || !wit.contains(EXPORT) {
-            return ctx.fail(missing, &[&format!("{name} does not export {EXPORT}")]);
+        if !ok || !wit.contains(EXPORT) || !wit.contains("run-batch: async func(") {
+            return ctx.fail(
+                missing,
+                &[&format!("{name} does not export async {EXPORT}")],
+            );
         }
-        ctx.log(format!("validated {name}: exports {EXPORT}"));
+        if wit.contains("@0.2.") {
+            return ctx.fail(
+                missing,
+                &[&format!("{name} still imports a WASI 0.2 interface")],
+            );
+        }
+        ctx.log(format!("validated {name}: exports async {EXPORT}"));
     }
     Ok(())
 }

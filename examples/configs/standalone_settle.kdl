@@ -1,0 +1,81 @@
+// SACI standalone config running the stateful settlement WASM processor under
+// `saci-service`: `examples/wasm/settle/`.
+//
+// The paths below are CWD-relative, so run from the repository root:
+//   cargo build --release -p settle-wasm --target wasm32-wasip3
+//   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate \
+//     --config examples/configs/standalone_settle.kdl --strict
+//   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve \
+//     --config examples/configs/standalone_settle.kdl
+//
+// It reads examples/configs/fixtures/settle_orders.csv, runs the `settle-wasm`
+// component, and writes /tmp/saci-settle-out.csv with `settlement` filled in.
+//
+// Every column appears in the CSV because all twelve `Order` fields must be
+// present in both `schema_fields` lists. The input fixture pre-seeds `settlement`
+// to `PENDING` because CSV turns an empty string into NULL and `settlement` is
+// declared non-nullable.
+
+mode "standalone"
+
+node id=1 name="saci-settle" data_dir="${SACI_DATA_DIR:-/tmp/saci-settle}"
+
+run_mode kind="one_shot"
+
+workflow "settle" {
+    // Both FileSource and FileSink move CSV bytes, so one declared transformer
+    // serves them both.
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+
+    // `component` must be "Order": the load-time graph check compares it
+    // against the component names the processor reports from `describe()`.
+    source "csv_orders" type="FileSource" component="Order" transformer="csv_fmt" {
+        config {
+            path "examples/configs/fixtures/settle_orders.csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "region" type="Utf8" nullable=#false
+            schema_fields "currency" type="Utf8" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#false
+            schema_fields "valid" type="Boolean" nullable=#false
+            schema_fields "usd_amount" type="Float64" nullable=#false
+            schema_fields "usd_amount_display" type="Utf8" nullable=#false
+            schema_fields "risk_score" type="Float64" nullable=#false
+            schema_fields "flagged" type="Boolean" nullable=#false
+            schema_fields "fee" type="Float64" nullable=#false
+            schema_fields "review_tier" type="Int64" nullable=#false
+            schema_fields "settlement" type="Utf8" nullable=#false
+        }
+    }
+
+    // Stateful WASI 0.3 processor component (`examples/wasm/settle/`).
+    wasm "settle" module="target/wasm32-wasip3/release/settle_wasm.wasm" {
+        // Optional batch size hint read via host-io `get-config`.
+        config ledger_tag="standalone"
+    }
+
+    // truncate replaces the file each run. Without it the sink appends, and
+    // csv with has_headers writes a second header line mid-file.
+    sink "csv_out" type="FileSink" component="Order" transformer="csv_fmt" {
+        config {
+            path "/tmp/saci-settle-out.csv"
+            truncate #true
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "region" type="Utf8" nullable=#false
+            schema_fields "currency" type="Utf8" nullable=#false
+            schema_fields "amount" type="Float64" nullable=#false
+            schema_fields "valid" type="Boolean" nullable=#false
+            schema_fields "usd_amount" type="Float64" nullable=#false
+            schema_fields "usd_amount_display" type="Utf8" nullable=#false
+            schema_fields "risk_score" type="Float64" nullable=#false
+            schema_fields "flagged" type="Boolean" nullable=#false
+            schema_fields "fee" type="Float64" nullable=#false
+            schema_fields "review_tier" type="Int64" nullable=#false
+            schema_fields "settlement" type="Utf8" nullable=#false
+        }
+    }
+
+    link from="csv_orders" to="settle"
+    link from="settle" to="csv_out"
+}

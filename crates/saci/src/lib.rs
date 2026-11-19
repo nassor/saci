@@ -19,7 +19,7 @@
 //! - `processor`: the WebAssembly Component Model processor SDK in
 //!   `processor`, with the `#[derive(Component)]`, `#[transform]`, `#[fold]`
 //!   and `#[processor]` macros and `export_pipeline!`. A processor targets
-//!   wasm32-wasip2, where tokio cannot build, so it depends on this crate
+//!   wasm32-wasip3, where tokio cannot build, so it depends on this crate
 //!   with `default-features = false, features = ["processor"]`.
 //! - `plugin`: the native plugin SDK in `plugin` and `export_plugin!`, for a
 //!   cdylib the host `dlopen`s.

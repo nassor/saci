@@ -3,24 +3,21 @@ title = "Host to processor wire format"
 description = "The exact bytes crossing the Component Model boundary: segment framing, Arrow IPC message framing, the flatbuffer field ids a processor must read, buffer layout per Arrow type, and the schema fingerprint algorithm."
 template = "page.html"
 weight = 2
-aliases = ["/reference/wire-format/", "/polyglot/wire-format/"]
+aliases = ["/reference/wire-format/"]
 +++
 # Host to processor wire format
 
-Read this only if you are writing an Arrow codec by hand. Five languages already
-have one, carried inside [`the SDK packages`](@/library/reference/sdk-packages.md).
-The implementation on both sides is `crates/saci/src/dataset/ipc.rs`, called
-identically by the host and by the `export_pipeline!` expansion in the processor.
+Read this if you are writing a standalone Arrow IPC codec (for example,
+`examples/plugins/settle-go/internal/arrowipc` for a Go native plugin) rather
+than linking `crates/saci/src/dataset/ipc.rs` through Rust's `processor` SDK.
 
 `run-batch` takes `list<u8>` and answers with a `run-result` whose `output`
-field is `list<u8>` again. This page specifies those bytes precisely enough to
-implement a processor in a language with no Arrow library. The Go, Python,
-TypeScript, Kotlin and C# stages of
-[the polyglot example](@/service/processors/build/_index.md) do exactly that.
+field is `list<u8>` again. The same binary segment format also crosses the
+native plugin C ABI.
 
 The numbers here match the stream that
-`cargo run -p saci --features wasm-host --example polyglot_schema_emit -- emit`
-writes to `examples/polyglot/generated/fixture_input.saci`.
+`cargo run -p saci --features plugin-host --example plugin_schema_emit -- emit`
+writes to `examples/plugins/generated/fixture_input.saci`.
 
 ---
 
@@ -195,27 +192,23 @@ return lowercase_hex_8(hash)
 Names, versions and field names only: no types, no nullability. Adding a field
 changes it; changing a field's type does not.
 
-Every language's SDK implements this once, deriving the fingerprint at build
-or init time from the row type the stage declares, rather than sharing a
-generated constant. The driver and the `polyglot_chain` integration test load
-all six stages, each declaring the one `Order` component, and compare the
-fingerprints they report against each other, failing on any disagreement.
+Deriving the fingerprint at build or init time from the row type keeps
+the schema declaration single-sourced rather than sharing a stale constant.
 
 ## `component-descriptor.arrow-schema-ipc`
 
 A *schema-only* Arrow IPC stream: a `StreamWriter` opened on the schema and
 immediately finished, with no batches. The host parses it with
 `StreamReader::schema()` and uses it to build the template dataset that sources
-and sinks are validated against. Same per-language derivation as the
-fingerprint: each SDK builds it from the row type at build or init time.
+and sinks are validated against.
 
 ## The conformance corpus
 
-A hand implementation has an acceptance suite the day it starts:
-`packages/arrow-ipc-conformance/` lists, in `manifest.json`, one binary stream
-per `vectors/*.saci` case and what each must do. The five SDK codecs all run it,
-so one answer covers which streams are valid. Regenerate it after any wire
-format or `Order` schema change:
+A hand-written codec has an acceptance suite in
+`packages/arrow-ipc-conformance/`, where `manifest.json` lists one binary
+stream per `vectors/*.saci` case and what each must do. The Go codec tests under
+`examples/plugins/settle-go/internal/arrowipc/` run against it directly.
+Regenerate the corpus after any wire format or `Order` schema change:
 
 ```bash,name=Regenerate the conformance corpus
 cargo run -p saci --features conformance --example conformance_vectors -- emit
@@ -223,8 +216,7 @@ cargo run -p saci --features conformance --example conformance_vectors -- emit
 
 The corpus is processor-side: it deliberately has no vector for the two rules
 the host enforces, the `__alive` row-count cross-check and 8-byte buffer
-alignment. It is covered with the codecs on
-[the SDK packages page](@/library/reference/sdk-packages.md).
+alignment.
 
 ## TCP frame
 

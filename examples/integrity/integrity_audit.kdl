@@ -53,7 +53,7 @@
 // `settle` in `integrity.kdl`, which answer 409.
 //
 // Build the processor first, from the repository root:
-//   cargo build --release -p integrity-audit-wasm --target wasm32-wasip2
+//   cargo build --release -p integrity-audit-wasm --target wasm32-wasip3
 //
 // Then:
 //   cargo run -p saci \
@@ -145,7 +145,7 @@ workflow "audit" name="CDC audit verification" {
     // Stateless: one verdict per change. It renames `__op` to `op` on the way
     // out, so the CDC metadata reaches the sink under a name a consumer can
     // read, and folds it into both the `ok` predicate and the checksum.
-    wasm "verify_audit" module="target/wasm32-wasip2/release/integrity_audit_wasm.wasm"
+    wasm "verify_audit" module="target/wasm32-wasip3/release/integrity_audit_wasm.wasm"
 
     // ------------------------------------------------------------------ sink
 

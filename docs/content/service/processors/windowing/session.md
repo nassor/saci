@@ -183,7 +183,7 @@ Every key of the block is listed under
 ## Prerequisites
 
 - A clone of the repository, from the root of which every command runs.
-- Rust with the `wasm32-wasip2` target: `rustup target add wasm32-wasip2`.
+- Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`.
 - Docker for NATS and PostgreSQL.
 - NATS and PostgreSQL are both opt-in connectors: the commands below pass
   `--features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host`.
@@ -191,7 +191,7 @@ Every key of the block is listed under
 ## 1. Build the processor
 
 ```bash,name=Build the session processor
-cargo build --release -p windowing-session-wasm --target wasm32-wasip2
+cargo build --release -p windowing-session-wasm --target wasm32-wasip3
 ```
 
 Runs the same on Linux, macOS and Windows (PowerShell).

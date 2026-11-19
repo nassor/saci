@@ -83,23 +83,23 @@ no .NET.
 ## 1. Build the processor component
 
 ```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
-cargo build --release -p order-processing-wasm --target wasm32-wasip2
+cargo build --release -p order-processing-wasm --target wasm32-wasip3
 ```
 
-`rustc` links a `wasm32-wasip2` cdylib into a Component Model component
+`rustc` links a `wasm32-wasip3` cdylib into a Component Model component
 itself, so plain `cargo build` is the whole toolchain. Confirm the finished
 component landed:
 
 Linux/macOS:
 
 ```bash
-ls -l target/wasm32-wasip2/release/order_processing_wasm.wasm
+ls -l target/wasm32-wasip3/release/order_processing_wasm.wasm
 ```
 
 Windows (PowerShell):
 
 ```powershell
-Get-Item target\wasm32-wasip2\release\order_processing_wasm.wasm | Select-Object Length, Name
+Get-Item target\wasm32-wasip3\release\order_processing_wasm.wasm | Select-Object Length, Name
 ```
 
 The component exports two functions, `describe()` and `run-batch`, which is
@@ -137,7 +137,7 @@ workflow "orders" {
         }
     }
 
-    wasm "process_orders" module="target/wasm32-wasip2/release/order_processing_wasm.wasm" {
+    wasm "process_orders" module="target/wasm32-wasip3/release/order_processing_wasm.wasm" {
         config fx_eur="1.08" fx_gbp="1.27" fx_jpy="0.0067" fx_cad="0.74"
     }
 
@@ -311,9 +311,9 @@ interrupt never lands mid-batch.
 The route above moves a static file. The full Quick Start in
 [`examples/quickstart/`](https://github.com/nassor/saci/tree/main/examples/quickstart)
 moves live data. A publisher writes card authorisations to a NATS subject. One
-`saci-service` process runs two linked WebAssembly processors in two languages
-against the same in-memory dataset, upserts the result into PostgreSQL, and
-serves a live dashboard on port 8080.
+`saci-service` process runs two linked Rust WASI 0.3 processors against the same
+in-memory dataset, upserts the result into PostgreSQL, and serves a live
+dashboard on port 8080.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 212" role="img" aria-labelledby="qs-title qs-desc">
@@ -322,9 +322,9 @@ serves a live dashboard on port 8080.
             A publisher sends NDJSON authorisations to the NATS subject
             authorizations.raw. One saci-service process, configured by
             quickstart.kdl, reads that subject and runs two linked WebAssembly
-            processors against the same in-memory dataset. The Go processor
-            validate-go.wasm writes the valid column, then the C# processor
-            settle-cs.wasm writes the fee and review_tier columns. The service
+            processors against the same in-memory dataset. The validate stage
+            validate.wasm writes the valid column, then the settle stage
+            settle.wasm writes the fee and review_tier columns. The service
             upserts all twelve columns into the PostgreSQL table
             public.settlements and serves one dashboard on port 8080.
         </desc>
@@ -345,11 +345,11 @@ serves a live dashboard on port 8080.
         </g>
         <g class="anim anim-3">
             <rect class="blk blk-bnd" x="178" y="68" width="152" height="44" rx="6"/>
-            <text class="t-lbl" x="188" y="86">validate-go.wasm</text>
+            <text class="t-lbl" x="188" y="86">validate.wasm</text>
             <text class="t-sm" x="188" y="102">writes valid</text>
             <path class="arw arw-data" d="M330 90 H342" marker-end="url(#qs-d)"/>
             <rect class="blk blk-bnd" x="346" y="68" width="168" height="44" rx="6"/>
-            <text class="t-lbl" x="356" y="86">settle-cs.wasm</text>
+            <text class="t-lbl" x="356" y="86">settle.wasm</text>
             <text class="t-sm" x="356" y="102">writes fee, review_tier</text>
             <text class="t-sm t-ctl" x="178" y="134">/ui on :8080</text>
         </g>
@@ -382,9 +382,8 @@ serves a live dashboard on port 8080.
     </figcaption>
 </div>
 
-It needs Docker (NATS 2.11 and PostgreSQL 18), the Go and C# toolchains from
-[A Go processor](@/service/processors/build/go.md) and
-[A C# processor](@/service/processors/build/csharp.md), and about ten minutes.
+It needs Docker (NATS 2.11 and PostgreSQL 18), the Rust toolchain from
+[A Rust processor](@/service/processors/build/rust.md), and `wasm-tools`.
 The commands, the `quickstart.kdl` config, and the expected `review_tier`
 breakdown are all in
 [`examples/quickstart/README.md`](https://github.com/nassor/saci/blob/main/examples/quickstart/README.md).
@@ -393,5 +392,5 @@ Two pages carry on from here:
 
 - [The config file](@/service/config/_index.md) is every key you can put beside
   the ones you just wrote.
-- [Build your own processor](@/service/processors/build/_index.md) replaces the
-  Rust component with one in your own language.
+- [Build your own processor](@/service/processors/build/_index.md) covers the
+  Rust processor SDK and the `saci:pipeline@0.4.0` WIT contract.

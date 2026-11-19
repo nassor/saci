@@ -1,7 +1,8 @@
 # Arrow IPC conformance corpus
 
-Test vectors that all five `saci-sdk-*` codecs run, so they agree on which Arrow IPC streams are
-valid and which are refused. A sixth implementation has an acceptance suite the day it starts.
+Test vectors for standalone Arrow IPC codecs (such as
+`examples/plugins/settle-go/internal/arrowipc`), so implementations agree on
+which Arrow IPC streams are valid and which are refused.
 
 The format itself is specified in
 [the wire format reference](https://nassor.github.io/saci/library/reference/wire-format/).

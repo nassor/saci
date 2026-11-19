@@ -66,8 +66,8 @@ impl Component for Counter {
 
 /// Where the release build leaves the smoketest artifact.
 ///
-/// `rustc` links a `wasm32-wasip2` cdylib into a Component Model component
-/// itself, so `cargo build --target wasm32-wasip2` writes the finished component
+/// `rustc` links a `wasm32-wasip3` cdylib into a Component Model component
+/// itself, so `cargo build --target wasm32-wasip3` writes the finished component
 /// here with no intermediate core module and no preview1 adapter step.
 pub fn smoketest_wasm_path() -> PathBuf {
     // CARGO_MANIFEST_DIR points at crates/saci, so the workspace root is
@@ -79,7 +79,7 @@ pub fn smoketest_wasm_path() -> PathBuf {
         .expect("workspace root above crates/saci");
     workspace_root
         .join("target")
-        .join("wasm32-wasip2")
+        .join("wasm32-wasip3")
         .join("release")
         .join("saci_processor_smoketest.wasm")
 }
@@ -91,7 +91,7 @@ pub fn load_runtime(config: HashMap<String, String>) -> WasmPipelineRuntime {
     assert!(
         wasm_path.exists(),
         "smoketest .wasm not found at {}; \
-         run `cargo build --release -p saci-processor-smoketest --target wasm32-wasip2` first",
+         run `cargo build --release -p saci-processor-smoketest --target wasm32-wasip3` first",
         wasm_path.display()
     );
 

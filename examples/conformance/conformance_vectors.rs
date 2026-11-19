@@ -55,16 +55,15 @@ const HEADER_RECORD_BATCH: u8 = 3;
 // the Order component
 //
 // Every vector is a mutation of a real `Dataset::write_ipc` stream of this
-// component, so these twelve fields are the shape each codec under
-// `packages/arrow-ipc-*` decodes when it runs the corpus. Field order is
-// load-bearing twice over: it feeds the schema fingerprint recorded in the
-// manifest, and it fixes the node and buffer order the mutations below index
-// into.
+// component, so these twelve fields are the shape every compatible wire codec
+// (such as `examples/plugins/settle-go/internal/arrowipc`) decodes when it runs
+// the corpus. Field order is load-bearing twice over: it feeds the schema
+// fingerprint recorded in the manifest, and it fixes the node and buffer order
+// the mutations below index into.
 //
-// The definition is inlined rather than shared with the polyglot example. The
-// corpus is checked in, so the generator has to build on its own; a schema
-// crate it depended on would make regenerating the corpus contingent on that
-// crate existing.
+// The definition is inlined rather than imported from `examples/wasm/settle/`.
+// The corpus is checked in, so the generator builds on its own without pulling
+// example crates.
 // ---------------------------------------------------------------------------
 
 /// One order, in the shape the conformance corpus carries.
@@ -143,8 +142,8 @@ impl Order {
 
 /// The six rows the baseline vector carries.
 ///
-/// The same fixture the polyglot example seeds, so a codec's conformance suite
-/// and its polyglot stage read identical input columns.
+/// Matches the fixture emitted by `plugin_schema_emit` so wire codec suites
+/// and the Go native plugin test against identical input columns.
 fn fixture_rows() -> Vec<Order> {
     vec![
         Order::seed(1, "emea", "EUR", 100.0),

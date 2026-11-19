@@ -37,7 +37,7 @@ usage: cargo xtask demo <name>
             windowing_sliding  streaming: prints the run commands
             windowing_session  streaming: prints the run commands
             quickstart         streaming: prints the run commands
-            standalone_polyglot  one_shot: runs serve and exits
+            standalone_settle  one_shot: runs serve and exits
             integrity          streaming: prints the run commands
             integrity_audit    streaming: prints the run commands
 

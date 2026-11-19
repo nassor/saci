@@ -40,7 +40,7 @@ workflow "route" {
         }
     }
 
-    wasm "router" module="target/wasm32-wasip2/release/multi_workflow_router_wasm.wasm"
+    wasm "router" module="target/wasm32-wasip3/release/multi_workflow_router_wasm.wasm"
 
     // The rush branch: routed batches land in PostgreSQL untouched.
     sink "rush_sales" type="PostgresSink" component="Sale" {
@@ -107,7 +107,7 @@ workflow "settle" {
         }
     }
 
-    wasm "window_sales" module="target/wasm32-wasip2/release/windowing_tumbling_wasm.wasm" {
+    wasm "window_sales" module="target/wasm32-wasip3/release/windowing_tumbling_wasm.wasm" {
         window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
             key_field "symbol"
         }

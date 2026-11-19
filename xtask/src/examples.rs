@@ -70,10 +70,10 @@ fn plugin_lib(name: &str, release: bool) -> String {
     )
 }
 
-/// Build one processor component for `wasm32-wasip2`.
+/// Build one processor component for `wasm32-wasip3`.
 fn cargo_wasm(ctx: &Ctx, pkg: &str) -> Result<()> {
     ctx.cargo()?
-        .args(["build", "--release", "-p", pkg, "--target", "wasm32-wasip2"])
+        .args(["build", "--release", "-p", pkg, "--target", "wasm32-wasip3"])
         .run()
 }
 
@@ -138,8 +138,8 @@ fn build_quickstart(_ctx: &Ctx) -> Result<()> {
     crate::quickstart::run(&[])
 }
 
-fn build_polyglot(_ctx: &Ctx) -> Result<()> {
-    crate::polyglot::run(&[])
+fn build_settle_wasm(ctx: &Ctx) -> Result<()> {
+    cargo_wasm(ctx, "settle-wasm")
 }
 
 /// Every runnable example config, in the order `cargo xtask validate` checks
@@ -221,11 +221,11 @@ pub const EXAMPLES: &[Example] = &[
         one_shot: false,
     },
     Example {
-        name: "standalone_polyglot",
-        config: "examples/configs/standalone_polyglot.kdl",
+        name: "standalone_settle",
+        config: "examples/configs/standalone_settle.kdl",
         features: &[],
-        build: build_polyglot,
-        variables: &[("SACI_DATA_DIR", |_| data_dir("standalone_polyglot"))],
+        build: build_settle_wasm,
+        variables: &[("SACI_DATA_DIR", |_| data_dir("standalone_settle"))],
         one_shot: true,
     },
     // Two entries, one example: `Example` carries one config, and this demo

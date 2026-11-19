@@ -2,8 +2,7 @@
 
 One plugin, one language, no WebAssembly. `settle-go` is a C shared library the
 host loads with dlopen, built from Go with cgo, exporting the ABI in
-`crates/saci/include/saci_plugin.h`. `examples/polyglot/PINS.md` covers
-the six WASM processors; this file covers what the native path needs.
+`crates/saci/include/saci_plugin.h`.
 
 ## Required tools
 
@@ -19,8 +18,7 @@ alone with `--only=go`, which still needs cargo because it regenerates the
 schema constants.
 
 cargo is on that list because the plugin compiles in the `Order` schema as
-generated constants, and the same emit that feeds the WASM stages produces
-them.
+generated constants produced by `examples/plugins/schema_emit.rs`.
 
 ## The C compiler is not optional
 
@@ -37,24 +35,9 @@ and the build fails with `function main is undeclared in the main package`.
 
 ## The codec
 
-The plugin depends on `packages/saci-sdk-go`, the Go SDK whose `arrowipc`
-subpackage reads and mutates the SACI wire format with nothing but the Go
-standard library. It resolves through a `require` plus a filesystem `replace`
-in `go.mod`:
-
-```
-require github.com/nassor/saci/packages/saci-sdk-go v0.0.0
-replace github.com/nassor/saci/packages/saci-sdk-go => ../../../packages/saci-sdk-go
-```
-
-That is the same pattern `examples/polyglot/stages/go-validate/go.mod` uses. The
-difference is that nothing rewrites this file: `componentize-go bindings` owns
-the WASM stage's `go.mod` and drops its dependencies on every run, which is why
-that stage's build re-applies them with `go mod edit`. A cgo build never touches
-`go.mod`, so the line above stays put.
-
-The SDK has no dependencies of its own, and a filesystem replacement needs no
-checksum, so there is no `go.sum`.
+The plugin owns `internal/arrowipc`, a pure Go standard-library package that
+reads and mutates the SACI wire format with no external dependencies. There is
+no `go.sum`.
 
 ## Load-bearing crate pin
 
@@ -154,36 +137,10 @@ it. The host vtable therefore hangs off the cookie the host holds as
 library do not share one host. That runtime also installs its own signal
 handlers, and its `GOMAXPROCS` competes with the host's tokio and rayon pools.
 
-### The generated constants arrive under the wrong package name
-
-`examples/polyglot/generated/schema_gen.go` is emitted as
-`package export_saci_pipeline_pipeline`, the name the WASM stage's binding
-directory needs. A `c-shared` plugin is `package main`, so `cargo xtask plugins`
-rewrites the clause on the way in and changes nothing else.
-
-## Smoke check
-
-```
-cargo xtask plugins --only=go
-```
-
-Produces `libsettle_go.so`, `libsettle_go.dylib` or `settle_go.dll` in this
-directory, named so a Rust test builds the path from
-`std::env::consts::DLL_PREFIX` and `DLL_SUFFIX` the same way it builds the
-smoketest fixture's.
-
-The manifest `describe` writes over the current generated constants is:
-
-```json
-{"name":"settle-go","version":"0.1.0","stateful":false,
- "schema_fingerprint":"8c0a76ff","components":[{"name":"Order",
- "arrow_schema_ipc_base64":"/////3gCAAAQ..."}]}
-```
-
-The fingerprint must equal `examples/polyglot/generated/order_fingerprint.txt`,
+The fingerprint must equal `examples/plugins/generated/order_fingerprint.txt`,
 and the host recomputes it from the decoded schema and refuses a mismatch.
 
-Over the six row `examples/polyglot/generated/fixture_input.saci`, whose amounts
+Over the six row `examples/plugins/generated/fixture_input.saci`, whose amounts
 are 100 EUR, -5 GBP, 1000000 JPY, 60000 USD, 0 EUR and 20000 USD, one batch with
 no config yields `review_tier` of `[0, 2, 1, 1, 2, 1]` and reports 5 blocked
 rows. Adding `settle.rate_JPY=0.0068` yields `[0, 2, 0, 1, 2, 1]`: the JPY row

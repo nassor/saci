@@ -13,6 +13,10 @@ readme = "README.md"
 keywords = ["arrow", "etl", "dataflow", "wasm", "batch"]
 categories = ["database", "wasm", "asynchronous", "concurrency"]
 
+# No lints of its own. The empty table tells cargo this is intentional: a workspace that depends on saci by path and
+# defines `[workspace.lints]` otherwise gets a `missing_lints_inheritance` warning on every build.
+[lints]
+
 [features]
 default = ["engine"]
 
@@ -59,7 +63,7 @@ all = [
 
 # Engine
 
-# tokio and rayon stage parallelism. Cannot target wasm32-wasip2.
+# tokio and rayon stage parallelism. Cannot target wasm32-wasip3.
 runtime = ["dep:tokio", "dep:rayon", "dep:num_cpus"]
 # The Source/Sink traits and the schema cast helpers.
 io = ["runtime"]
@@ -76,10 +80,9 @@ trace-context = ["tracing", "dep:opentelemetry", "dep:tracing-opentelemetry"]
 
 # Authoring SDKs
 
-# A WebAssembly Component Model processor: sequential execution driven by the
-# pollster executor, so build with `--no-default-features --features processor`
-# for wasm32-wasip2.
-processor = ["dep:pollster", "dep:saci-macros"]
+# A WebAssembly Component Model processor: Component Model Async execution on
+# wasm32-wasip3, built with `--no-default-features --features processor`.
+processor = ["dep:saci-macros"]
 # A native plugin: a cdylib the host `dlopen`s.
 plugin = ["runtime", "dep:pollster", "dep:serde_json", "dep:base64"]
 
@@ -156,7 +159,7 @@ distributed-raft = ["distributed", "dep:openraft", "dep:futures-util", "dep:post
 # Archival Parquet checkpoint store.
 parquet-checkpoint = ["distributed", "dep:parquet"]
 # The WebAssembly processor host.
-wasm-host = ["runtime", "dep:wasmtime", "dep:wasmtime-wasi", "dep:sha3"]
+wasm-host = ["runtime", "dep:wasmtime", "dep:wasmtime-wasi", "dep:sha3", "dep:pollster"]
 # The native plugin host: dlopen a shared library exporting the plugin C ABI.
 # `sha3` is the optional content digest for the library file.
 plugin-host = ["runtime", "dep:libloading", "dep:base64", "dep:serde_json", "dep:sha3"]
@@ -424,14 +427,9 @@ path = "../../examples/distributed_fulfillment/main.rs"
 required-features = ["service-cluster"]
 
 [[example]]
-name = "polyglot_orders"
-path = "../../examples/polyglot/polyglot_orders.rs"
-required-features = ["wasm-host"]
-
-[[example]]
-name = "polyglot_schema_emit"
-path = "../../examples/polyglot/schema_emit.rs"
-required-features = ["wasm-host"]
+name = "plugin_schema_emit"
+path = "../../examples/plugins/schema_emit.rs"
+required-features = ["plugin-host"]
 
 [[example]]
 name = "native_plugin"

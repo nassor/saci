@@ -29,7 +29,7 @@ run_mode kind="one_shot"
 //
 // The processor's `describe()` response supplies the component list, so the
 // `component` properties below must name components it declares. Build the
-// module with `cargo build --release --target wasm32-wasip2`.
+// module with `cargo build --release --target wasm32-wasip3`.
 workflow "orders" {
     // Both FileSource and FileSink move CSV bytes, so one declared transformer
     // serves them both. csv requires schema_fields and reads has_headers off

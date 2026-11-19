@@ -15,7 +15,7 @@
 // at-most-once and runs until Ctrl-C.
 //
 // Build the two processors first, from the repository root:
-//   cargo build --release -p branching-wasm --target wasm32-wasip2
+//   cargo build --release -p branching-wasm --target wasm32-wasip3
 //   cargo build --release -p branching-plugin
 //
 // Start NATS, then run the service and the publisher:
@@ -90,9 +90,9 @@ workflow "branching" {
         }
     }
 
-    // `cargo build --release --target wasm32-wasip2` writes the finished
+    // `cargo build --release --target wasm32-wasip3` writes the finished
     // component here: rustc links the cdylib into a component itself.
-    wasm "router_wasm" module="target/wasm32-wasip2/release/branching_wasm.wasm"
+    wasm "router_wasm" module="target/wasm32-wasip3/release/branching_wasm.wasm"
 
     // A cdylib's file name is platform specific: libbranching_plugin.so on
     // Linux, libbranching_plugin.dylib on macOS, branching_plugin.dll on

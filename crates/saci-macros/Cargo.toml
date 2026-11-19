@@ -12,7 +12,7 @@ description = "Derive and attribute macros for the SACI processor SDK: #[derive(
 keywords = ["saci", "arrow", "wasm", "proc-macro", "derive"]
 categories = ["wasm", "development-tools::procedural-macro-helpers"]
 
-# A host proc-macro crate. It never compiles for wasm32-wasip2: cargo builds it
+# A host proc-macro crate. It never compiles for wasm32-wasip3: cargo builds it
 # for the host even when the crate that invokes the macros is a wasm target, so
 # the wasm-side pins (arrow-ipc, wit-bindgen) are irrelevant here.
 [lib]
