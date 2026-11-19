@@ -40,11 +40,17 @@ impl StatsCell {
     }
 
     fn get(&self) -> RunStats {
-        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn set(&self, stats: RunStats) {
-        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = stats;
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stats;
     }
 }
 

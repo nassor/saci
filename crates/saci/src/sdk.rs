@@ -347,7 +347,10 @@ mod tests {
         assert_eq!(second.name(), "first");
         assert!(std::ptr::eq(first, second));
         // Both shared borrows are live at once: nothing is locked while a run is in flight.
-        assert_eq!(first.last_stats().systems_run, second.last_stats().systems_run);
+        assert_eq!(
+            first.last_stats().systems_run,
+            second.last_stats().systems_run
+        );
     }
 
     /// A single-row state component, as `#[fold]` expects.
