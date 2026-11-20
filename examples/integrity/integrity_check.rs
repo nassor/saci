@@ -10,13 +10,13 @@
 //!
 //! ```text
 //! docker compose -f examples/integrity/docker-compose.yml up -d
-//! cargo run -p saci --example integrity_check --features service,transformer-arrow-ipc,transformer-csv,transformer-ndjson,transformer-parquet
+//! cargo run -p saci --example integrity_check --features service,codec-arrow-ipc,codec-csv,codec-ndjson,codec-parquet
 //! # then, in two more terminals, the two services the example drives:
 //! cargo run -p saci \
-//!     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm-host,windows \
+//!     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,codec-ndjson,codec-csv,codec-arrow-ipc,wasm-host,windows \
 //!     -- serve --config examples/integrity/integrity.kdl
 //! cargo run -p saci \
-//!     --features server,connector-postgresql,connector-http,transformer-parquet,wasm-host \
+//!     --features server,connector-postgresql,connector-http,codec-parquet,wasm-host \
 //!     -- serve --config examples/integrity/integrity_audit.kdl
 //! ```
 //!
@@ -113,12 +113,12 @@ use axum::http::StatusCode;
 use axum::routing::post;
 // `random_range` lives on `RngExt` in rand 0.10, not on `Rng`.
 use rand::{RngExt as _, SeedableRng as _};
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
+use saci::codec::csv::CsvCodec;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::codec::parquet::ParquetCodec;
 use saci::inspector_wire::{ServiceLifecycleReport, WorkflowStatus};
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
-use saci::transformer::csv::CsvTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
-use saci::transformer::parquet::ParquetTransformer;
 use tokio_util::sync::CancellationToken;
 
 /// Simulated epoch the example's clock starts at, milliseconds.
@@ -608,7 +608,7 @@ impl Verifier {
     }
 }
 
-// ── decoding a sink body through the real transformers ──────────────────────
+// ── decoding a sink body through the real codecs ────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SinkKind {
@@ -636,23 +636,17 @@ impl SinkKind {
         }
     }
 
-    /// The transformer, and the schema to declare. `arrow-ipc` and `parquet`
+    /// The codec, and the schema to declare. `arrow-ipc` and `parquet`
     /// are given none, so each body's own schema governs the read.
-    fn reader_setup(self) -> (Box<dyn Transformer>, Option<Arc<Schema>>) {
+    fn reader_setup(self) -> (Box<dyn Codec>, Option<Arc<Schema>>) {
         match self {
-            Self::Express => (
-                Box::new(NdjsonTransformer::default()),
-                Some(classified_schema()),
-            ),
+            Self::Express => (Box::new(NdjsonCodec::default()), Some(classified_schema())),
             // `HttpSink` writes through the stream surface, which emits the
             // header row `has_headers` asks for; the message surface would
             // not.
-            Self::Standard => (
-                Box::new(CsvTransformer::new(true)),
-                Some(classified_schema()),
-            ),
-            Self::Window => (Box::new(ArrowIpcTransformer::new()), None),
-            Self::Audit => (Box::new(ParquetTransformer::new()), None),
+            Self::Standard => (Box::new(CsvCodec::new(true)), Some(classified_schema())),
+            Self::Window => (Box::new(ArrowIpcCodec::new()), None),
+            Self::Audit => (Box::new(ParquetCodec::new()), None),
         }
     }
 }
@@ -663,7 +657,7 @@ impl SinkKind {
 /// before any row group, so an in-memory body has to land on disk first. This
 /// is what `HttpSource` does with a response body.
 fn decode(sink: SinkKind, body: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
-    let (transformer, declared) = sink.reader_setup();
+    let (codec, declared) = sink.reader_setup();
     let mut tmp =
         tempfile::NamedTempFile::new().map_err(|e| format!("temp file for the body: {e}"))?;
     tmp.write_all(body)
@@ -673,7 +667,7 @@ fn decode(sink: SinkKind, body: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>)
         .reopen()
         .map_err(|e| format!("reopening the spooled body: {e}"))?;
 
-    let mut reader = transformer
+    let mut reader = codec
         .open_reader(file, declared)
         .map_err(|e| format!("{}: open_reader: {e}", sink.label()))?;
     let schema = reader.schema();
@@ -852,7 +846,7 @@ fn decode_inferred_ndjson(body: &[u8]) -> Result<Arc<Schema>, String> {
         .and_then(|()| tmp.flush())
         .map_err(|e| e.to_string())?;
     let file = tmp.reopen().map_err(|e| e.to_string())?;
-    let reader = NdjsonTransformer::default()
+    let reader = NdjsonCodec::default()
         .open_reader(file, None)
         .map_err(|e| e.to_string())?;
     Ok(reader.schema())

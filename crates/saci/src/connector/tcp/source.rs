@@ -12,7 +12,7 @@
 //! same convention the Raft transport uses
 //! (`distributed::consensus::transport::wire`). Framing is transport, so this
 //! crate owns it; what the payload bytes mean is the
-//! [`Transformer`] the host resolved from the
+//! [`Codec`] the host resolved from the
 //! source's `transformer` key.
 //!
 //! A frame carrying several batches yields their concatenation, because the
@@ -26,9 +26,9 @@
 //!
 //! Whether the format can decode a message at all is not a protocol violation
 //! but a property of the config, and the answer is the same for every
-//! connection. [`new`](TcpIngestSource::new) therefore asks the transformer
+//! connection. [`new`](TcpIngestSource::new) therefore asks the codec
 //! for a decoder while building and hands the refusal back, the way
-//! `FileSource::open` asks its transformer for a reader. A source that
+//! `FileSource::open` asks its codec for a reader. A source that
 //! deferred that answer would accept every connection, close it, and deliver
 //! nothing.
 
@@ -45,7 +45,6 @@ use tokio::task::JoinHandle;
 
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
 
 /// Live TCP ingestion source: one frame in, one `RecordBatch` out.
 ///
@@ -61,7 +60,7 @@ pub struct TcpIngestSource {
     listener: Option<std::net::TcpListener>,
     local_addr: SocketAddr,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     tx: mpsc::Sender<RecordBatch>,
     rx: mpsc::Receiver<RecordBatch>,
     max_frame_bytes: usize,
@@ -74,27 +73,27 @@ impl TcpIngestSource {
     /// `buffer` is the number of decoded batches that may queue before
     /// backpressure reaches the producers. `max_frame_bytes` caps a single
     /// frame; a producer that announces more has its connection closed.
-    /// `transformer` decodes each frame's payload; every accepted connection
+    /// `codec` decodes each frame's payload; every accepted connection
     /// opens its own decoder from it, and one is opened here to settle whether
     /// this format can decode a message against `schema` at all.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `transformer` cannot open a
+    /// Returns [`SaciError::Configuration`] if `codec` cannot open a
     /// message decoder for `schema`, or if `bind` cannot be bound.
     pub fn new(
         bind: &str,
         schema: Arc<Schema>,
         buffer: usize,
         max_frame_bytes: usize,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         // Opening a decoder reads `schema` and nothing else, so every
         // connection would get this same answer. Asking here is what makes a
         // format with no message decoder a config error the caller is told
         // about, rather than a listener that accepts, closes, and delivers
         // nothing at all.
-        transformer.open_message_decoder(Arc::clone(&schema))?;
+        codec.open_message_decoder(Arc::clone(&schema))?;
 
         let listener = std::net::TcpListener::bind(bind).map_err(|e| {
             SaciError::configuration(format!("TcpIngestSource: cannot bind '{bind}': {e}"))
@@ -112,7 +111,7 @@ impl TcpIngestSource {
             listener: Some(listener),
             local_addr,
             schema,
-            transformer,
+            codec,
             tx,
             rx,
             max_frame_bytes,
@@ -141,7 +140,7 @@ impl TcpIngestSource {
 
         let tx = self.tx.clone();
         let schema = Arc::clone(&self.schema);
-        let transformer = Arc::clone(&self.transformer);
+        let codec = Arc::clone(&self.codec);
         let max_frame_bytes = self.max_frame_bytes;
 
         self.listener_task = Some(tokio::spawn(async move {
@@ -157,9 +156,9 @@ impl TcpIngestSource {
 
                 let tx = tx.clone();
                 let schema = Arc::clone(&schema);
-                let transformer = Arc::clone(&transformer);
+                let codec = Arc::clone(&codec);
                 tokio::spawn(async move {
-                    read_connection(stream, tx, schema, transformer, max_frame_bytes).await;
+                    read_connection(stream, tx, schema, codec, max_frame_bytes).await;
                 });
             }
         }));
@@ -172,15 +171,15 @@ impl TcpIngestSource {
 /// One decoder serves the whole connection: `flush` resets it, so a frame's
 /// batch never leaks into the next frame's. [`TcpIngestSource::new`] already
 /// opened one off the same schema, so the open below fails only for a
-/// transformer that answers differently twice.
+/// codec that answers differently twice.
 async fn read_connection(
     mut stream: TcpStream,
     tx: mpsc::Sender<RecordBatch>,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     max_frame_bytes: usize,
 ) {
-    let mut decoder = match transformer.open_message_decoder(schema) {
+    let mut decoder = match codec.open_message_decoder(schema) {
         Ok(decoder) => decoder,
         Err(_e) => {
             #[cfg(feature = "tracing")]
@@ -275,17 +274,17 @@ impl Drop for TcpIngestSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transformer::arrow_ipc::ArrowIpcTransformer;
+    use crate::codec::arrow_ipc::ArrowIpcCodec;
     use arrow_schema::{DataType, Field};
 
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]))
     }
 
-    /// Framing is what this crate owns; the payload codec is the transformer's,
+    /// Framing is what this crate owns; the payload encoding is the codec's,
     /// and its own tests cover the decode paths.
-    fn arrow_ipc() -> Arc<dyn Transformer> {
-        Arc::new(ArrowIpcTransformer::new())
+    fn arrow_ipc() -> Arc<dyn Codec> {
+        Arc::new(ArrowIpcCodec::new())
     }
 
     #[test]
@@ -307,7 +306,7 @@ mod tests {
     /// surface, so the gate is exercised against a stand-in.
     struct StreamOnly;
 
-    impl Transformer for StreamOnly {
+    impl Codec for StreamOnly {
         fn format(&self) -> &'static str {
             "stream-only"
         }

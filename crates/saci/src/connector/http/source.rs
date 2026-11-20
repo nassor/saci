@@ -1,10 +1,10 @@
 //! [`HttpSource`]: one HTTP read, in one of three shapes.
 //!
 //! [`ReadMode::Document`] is one GET of a finite resource. The body is spooled
-//! to an unnamed temp file as it arrives and handed to the transformer's stream
-//! read surface: [`Transformer::open_reader`] takes a `std::fs::File` because
+//! to an unnamed temp file as it arrives and handed to the codec's stream
+//! read surface: [`Codec::open_reader`] takes a `std::fs::File` because
 //! parquet reads its footer before any row group. One dedicated OS thread then
-//! drives the [`BatchReader`](crate::transformer::BatchReader) and pushes batches
+//! drives the [`BatchReader`](crate::codec::BatchReader) and pushes batches
 //! down a bounded channel, so the executor never blocks on the decode. The
 //! source reports EOF when that stream ends and re-arms, so the next call
 //! issues a fresh GET: that is what makes `interval` re-read the resource on
@@ -14,7 +14,7 @@
 //!
 //! [`ReadMode::Lines`] and [`ReadMode::Events`] read a body that never ends:
 //! newline-delimited records, and `text/event-stream`. Each frame goes through
-//! the transformer's *message* surface rather than its stream surface, a window
+//! the codec's *message* surface rather than its stream surface, a window
 //! closes on `batch_size` frames or `poll_timeout`, and a body that does end is
 //! reconnected to after `reconnect`. Both are live sources: only the stream
 //! runner can drive them, and the service's config validator refuses any
@@ -44,7 +44,6 @@ use tokio::task::JoinHandle;
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
 
 use crate::connector::http::client::{self, Exchange, HttpClient, HttpVersion};
 use crate::connector::http::document::{self, CHANNEL_CAPACITY};
@@ -169,7 +168,7 @@ impl Default for HttpClientOptions {
     }
 }
 
-/// Everything [`HttpSource::new`] takes past the url and the transformer.
+/// Everything [`HttpSource::new`] takes past the url and the codec.
 #[derive(Debug, Clone, Default)]
 pub struct HttpSourceOptions {
     /// Transport, TLS, headers and the budget.
@@ -271,13 +270,13 @@ enum Engine {
 ///
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::http::{HttpSource, HttpSourceOptions, SchemaFrom};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 /// // csv carries no schema of its own, so the declared one is required.
 /// let src = HttpSource::new(
 ///     "https://example.invalid/orders.csv",
-///     Arc::new(CsvTransformer::new(true)),
+///     Arc::new(CsvCodec::new(true)),
 ///     HttpSourceOptions {
 ///         declared: Some(schema),
 ///         schema_from: SchemaFrom::Config,
@@ -288,7 +287,7 @@ enum Engine {
 /// ```
 pub struct HttpSource {
     request: Arc<Request>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// The schema the config declared, `None` when it declared none. What the
     /// format is handed depends on [`SchemaFrom`]: `Config` hands it over
     /// verbatim, `Body` withholds it so the body's own schema governs.
@@ -305,7 +304,7 @@ pub struct HttpSource {
 impl HttpSource {
     /// Prepare the source without making a request.
     ///
-    /// `url` is read on the first batch. In a streaming mode the transformer's
+    /// `url` is read on the first batch. In a streaming mode the codec's
     /// message decoder is opened here, against the declared schema, so a
     /// format that cannot decode discrete messages is a configuration error
     /// before a connection is opened rather than a reader that connects,
@@ -322,7 +321,7 @@ impl HttpSource {
     /// cannot be built. No request is made.
     pub fn new(
         url: &str,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
         options: HttpSourceOptions,
     ) -> Result<Self, SaciError> {
         let HttpSourceOptions {
@@ -368,7 +367,7 @@ impl HttpSource {
         // connection would get the same one. Asking here is what makes a
         // format with no message decoder a configuration error.
         if let Some(schema) = declared_for_stream {
-            transformer.open_message_decoder(schema)?;
+            codec.open_message_decoder(schema)?;
         }
 
         let mut headers = client_options.headers.clone();
@@ -427,7 +426,7 @@ impl HttpSource {
                 headers: client::header_map(WHAT, headers)?,
                 metrics: Instruments::new("source", client_options.identity.as_ref()),
             }),
-            transformer,
+            codec,
             schema: match &declared {
                 Some(schema) => Arc::clone(schema),
                 None => Arc::new(Schema::empty()),
@@ -451,7 +450,7 @@ struct Page {
 
 /// What decoding one page needs, the same for every page of one read.
 struct Decode {
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// What the format is handed, already resolved from the `schema_from`
     /// rule: the declaration verbatim, or nothing so a self-describing format
     /// reads its own.
@@ -483,7 +482,7 @@ async fn fetch_page(
     validators: &HeaderMap,
 ) -> Result<Option<Page>, SaciError> {
     let Decode {
-        transformer,
+        codec,
         declared,
         check,
         expected,
@@ -539,15 +538,7 @@ async fn fetch_page(
     // Opening the reader is blocking: a parquet footer read is a seek.
     let source = url.to_string();
     let reader = tokio::task::spawn_blocking(move || {
-        document::open(
-            WHAT,
-            &source,
-            &transformer,
-            spool,
-            declared,
-            check,
-            &expected,
-        )
+        document::open(WHAT, &source, &codec, spool, declared, check, &expected)
     })
     .await
     .map_err(|e| SaciError::generic(format!("{WHAT}: spawn_blocking panic: {e}")))?
@@ -648,7 +639,7 @@ fn validators(state: &DocumentState) -> HeaderMap {
 /// reader then waits `reconnect` and asks again.
 async fn read_stream(
     request: Arc<Request>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
     window: Window,
     events: Option<Option<String>>,
@@ -692,7 +683,7 @@ async fn read_stream(
 
         let outcome = read_body(
             &request,
-            &transformer,
+            &codec,
             &schema,
             window,
             events.as_ref(),
@@ -725,7 +716,7 @@ enum BodyEnd {
 #[allow(clippy::too_many_arguments)]
 async fn read_body(
     request: &Arc<Request>,
-    transformer: &Arc<dyn Transformer>,
+    codec: &Arc<dyn Codec>,
     schema: &Arc<Schema>,
     window: Window,
     events: Option<&Option<String>>,
@@ -735,7 +726,7 @@ async fn read_body(
     reconnect: &mut Duration,
     last_event_id: &mut Option<HeaderValue>,
 ) -> BodyEnd {
-    let mut frames = match Frames::open(&request.metrics, transformer, schema, tx, window) {
+    let mut frames = match Frames::open(&request.metrics, codec, schema, tx, window) {
         Ok(frames) => frames,
         Err(e) => {
             request.metrics.error("decode");
@@ -889,11 +880,11 @@ async fn read_body(
 /// the transport's own flow control stalls the server.
 struct Frames<'a> {
     metrics: &'a Instruments,
-    transformer: &'a Arc<dyn Transformer>,
+    codec: &'a Arc<dyn Codec>,
     schema: &'a Arc<Schema>,
     tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
     window: Window,
-    decoder: Box<dyn crate::transformer::MessageDecoder>,
+    decoder: Box<dyn crate::codec::MessageDecoder>,
     /// Frames pushed since the last close.
     pushed: usize,
     /// When the open window's `poll_timeout` runs out, `None` while the
@@ -909,18 +900,18 @@ impl<'a> Frames<'a> {
     /// Returns the format's own error when the decoder cannot be built.
     fn open(
         metrics: &'a Instruments,
-        transformer: &'a Arc<dyn Transformer>,
+        codec: &'a Arc<dyn Codec>,
         schema: &'a Arc<Schema>,
         tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
         window: Window,
     ) -> Result<Self, SaciError> {
         Ok(Self {
             metrics,
-            transformer,
+            codec,
             schema,
             tx,
             window,
-            decoder: transformer.open_message_decoder(Arc::clone(schema))?,
+            decoder: codec.open_message_decoder(Arc::clone(schema))?,
             pushed: 0,
             deadline: None,
         })
@@ -996,10 +987,7 @@ impl<'a> Frames<'a> {
 
     /// Replace the decoder, which a refused frame leaves holding part of one.
     async fn reopen(&mut self) -> Result<(), BodyEnd> {
-        match self
-            .transformer
-            .open_message_decoder(Arc::clone(self.schema))
-        {
+        match self.codec.open_message_decoder(Arc::clone(self.schema)) {
             Ok(decoder) => {
                 self.decoder = decoder;
                 Ok(())
@@ -1052,7 +1040,7 @@ impl Source for HttpSource {
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
         let Self {
             request,
-            transformer,
+            codec,
             declared,
             schema_from,
             schema,
@@ -1067,7 +1055,7 @@ impl Source for HttpSource {
                     state.batches = Some(rx);
                     state.task = Some(tokio::spawn(read_stream(
                         Arc::clone(request),
-                        Arc::clone(transformer),
+                        Arc::clone(codec),
                         Arc::clone(schema),
                         state.window,
                         state.events.clone(),
@@ -1097,7 +1085,7 @@ impl Source for HttpSource {
                     let page = fetch_page(
                         request,
                         Decode {
-                            transformer: Arc::clone(transformer),
+                            codec: Arc::clone(codec),
                             declared: match schema_from {
                                 SchemaFrom::Config => declared.clone(),
                                 SchemaFrom::Body => None,
@@ -1177,7 +1165,7 @@ mod tests {
         rows: Vec<i64>,
     }
 
-    impl crate::transformer::MessageDecoder for CleanDecoder {
+    impl crate::codec::MessageDecoder for CleanDecoder {
         fn push(&mut self, payload: &[u8]) -> Result<(), SaciError> {
             let text = String::from_utf8_lossy(payload);
             let row: i64 = text
@@ -1204,7 +1192,7 @@ mod tests {
 
     struct CleanFormat;
 
-    impl Transformer for CleanFormat {
+    impl Codec for CleanFormat {
         fn format(&self) -> &'static str {
             "stub"
         }
@@ -1212,7 +1200,7 @@ mod tests {
         fn open_message_decoder(
             &self,
             _schema: Arc<Schema>,
-        ) -> Result<Box<dyn crate::transformer::MessageDecoder>, SaciError> {
+        ) -> Result<Box<dyn crate::codec::MessageDecoder>, SaciError> {
             Ok(Box::new(CleanDecoder::default()))
         }
     }
@@ -1235,7 +1223,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_frame_hands_over_the_rows_before_it() {
         let metrics = Instruments::new("source", None);
-        let transformer: Arc<dyn Transformer> = Arc::new(CleanFormat);
+        let codec: Arc<dyn Codec> = Arc::new(CleanFormat);
         let schema = stub_schema();
         let (tx, mut rx) = mpsc::channel(8);
         let window = Window {
@@ -1243,7 +1231,7 @@ mod tests {
             ..Window::default()
         };
 
-        let mut decode = Frames::open(&metrics, &transformer, &schema, &tx, window).expect("open");
+        let mut decode = Frames::open(&metrics, &codec, &schema, &tx, window).expect("open");
         decode
             .push(frames(&["1", "2", "3", "oops", "5", "6"]))
             .await
@@ -1261,17 +1249,16 @@ mod tests {
     /// `arrow-json`'s tape keeps the partial record a failed decode left, so
     /// the decoder is replaced: one bad line costs its own window, not every
     /// frame of a body that never ends.
-    #[cfg(feature = "transformer-ndjson")]
+    #[cfg(feature = "codec-ndjson")]
     #[tokio::test]
     async fn a_refused_frame_does_not_end_the_decode() {
         let metrics = Instruments::new("source", None);
-        let transformer: Arc<dyn Transformer> =
-            Arc::new(crate::transformer::ndjson::NdjsonTransformer::default());
+        let codec: Arc<dyn Codec> = Arc::new(crate::codec::ndjson::NdjsonCodec::default());
         let schema = stub_schema();
         let (tx, mut rx) = mpsc::channel(8);
 
         let mut decode =
-            Frames::open(&metrics, &transformer, &schema, &tx, Window::default()).expect("open");
+            Frames::open(&metrics, &codec, &schema, &tx, Window::default()).expect("open");
         decode
             .push(frames(&[r#"{"id":1}"#, "not json", r#"{"id":2}"#]))
             .await

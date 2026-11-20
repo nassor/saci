@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use crate::connector::{NodeIdentity, from_kdl_str};
 
-    /// A context the way the host hands one to a factory: no transformer, an
+    /// A context the way the host hands one to a factory: no codec, an
     /// identity bound.
     fn ctx() -> ConnectorContext {
         ConnectorContext::new(None).with_identity(NodeIdentity {

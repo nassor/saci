@@ -1,9 +1,9 @@
-//! [`RedbSource`]: the entries of one redb table, read through a transformer.
+//! [`RedbSource`]: the entries of one redb table, read through a codec.
 //!
 //! The source lists the table's matching keys once, then walks that list one
 //! entry at a time. Each value is spooled into an unnamed tempfile, one
-//! dedicated OS thread drives the transformer's
-//! [`BatchReader`](crate::transformer::BatchReader) over that file, and
+//! dedicated OS thread drives the codec's
+//! [`BatchReader`](crate::codec::BatchReader) over that file, and
 //! [`Source::next_batch`] awaits the bounded channel the thread feeds. EOF is
 //! the key list exhausted; there is no re-scan or tail mode, so this is a
 //! finite source every run mode can drive.
@@ -21,7 +21,6 @@ use tokio::sync::mpsc;
 
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
 
 use crate::connector::redb::config::RedbSourceConfig;
 
@@ -29,7 +28,7 @@ use crate::connector::redb::config::RedbSourceConfig;
 /// the `file` connector's.
 const CHANNEL_CAPACITY: usize = 4;
 
-/// redb [`Source`]. The transformer decodes; this type owns the database
+/// redb [`Source`]. The codec decodes; this type owns the database
 /// handle, the key list, the spool file, the reader thread and the channel.
 ///
 /// # Example
@@ -40,7 +39,7 @@ const CHANNEL_CAPACITY: usize = 4;
 ///
 /// use arrow_schema::Schema;
 /// use saci::connector::redb::{RedbSource, RedbSourceConfig};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let config = RedbSourceConfig {
 ///     directory: PathBuf::from("/data/orders"),
@@ -56,7 +55,7 @@ const CHANNEL_CAPACITY: usize = 4;
 /// let src = RedbSource::new(
 ///     config,
 ///     Arc::new(Schema::empty()),
-///     Arc::new(CsvTransformer::new(true)),
+///     Arc::new(CsvCodec::new(true)),
 /// )
 /// .unwrap();
 /// ```
@@ -67,7 +66,7 @@ pub struct RedbSource {
     key_suffix: String,
     check_integrity: bool,
     cache_size_bytes: Option<usize>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     declared: Arc<Schema>,
     /// `None` before the first batch opens the file and again at EOF.
     ///
@@ -104,7 +103,7 @@ impl RedbSource {
     pub fn new(
         config: RedbSourceConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         config.validate("RedbSource")?;
         Ok(Self {
@@ -114,7 +113,7 @@ impl RedbSource {
             key_suffix: config.key_suffix,
             check_integrity: config.check_integrity,
             cache_size_bytes: config.cache_size_bytes,
-            transformer,
+            codec,
             declared: schema,
             db: None,
             pending: None,
@@ -169,15 +168,15 @@ impl RedbSource {
         Ok(())
     }
 
-    /// Read one entry's bytes and hand the transformer a spool file over them.
+    /// Read one entry's bytes and hand the codec a spool file over them.
     async fn open_entry(
         &self,
         key: String,
-    ) -> Result<Box<dyn crate::transformer::BatchReader>, SaciError> {
+    ) -> Result<Box<dyn crate::codec::BatchReader>, SaciError> {
         let db = Arc::clone(self.db.as_ref().expect("the file was just opened"));
         let path = self.path.clone();
         let table = self.table.clone();
-        let transformer = Arc::clone(&self.transformer);
+        let codec = Arc::clone(&self.codec);
         let declared = Arc::clone(&self.declared);
         tokio::task::spawn_blocking(move || {
             let definition: TableDefinition<&str, &[u8]> = TableDefinition::new(&table);
@@ -206,7 +205,7 @@ impl RedbSource {
                 })?;
             let bytes = value.value();
             let size = bytes.len();
-            // A spool file rather than a `Vec`: `Transformer::open_reader`
+            // A spool file rather than a `Vec`: `Codec::open_reader`
             // takes a concrete `std::fs::File`, and the OS reclaims an unnamed
             // tempfile on close.
             let mut spool = tempfile::tempfile()
@@ -223,7 +222,7 @@ impl RedbSource {
             #[cfg(not(feature = "tracing"))]
             let _ = size;
 
-            transformer.open_reader(spool, Some(declared))
+            codec.open_reader(spool, Some(declared))
         })
         .await
         .map_err(|e| SaciError::generic(format!("RedbSource: spawn_blocking panic: {e}")))?
@@ -270,7 +269,7 @@ fn check_integrity(path: &std::path::Path, cache: Option<usize>) -> Result<(), S
 /// The keys of `table` that carry both `prefix` and `suffix`, in key order.
 ///
 /// The segment between the two is never parsed, so an entry another writer put
-/// in the same table under a matching name reaches the transformer and fails
+/// in the same table under a matching name reaches the codec and fails
 /// there by name rather than being skipped in silence.
 fn collect_keys(
     db: &ReadOnlyDatabase,

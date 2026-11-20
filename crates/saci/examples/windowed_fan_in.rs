@@ -248,7 +248,7 @@ async fn main() -> Result<(), SaciError> {
         workflows: vec![WorkflowSpec {
             id: "windowed-fan-in".to_string(),
             name: Some("Two streams, one windowed processor".to_string()),
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources: Vec::new(),
             plugin: Vec::new(),
             wasm: Vec::new(),

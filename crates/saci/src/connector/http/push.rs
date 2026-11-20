@@ -59,7 +59,6 @@ use tokio::task::JoinHandle;
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
 
 use crate::connector::http::client;
 use crate::connector::http::document;
@@ -82,7 +81,7 @@ pub struct ServerTls {
 }
 
 /// Everything [`HttpPushSource::new`] takes past the bind address and the
-/// transformer.
+/// codec.
 #[derive(Debug, Clone)]
 pub struct HttpPushOptions {
     /// The schema every document is read against. Required: the graph is
@@ -137,7 +136,7 @@ struct Handler {
     bearer: Option<Vec<u8>>,
     declared: Arc<Schema>,
     schema_from: SchemaFrom,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// Every batch of one document, so a document is queued in one send.
     tx: mpsc::Sender<Result<Vec<RecordBatch>, SaciError>>,
     /// `alt-svc` for the QUIC port, when one is served.
@@ -166,12 +165,12 @@ struct Handler {
 ///
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::http::{HttpPushOptions, HttpPushSource};
-/// use saci::transformer::ndjson::NdjsonTransformer;
+/// use saci::codec::ndjson::NdjsonCodec;
 ///
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 /// let source = HttpPushSource::new(
 ///     "127.0.0.1:0",
-///     Arc::new(NdjsonTransformer::default()),
+///     Arc::new(NdjsonCodec::default()),
 ///     HttpPushOptions {
 ///         declared: schema,
 ///         path: "/orders".to_string(),
@@ -205,7 +204,7 @@ impl HttpPushSource {
     /// Bind the listener (and the QUIC socket, when one is asked for) and
     /// prepare the ingest channel.
     ///
-    /// The transformer's read surface is not probed here: a stream surface is
+    /// The codec's read surface is not probed here: a stream surface is
     /// probed on the first document, the way [`HttpSink`](crate::connector::http::HttpSink)
     /// probes its writer.
     ///
@@ -217,7 +216,7 @@ impl HttpPushSource {
     /// malformed, or when `methods` is empty.
     pub fn new(
         bind: &str,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
         options: HttpPushOptions,
     ) -> Result<Self, SaciError> {
         let HttpPushOptions {
@@ -318,7 +317,7 @@ impl HttpPushSource {
                 bearer: bearer.map(String::into_bytes),
                 declared: Arc::clone(&declared),
                 schema_from,
-                transformer,
+                codec,
                 tx,
                 alt_svc,
                 metrics: Instruments::new("push", identity.as_ref()),
@@ -827,22 +826,15 @@ impl Handler {
         };
         let check = self.schema_from == SchemaFrom::Body;
         let expected = Arc::clone(&self.declared);
-        let transformer = Arc::clone(&self.transformer);
+        let codec = Arc::clone(&self.codec);
 
         // Spooling and decoding are blocking: the read surface needs a
         // seekable file, and a parquet footer read is a seek.
         let decoded = tokio::task::spawn_blocking(move || {
             let spool = document::spool_bytes(WHAT, &body).map_err(ReadFailure::Spool)?;
-            let mut reader = document::open(
-                WHAT,
-                "body",
-                &transformer,
-                spool,
-                declared,
-                check,
-                &expected,
-            )
-            .map_err(ReadFailure::Document)?;
+            let mut reader =
+                document::open(WHAT, "body", &codec, spool, declared, check, &expected)
+                    .map_err(ReadFailure::Document)?;
             let mut batches = Vec::new();
             while let Some(batch) = reader.next_batch().map_err(ReadFailure::Document)? {
                 batches.push(batch);
@@ -958,9 +950,9 @@ impl Drop for HttpPushSource {
     }
 }
 
-#[cfg(all(test, feature = "transformer-ndjson"))]
+#[cfg(all(test, feature = "codec-ndjson"))]
 mod tests {
-    use crate::transformer::ndjson::NdjsonTransformer;
+    use crate::codec::ndjson::NdjsonCodec;
     use arrow_schema::{DataType, Field};
 
     use super::*;
@@ -969,8 +961,8 @@ mod tests {
         Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
     }
 
-    fn ndjson() -> Arc<dyn Transformer> {
-        Arc::new(NdjsonTransformer::default())
+    fn ndjson() -> Arc<dyn Codec> {
+        Arc::new(NdjsonCodec::default())
     }
 
     fn options() -> HttpPushOptions {

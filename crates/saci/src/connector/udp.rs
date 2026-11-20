@@ -16,7 +16,7 @@
 //! address in `connect`. One datagram carries exactly one payload and no
 //! length prefix, because the datagram boundary is the frame, so the two
 //! halves are wire compatible: the
-//! [`Transformer`](crate::transformer::Transformer) the host resolved from the
+//! [`Codec`](crate::codec::Codec) the host resolved from the
 //! node's `transformer` key decodes or encodes the bytes.
 //!
 //! A zero-length datagram is the liveness probe. The source answers one with a

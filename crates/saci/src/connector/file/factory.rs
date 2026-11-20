@@ -1,6 +1,6 @@
 //! The file source and sink factories.
 //!
-//! Both resolve their byte format through the transformer the host bound to
+//! Both resolve their byte format through the codec the host bound to
 //! this connector instance via a declared `transformer` key. The schema is
 //! where they differ: a source hands the format whatever `schema_fields`
 //! says, including nothing, and lets the format decide, while a sink always
@@ -25,8 +25,8 @@ use crate::connector::file::{FileSink, FileSource};
 ///   `csv`, a projection target for `parquet`, `avro` and `arrow-ipc`, and
 ///   inferred by `ndjson` when absent.
 ///
-/// The byte format is whatever transformer the `source` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
+/// The byte format is whatever codec the `source` node's `transformer`
+/// key names; see [`ConnectorContext::codec`].
 pub struct FileSourceFactory;
 
 impl SourceFactory for FileSourceFactory {
@@ -42,11 +42,11 @@ impl SourceFactory for FileSourceFactory {
         let path = config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
             SaciError::configuration("FileSource config requires a 'path' string field")
         })?;
-        let transformer = ctx.transformer("FileSource")?;
+        let codec = ctx.codec("FileSource")?;
         let declared = parse_optional_schema_fields(config, "FileSource")?;
         Ok(Box::new(FileSource::open(
             Path::new(path),
-            transformer,
+            codec,
             declared,
         )?))
     }
@@ -66,8 +66,8 @@ impl SourceFactory for FileSourceFactory {
 /// - `truncate` (bool, optional, default `false`): replace the file rather
 ///   than append to it.
 ///
-/// The byte format is whatever transformer the `sink` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
+/// The byte format is whatever codec the `sink` node's `transformer`
+/// key names; see [`ConnectorContext::codec`].
 pub struct FileSinkFactory;
 
 impl SinkFactory for FileSinkFactory {
@@ -83,7 +83,7 @@ impl SinkFactory for FileSinkFactory {
         let path = config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
             SaciError::configuration("FileSink config requires a 'path' string field")
         })?;
-        let transformer = ctx.transformer("FileSink")?;
+        let codec = ctx.codec("FileSink")?;
         let schema = parse_schema_fields(config, "FileSink")?;
         let truncate = config
             .get("truncate")
@@ -91,9 +91,9 @@ impl SinkFactory for FileSinkFactory {
             .unwrap_or(false);
         let path = Path::new(path);
         let sink = if truncate {
-            FileSink::create_truncating(path, transformer, schema)?
+            FileSink::create_truncating(path, codec, schema)?
         } else {
-            FileSink::create(path, transformer, schema)?
+            FileSink::create(path, codec, schema)?
         };
         Ok(Box::new(sink))
     }
@@ -117,40 +117,38 @@ impl SinkFactory for FileSinkFactory {
 
 #[cfg(all(
     test,
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-ndjson",
+    feature = "codec-parquet"
 ))]
 mod tests {
     use std::sync::Arc;
 
+    use crate::codec::csv::CsvCodecFactory;
+    use crate::codec::ndjson::NdjsonCodecFactory;
+    use crate::codec::parquet::ParquetCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::csv::CsvTransformerFactory;
-    use crate::transformer::ndjson::NdjsonTransformerFactory;
-    use crate::transformer::parquet::ParquetTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use tempfile::TempDir;
 
     use super::*;
 
-    fn csv_transformer(options: &ConfigValue) -> Arc<dyn Transformer> {
-        CsvTransformerFactory
-            .build(options)
-            .expect("csv transformer builds")
+    fn csv_codec(options: &ConfigValue) -> Arc<dyn Codec> {
+        CsvCodecFactory.build(options).expect("csv codec builds")
     }
 
-    fn parquet_transformer() -> Arc<dyn Transformer> {
-        ParquetTransformerFactory
+    fn parquet_codec() -> Arc<dyn Codec> {
+        ParquetCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("parquet transformer builds")
+            .expect("parquet codec builds")
     }
 
-    fn ndjson_transformer() -> Arc<dyn Transformer> {
-        NdjsonTransformerFactory
+    fn ndjson_codec() -> Arc<dyn Codec> {
+        NdjsonCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("ndjson transformer builds")
+            .expect("ndjson codec builds")
     }
 
     fn empty_config() -> ConfigValue {
@@ -200,13 +198,13 @@ schema_fields "id" type="Int64" nullable=#false
     }
 
     #[test]
-    fn a_source_with_no_bound_transformer_is_a_configuration_error() {
+    fn a_source_with_no_bound_codec_is_a_configuration_error() {
         let ctx = ConnectorContext::new(None);
         let dir = TempDir::new().expect("temp dir");
         let raw = format!("path \"{}\"\n{CSV_SCHEMA}", config_path(&dir, "in.csv"));
 
         let Err(err) = FileSourceFactory.build(&config(&raw), &ctx) else {
-            panic!("a source that moves bytes needs a bound transformer");
+            panic!("a source that moves bytes needs a bound codec");
         };
         assert_eq!(
             err.message(),
@@ -216,7 +214,7 @@ schema_fields "id" type="Int64" nullable=#false
 
     #[test]
     fn parquet_with_declared_schema_fields_projects_onto_them() {
-        let ctx = ConnectorContext::new(Some(parquet_transformer()));
+        let ctx = ConnectorContext::new(Some(parquet_codec()));
         let dir = TempDir::new().expect("temp dir");
 
         // A two-column file, so the declaration has a column to drop. Parquet's
@@ -234,7 +232,7 @@ schema_fields "id" type="Int64" nullable=#false
             ],
         )
         .expect("batch");
-        let payloads = parquet_transformer()
+        let payloads = parquet_codec()
             .encode_messages(&file_batch)
             .expect("encode");
         std::fs::write(dir.path().join("in.parquet"), &payloads[0]).expect("fixture");
@@ -249,7 +247,7 @@ schema_fields "id" type="Int64" nullable=#false
 
     #[test]
     fn a_sink_without_schema_fields_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(csv_transformer(&empty_config())));
+        let ctx = ConnectorContext::new(Some(csv_codec(&empty_config())));
         let dir = TempDir::new().expect("temp dir");
         let raw = format!("path \"{}\"\n", config_path(&dir, "out.csv"));
 
@@ -263,7 +261,7 @@ schema_fields "id" type="Int64" nullable=#false
     fn a_csv_source_builds_and_reports_the_declared_schema() {
         let mut options = ConfigMap::new();
         options.insert("has_headers".to_string(), ConfigValue::Bool(true));
-        let ctx = ConnectorContext::new(Some(csv_transformer(&ConfigValue::Object(options))));
+        let ctx = ConnectorContext::new(Some(csv_codec(&ConfigValue::Object(options))));
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("in.csv");
         std::fs::write(&path, "id\n1\n2\n").expect("fixture");
@@ -279,7 +277,7 @@ schema_fields "id" type="Int64" nullable=#false
     /// Build a sink through the factory and write one row holding `id`.
     /// `extra` carries the config lines under test.
     async fn write_one_row(dir: &TempDir, name: &str, extra: &str, id: i64) {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let raw = format!("path \"{}\"\n{CSV_SCHEMA}{extra}", config_path(dir, name));
         let mut sink = FileSinkFactory
             .build(&config(&raw), &ctx)

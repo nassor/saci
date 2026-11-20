@@ -1,8 +1,8 @@
 //! [`ConnectorContext`]: what a factory can reach while it builds.
 //!
-//! The context carries the transformer, if any, the host bound to this
+//! The context carries the codec, if any, the host bound to this
 //! connector instance through a declared `transformer` id. Resolution against
-//! the `TransformerRegistry` happens in the host, once per workflow build, so
+//! the `CodecRegistry` happens in the host, once per workflow build, so
 //! every byte-carrying connector uses what it is handed instead of resolving a
 //! `format` key itself.
 //!
@@ -13,8 +13,8 @@
 
 use std::sync::Arc;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::transformer::Transformer;
 
 use crate::connector::ChannelBridge;
 
@@ -34,24 +34,24 @@ pub struct NodeIdentity {
     pub node: String,
 }
 
-/// What a factory can reach while it builds: the transformer the config
+/// What a factory can reach while it builds: the codec the config
 /// bound to this connector instance, if any, the channel bridge, if one
 /// was registered, and where this node sits.
 pub struct ConnectorContext {
-    transformer: Option<Arc<dyn Transformer>>,
+    codec: Option<Arc<dyn Codec>>,
     channels: Option<Arc<dyn ChannelBridge>>,
     identity: Option<NodeIdentity>,
 }
 
 impl ConnectorContext {
-    /// Wrap the transformer the host resolved for this connector instance.
+    /// Wrap the codec the host resolved for this connector instance.
     ///
     /// `None` for a connector declared with no `transformer` key, which is
     /// valid for a connector that produces `RecordBatch`es directly (for
     /// example `PostgresSource`) and an error for one that moves bytes.
-    pub fn new(transformer: Option<Arc<dyn Transformer>>) -> Self {
+    pub fn new(codec: Option<Arc<dyn Codec>>) -> Self {
         Self {
-            transformer,
+            codec,
             channels: None,
             identity: None,
         }
@@ -88,11 +88,11 @@ impl ConnectorContext {
     }
 
     /// The channel bridge, if one was registered; `None` otherwise.
-    pub fn channel_bridge(&self) -> Option<&Arc<dyn ChannelBridge>> {
+    pub fn channels(&self) -> Option<&Arc<dyn ChannelBridge>> {
         self.channels.as_ref()
     }
 
-    /// The bound transformer, or a configuration error naming `what`.
+    /// The bound codec, or a configuration error naming `what`.
     ///
     /// `what` prefixes the error, so a bad key names the connector that
     /// rejected it.
@@ -101,8 +101,8 @@ impl ConnectorContext {
     ///
     /// Returns [`SaciError::Configuration`] when the source or sink declared no
     /// `transformer` key.
-    pub fn transformer(&self, what: &str) -> Result<Arc<dyn Transformer>, SaciError> {
-        self.transformer.clone().ok_or_else(|| {
+    pub fn codec(&self, what: &str) -> Result<Arc<dyn Codec>, SaciError> {
+        self.codec.clone().ok_or_else(|| {
             SaciError::configuration(format!(
                 "{what} moves bytes and needs a 'transformer' key naming a declared transformer"
             ))
@@ -114,25 +114,25 @@ impl ConnectorContext {
 mod tests {
     use super::*;
 
-    struct EchoTransformer(&'static str);
+    struct EchoCodec(&'static str);
 
-    impl Transformer for EchoTransformer {
+    impl Codec for EchoCodec {
         fn format(&self) -> &'static str {
             self.0
         }
     }
 
     #[test]
-    fn a_bound_transformer_resolves() {
-        let ctx = ConnectorContext::new(Some(Arc::new(EchoTransformer("csv"))));
-        assert_eq!(ctx.transformer("FileSource").unwrap().format(), "csv");
+    fn a_bound_codec_resolves() {
+        let ctx = ConnectorContext::new(Some(Arc::new(EchoCodec("csv"))));
+        assert_eq!(ctx.codec("FileSource").unwrap().format(), "csv");
     }
 
     #[test]
-    fn an_unbound_transformer_is_a_configuration_error_naming_the_connector() {
+    fn an_unbound_codec_is_a_configuration_error_naming_the_connector() {
         let ctx = ConnectorContext::new(None);
-        let err = match ctx.transformer("FileSource") {
-            Ok(_) => panic!("no transformer was bound"),
+        let err = match ctx.codec("FileSource") {
+            Ok(_) => panic!("no codec was bound"),
             Err(e) => e,
         };
         assert_eq!(err.category(), "configuration");

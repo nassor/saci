@@ -99,7 +99,7 @@ jobs:
     # `test_cluster_mode_without_the_raft_stack_names_the_feature`, are not
     # exclusive to it: neither `plugin-host` nor `service-cluster` is in the
     # `server` bundle, so the server-bundle step below runs both too. This
-    # build is also the only one carrying no transformer and one connector,
+    # build is also the only one carrying no codec and one connector,
     # so it is where a missing-format or missing-factory message is produced
     # by the real call path instead of by a direct call.
     # `--lib` on purpose: the integration tests under `tests/` need

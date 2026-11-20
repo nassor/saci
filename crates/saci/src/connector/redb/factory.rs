@@ -1,6 +1,6 @@
 //! The redb source and sink factories.
 //!
-//! Both resolve their byte format through the transformer the host bound to
+//! Both resolve their byte format through the codec the host bound to
 //! this connector instance via a declared `transformer` key. Both need the
 //! declared `schema_fields`: a source's schema is read at load time by
 //! `validate_workflow_graph`, before the file is opened, so it cannot be
@@ -43,8 +43,8 @@ use crate::connector::redb::{RedbSink, RedbSource};
 /// `quick_repair`/`two_phase_commit` defaults keep every file it writes out
 /// of that state.
 ///
-/// The byte format is whatever transformer the `source` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
+/// The byte format is whatever codec the `source` node's `transformer`
+/// key names; see [`ConnectorContext::codec`].
 pub struct RedbSourceFactory;
 
 impl SourceFactory for RedbSourceFactory {
@@ -59,9 +59,9 @@ impl SourceFactory for RedbSourceFactory {
     ) -> Result<Box<dyn Source>, SaciError> {
         let cfg = RedbSourceConfig::deserialize(config.clone())
             .map_err(|e| SaciError::configuration(format!("RedbSource config: {e}")))?;
-        let transformer = ctx.transformer("RedbSource")?;
+        let codec = ctx.codec("RedbSource")?;
         let schema = parse_schema_fields(config, "RedbSource")?;
-        Ok(Box::new(RedbSource::new(cfg, schema, transformer)?))
+        Ok(Box::new(RedbSource::new(cfg, schema, codec)?))
     }
 
     /// The table is scanned once per instance, so a fresh one re-delivers
@@ -100,8 +100,8 @@ impl SourceFactory for RedbSourceFactory {
 /// redb locks the file exclusively from the build until `finish`, so no other
 /// handle, `RedbSource` included, can open the same path at the same time.
 ///
-/// The byte format is whatever transformer the `sink` node's `transformer` key
-/// names; see [`ConnectorContext::transformer`].
+/// The byte format is whatever codec the `sink` node's `transformer` key
+/// names; see [`ConnectorContext::codec`].
 pub struct RedbSinkFactory;
 
 impl SinkFactory for RedbSinkFactory {
@@ -116,9 +116,9 @@ impl SinkFactory for RedbSinkFactory {
     ) -> Result<Box<dyn Sink>, SaciError> {
         let cfg = RedbSinkConfig::deserialize(config.clone())
             .map_err(|e| SaciError::configuration(format!("RedbSink config: {e}")))?;
-        let transformer = ctx.transformer("RedbSink")?;
+        let codec = ctx.codec("RedbSink")?;
         let schema = parse_schema_fields(config, "RedbSink")?;
-        Ok(Box::new(RedbSink::open(cfg, schema, transformer)?))
+        Ok(Box::new(RedbSink::open(cfg, schema, codec)?))
     }
 
     /// Every accepted batch is its own committed transaction, so nothing is
@@ -130,13 +130,13 @@ impl SinkFactory for RedbSinkFactory {
     }
 }
 
-#[cfg(all(test, feature = "transformer-csv"))]
+#[cfg(all(test, feature = "codec-csv"))]
 mod tests {
     use std::sync::Arc;
 
+    use crate::codec::csv::CsvCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::csv::CsvTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
 
     use super::*;
 
@@ -148,10 +148,10 @@ mod tests {
         from_kdl_str(raw).expect("parse test config")
     }
 
-    fn csv_transformer() -> Arc<dyn Transformer> {
-        CsvTransformerFactory
+    fn csv_codec() -> Arc<dyn Codec> {
+        CsvCodecFactory
             .build(&empty_config())
-            .expect("csv transformer builds")
+            .expect("csv codec builds")
     }
 
     const SCHEMA: &str = r#"
@@ -167,8 +167,7 @@ schema_fields "id" type="Int64" nullable=#false
     #[test]
     fn a_missing_directory_is_a_configuration_error() {
         let config = config(SCHEMA);
-        let Err(err) =
-            RedbSourceFactory.build(&config, &ConnectorContext::new(Some(csv_transformer())))
+        let Err(err) = RedbSourceFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("missing directory must fail");
         };
@@ -186,8 +185,7 @@ schema_fields "id" type="Int64" nullable=#false
 bogus_key "x"
 {SCHEMA}"#
         ));
-        let Err(err) =
-            RedbSinkFactory.build(&config, &ConnectorContext::new(Some(csv_transformer())))
+        let Err(err) = RedbSinkFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("an unknown key must fail");
         };
@@ -206,8 +204,7 @@ bogus_key "x"
 durability "bogus"
 {SCHEMA}"#
         ));
-        let Err(err) =
-            RedbSinkFactory.build(&config, &ConnectorContext::new(Some(csv_transformer())))
+        let Err(err) = RedbSinkFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("an unknown durability level must fail");
         };
@@ -220,13 +217,13 @@ durability "bogus"
     }
 
     #[test]
-    fn a_missing_transformer_names_the_connector() {
+    fn a_missing_codec_names_the_connector() {
         let config = config(&format!(
             r#"directory "/tmp/saci-redb-factory-test"
 {SCHEMA}"#
         ));
         let Err(err) = RedbSourceFactory.build(&config, &ConnectorContext::new(None)) else {
-            panic!("no transformer bound must fail");
+            panic!("no codec bound must fail");
         };
         assert_eq!(err.category(), "configuration");
         assert_eq!(
@@ -238,8 +235,7 @@ durability "bogus"
     #[test]
     fn a_missing_schema_fields_is_a_configuration_error() {
         let config = config(r#"directory "/tmp/saci-redb-factory-test""#);
-        let Err(err) =
-            RedbSourceFactory.build(&config, &ConnectorContext::new(Some(csv_transformer())))
+        let Err(err) = RedbSourceFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("missing schema must fail");
         };
@@ -254,7 +250,7 @@ durability "bogus"
 {SCHEMA}"#
         ));
         RedbSourceFactory
-            .build(&config, &ConnectorContext::new(Some(csv_transformer())))
+            .build(&config, &ConnectorContext::new(Some(csv_codec())))
             .expect("source builds without opening the file");
     }
 

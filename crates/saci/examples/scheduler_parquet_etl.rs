@@ -1,7 +1,7 @@
 //! End-to-end Parquet ETL through the Source/Sink layer.
 //!
 //! Generates a synthetic 10 000-row `input.parquet` in a temp directory, reads
-//! it with a [`FileSource`] carrying a [`ParquetTransformer`] through
+//! it with a [`FileSource`] carrying a [`ParquetCodec`] through
 //! [`Pipeline::run`], scales `price` by 1.1 and derives a `rounded`
 //! column with two [`ParallelSystem`]s, writes the result with a [`FileSink`],
 //! then reads it back and prints five rows.
@@ -13,7 +13,6 @@ use arrow_schema::{DataType, Field, Schema};
 
 use saci::connector::file::{FileSink, FileSource};
 use saci::prelude::*;
-use saci::transformer::parquet::ParquetTransformer;
 
 /// Schema with `id` (Int64), `price` (Float64), `rounded` (Int64).
 fn trade_schema() -> Arc<Schema> {
@@ -95,7 +94,7 @@ async fn generate_input(path: &std::path::Path, n: usize) -> Result<(), SaciErro
     let batch = RecordBatch::try_new(schema.clone(), vec![ids, prices])
         .map_err(|e| SaciError::generic(format!("generate_input: {e}")))?;
 
-    let mut sink = FileSink::create(path, Arc::new(ParquetTransformer::new()), schema)?;
+    let mut sink = FileSink::create(path, Arc::new(ParquetCodec::new()), schema)?;
     sink.write_batch(&batch).await?;
     sink.finish().await
 }
@@ -149,14 +148,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let inner_src =
-        FileSource::open_async(&input_path, Arc::new(ParquetTransformer::new()), None).await?;
+        FileSource::open_async(&input_path, Arc::new(ParquetCodec::new()), None).await?;
     let src = PaddedParquetSource {
         inner: inner_src,
         full_schema: full_schema.clone(),
     };
     let sink = FileSink::create(
         &output_path,
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
         full_schema.clone(),
     )?;
 
@@ -179,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "-".repeat(34));
 
     let mut out_src =
-        FileSource::open_async(&output_path, Arc::new(ParquetTransformer::new()), None).await?;
+        FileSource::open_async(&output_path, Arc::new(ParquetCodec::new()), None).await?;
     let mut printed = 0usize;
     'outer: while let Some(batch) = out_src.next_batch().await? {
         let ids = batch

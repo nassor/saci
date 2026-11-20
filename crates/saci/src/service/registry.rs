@@ -3,7 +3,7 @@
 //! The registry maps string type names (from the config file) to factory
 //! objects that construct concrete [`Source`](crate::io::source::Source)
 //! and [`Sink`](crate::io::sink::Sink) instances, and format names to the
-//! [`TransformerFactory`] that decodes the bytes those connectors move.
+//! [`CodecFactory`] that decodes the bytes those connectors move.
 //!
 //! The runtime itself is supplied directly as a `Box<dyn PipelineRuntime>` or
 //! loaded from a WASM module via
@@ -17,16 +17,16 @@
 //! use saci::service::registry::Registry;
 //!
 //! let mut registry = Registry::new();
-//! // register_source / register_sink / register_transformer go here
+//! // register_source / register_sink / register_codec go here
 //! assert_eq!(registry.source_count(), 0);
-//! assert_eq!(registry.transformer_count(), 0);
+//! assert_eq!(registry.codec_count(), 0);
 //! # }
 //! ```
 
 use std::collections::HashMap;
 
+pub use crate::codec::{Codec, CodecFactory, CodecRegistry};
 pub use crate::connector::{SinkFactory, SourceFactory};
-pub use crate::transformer::{Transformer, TransformerFactory, TransformerRegistry};
 
 /// Central registry mapping type names to their IO factories.
 ///
@@ -45,14 +45,14 @@ pub use crate::transformer::{Transformer, TransformerFactory, TransformerRegistr
 /// let registry = Registry::new();
 /// assert_eq!(registry.source_count(), 0);
 /// assert_eq!(registry.sink_count(), 0);
-/// assert_eq!(registry.transformer_count(), 0);
+/// assert_eq!(registry.codec_count(), 0);
 /// # }
 /// ```
 #[derive(Default)]
 pub struct Registry {
     sources: HashMap<String, Box<dyn SourceFactory>>,
     sinks: HashMap<String, Box<dyn SinkFactory>>,
-    transformers: TransformerRegistry,
+    codecs: CodecRegistry,
 }
 
 impl Registry {
@@ -81,12 +81,12 @@ impl Registry {
         self
     }
 
-    /// Register a transformer factory.
+    /// Register a codec factory.
     ///
     /// If a factory with the same `format_name` is already registered, it is
     /// silently replaced.
-    pub fn register_transformer<F: TransformerFactory>(&mut self, factory: F) -> &mut Self {
-        self.transformers.register(factory);
+    pub fn register_codec<F: CodecFactory>(&mut self, factory: F) -> &mut Self {
+        self.codecs.register(factory);
         self
     }
 
@@ -102,7 +102,7 @@ impl Registry {
 
     /// Registered source type names, sorted.
     ///
-    /// The counterpart of [`TransformerRegistry::formats`], and what lets a
+    /// The counterpart of [`CodecRegistry::names`], and what lets a
     /// test compare the built-in table against what actually registered.
     pub fn source_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.sources.keys().map(String::as_str).collect();
@@ -117,11 +117,11 @@ impl Registry {
         names
     }
 
-    /// The transformer registry a [`ConnectorContext`] is built from.
+    /// The codec registry a [`ConnectorContext`] is built from.
     ///
     /// [`ConnectorContext`]: crate::connector::ConnectorContext
-    pub fn transformers(&self) -> &TransformerRegistry {
-        &self.transformers
+    pub fn codecs(&self) -> &CodecRegistry {
+        &self.codecs
     }
 
     /// Returns the number of registered source factories.
@@ -134,9 +134,9 @@ impl Registry {
         self.sinks.len()
     }
 
-    /// Returns the number of registered transformer factories.
-    pub fn transformer_count(&self) -> usize {
-        self.transformers.count()
+    /// Returns the number of registered codec factories.
+    pub fn codec_count(&self) -> usize {
+        self.codecs.len()
     }
 }
 
@@ -172,20 +172,20 @@ mod tests {
         }
     }
 
-    struct TestTransformer;
-    impl Transformer for TestTransformer {
+    struct TestCodec;
+    impl Codec for TestCodec {
         fn format(&self) -> &'static str {
             "test-format"
         }
     }
 
-    struct TestTransformerFactory;
-    impl TransformerFactory for TestTransformerFactory {
+    struct TestCodecFactory;
+    impl CodecFactory for TestCodecFactory {
         fn format_name(&self) -> &'static str {
             "test-format"
         }
-        fn build(&self, _options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError> {
-            Ok(Arc::new(TestTransformer))
+        fn build(&self, _options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
+            Ok(Arc::new(TestCodec))
         }
     }
 
@@ -227,11 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn test_register_and_lookup_transformer_factory() {
+    fn test_register_and_lookup_codec_factory() {
         let mut reg = Registry::new();
-        reg.register_transformer(TestTransformerFactory);
-        assert!(reg.transformers().get("test-format").is_some());
-        assert!(reg.transformers().get("missing").is_none());
+        reg.register_codec(TestCodecFactory);
+        assert!(reg.codecs().get("test-format").is_some());
+        assert!(reg.codecs().get("missing").is_none());
     }
 
     #[cfg(feature = "connector-channel")]
@@ -240,13 +240,13 @@ mod tests {
         let mut reg = Registry::new();
         assert_eq!(reg.source_count(), 0);
         assert_eq!(reg.sink_count(), 0);
-        assert_eq!(reg.transformer_count(), 0);
+        assert_eq!(reg.codec_count(), 0);
         reg.register_source(TestSourceFactory);
         assert_eq!(reg.source_count(), 1);
         reg.register_sink(TestSinkFactory);
         assert_eq!(reg.sink_count(), 1);
-        reg.register_transformer(TestTransformerFactory);
-        assert_eq!(reg.transformer_count(), 1);
+        reg.register_codec(TestCodecFactory);
+        assert_eq!(reg.codec_count(), 1);
     }
 
     #[cfg(feature = "connector-channel")]
@@ -287,6 +287,6 @@ mod tests {
         let reg = Registry::default();
         assert_eq!(reg.source_count(), 0);
         assert_eq!(reg.sink_count(), 0);
-        assert_eq!(reg.transformer_count(), 0);
+        assert_eq!(reg.codec_count(), 0);
     }
 }

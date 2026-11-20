@@ -25,7 +25,7 @@ use crate::connector::kafka::{KafkaSink, KafkaSinkConfig, KafkaSource, KafkaSour
 /// The `config` table is [`KafkaSourceConfig`]: `brokers`, `topic`, and the
 /// `schema_fields` entries declaring the Arrow schema, plus the consumer and
 /// provisioning knobs documented on the config type. The payload codec is the
-/// transformer the node's `transformer` key names.
+/// codec the node's `transformer` key names.
 pub struct KafkaSourceFactory;
 
 impl SourceFactory for KafkaSourceFactory {
@@ -41,8 +41,8 @@ impl SourceFactory for KafkaSourceFactory {
         let cfg = KafkaSourceConfig::deserialize(config.clone())
             .map_err(|e| SaciError::configuration(format!("KafkaSource config: {e}")))?;
         let schema = parse_schema_fields(config, "KafkaSource")?;
-        let transformer = ctx.transformer("KafkaSource")?;
-        Ok(Box::new(KafkaSource::new(cfg, schema, transformer)?))
+        let codec = ctx.codec("KafkaSource")?;
+        Ok(Box::new(KafkaSource::new(cfg, schema, codec)?))
     }
 
     /// A fresh consumer resumes from the committed group offset; the
@@ -58,7 +58,7 @@ impl SourceFactory for KafkaSourceFactory {
 /// The `config` table is [`KafkaSinkConfig`]: `brokers`, `topic`, and the
 /// `schema_fields` entries declaring the Arrow schema, plus the producer and
 /// provisioning knobs documented on the config type. The payload codec is the
-/// transformer the node's `transformer` key names.
+/// codec the node's `transformer` key names.
 pub struct KafkaSinkFactory;
 
 impl SinkFactory for KafkaSinkFactory {
@@ -74,8 +74,8 @@ impl SinkFactory for KafkaSinkFactory {
         let cfg = KafkaSinkConfig::deserialize(config.clone())
             .map_err(|e| SaciError::configuration(format!("KafkaSink config: {e}")))?;
         let schema = parse_schema_fields(config, "KafkaSink")?;
-        let transformer = ctx.transformer("KafkaSink")?;
-        Ok(Box::new(KafkaSink::new(cfg, schema, transformer)?))
+        let codec = ctx.codec("KafkaSink")?;
+        Ok(Box::new(KafkaSink::new(cfg, schema, codec)?))
     }
 
     /// `write_batch` awaits every delivery and then flushes, so a failed
@@ -91,9 +91,9 @@ mod tests {
 
     use std::sync::Arc;
 
+    use crate::codec::ndjson::NdjsonCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::ndjson::NdjsonTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
 
     const SOURCE: &str = r#"
 brokers "localhost:9092"
@@ -111,11 +111,11 @@ schema_fields "id" type="int64" nullable=#false
 
     /// The host resolves a declared `transformer` node once per workflow
     /// build, so a test builds the instance itself and hands it over.
-    fn context(factory: impl TransformerFactory) -> ConnectorContext {
-        let transformer: Arc<dyn Transformer> = factory
+    fn context(factory: impl CodecFactory) -> ConnectorContext {
+        let codec: Arc<dyn Codec> = factory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("a transformer factory must build from empty options");
-        ConnectorContext::new(Some(transformer))
+            .expect("a codec factory must build from empty options");
+        ConnectorContext::new(Some(codec))
     }
 
     #[test]
@@ -132,7 +132,7 @@ topic "orders"
 schema_fields "id" type="int64"
 "#;
         let value = from_kdl_str(raw).expect("parse kdl");
-        let ctx = context(NdjsonTransformerFactory);
+        let ctx = context(NdjsonCodecFactory);
         let Err(err) = KafkaSourceFactory.build(&value, &ctx) else {
             panic!("missing brokers must fail");
         };
@@ -145,7 +145,7 @@ schema_fields "id" type="int64"
         // missing `brokers` field, proving `KafkaSourceConfig::deserialize`
         // runs (and fails) before `parse_schema_fields` is ever called.
         let value = from_kdl_str(r#"topic "orders""#).expect("parse kdl");
-        let ctx = context(NdjsonTransformerFactory);
+        let ctx = context(NdjsonCodecFactory);
         let Err(err) = KafkaSourceFactory.build(&value, &ctx) else {
             panic!("missing brokers must fail");
         };
@@ -153,10 +153,10 @@ schema_fields "id" type="int64"
     }
 
     #[test]
-    fn a_source_with_no_bound_transformer_is_a_configuration_error() {
+    fn a_source_with_no_bound_codec_is_a_configuration_error() {
         let value = from_kdl_str(SOURCE).expect("parse kdl");
         let Err(err) = KafkaSourceFactory.build(&value, &ConnectorContext::new(None)) else {
-            panic!("KafkaSource moves bytes, so it needs a transformer");
+            panic!("KafkaSource moves bytes, so it needs a codec");
         };
         assert_eq!(err.category(), "configuration");
         assert!(err.message().contains("'transformer'"), "got: {err}");
@@ -169,16 +169,16 @@ schema_fields "id" type="int64"
     async fn a_well_formed_source_config_builds() {
         let value = from_kdl_str(SOURCE).expect("parse kdl");
         KafkaSourceFactory
-            .build(&value, &context(NdjsonTransformerFactory))
+            .build(&value, &context(NdjsonCodecFactory))
             .expect("well-formed config must build");
     }
 
-    #[cfg(feature = "transformer-arrow-ipc")]
+    #[cfg(feature = "codec-arrow-ipc")]
     #[test]
     fn a_key_field_against_a_batch_per_message_format_is_rejected() {
         let value =
             from_kdl_str(&SINK.replace("topic ", "key_field \"id\"\ntopic ")).expect("parse kdl");
-        let ctx = context(crate::transformer::arrow_ipc::ArrowIpcTransformerFactory);
+        let ctx = context(crate::codec::arrow_ipc::ArrowIpcCodecFactory);
 
         let Err(err) = KafkaSinkFactory.build(&value, &ctx) else {
             panic!("arrow-ipc emits one message per batch, so there is no row to key");
@@ -187,13 +187,13 @@ schema_fields "id" type="int64"
         assert!(err.message().contains("'key_field'"), "got: {err}");
     }
 
-    /// A stream-only format: every message method keeps the [`Transformer`]
+    /// A stream-only format: every message method keeps the [`Codec`]
     /// contract's `unsupported` default. Every format SACI registers implements
     /// the message surface, so the gate is exercised against a stand-in rather
     /// than a shipped format.
     struct StreamOnly;
 
-    impl Transformer for StreamOnly {
+    impl Codec for StreamOnly {
         fn format(&self) -> &'static str {
             "stream-only"
         }
@@ -202,7 +202,7 @@ schema_fields "id" type="int64"
     #[test]
     fn a_format_with_no_message_codec_is_rejected() {
         let value = from_kdl_str(SINK).expect("parse kdl");
-        let ctx = ConnectorContext::new(Some(Arc::new(StreamOnly) as Arc<dyn Transformer>));
+        let ctx = ConnectorContext::new(Some(Arc::new(StreamOnly) as Arc<dyn Codec>));
 
         let Err(err) = KafkaSinkFactory.build(&value, &ctx) else {
             panic!("a format with no message surface must be refused");
@@ -216,7 +216,7 @@ schema_fields "id" type="int64"
     fn a_well_formed_sink_config_builds() {
         let value = from_kdl_str(SINK).expect("parse kdl");
         KafkaSinkFactory
-            .build(&value, &context(NdjsonTransformerFactory))
+            .build(&value, &context(NdjsonCodecFactory))
             .expect("well-formed config must build");
     }
 
@@ -228,7 +228,7 @@ schema_fields "id" type="int64"
             from_kdl_str(&SOURCE.replace("topic ", "compacted #true\nkey_field \"id\"\ntopic "))
                 .expect("parse kdl");
         KafkaSourceFactory
-            .build(&value, &context(NdjsonTransformerFactory))
+            .build(&value, &context(NdjsonCodecFactory))
             .expect("a compacted config must build");
     }
 
@@ -238,7 +238,7 @@ schema_fields "id" type="int64"
             &SOURCE.replace("topic ", "compacted #true\nkey_field \"absent\"\ntopic "),
         )
         .expect("parse kdl");
-        let Err(err) = KafkaSourceFactory.build(&value, &context(NdjsonTransformerFactory)) else {
+        let Err(err) = KafkaSourceFactory.build(&value, &context(NdjsonCodecFactory)) else {
             panic!("'absent' is not one of the declared schema_fields");
         };
         assert_eq!(err.category(), "configuration");
@@ -251,7 +251,7 @@ schema_fields "id" type="int64"
             from_kdl_str(&SINK.replace("topic ", "tombstones #true\nkey_field \"id\"\ntopic "))
                 .expect("parse kdl");
         KafkaSinkFactory
-            .build(&value, &context(NdjsonTransformerFactory))
+            .build(&value, &context(NdjsonCodecFactory))
             .expect("a tombstone-enabled config must build");
     }
 }

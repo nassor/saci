@@ -10,7 +10,7 @@
 //! rule reads source nodes only, so a `udp` sink runs in every mode.
 //!
 //! Producers write one payload per datagram, and [`UdpSink`] writes the same.
-//! What the payload bytes are is the transformer's business: the node's
+//! What the payload bytes are is the codec's business: the node's
 //! `transformer` key names a declared `transformer` node, and that node's
 //! format decides how each datagram encodes or decodes. There is no default.
 
@@ -45,7 +45,7 @@ const DEFAULT_PROBE_TIMEOUT_MS: u64 = 1000;
 ///   same IP family as `bind`.
 /// - `schema_fields` (list, required): Arrow schema definition.
 ///
-/// Each datagram is decoded by the transformer the host bound to this node
+/// Each datagram is decoded by the codec the host bound to this node
 /// from its `transformer` key, reached through the [`ConnectorContext`] rather
 /// than read out of `config`.
 pub struct UdpSourceFactory;
@@ -85,14 +85,14 @@ impl SourceFactory for UdpSourceFactory {
         };
 
         let schema = parse_schema_fields(config, "udp")?;
-        let transformer = ctx.transformer("udp")?;
+        let codec = ctx.codec("udp")?;
 
         Ok(Box::new(UdpSource::new(
             bind,
             multicast_group,
             schema,
             buffer,
-            transformer,
+            codec,
         )?))
     }
 
@@ -117,7 +117,7 @@ impl SourceFactory for UdpSourceFactory {
 ///   `on_failure` (`"refuse"` or `"warn"`, default `"refuse"`).
 /// - `schema_fields` (list, required): Arrow schema definition.
 ///
-/// Each batch is encoded by the transformer the host bound to this node from
+/// Each batch is encoded by the codec the host bound to this node from
 /// its `transformer` key, reached through the [`ConnectorContext`] rather than
 /// read out of `config`. The addresses are resolved here and the sockets open
 /// on the first batch, so a peer that is down fails at serve time, not at
@@ -156,7 +156,7 @@ impl SinkFactory for UdpSinkFactory {
 
         let probe = parse_probe(config)?;
         let schema = parse_schema_fields(config, "udp")?;
-        let transformer = ctx.transformer("udp")?;
+        let codec = ctx.codec("udp")?;
 
         Ok(Box::new(UdpSink::connect(
             &connect,
@@ -164,7 +164,7 @@ impl SinkFactory for UdpSinkFactory {
             max_datagram_bytes,
             probe,
             schema,
-            transformer,
+            codec,
         )?))
     }
 
@@ -271,19 +271,19 @@ fn probe_millis(value: &ConfigValue, key: &str, default: u64) -> Result<u64, Sac
     }
 }
 
-#[cfg(all(test, feature = "transformer-arrow-ipc"))]
+#[cfg(all(test, feature = "codec-arrow-ipc"))]
 mod tests {
     use super::*;
+    use crate::codec::arrow_ipc::ArrowIpcCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::arrow_ipc::ArrowIpcTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
     use std::sync::Arc;
 
-    /// A built transformer, the way the host hands one to a factory.
-    fn transformer() -> Arc<dyn Transformer> {
-        ArrowIpcTransformerFactory
+    /// A built codec, the way the host hands one to a factory.
+    fn codec() -> Arc<dyn Codec> {
+        ArrowIpcCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("build arrow-ipc transformer")
+            .expect("build arrow-ipc codec")
     }
 
     fn config(extra: &str) -> ConfigValue {
@@ -301,7 +301,7 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn builds_with_defaults() {
         let source = UdpSourceFactory
-            .build(&config(""), &ConnectorContext::new(Some(transformer())))
+            .build(&config(""), &ConnectorContext::new(Some(codec())))
             .expect("build");
         assert_eq!(source.schema().fields().len(), 1);
     }
@@ -323,7 +323,7 @@ schema_fields "v" type="Int64"
     }
 
     #[test]
-    fn a_missing_transformer_is_a_configuration_error() {
+    fn a_missing_codec_is_a_configuration_error() {
         let err = UdpSourceFactory
             .build(&config(""), &ConnectorContext::new(None))
             .err()
@@ -348,7 +348,7 @@ schema_fields "v" type="Int64"
         let err = UdpSourceFactory
             .build(
                 &config("multicast_group \"not-an-address\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -371,10 +371,7 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn the_sink_builds_from_connect_and_schema_fields() {
         let sink = UdpSinkFactory
-            .build(
-                &sink_config(""),
-                &ConnectorContext::new(Some(transformer())),
-            )
+            .build(&sink_config(""), &ConnectorContext::new(Some(codec())))
             .expect("build");
         assert_eq!(sink.schema().fields().len(), 1);
     }
@@ -414,7 +411,7 @@ schema_fields "v" type="Int64"
     }
 
     #[test]
-    fn a_sink_missing_its_transformer_is_a_configuration_error() {
+    fn a_sink_missing_its_codec_is_a_configuration_error() {
         let err = UdpSinkFactory
             .build(&sink_config(""), &ConnectorContext::new(None))
             .err()
@@ -438,7 +435,7 @@ schema_fields "v" type="Int64" nullable=#false
             vec!["127.0.0.1:9701".to_string(), "127.0.0.1:9702".to_string()]
         );
         UdpSinkFactory
-            .build(&cfg, &ConnectorContext::new(Some(transformer())))
+            .build(&cfg, &ConnectorContext::new(Some(codec())))
             .expect("build");
     }
 
@@ -460,7 +457,7 @@ schema_fields "v" type="Int64" nullable=#false
             }
         );
         UdpSinkFactory
-            .build(&cfg, &ConnectorContext::new(Some(transformer())))
+            .build(&cfg, &ConnectorContext::new(Some(codec())))
             .expect("build");
     }
 
@@ -469,7 +466,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe kind=\"ping\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -482,7 +479,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe on_failure=\"ignore\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -495,7 +492,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("broadcast #true\nprobe"),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -508,7 +505,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("max_datagram_bytes \"lots\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -524,7 +521,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("max_datagram_bytes -1"),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -540,7 +537,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe \"yes\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -559,7 +556,7 @@ schema_fields "v" type="Int64" nullable=#false
         )
         .expect("parse test config");
         let err = UdpSinkFactory
-            .build(&cfg, &ConnectorContext::new(Some(transformer())))
+            .build(&cfg, &ConnectorContext::new(Some(codec())))
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -577,7 +574,7 @@ schema_fields "v" type="Int64" nullable=#false
         )
         .expect("parse test config");
         let err = UdpSinkFactory
-            .build(&cfg, &ConnectorContext::new(Some(transformer())))
+            .build(&cfg, &ConnectorContext::new(Some(codec())))
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -589,7 +586,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe interval_ms=0"),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -602,7 +599,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSourceFactory
             .build(
                 &config("multicast_group \"ff02::1\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -613,10 +610,7 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn buffer_below_one_still_builds() {
         UdpSourceFactory
-            .build(
-                &config("buffer 0"),
-                &ConnectorContext::new(Some(transformer())),
-            )
+            .build(&config("buffer 0"), &ConnectorContext::new(Some(codec())))
             .expect("a buffer of zero must still build, clamped to one internally");
     }
 
@@ -628,7 +622,7 @@ schema_fields "v" type="Int64" nullable=#false
             .expect("a probe node declares a probe");
         assert_eq!(settings.kind, ProbeKind::Icmp);
         UdpSinkFactory
-            .build(&cfg, &ConnectorContext::new(Some(transformer())))
+            .build(&cfg, &ConnectorContext::new(Some(codec())))
             .expect("build");
     }
 
@@ -640,7 +634,7 @@ schema_fields "v" type="Int64" nullable=#false
             .expect("a probe node declares a probe");
         assert_eq!(settings.on_failure, OnFailure::Warn);
         UdpSinkFactory
-            .build(&cfg, &ConnectorContext::new(Some(transformer())))
+            .build(&cfg, &ConnectorContext::new(Some(codec())))
             .expect("build");
     }
 
@@ -649,7 +643,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSourceFactory
             .build(
                 &config("multicast_group 239"),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -662,7 +656,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("broadcast \"true\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -675,7 +669,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe interval_ms=-5"),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -688,7 +682,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe timeout_ms=\"1s\""),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -701,7 +695,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe kind=5"),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");
@@ -714,7 +708,7 @@ schema_fields "v" type="Int64" nullable=#false
         let err = UdpSinkFactory
             .build(
                 &sink_config("probe on_failure=1"),
-                &ConnectorContext::new(Some(transformer())),
+                &ConnectorContext::new(Some(codec())),
             )
             .err()
             .expect("build must fail");

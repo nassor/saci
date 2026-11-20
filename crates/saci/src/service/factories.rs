@@ -2,7 +2,7 @@
 //!
 //! Two kinds of factory reach the registry here. A connector factory builds a
 //! [`Source`](crate::io::source::Source) or a
-//! [`Sink`](crate::io::sink::Sink) that moves bytes; a transformer factory
+//! [`Sink`](crate::io::sink::Sink) that moves bytes; a codec factory
 //! builds the byte format a connector's `format` key names. One feature per
 //! crate decides whether it is compiled in and registered:
 //!
@@ -23,15 +23,15 @@
 //! - `connector-tcp`: [`TcpSourceFactory`], [`TcpSinkFactory`]
 //! - `connector-udp`: [`UdpSourceFactory`], [`UdpSinkFactory`]
 //! - `connector-turso`: [`TursoSourceFactory`], [`TursoSinkFactory`]
-//! - `transformer-arrow-ipc`: [`ArrowIpcTransformerFactory`]
-//! - `transformer-avro`: [`AvroTransformerFactory`]
-//! - `transformer-csv`: [`CsvTransformerFactory`]
-//! - `transformer-ndjson`: [`NdjsonTransformerFactory`]
-//! - `transformer-parquet`: [`ParquetTransformerFactory`]
+//! - `codec-arrow-ipc`: [`ArrowIpcCodecFactory`]
+//! - `codec-avro`: [`AvroCodecFactory`]
+//! - `codec-csv`: [`CsvCodecFactory`]
+//! - `codec-ndjson`: [`NdjsonCodecFactory`]
+//! - `codec-parquet`: [`ParquetCodecFactory`]
 //!
 //! [`register_builtin_factories`] adds every enabled factory to a
 //! [`ServiceBuilder`] in one call. [`BUILTIN_CONNECTOR_FEATURES`] names every
-//! connector type name and [`BUILTIN_TRANSFORMER_FEATURES`] every format name
+//! connector type name and [`BUILTIN_CODEC_FEATURES`] every format name
 //! the crate carries, whether or not the feature is on, so a lookup that
 //! misses can still say which feature to build with.
 //!
@@ -75,16 +75,6 @@ pub use crate::connector::tcp::{TcpSinkFactory, TcpSourceFactory};
 pub use crate::connector::turso::{TursoSinkFactory, TursoSourceFactory};
 #[cfg(feature = "connector-udp")]
 pub use crate::connector::udp::{UdpSinkFactory, UdpSourceFactory};
-#[cfg(feature = "transformer-arrow-ipc")]
-pub use crate::transformer::arrow_ipc::ArrowIpcTransformerFactory;
-#[cfg(feature = "transformer-avro")]
-pub use crate::transformer::avro::AvroTransformerFactory;
-#[cfg(feature = "transformer-csv")]
-pub use crate::transformer::csv::CsvTransformerFactory;
-#[cfg(feature = "transformer-ndjson")]
-pub use crate::transformer::ndjson::NdjsonTransformerFactory;
-#[cfg(feature = "transformer-parquet")]
-pub use crate::transformer::parquet::ParquetTransformerFactory;
 
 use crate::error::SaciError;
 
@@ -139,7 +129,7 @@ pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
 /// Every built-in format name and the feature that compiles it in.
 ///
 /// The keys are the strings
-/// [`TransformerFactory::format_name`](crate::transformer::TransformerFactory::format_name)
+/// [`CodecFactory::format_name`](crate::codec::CodecFactory::format_name)
 /// returns, which is what a `transformer` node's `format =` names. Kept apart
 /// from [`BUILTIN_CONNECTOR_FEATURES`] because a format name and a connector
 /// type name are different namespaces: one table would let a `format` key
@@ -147,15 +137,15 @@ pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
 ///
 /// Listed unconditionally, for the same reason: a factory compiled out takes
 /// its `format_name` with it, so nothing else in a binary built without
-/// `transformer-csv` knows that `csv` is a format this crate ships.
-/// `builtin_transformer_table_matches_the_registry` pins it against the
+/// `codec-csv` knows that `csv` is a format this crate ships.
+/// `builtin_codec_table_matches_the_registry` pins it against the
 /// registry in both directions.
-pub const BUILTIN_TRANSFORMER_FEATURES: &[(&str, &str)] = &[
-    ("arrow-ipc", "transformer-arrow-ipc"),
-    ("avro", "transformer-avro"),
-    ("csv", "transformer-csv"),
-    ("ndjson", "transformer-ndjson"),
-    ("parquet", "transformer-parquet"),
+pub const BUILTIN_CODEC_FEATURES: &[(&str, &str)] = &[
+    ("arrow-ipc", "codec-arrow-ipc"),
+    ("avro", "codec-avro"),
+    ("csv", "codec-csv"),
+    ("ndjson", "codec-ndjson"),
+    ("parquet", "codec-parquet"),
 ];
 
 /// The feature that compiles in the connector registering `type_name`.
@@ -179,11 +169,11 @@ pub fn builtin_feature(type_name: &str) -> Option<&'static str> {
     tabled_feature(BUILTIN_CONNECTOR_FEATURES, type_name)
 }
 
-/// The feature that compiles in the transformer registering `format`.
+/// The feature that compiles in the codec registering `format`.
 ///
-/// `None` for a format no transformer crate here registers, which is what
+/// `None` for a format no codec crate here registers, which is what
 /// keeps a user-registered format out of the feature advice: `protobuf` is not
-/// in [`BUILTIN_TRANSFORMER_FEATURES`], so nothing claims a flag would supply
+/// in [`BUILTIN_CODEC_FEATURES`], so nothing claims a flag would supply
 /// it.
 ///
 /// # Example
@@ -191,14 +181,14 @@ pub fn builtin_feature(type_name: &str) -> Option<&'static str> {
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::factories::builtin_transformer_feature;
+/// use saci::service::factories::builtin_codec_feature;
 ///
-/// assert_eq!(builtin_transformer_feature("csv"), Some("transformer-csv"));
-/// assert_eq!(builtin_transformer_feature("protobuf"), None);
+/// assert_eq!(builtin_codec_feature("csv"), Some("codec-csv"));
+/// assert_eq!(builtin_codec_feature("protobuf"), None);
 /// # }
 /// ```
-pub fn builtin_transformer_feature(format: &str) -> Option<&'static str> {
-    tabled_feature(BUILTIN_TRANSFORMER_FEATURES, format)
+pub fn builtin_codec_feature(format: &str) -> Option<&'static str> {
+    tabled_feature(BUILTIN_CODEC_FEATURES, format)
 }
 
 /// The feature paired with `key` in one of the two tables above.
@@ -236,7 +226,7 @@ pub(crate) fn missing_factory_error(kind: &str, type_name: &str, node_id: &str) 
     }
 }
 
-/// The error a [`TransformerRegistry`](crate::transformer::TransformerRegistry)
+/// The error a [`CodecRegistry`](crate::codec::CodecRegistry)
 /// lookup that missed reports, naming the feature when the format is a
 /// built-in.
 ///
@@ -246,26 +236,22 @@ pub(crate) fn missing_factory_error(kind: &str, type_name: &str, node_id: &str) 
 /// message keeps working when the hint appears.
 ///
 /// Reached only after the lookup already failed, so a binary registering its
-/// own `csv` transformer never consults the table.
-pub(crate) fn missing_transformer_error(
-    node_id: &str,
-    format: &str,
-    registered: &[&str],
-) -> SaciError {
+/// own `csv` codec never consults the table.
+pub(crate) fn missing_codec_error(node_id: &str, format: &str, registered: &[&str]) -> SaciError {
     let list = if registered.is_empty() {
         "none".to_string()
     } else {
         registered.join(", ")
     };
-    match builtin_transformer_feature(format) {
+    match builtin_codec_feature(format) {
         Some(feature) => SaciError::configuration(format!(
-            "transformer '{node_id}' names format '{format}', which no transformer is \
+            "transformer '{node_id}' names format '{format}', which no codec is \
              registered for (registered: {list}): that is a built-in format this binary \
              was built without, so rebuild or reinstall with `--features {feature}`, or \
-             register your own transformer under that name"
+             register your own codec under that name"
         )),
         None => SaciError::configuration(format!(
-            "transformer '{node_id}' names format '{format}', which no transformer is \
+            "transformer '{node_id}' names format '{format}', which no codec is \
              registered for (registered: {list})"
         )),
     }
@@ -277,7 +263,7 @@ pub(crate) fn missing_transformer_error(
 /// `subject` names what the config declared, `needs` the capability it needs,
 /// and `feature` the `--features` flag that compiles that capability in. The
 /// tail matches the one [`missing_factory_error`] and
-/// [`missing_transformer_error`] append, so the three read alike.
+/// [`missing_codec_error`] append, so the three read alike.
 fn capability_error(subject: &str, needs: &str, feature: &str) -> SaciError {
     SaciError::configuration(format!(
         "{subject} needs the {needs}, which this binary was built without, so \
@@ -339,7 +325,7 @@ pub fn missing_cluster_host_error() -> SaciError {
     )
 }
 
-/// Register every enabled connector's and transformer's factories into
+/// Register every enabled connector's and codec's factories into
 /// `builder`.
 ///
 /// A crate reaches the registry only when its feature is on. Supply the runtime
@@ -358,22 +344,22 @@ pub fn missing_cluster_host_error() -> SaciError {
 /// # }
 /// ```
 pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
-    // Transformers first: a connector factory resolves its `format` key against
+    // Codecs first: a connector factory resolves its `format` key against
     // the registry, so the format has to be in it by the time config is built.
-    #[cfg(feature = "transformer-arrow-ipc")]
-    let builder = builder.register_transformer(ArrowIpcTransformerFactory);
+    #[cfg(feature = "codec-arrow-ipc")]
+    let builder = builder.codec(ArrowIpcCodecFactory);
 
-    #[cfg(feature = "transformer-avro")]
-    let builder = builder.register_transformer(AvroTransformerFactory);
+    #[cfg(feature = "codec-avro")]
+    let builder = builder.codec(AvroCodecFactory);
 
-    #[cfg(feature = "transformer-csv")]
-    let builder = builder.register_transformer(CsvTransformerFactory);
+    #[cfg(feature = "codec-csv")]
+    let builder = builder.codec(CsvCodecFactory);
 
-    #[cfg(feature = "transformer-ndjson")]
-    let builder = builder.register_transformer(NdjsonTransformerFactory);
+    #[cfg(feature = "codec-ndjson")]
+    let builder = builder.codec(NdjsonCodecFactory);
 
-    #[cfg(feature = "transformer-parquet")]
-    let builder = builder.register_transformer(ParquetTransformerFactory);
+    #[cfg(feature = "codec-parquet")]
+    let builder = builder.codec(ParquetCodecFactory);
 
     #[cfg(feature = "connector-channel")]
     let builder = builder
@@ -538,16 +524,16 @@ mod tests {
 
     /// A format this crate carries but was compiled out names its feature.
     ///
-    /// A build with every transformer cannot reach this arm through
+    /// A build with every codec cannot reach this arm through
     /// `build_all`, so the producer is called directly. The opening is pinned
     /// too: it is what an operator greps for and what any future classifier
     /// would match on.
     #[test]
     fn a_missing_builtin_format_names_its_feature() {
-        let message = missing_transformer_error("csv_fmt", "csv", &[]).message();
+        let message = missing_codec_error("csv_fmt", "csv", &[]).message();
         assert!(
             message.starts_with(
-                "transformer 'csv_fmt' names format 'csv', which no transformer is registered for"
+                "transformer 'csv_fmt' names format 'csv', which no codec is registered for"
             ),
             "the opening must survive the hint: {message}"
         );
@@ -556,42 +542,42 @@ mod tests {
             "an operator needs to see the binary carries no format at all: {message}"
         );
         assert!(
-            message.contains("--features transformer-csv"),
+            message.contains("--features codec-csv"),
             "the hint must name the feature: {message}"
         );
     }
 
-    /// A format no transformer here registers gets the plain message, so an
+    /// A format no codec here registers gets the plain message, so an
     /// embedder registering their own is never told a build flag supplies it.
     #[test]
     fn an_unknown_format_gets_no_feature_hint() {
-        let message = missing_transformer_error("pb_fmt", "protobuf", &["csv", "ndjson"]).message();
+        let message = missing_codec_error("pb_fmt", "protobuf", &["csv", "ndjson"]).message();
         assert_eq!(
             message,
-            "transformer 'pb_fmt' names format 'protobuf', which no transformer is \
+            "transformer 'pb_fmt' names format 'protobuf', which no codec is \
              registered for (registered: csv, ndjson)"
         );
     }
 
-    /// The format table is the transformer registry's key set, in both
+    /// The format table is the codec registry's key set, in both
     /// directions.
     ///
-    /// A sixth transformer registering without a table entry leaves its
+    /// A sixth codec registering without a table entry leaves its
     /// missing-format error unable to name a feature, and an entry a removed
-    /// transformer left behind makes one name a feature that no longer
+    /// codec left behind makes one name a feature that no longer
     /// exists.
     ///
-    /// Gated on `all`, the build that carries every transformer, because the
+    /// Gated on `all`, the build that carries every codec, because the
     /// check is bidirectional: with one compiled out the registry is
     /// legitimately missing a name the table must still carry.
     /// `--all-features` selects it.
     #[cfg(feature = "all")]
     #[test]
-    fn builtin_transformer_table_matches_the_registry() {
+    fn builtin_codec_table_matches_the_registry() {
         let builder = register_builtin_factories(ServiceBuilder::new());
-        let registered = builder.registry().transformers().formats();
+        let registered = builder.registry().codecs().names();
 
-        let mut tabled: Vec<&str> = BUILTIN_TRANSFORMER_FEATURES
+        let mut tabled: Vec<&str> = BUILTIN_CODEC_FEATURES
             .iter()
             .map(|(name, _)| *name)
             .collect();
@@ -600,7 +586,7 @@ mod tests {
         assert_eq!(
             registered, tabled,
             "register_builtin_factories registers formats {registered:?} but \
-             BUILTIN_TRANSFORMER_FEATURES lists {tabled:?}; add the format and its \
+             BUILTIN_CODEC_FEATURES lists {tabled:?}; add the format and its \
              feature to the table, or drop the stale entry, so a missing-format error \
              can name the feature to build with"
         );

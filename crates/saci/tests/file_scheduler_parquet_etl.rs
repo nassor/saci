@@ -1,10 +1,10 @@
 #![cfg(all(
     feature = "connector-file",
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-ndjson",
+    feature = "codec-parquet"
 ))]
-// A file source and sink carrying the parquet transformer around a
+// A file source and sink carrying the parquet codec around a
 // two-system pipeline.
 
 use std::sync::Arc;
@@ -20,7 +20,6 @@ use saci::io::sink::Sink;
 use saci::io::source::Source;
 use saci::pipeline::Pipeline;
 use saci::system::{ParallelSystem, SystemMeta, WriteSet};
-use saci::transformer::parquet::ParquetTransformer;
 
 struct ScaleSystem;
 
@@ -91,7 +90,7 @@ async fn generate_input(path: &std::path::Path, n: usize) -> Result<(), SaciErro
     ));
     let batch = RecordBatch::try_new(schema.clone(), vec![ids, prices])
         .map_err(|e| SaciError::generic(format!("{e}")))?;
-    let mut sink = FileSink::create(path, Arc::new(ParquetTransformer::new()), schema)?;
+    let mut sink = FileSink::create(path, Arc::new(ParquetCodec::new()), schema)?;
     sink.write_batch(&batch).await?;
     sink.finish().await
 }
@@ -144,7 +143,7 @@ async fn test_parquet_etl_pipeline_reads_scales_rounds_and_writes() {
         .register_schema("Trade", full_schema.clone())
         .unwrap();
 
-    let inner_src = FileSource::open_async(&input_path, Arc::new(ParquetTransformer::new()), None)
+    let inner_src = FileSource::open_async(&input_path, Arc::new(ParquetCodec::new()), None)
         .await
         .unwrap();
     let src = PaddedParquetSource {
@@ -153,7 +152,7 @@ async fn test_parquet_etl_pipeline_reads_scales_rounds_and_writes() {
     };
     let sink = FileSink::create(
         &output_path,
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
         full_schema.clone(),
     )
     .unwrap();
@@ -172,10 +171,9 @@ async fn test_parquet_etl_pipeline_reads_scales_rounds_and_writes() {
         "all 100 rows should be present"
     );
 
-    let mut out_src =
-        FileSource::open_async(&output_path, Arc::new(ParquetTransformer::new()), None)
-            .await
-            .unwrap();
+    let mut out_src = FileSource::open_async(&output_path, Arc::new(ParquetCodec::new()), None)
+        .await
+        .unwrap();
     let batch = out_src
         .next_batch()
         .await
@@ -220,7 +218,7 @@ async fn test_parquet_etl_pipeline_runs_with_1000_rows() {
         .register_schema("Trade", full_schema.clone())
         .unwrap();
 
-    let inner_src = FileSource::open_async(&input_path, Arc::new(ParquetTransformer::new()), None)
+    let inner_src = FileSource::open_async(&input_path, Arc::new(ParquetCodec::new()), None)
         .await
         .unwrap();
     let src = PaddedParquetSource {
@@ -229,7 +227,7 @@ async fn test_parquet_etl_pipeline_runs_with_1000_rows() {
     };
     let sink = FileSink::create(
         &output_path,
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
         full_schema.clone(),
     )
     .unwrap();

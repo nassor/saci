@@ -17,8 +17,8 @@
 #![cfg(all(
     feature = "connector-http",
     feature = "service",
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
+    feature = "codec-csv",
+    feature = "codec-ndjson",
     feature = "wasm-host"
 ))]
 
@@ -36,8 +36,6 @@ use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
-use saci::transformer::Transformer;
-use saci::transformer::csv::CsvTransformer;
 
 const COMPONENT: &str = "Order";
 const CSV_BODY: &[u8] = b"id,total\n1,10\n2,20\n3,30\n4,40\n";
@@ -131,7 +129,7 @@ fn decode_body(body: &[u8]) -> Vec<RecordBatch> {
     spool.write_all(body).expect("write body");
     std::io::Seek::rewind(&mut spool).expect("rewind");
 
-    let mut reader = CsvTransformer::new(true)
+    let mut reader = CsvCodec::new(true)
         .open_reader(spool, Some(schema()))
         .expect("the body is a whole csv document");
     let mut batches = Vec::new();
@@ -252,7 +250,7 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
 /// that may drive it, and one POSTed document is one item. The format is
 /// `ndjson`, so one request body is a batch of json lines and the sink writes
 /// the same shape back out.
-#[cfg(feature = "transformer-ndjson")]
+#[cfg(feature = "codec-ndjson")]
 mod push {
     use std::io::Write;
     use std::time::Duration;
@@ -268,8 +266,6 @@ mod push {
     use saci::service::install_ring_provider;
     use saci::service::run_standalone;
     use saci::service::standalone::StandaloneStats;
-    use saci::transformer::Transformer;
-    use saci::transformer::ndjson::NdjsonTransformer;
 
     use super::{COMPONENT, build_pipeline, column, config_path_text, schema, serve};
 
@@ -345,7 +341,7 @@ observability log_level="warn"
         spool.write_all(body).expect("write body");
         std::io::Seek::rewind(&mut spool).expect("rewind");
 
-        let mut reader = NdjsonTransformer::default()
+        let mut reader = NdjsonCodec::default()
             .open_reader(spool, Some(schema()))
             .expect("the body is a whole ndjson document");
         let mut batches = Vec::new();

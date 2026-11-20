@@ -8,7 +8,7 @@
     feature = "connector-channel",
     feature = "connector-file",
     feature = "service",
-    feature = "transformer-csv"
+    feature = "codec-csv"
 ))]
 
 use tokio_util::sync::CancellationToken;

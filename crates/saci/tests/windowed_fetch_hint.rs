@@ -260,7 +260,7 @@ fn pinned_config(run_mode: RunMode) -> ServiceConfig {
         workflows: vec![WorkflowSpec {
             id: "hint".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),

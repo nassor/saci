@@ -146,7 +146,7 @@ pub struct RedbSinkConfig {
     /// after a crash is instant instead of a full-file walk.
     #[serde(default = "default_true")]
     pub quick_repair: bool,
-    /// Declared Arrow schema. Required, whatever the transformer: it is the
+    /// Declared Arrow schema. Required, whatever the codec: it is the
     /// schema the rows are written with.
     #[serde(default, deserialize_with = "crate::connector::one_or_many")]
     pub schema_fields: Vec<ConfigValue>,

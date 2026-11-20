@@ -15,8 +15,8 @@
 //!   `mariadb`, `nats`, `postgresql`, `s3`, `turso`, `clickhouse` and
 //!   `opentelemetry` each need a specific broker, database, object store or
 //!   OTLP endpoint running first.
-//! - `transformer-<format>`: one byte format in `transformer::<format>`.
-//!   `transformers` enables all five: `arrow-ipc`, `avro`, `csv`, `ndjson`
+//! - `codec-<format>`: one byte format in `codec::<format>`.
+//!   `codecs` enables all five: `arrow-ipc`, `avro`, `csv`, `ndjson`
 //!   and `parquet`.
 //! - `processor`: a WebAssembly Component Model processor built with the
 //!   authoring SDK in [`sdk`] and `#[processor]`. A processor targets
@@ -128,10 +128,10 @@ pub mod __private {
 #[cfg(feature = "config")]
 pub mod config;
 
-#[cfg(feature = "transformer-contract")]
-pub mod transformer;
+#[cfg(feature = "codec-api")]
+pub mod codec;
 
-#[cfg(feature = "connector-contract")]
+#[cfg(feature = "connector-api")]
 pub mod connector;
 
 #[cfg(feature = "plugin")]
@@ -184,7 +184,7 @@ pub mod service;
 /// Convenience re-exports of the most commonly used types and traits.
 ///
 /// `use saci::prelude::*;` pulls in the engine types plus whatever the
-/// enabled `processor`, `connector-*` and `transformer-*` features add.
+/// enabled `processor`, `connector-*` and `codec-*` features add.
 pub mod prelude {
     pub use crate::column::ComponentView;
     #[cfg(feature = "plugin")]

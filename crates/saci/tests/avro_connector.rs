@@ -2,14 +2,14 @@
 //! `FileSink` over one component, driven by `run_standalone`.
 //!
 //! One run covers the whole path a `format = "avro"` key travels: registration
-//! as a builtin, resolution out of the transformer registry, writing a
+//! as a builtin, resolution out of the codec registry, writing a
 //! deflate-compressed object container file, and reading it back.
 
 #![cfg(all(
     feature = "connector-file",
     feature = "service",
-    feature = "transformer-avro",
-    feature = "transformer-csv"
+    feature = "codec-avro",
+    feature = "codec-csv"
 ))]
 
 use std::sync::Arc;
@@ -25,7 +25,6 @@ use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
-use saci::transformer::avro::AvroTransformer;
 
 const COMPONENT: &str = "Order";
 
@@ -121,7 +120,7 @@ async fn a_csv_source_and_an_avro_sink_share_one_file_connector() {
     let built = register_builtin_factories(ServiceBuilder::new())
         .with_runtime("transform", Box::new(build_pipeline()))
         .build_all(&config)
-        .expect("both formats resolve through the transformer registry")
+        .expect("both formats resolve through the codec registry")
         .remove(0);
 
     let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
@@ -134,12 +133,8 @@ async fn a_csv_source_and_an_avro_sink_share_one_file_connector() {
     // A reader takes the codec from the container file header, so reading this
     // back with no compression of its own also proves the writer honoured the
     // `deflate` option.
-    let mut readback = FileSource::open(
-        &output_path,
-        Arc::new(AvroTransformer::new(None, None)),
-        None,
-    )
-    .expect("the sink wrote a readable Avro file");
+    let mut readback = FileSource::open(&output_path, Arc::new(AvroCodec::new(None, None)), None)
+        .expect("the sink wrote a readable Avro file");
 
     let batch = readback
         .next_batch()

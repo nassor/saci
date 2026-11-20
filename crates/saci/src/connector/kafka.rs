@@ -6,8 +6,8 @@
 //! [`KafkaSource`] consumes a topic (or several) with `rdkafka`'s
 //! `StreamConsumer`; [`KafkaSink`] produces to one with a `FutureProducer`.
 //! What a message payload means is the
-//! [`Transformer`](crate::transformer::Transformer) the node's `transformer` key
-//! names, and its [`MessageShape`](crate::transformer::MessageShape) decides
+//! [`Codec`](crate::codec::Codec) the node's `transformer` key
+//! names, and its [`MessageShape`](crate::codec::MessageShape) decides
 //! whether a batch becomes one message per row or one message in total.
 //!
 //! Both sides are declarative: the Arrow schema is written in the service

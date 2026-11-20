@@ -113,9 +113,9 @@ pub use builder::{BuiltNode, BuiltNodeKind, BuiltService, ServiceBuilder};
 pub use cluster::{ClusterStats, run_cluster};
 #[cfg(feature = "service")]
 pub use config::{
-    ClusterConfig, DlqBlock, DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig, HttpConfig,
-    LinkSpec, LogFormat, NodeConfig, ObservabilityConfig, PeerSpec, PluginSpec, RunMode,
-    ServiceConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig, TransformerSpec, WasmSpec,
+    ClusterConfig, CodecSpec, DlqBlock, DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig,
+    HttpConfig, LinkSpec, LogFormat, NodeConfig, ObservabilityConfig, PeerSpec, PluginSpec,
+    RunMode, ServiceConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig, WasmSpec,
     WorkflowSpec,
 };
 #[cfg(feature = "service")]
@@ -148,9 +148,7 @@ pub use plugin_loader::load_plugin_runtime;
 #[cfg(feature = "service")]
 pub use redb_state::{RedbStateClient, SourceCursorMeta};
 #[cfg(feature = "service")]
-pub use registry::{
-    Registry, SinkFactory, SourceFactory, Transformer, TransformerFactory, TransformerRegistry,
-};
+pub use registry::{Codec, CodecFactory, CodecRegistry, Registry, SinkFactory, SourceFactory};
 #[cfg(feature = "service")]
 pub use shutdown::ShutdownCoordinator;
 #[cfg(feature = "service")]

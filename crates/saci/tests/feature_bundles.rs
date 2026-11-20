@@ -168,7 +168,7 @@ fn reachable(features: &[(&'static str, Vec<&'static str>)], root: &str) -> BTre
 /// binary that rejects it, with no build error anywhere to say so. A new
 /// capability alongside `inspector`, `plugin-host` and `service-cluster` goes
 /// missing the same way, which is why the check is a set difference over every
-/// key rather than a filter on the connector and transformer names.
+/// key rather than a filter on the connector and codec names.
 #[test]
 fn all_bundle_lists_every_feature() {
     let features = features();
@@ -271,7 +271,7 @@ fn server_bundle_requires_no_installed_service() {
         .copied()
         .filter(|name| features.iter().any(|(key, _)| key == name))
         .filter(|name| name.starts_with("connector-"))
-        .filter(|name| *name != "connector-contract")
+        .filter(|name| *name != "connector-api")
         .filter(|name| !SELF_CONTAINED_CONNECTORS.contains(name))
         .collect();
     assert!(

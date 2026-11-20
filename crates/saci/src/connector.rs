@@ -11,8 +11,8 @@
 //! [`from_kdl_str`] and [`one_or_many`], so a connector names one path.
 //!
 //! [`ConnectorContext`] is what a factory can reach while it builds: the
-//! transformer the config bound to this connector instance, if any, resolved
-//! by the host against the [`TransformerRegistry`](crate::transformer::TransformerRegistry)
+//! codec the config bound to this connector instance, if any, resolved
+//! by the host against the [`CodecRegistry`](crate::codec::CodecRegistry)
 //! once per workflow build, and the [`NodeIdentity`] naming the service,
 //! workflow and node it was declared on. A connector that moves bytes never
 //! owns a list of byte formats or a `format` config key of its own.

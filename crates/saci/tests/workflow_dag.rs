@@ -13,7 +13,7 @@
 #![cfg(all(
     feature = "connector-file",
     feature = "service",
-    feature = "transformer-csv",
+    feature = "codec-csv",
     feature = "wasm-host"
 ))]
 
@@ -27,7 +27,6 @@ use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
-use saci::transformer::csv::CsvTransformer;
 use tokio_util::sync::CancellationToken;
 
 #[path = "common/smoketest.rs"]
@@ -137,7 +136,7 @@ async fn a_two_processor_link_runs_two_real_wasmtime_instances() {
     // rather than the config merely parsing.
     let mut readback = FileSource::open(
         &output_path,
-        Arc::new(CsvTransformer::new(true)),
+        Arc::new(CsvCodec::new(true)),
         Some(Ping::schema()),
     )
     .expect("the sink wrote a readable csv file");

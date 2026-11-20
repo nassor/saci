@@ -3,7 +3,7 @@
 //! Configuration is written in [KDL](https://kdl.dev). This crate turns that
 //! text into [`ConfigValue`], a self-describing value tree that carries a
 //! `serde::Deserializer`, so the host config schema and every connector,
-//! transformer and plugin config struct deserializes from it with the serde
+//! codec and plugin config struct deserializes from it with the serde
 //! attributes it already has.
 //!
 //! ```

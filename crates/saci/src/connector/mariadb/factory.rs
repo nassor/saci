@@ -120,7 +120,7 @@ schema_fields "total" type="float64"
     }
 
     // MariaDB and MySQL carry their own wire format, so neither factory reads a
-    // transformer and every build below is handed none.
+    // codec and every build below is handed none.
 
     #[test]
     fn the_source_factory_builds_from_its_config_table() {

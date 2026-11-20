@@ -1,7 +1,7 @@
 //! [`RedbSink`]: one committed redb entry per batch.
 //!
 //! Each batch is encoded into a self-contained document by the node's
-//! transformer and stored under a generated key, in its own write transaction.
+//! codec and stored under a generated key, in its own write transaction.
 //! Nothing is buffered between batches: an accepted batch is already on disk
 //! (with the default `Immediate` durability), so a failed run leaves every
 //! entry it reported as written behind.
@@ -18,15 +18,14 @@ use redb::{Database, ReadableDatabase, TableDefinition, TableError};
 
 use crate::error::SaciError;
 use crate::io::sink::Sink;
-use crate::transformer::Transformer;
 
 use crate::connector::redb::config::RedbSinkConfig;
 use crate::connector::redb::key::{entry_key, parse_seq};
 
 /// A `std::io::Write` handle onto a shared byte buffer.
 ///
-/// [`Transformer::open_writer`] takes ownership of the handle and
-/// [`BatchWriter::finish`](crate::transformer::BatchWriter::finish) consumes the
+/// [`Codec::open_writer`] takes ownership of the handle and
+/// [`BatchWriter::finish`](crate::codec::BatchWriter::finish) consumes the
 /// writer, so the sink keeps a second handle on the same bytes to read the
 /// finished document back out. The same trick `S3Sink` and `HttpSink` play,
 /// and `FileSink` with `File::try_clone`.
@@ -53,7 +52,7 @@ impl std::io::Write for SharedBuffer {
     }
 }
 
-/// redb [`Sink`]: one entry per batch, the transformer writes the value.
+/// redb [`Sink`]: one entry per batch, the codec writes the value.
 ///
 /// # Example
 ///
@@ -63,7 +62,7 @@ impl std::io::Write for SharedBuffer {
 ///
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::redb::{DurabilityMode, RedbSink, RedbSinkConfig};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let config = RedbSinkConfig {
 ///     directory: PathBuf::from("/data/orders"),
@@ -80,7 +79,7 @@ impl std::io::Write for SharedBuffer {
 ///     schema_fields: Vec::new(),
 /// };
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-/// let sink = RedbSink::open(config, schema, Arc::new(CsvTransformer::new(true))).unwrap();
+/// let sink = RedbSink::open(config, schema, Arc::new(CsvCodec::new(true))).unwrap();
 /// ```
 pub struct RedbSink {
     /// `None` after [`Sink::finish`], which is what releases the file lock.
@@ -100,7 +99,7 @@ pub struct RedbSink {
     quick_repair: bool,
     compact: bool,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
 }
 
 impl RedbSink {
@@ -121,7 +120,7 @@ impl RedbSink {
     pub fn open(
         config: RedbSinkConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         config.validate("RedbSink")?;
         let path = config.path();
@@ -161,7 +160,7 @@ impl RedbSink {
             quick_repair: config.quick_repair,
             compact: config.compact,
             schema,
-            transformer,
+            codec,
         })
     }
 
@@ -173,7 +172,7 @@ impl RedbSink {
     fn encode(&self, batch: &RecordBatch) -> Result<Vec<u8>, SaciError> {
         let buffer = SharedBuffer::default();
         let mut writer = self
-            .transformer
+            .codec
             .open_writer(Box::new(buffer.clone()), Arc::clone(&self.schema))?;
         writer.write_batch(batch)?;
         // Consumes the writer, so the format's own trailer reaches the buffer.
@@ -264,7 +263,7 @@ impl Sink for RedbSink {
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Generic`] after `finish`, when the transformer
+    /// Returns [`SaciError::Generic`] after `finish`, when the codec
     /// refuses the batch, when the generated key is already present (a foreign
     /// writer took it), or on any redb failure. The sequence advances only
     /// after the commit succeeds, so a caller's retry reuses the same key.

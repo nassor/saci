@@ -20,7 +20,7 @@
 //! ```
 //!
 //! One `workflow` declares the whole DAG: sources, `wasm`/`plugin` processors,
-//! sinks and transformers, each with a mandatory id and an optional name,
+//! sinks and codecs, each with a mandatory id and an optional name,
 //! connected by explicit `link from="..." to="..."` declarations. See
 //! [`WorkflowSpec`].
 //!
@@ -763,13 +763,13 @@ pub struct PluginSpec {
 /// ```
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct TransformerSpec {
+pub struct CodecSpec {
     /// Mandatory id, from the node's leading argument. Unique workflow-wide.
     pub id: String,
     /// Optional display name. The dashboard shows the id when this is absent.
     #[serde(default)]
     pub name: Option<String>,
-    /// Registered format name, resolved against the `TransformerRegistry`.
+    /// Registered format name, resolved against the `CodecRegistry`.
     pub format: String,
     /// Handed to that format's factory. Empty table when absent.
     #[serde(default = "default_config")]
@@ -1443,8 +1443,8 @@ pub struct SourceSpec {
     pub type_name: String,
     /// Id of the `transformer` node that decodes this source's bytes. Absent
     /// for a connector that produces `RecordBatch`es directly.
-    #[serde(default)]
-    pub transformer: Option<String>,
+    #[serde(default, rename = "transformer")]
+    pub codec: Option<String>,
     /// Name of the component this source writes into. Checked against the
     /// runtime's `declared_components()` at load time.
     pub component: String,
@@ -1482,8 +1482,8 @@ pub struct SinkSpec {
     pub type_name: String,
     /// Id of the `transformer` node that encodes this sink's bytes. Absent
     /// for a connector that consumes `RecordBatch`es directly.
-    #[serde(default)]
-    pub transformer: Option<String>,
+    #[serde(default, rename = "transformer")]
+    pub codec: Option<String>,
     /// Name of the component this sink reads from. Checked against the
     /// runtime's `declared_components()` at load time.
     pub component: String,
@@ -1534,9 +1534,9 @@ pub(crate) enum NodeKind {
 }
 
 /// One `workflow`: the whole DAG of sources, processors, sinks and
-/// transformers, wired together by explicit [`LinkSpec`] declarations.
+/// codecs, wired together by explicit [`LinkSpec`] declarations.
 ///
-/// Every declared transformer, source, `wasm`, `plugin` and sink id shares one
+/// Every declared codec, source, `wasm`, `plugin` and sink id shares one
 /// namespace and must be unique; see `WorkflowSpec::validate` for the full
 /// set of load-time graph rules.
 ///
@@ -1556,7 +1556,7 @@ pub struct WorkflowSpec {
     pub name: Option<String>,
     /// Declared byte formats, one `transformer` node each.
     #[serde(rename = "transformer", default, deserialize_with = "one_or_many")]
-    pub transformers: Vec<TransformerSpec>,
+    pub codecs: Vec<CodecSpec>,
     /// Data sources feeding the workflow. One `source` node each.
     #[serde(rename = "source", default, deserialize_with = "one_or_many")]
     pub sources: Vec<SourceSpec>,
@@ -1617,11 +1617,11 @@ impl WorkflowSpec {
         out
     }
 
-    /// Every declared id outside `nodes()` too (transformers), each paired
+    /// Every declared id outside `nodes()` too (codecs), each paired
     /// with the KDL node kind that declared it, for id-validation messages.
     fn declared_ids(&self) -> Vec<(&str, &'static str)> {
         let mut out = Vec::new();
-        for t in &self.transformers {
+        for t in &self.codecs {
             out.push((t.id.as_str(), "transformer"));
         }
         for (id, kind) in self.nodes() {
@@ -1747,13 +1747,12 @@ impl WorkflowSpec {
             seen.insert(id, kind);
         }
 
-        // 4. Every source.transformer / sink.transformer names a declared
-        //    transformer id.
-        let transformer_ids: HashSet<&str> =
-            self.transformers.iter().map(|t| t.id.as_str()).collect();
+        // 4. Every source.codec / sink.codec names a declared codec id (the
+        //    `transformer` node in KDL).
+        let codec_ids: HashSet<&str> = self.codecs.iter().map(|t| t.id.as_str()).collect();
         for s in &self.sources {
-            if let Some(t) = &s.transformer
-                && !transformer_ids.contains(t.as_str())
+            if let Some(t) = &s.codec
+                && !codec_ids.contains(t.as_str())
             {
                 return Err(SaciError::configuration(format!(
                     "workflow '{wf}': source '{}' names transformer '{t}', \
@@ -1763,8 +1762,8 @@ impl WorkflowSpec {
             }
         }
         for s in &self.sinks {
-            if let Some(t) = &s.transformer
-                && !transformer_ids.contains(t.as_str())
+            if let Some(t) = &s.codec
+                && !codec_ids.contains(t.as_str())
             {
                 return Err(SaciError::configuration(format!(
                     "workflow '{wf}': sink '{}' names transformer '{t}', which is not declared",
@@ -1774,7 +1773,7 @@ impl WorkflowSpec {
         }
 
         // 5. Every link.from / link.to names a declared source, wasm, plugin
-        //    or sink id, and from != to. A transformer id is not a node, so
+        //    or sink id, and from != to. A codec id is not a node, so
         //    it is rejected here too.
         let node_kind: HashMap<&str, NodeKind> =
             nodes.iter().map(|&(id, kind)| (id, kind)).collect();
@@ -2626,14 +2625,14 @@ peer id=2 addr="127.0.0.2:9000"
             workflows: vec![WorkflowSpec {
                 id: "payments".to_string(),
                 name: None,
-                transformers: Vec::new(),
+                codecs: Vec::new(),
                 sources: vec![SourceSpec {
                     heal: None,
                     flow_control: None,
                     id: "kafka_in".to_string(),
                     name: None,
                     type_name: "MongoSource".to_string(),
-                    transformer: None,
+                    codec: None,
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
                     config: default_config(),
@@ -2645,7 +2644,7 @@ peer id=2 addr="127.0.0.2:9000"
                     id: "pg_out".to_string(),
                     name: None,
                     type_name: "PostgresSink".to_string(),
-                    transformer: None,
+                    codec: None,
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
                     config: default_config(),
@@ -3547,7 +3546,7 @@ workflow "w" {
             workflows: vec![WorkflowSpec {
                 id: "w".to_string(),
                 name: None,
-                transformers: Vec::new(),
+                codecs: Vec::new(),
                 sources: Vec::new(),
                 wasm: vec![WasmSpec {
                     id: "p".to_string(),
@@ -4032,7 +4031,7 @@ link from="shared" to="shared"
     }
 
     #[test]
-    fn rule_source_transformer_must_be_declared() {
+    fn rule_source_codec_must_be_declared() {
         let err = workflow_err(
             r#"
 source "in" type="NoopSource" transformer="missing" component="X"

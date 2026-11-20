@@ -18,7 +18,7 @@ use crate::connector::opentelemetry::source::OpenTelemetryMetricsSource;
 ///
 /// The `config` table is [`OpenTelemetryMetricsSourceConfig`]: the push mode's
 /// shorthand keys, or a `mode` block naming `push` or `pull`, and the
-/// `schema_fields` entries declaring the Arrow schema to emit. No transformer
+/// `schema_fields` entries declaring the Arrow schema to emit. No codec
 /// is resolved: the connector carries `RecordBatch`es and owns the OTLP
 /// decoding itself.
 pub struct OpenTelemetryMetricsSourceFactory;
@@ -54,7 +54,7 @@ impl SourceFactory for OpenTelemetryMetricsSourceFactory {
 ///
 /// The `config` table is [`OpenTelemetryMetricsSinkConfig`]: the collector's
 /// `url`, the body `encoding`, the `headers` every export carries, and the
-/// timeouts and counts documented on the config type. No transformer is
+/// timeouts and counts documented on the config type. No codec is
 /// resolved: an OTLP request is the wire format.
 pub struct OpenTelemetryMetricsSinkFactory;
 

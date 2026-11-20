@@ -1,4 +1,4 @@
-//! Harness for the connector/transformer/processor test matrix.
+//! Harness for the connector/codec/processor test matrix.
 //!
 //! One [`Case`] is one `{source connector, sink connector, byte format,
 //! processor runtime}` tuple. [`run_case`] turns it into a KDL config, loads it
@@ -25,10 +25,10 @@
 //!
 //! One format per case, applied to every byte-carrying end. The independent
 //! source-format x sink-format cross product is not taken: it is 25920 cases
-//! against 4320, and a mixed pair adds no connector or transformer coverage
+//! against 4320, and a mixed pair adds no connector or codec coverage
 //! over the two paired cases that already cover both halves.
 //!
-//! The transformer dimension is not reduced either: every one of the 4320
+//! The codec dimension is not reduced either: every one of the 4320
 //! cases runs, so nothing is traded away to fit a time budget.
 //!
 //! # Row schema per processor
@@ -63,7 +63,7 @@
 //!
 //! | Connector | Surface | Evidence |
 //! |---|---|---|
-//! | `channel`, `postgresql`, `mariadb`, `turso`, `saci`, `clickhouse`, `opentelemetry` | rows | none of them resolves a transformer |
+//! | `channel`, `postgresql`, `mariadb`, `turso`, `saci`, `clickhouse`, `opentelemetry` | rows | none of them resolves a codec |
 //! | `file` | stream | `connector/file/{source,sink}.rs` call `open_reader`/`open_writer` |
 //! | `redb` | stream | `connector/redb/{source,sink}.rs` spool one entry |
 //! | `http` | stream | `connector/http/{source,sink}.rs` spool a whole document |
@@ -74,9 +74,9 @@
 //! | `kafka` | message | `connector/kafka/{source,sink}.rs`, plus a `message_shape` gate |
 //! | `nats` | message | `connector/nats/{source,sink}.rs`, plus a `message_shape` gate |
 //!
-//! Which surface a format offers, taken from the methods each transformer
-//! actually overrides (the [`Transformer`] contract defaults every unsupported
-//! method to `saci::transformer::unsupported`):
+//! Which surface a format offers, taken from the methods each codec
+//! actually overrides (the [`Codec`] contract defaults every unsupported
+//! method to `saci::codec::unsupported`):
 //!
 //! | Format | Stream | Message | `message_shape` |
 //! |---|---|---|---|
@@ -135,12 +135,12 @@
 //!
 //! | Refusal | Site | Evidence |
 //! |---|---|---|
-//! | byte connector with no `transformer` key | build | `ConnectorContext::transformer` |
+//! | byte connector with no `transformer` key | build | `ConnectorContext::codec` |
 //! | `avro` + WASM on a `file` source | build | the container file's `Int64` disagrees with `Ping.seq` |
 //! | `avro` + WASM on an `http`/`http-push`/`s3` source | run | the `schema_from` cross-check compares the document's `Int64` against `Ping.seq` at drain time |
 //! | `uint64` on a `postgresql` node | build | no `PgFieldType` variant |
 //!
-//! Every transformer implements all four transformer methods, so every byte
+//! Every codec implements all four codec methods, so every byte
 //! connector, on either end, has exactly one format it refuses,
 //! [`Format::None`], and it refuses it while building. The `message_shape`
 //! gates in `KafkaSink`, `NatsSink`, `TcpSink::connect` and
@@ -152,7 +152,7 @@
 //! a case observes: every node is built in topological order (source before
 //! sink), then `validate_workflow_graph` runs over the finished nodes, and only
 //! then does the runner drain and write. So `file -> postgresql` with a WASM
-//! processor reports the source's missing transformer, not the PostgreSQL
+//! processor reports the source's missing codec, not the PostgreSQL
 //! node's unsigned column.
 //!
 //! An `s3` source keeps its refusal under the default four attempts:
@@ -226,13 +226,13 @@
 //! silent about both.
 //!
 //! - **The bytes a format writes.** [`read_back`] decodes a `file`, `http`,
-//!   `tcp` or `udp` sink through the same [`Transformer`] the sink wrote with,
+//!   `tcp` or `udp` sink through the same [`Codec`] the sink wrote with,
 //!   and reads a `kafka`, `nats` or `s3` sink back through the sibling source
 //!   connector. Only the `postgresql` and `mariadb` readbacks go around the connector, in
 //!   SQL. A change that corrupts a format symmetrically therefore cancels out:
 //!   every case round-trips its rows while the file on disk, the object, the
-//!   message and the frame are all in the wrong format. What a transformer
-//!   emits is pinned by that transformer's own unit tests. This matrix pins
+//!   message and the frame are all in the wrong format. What a codec
+//!   emits is pinned by that codec's own unit tests. This matrix pins
 //!   that a connector pair can carry rows through it.
 //! - **Where a build refusal went.** [`execute`] derives `build_only` from
 //!   [`Case::expect`], so a [`Site::Build`] case resolves placeholder
@@ -318,7 +318,6 @@ use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::standalone::{StandaloneStats, run_standalone};
 use saci::system::{SystemMeta, WriteSet, system_fn};
-use saci::transformer::Transformer;
 use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
 
 // ── Dimensions ───────────────────────────────────────────────────────────────
@@ -364,10 +363,10 @@ pub const CONNECTORS: [Connector; 16] = [
     Connector::Redb,
     Connector::OpenTelemetry,
 ];
-/// Which transformer surface a connector drives.
+/// Which codec surface a connector drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
-    /// Carries `RecordBatch`es; no transformer is resolved at all.
+    /// Carries `RecordBatch`es; no codec is resolved at all.
     Rows,
     /// One seekable document per drain or write.
     Stream,
@@ -542,24 +541,16 @@ impl Format {
         self.key().unwrap_or("none")
     }
 
-    /// A transformer instance matching what the registry builds for this
+    /// A codec instance matching what the registry builds for this
     /// format, for seeding and reading back outside the service.
-    fn transformer(self) -> Option<Arc<dyn Transformer>> {
+    fn codec(self) -> Option<Arc<dyn Codec>> {
         match self {
             Self::None => None,
-            Self::ArrowIpc => Some(Arc::new(
-                saci::transformer::arrow_ipc::ArrowIpcTransformer::new(),
-            )),
-            Self::Avro => Some(Arc::new(saci::transformer::avro::AvroTransformer::new(
-                None, None,
-            ))),
-            Self::Csv => Some(Arc::new(saci::transformer::csv::CsvTransformer::new(true))),
-            Self::Ndjson => Some(Arc::new(
-                saci::transformer::ndjson::NdjsonTransformer::default(),
-            )),
-            Self::Parquet => Some(Arc::new(
-                saci::transformer::parquet::ParquetTransformer::new(),
-            )),
+            Self::ArrowIpc => Some(Arc::new(saci::codec::arrow_ipc::ArrowIpcCodec::new())),
+            Self::Avro => Some(Arc::new(saci::codec::avro::AvroCodec::new(None, None))),
+            Self::Csv => Some(Arc::new(saci::codec::csv::CsvCodec::new(true))),
+            Self::Ndjson => Some(Arc::new(saci::codec::ndjson::NdjsonCodec::default())),
+            Self::Parquet => Some(Arc::new(saci::codec::parquet::ParquetCodec::new())),
         }
     }
 
@@ -574,10 +565,10 @@ impl Format {
     /// Does this format offer the surface `connector` drives?
     fn fits(self, connector: Connector) -> bool {
         match connector.surface() {
-            // A rows connector resolves no transformer, so any declaration is
+            // A rows connector resolves no codec, so any declaration is
             // simply unreferenced.
             Surface::Rows => true,
-            // Every transformer implements both byte surfaces, so the only
+            // Every codec implements both byte surfaces, so the only
             // thing a byte connector cannot carry is the absence of a format.
             Surface::Stream | Surface::Message => self != Self::None,
         }
@@ -1111,11 +1102,11 @@ impl Case {
         }
         if self.format == Format::None {
             return rejected(
-                "a byte connector needs a transformer",
+                "a byte connector needs a codec",
                 "needs a 'transformer' key",
             );
         }
-        // Every transformer implements both byte surfaces, so [`Format::None`]
+        // Every codec implements both byte surfaces, so [`Format::None`]
         // above is the only format any byte connector refuses. Nothing else
         // reaches a node without the surface it drives, on either end: a
         // `file`, `http` or `s3` node opens a reader or a writer, a `kafka`,
@@ -1309,7 +1300,7 @@ impl Report {
         );
         println!(
             "{:<12} {:<12} {:<10} {:<8} {:<10} {:<8} {:>9}  detail",
-            "source", "sink", "transformer", "runtime", "outcome", "site", "elapsed"
+            "source", "sink", "codec", "runtime", "outcome", "site", "elapsed"
         );
         for report in &self.cases {
             // One line per case: a failed case's detail also carries the whole
@@ -1933,12 +1924,10 @@ fn kdl_path(path: &Path) -> String {
 
 /// Encode `batch` as one self-contained document in `format`.
 fn encode_document(format: Format, batch: &RecordBatch) -> Result<Vec<u8>, String> {
-    let transformer = format
-        .transformer()
-        .ok_or("Format::None encodes no document")?;
+    let codec = format.codec().ok_or("Format::None encodes no document")?;
     let mut spool = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let handle = spool.reopen().map_err(|e| e.to_string())?;
-    let mut writer = transformer
+    let mut writer = codec
         .open_writer(Box::new(handle), batch.schema())
         .map_err(|e| format!("open_writer: {e}"))?;
     writer
@@ -1953,14 +1942,12 @@ fn encode_document(format: Format, batch: &RecordBatch) -> Result<Vec<u8>, Strin
 
 /// Decode one self-contained `format` document into its batches.
 fn decode_document(format: Format, row: RowKind, bytes: &[u8]) -> Result<Vec<RecordBatch>, String> {
-    let transformer = format
-        .transformer()
-        .ok_or("Format::None decodes no document")?;
+    let codec = format.codec().ok_or("Format::None decodes no document")?;
     let mut spool = tempfile::tempfile().map_err(|e| e.to_string())?;
     spool.write_all(bytes).map_err(|e| e.to_string())?;
     spool.rewind().map_err(|e| e.to_string())?;
     let declared = (!format.carries_its_own_schema()).then(|| row.schema());
-    let mut reader = transformer
+    let mut reader = codec
         .open_reader(spool, declared)
         .map_err(|e| format!("open_reader: {e}"))?;
     let mut batches = Vec::new();
@@ -1979,10 +1966,8 @@ fn decode_document(format: Format, row: RowKind, bytes: &[u8]) -> Result<Vec<Rec
 /// source flushes its decoder per frame, so a `PerRow` format turns three rows
 /// into three items.
 fn encode_frames(format: Format, batch: &RecordBatch) -> Result<Vec<Vec<u8>>, String> {
-    let transformer = format
-        .transformer()
-        .ok_or("Format::None encodes no frame")?;
-    let payloads = transformer
+    let codec = format.codec().ok_or("Format::None encodes no frame")?;
+    let payloads = codec
         .encode_messages(batch)
         .map_err(|e| format!("encode_messages: {e}"))?;
     payloads
@@ -2001,14 +1986,12 @@ fn encode_frames(format: Format, batch: &RecordBatch) -> Result<Vec<Vec<u8>>, St
 /// One datagram per encoded payload, with no prefix at all.
 ///
 /// The datagram boundary is the frame, so the payloads go on the wire exactly
-/// as the transformer produced them. The datagram count is the stream
+/// as the codec produced them. The datagram count is the stream
 /// runner's item count for this batch, the same way [`encode_frames`]'s frame
 /// count is.
 fn encode_datagrams(format: Format, batch: &RecordBatch) -> Result<Vec<Vec<u8>>, String> {
-    let transformer = format
-        .transformer()
-        .ok_or("Format::None encodes no datagram")?;
-    transformer
+    let codec = format.codec().ok_or("Format::None encodes no datagram")?;
+    codec
         .encode_messages(batch)
         .map_err(|e| format!("encode_messages: {e}"))
 }
@@ -2115,10 +2098,8 @@ fn decode_saci_session(bytes: &[u8]) -> Result<Vec<RecordBatch>, String> {
 
 /// Decode a stream of length-prefixed frames into one batch per flush window.
 fn decode_frames(format: Format, row: RowKind, bytes: &[u8]) -> Result<Vec<RecordBatch>, String> {
-    let transformer = format
-        .transformer()
-        .ok_or("Format::None decodes no frame")?;
-    let mut decoder = transformer
+    let codec = format.codec().ok_or("Format::None decodes no frame")?;
+    let mut decoder = codec
         .open_message_decoder(row.schema())
         .map_err(|e| format!("open_message_decoder: {e}"))?;
     let mut at = 0usize;
@@ -2159,10 +2140,8 @@ fn decode_datagrams(
     row: RowKind,
     datagrams: &[Vec<u8>],
 ) -> Result<Vec<RecordBatch>, String> {
-    let transformer = format
-        .transformer()
-        .ok_or("Format::None decodes no datagram")?;
-    let mut decoder = transformer
+    let codec = format.codec().ok_or("Format::None decodes no datagram")?;
+    let mut decoder = codec
         .open_message_decoder(row.schema())
         .map_err(|e| format!("open_message_decoder: {e}"))?;
     let mut batches = Vec::new();
@@ -2602,7 +2581,7 @@ impl SourceProbe {
                 saci::connector::http::HttpSource::new(
                     &url,
                     format
-                        .transformer()
+                        .codec()
                         .ok_or("a probed source always names a format")?,
                     saci::connector::http::HttpSourceOptions {
                         client: saci::connector::http::HttpClientOptions {
@@ -2632,7 +2611,7 @@ impl SourceProbe {
                     },
                     schema,
                     format
-                        .transformer()
+                        .codec()
                         .ok_or("a probed source always names a format")?,
                 )
                 .map_err(|e| format!("probe source: {e}"))?,
@@ -2645,7 +2624,7 @@ impl SourceProbe {
                 return push_refusal(
                     document,
                     format
-                        .transformer()
+                        .codec()
                         .ok_or("a probed source always names a format")?,
                     schema,
                 )
@@ -2671,12 +2650,12 @@ impl SourceProbe {
 /// and sent down the channel as an `Err`, which is what this reads.
 async fn push_refusal(
     document: Vec<u8>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
 ) -> Result<String, String> {
     let mut source = saci::connector::http::HttpPushSource::new(
         "127.0.0.1:0",
-        transformer,
+        codec,
         saci::connector::http::HttpPushOptions {
             declared: schema,
             schema_from: saci::connector::http::SchemaFrom::Body,
@@ -2940,7 +2919,7 @@ async fn prepare_source(
     let component = row.component();
     let batch = row.input(index);
     let format = case.format;
-    let transformer_key = format
+    let codec_key = format
         .key()
         .map(|_| " transformer=\"fmt\"".to_string())
         .unwrap_or_default();
@@ -3006,7 +2985,7 @@ async fn prepare_source(
                 format!("\n{fields}")
             };
             side.kdl = format!(
-                "    source \"in\" type=\"FileSource\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"FileSource\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            path \"{}\"{declared}\n        }}\n    }}",
                 kdl_path(&path)
             );
@@ -3019,7 +2998,7 @@ async fn prepare_source(
             // as a projection target, whatever the format, so every `redb`
             // case declares one.
             side.kdl = format!(
-                "    source \"in\" type=\"RedbSource\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"RedbSource\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            directory \"{}\"\n{fields}\n        }}\n    }}",
                 kdl_path(dir.path())
             );
@@ -3043,7 +3022,7 @@ async fn prepare_source(
                 schema: row.schema(),
             });
             side.kdl = format!(
-                "    source \"in\" type=\"HttpSource\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"HttpSource\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            url \"{}\"{schema_from_kdl}\n            timeout_ms 15000\n{fields}\n        }}\n    }}",
                 probe.url
             );
@@ -3079,7 +3058,7 @@ async fn prepare_source(
                     schema: row.schema(),
                 });
             side.kdl = format!(
-                "    source \"in\" type=\"HttpPushSource\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"HttpPushSource\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            path \"/matrix\"\n            buffer 8{schema_from_kdl}\n{fields}\n        }}\n    }}"
             );
             side.http_push = Some((format!("http://{bind}/matrix"), documents));
@@ -3127,7 +3106,7 @@ async fn prepare_source(
                 Vec::new()
             };
             side.kdl = format!(
-                "    source \"in\" type=\"tcp\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"tcp\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n            max_frame_bytes 1048576\n{fields}\n        }}\n    }}"
             );
             side.tcp = Some((bind, frames));
@@ -3146,7 +3125,7 @@ async fn prepare_source(
             // kernel holds every datagram the driver sends before the receive
             // loop starts. That is what stands in for tcp's accept backlog.
             side.kdl = format!(
-                "    source \"in\" type=\"udp\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"udp\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n{fields}\n        }}\n    }}"
             );
             side.udp = Some((bind, datagrams));
@@ -3157,7 +3136,7 @@ async fn prepare_source(
             // item arithmetic still holds: the hello rides in front of the
             // first data frame rather than being an entry of its own, and one
             // data frame is one batch whatever the declared format is. A
-            // `saci` node resolves no transformer, so `format` never gates
+            // `saci` node resolves no codec, so `format` never gates
             // this half.
             let bytes = saci_hello_and_batch(&batch)?;
             side.kdl = format!(
@@ -3172,7 +3151,7 @@ async fn prepare_source(
                 seed_kafka(&endpoints.brokers, &topic, format, &batch).await?;
             }
             side.kdl = format!(
-                "    source \"in\" type=\"KafkaSource\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"KafkaSource\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            brokers \"{}\"\n            topic \"{topic}\"\n\
                  \x20           group_id \"{}\"\n            stop_at_end #true\n            poll_timeout_ms 25000\n{fields}\n        }}\n    }}",
                 endpoints.brokers,
@@ -3186,7 +3165,7 @@ async fn prepare_source(
                 seed_nats(&endpoints.nats_url, &stream, &subject, format, &batch).await?;
             }
             side.kdl = format!(
-                "    source \"in\" type=\"NatsSource\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"NatsSource\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            stop_at_end #true\n            poll_timeout_ms 20000\n\
                  \x20           connection {{\n                servers \"{}\"\n            }}\n\
                  \x20           mode kind=\"jetstream\" {{\n                stream \"{stream}\"\n\
@@ -3300,7 +3279,7 @@ async fn prepare_source(
             let prefix = unique("in");
             // The object is always real, and every format a case can name has
             // a stream writer to encode one with. A node carrying no
-            // transformer at all is refused while building, so `live` is
+            // codec at all is refused while building, so `live` is
             // false there; an empty prefix would make a refusal
             // indistinguishable from an empty bucket.
             if live {
@@ -3326,7 +3305,7 @@ async fn prepare_source(
                 schema_from,
             });
             side.kdl = format!(
-                "    source \"in\" type=\"S3Source\" component=\"{component}\"{transformer_key} {{\n\
+                "    source \"in\" type=\"S3Source\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            prefix \"{prefix}\"{schema_from_kdl}\n{}\n{fields}\n        }}\n    }}",
                 s3_connection_kdl(&endpoints.s3, "            ")
             );
@@ -3347,7 +3326,7 @@ async fn prepare_sink(
     let row = case.row();
     let component = row.component();
     let format = case.format;
-    let transformer_key = format
+    let codec_key = format
         .key()
         .map(|_| " transformer=\"fmt\"".to_string())
         .unwrap_or_default();
@@ -3390,7 +3369,7 @@ async fn prepare_sink(
             let path = dir.path().join("sink.dat");
             (
                 format!(
-                    "    sink \"out\" type=\"FileSink\" component=\"{component}\"{transformer_key} {{\n\
+                    "    sink \"out\" type=\"FileSink\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            path \"{}\"\n            truncate #true\n{fields}\n        }}\n    }}",
                     kdl_path(&path)
                 ),
@@ -3406,7 +3385,7 @@ async fn prepare_sink(
             let directory = dir.path().to_path_buf();
             (
                 format!(
-                    "    sink \"out\" type=\"RedbSink\" component=\"{component}\"{transformer_key} {{\n\
+                    "    sink \"out\" type=\"RedbSink\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            directory \"{}\"\n{fields}\n        }}\n    }}",
                     kdl_path(&directory)
                 ),
@@ -3420,7 +3399,7 @@ async fn prepare_sink(
         Connector::Http => {
             let probe = HttpProbe::spawn(Vec::new())?;
             let kdl = format!(
-                "    sink \"out\" type=\"HttpSink\" component=\"{component}\"{transformer_key} {{\n\
+                "    sink \"out\" type=\"HttpSink\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            url \"{}\"\n            method \"POST\"\n            timeout_ms 15000\n{fields}\n        }}\n    }}",
                 probe.url
             );
@@ -3456,7 +3435,7 @@ async fn prepare_sink(
                 .map_err(|e| format!("tcp collector addr: {e}"))?;
             (
                 format!(
-                    "    sink \"out\" type=\"tcp\" component=\"{component}\"{transformer_key} {{\n\
+                    "    sink \"out\" type=\"tcp\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            connect \"{addr}\"\n{fields}\n        }}\n    }}"
                 ),
                 Readback::Tcp { listener, format },
@@ -3473,7 +3452,7 @@ async fn prepare_sink(
             // echo probe would mark it down and refuse every write.
             (
                 format!(
-                    "    sink \"out\" type=\"udp\" component=\"{component}\"{transformer_key} {{\n\
+                    "    sink \"out\" type=\"udp\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            connect \"{addr}\"\n{fields}\n        }}\n    }}"
                 ),
                 Readback::Udp { socket, format },
@@ -3494,7 +3473,7 @@ async fn prepare_sink(
             let topic = unique("matrix-out");
             (
                 format!(
-                    "    sink \"out\" type=\"KafkaSink\" component=\"{component}\"{transformer_key} {{\n\
+                    "    sink \"out\" type=\"KafkaSink\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            brokers \"{}\"\n            topic \"{topic}\"\n{fields}\n        }}\n    }}",
                     endpoints.brokers
                 ),
@@ -3510,7 +3489,7 @@ async fn prepare_sink(
             let subject = format!("matrix.out.{}", unique("s"));
             (
                 format!(
-                    "    sink \"out\" type=\"NatsSink\" component=\"{component}\"{transformer_key} {{\n\
+                    "    sink \"out\" type=\"NatsSink\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            connection {{\n                servers \"{}\"\n            }}\n\
                      \x20           mode kind=\"jetstream\" {{\n                stream \"{stream}\"\n                subject \"{subject}\"\n            }}\n{fields}\n        }}\n    }}",
                     endpoints.nats_url
@@ -3633,7 +3612,7 @@ async fn prepare_sink(
             let prefix = unique("out");
             (
                 format!(
-                    "    sink \"out\" type=\"S3Sink\" component=\"{component}\"{transformer_key} {{\n\
+                    "    sink \"out\" type=\"S3Sink\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            prefix \"{prefix}\"\n            suffix \".dat\"\n\
                      \x20           flush max_rows=0 max_bytes=0 max_age_ms=0\n{}\n{fields}\n        }}\n    }}",
                     s3_connection_kdl(&endpoints.s3, "            ")
@@ -3661,7 +3640,7 @@ async fn seed_kafka(
     format: Format,
     batch: &RecordBatch,
 ) -> Result<(), String> {
-    let transformer = format.transformer().ok_or("kafka needs a format")?;
+    let codec = format.codec().ok_or("kafka needs a format")?;
     let mut sink = saci::connector::kafka::KafkaSink::new(
         saci::connector::kafka::KafkaSinkConfig {
             brokers: brokers.to_string(),
@@ -3674,7 +3653,7 @@ async fn seed_kafka(
             schema_fields: Vec::new(),
         },
         batch.schema(),
-        transformer,
+        codec,
     )
     .map_err(|e| format!("kafka seed sink: {e}"))?;
     sink.write_batch(batch)
@@ -3692,7 +3671,7 @@ async fn seed_nats(
     format: Format,
     batch: &RecordBatch,
 ) -> Result<(), String> {
-    let transformer = format.transformer().ok_or("nats needs a format")?;
+    let codec = format.codec().ok_or("nats needs a format")?;
     let mut sink = saci::connector::nats::NatsSink::new(
         saci::connector::nats::NatsSinkConfig {
             connection: saci::connector::nats::ConnectionConfig {
@@ -3709,7 +3688,7 @@ async fn seed_nats(
             schema_fields: Vec::new(),
         },
         batch.schema(),
-        transformer,
+        codec,
     )
     .map_err(|e| format!("nats seed sink: {e}"))?;
     sink.write_batch(batch)
@@ -3726,7 +3705,7 @@ async fn seed_s3(
     format: Format,
     batch: &RecordBatch,
 ) -> Result<(), String> {
-    let transformer = format.transformer().ok_or("s3 needs a format")?;
+    let codec = format.codec().ok_or("s3 needs a format")?;
     let mut sink = saci::connector::s3::S3Sink::new(
         saci::connector::s3::S3SinkConfig {
             connection: connection.clone(),
@@ -3740,7 +3719,7 @@ async fn seed_s3(
             schema_fields: Vec::new(),
         },
         batch.schema(),
-        transformer,
+        codec,
     )
     .map_err(|e| format!("s3 seed sink: {e}"))?;
     sink.write_batch(batch)
@@ -3960,7 +3939,7 @@ async fn read_back(
             topic,
             format,
         } => {
-            let transformer = format.transformer().ok_or("kafka needs a format")?;
+            let codec = format.codec().ok_or("kafka needs a format")?;
             let source = saci::connector::kafka::KafkaSource::new(
                 saci::connector::kafka::KafkaSourceConfig {
                     brokers,
@@ -3978,7 +3957,7 @@ async fn read_back(
                     schema_fields: Vec::new(),
                 },
                 row.schema(),
-                transformer,
+                codec,
             )
             .map_err(|e| format!("kafka readback source: {e}"))?;
             drain(Box::new(source)).await?
@@ -3988,7 +3967,7 @@ async fn read_back(
             stream,
             format,
         } => {
-            let transformer = format.transformer().ok_or("nats needs a format")?;
+            let codec = format.codec().ok_or("nats needs a format")?;
             let source = saci::connector::nats::NatsSource::new(
                 saci::connector::nats::NatsSourceConfig {
                     connection: saci::connector::nats::ConnectionConfig {
@@ -4009,7 +3988,7 @@ async fn read_back(
                     schema_fields: Vec::new(),
                 },
                 row.schema(),
-                transformer,
+                codec,
             )
             .map_err(|e| format!("nats readback source: {e}"))?;
             drain(Box::new(source)).await?
@@ -4215,7 +4194,7 @@ async fn read_back(
             prefix,
             format,
         } => {
-            let transformer = format.transformer().ok_or("s3 needs a format")?;
+            let codec = format.codec().ok_or("s3 needs a format")?;
             let source = saci::connector::s3::S3Source::new(
                 saci::connector::s3::S3SourceConfig {
                     connection,
@@ -4228,7 +4207,7 @@ async fn read_back(
                     schema_fields: Vec::new(),
                 },
                 row.readback_schema(widened_unsigned),
-                transformer,
+                codec,
             )
             .map_err(|e| format!("s3 readback source: {e}"))?;
             drain(Box::new(source)).await?
@@ -4268,7 +4247,7 @@ fn case_kdl(
     processor: &str,
     data_dir: &Path,
 ) -> String {
-    let transformer = match case.format.key() {
+    let codec = match case.format.key() {
         Some("csv") => {
             "    transformer \"fmt\" format=\"csv\" {\n        options has_headers=#true\n    }\n"
                 .to_string()
@@ -4299,7 +4278,7 @@ node id=1 name="saci-matrix" data_dir="{data_dir}"
 run_mode kind="{run_mode}"
 
 {feeder}workflow "matrix" {{
-{transformer}{source_kdl}
+{codec}{source_kdl}
 
 {processor}
 
@@ -5057,7 +5036,7 @@ pub async fn run_maximal(
         ),
     ];
 
-    let mut transformers: Vec<String> = Vec::new();
+    let mut codecs: Vec<String> = Vec::new();
     let mut nodes: Vec<MaxNode> = Vec::new();
     let mut links: Vec<String> = Vec::new();
     let mut source_labels = Vec::new();
@@ -5100,7 +5079,7 @@ pub async fn run_maximal(
         // one of its sinks must hold.
         let mut fed_by: Vec<usize> = Vec::new();
         let fmt_id = format!("fmt{index}");
-        transformers.push(match format {
+        codecs.push(match format {
             Format::Csv => format!(
                 "    transformer \"{fmt_id}\" format=\"csv\" {{\n        options has_headers=#true\n    }}"
             ),
@@ -5199,7 +5178,7 @@ pub async fn run_maximal(
         return Err("no processor could be given both a source and a sink".to_string());
     }
 
-    let body: Vec<String> = transformers
+    let body: Vec<String> = codecs
         .into_iter()
         .chain(nodes.iter().map(|n| n.kdl.clone()))
         .chain(links.iter().cloned())

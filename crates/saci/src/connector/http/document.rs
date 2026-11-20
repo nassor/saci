@@ -1,6 +1,6 @@
 //! Turning one whole document body into batches, shared by the read halves.
 //!
-//! The transformer's stream read surface takes a `std::fs::File` because
+//! The codec's stream read surface takes a `std::fs::File` because
 //! parquet reads its footer before any row group, so a body has to land
 //! somewhere seekable before it can be decoded. It lands in an unnamed temp
 //! file the OS reclaims when the last handle closes, written chunk by chunk as
@@ -17,8 +17,8 @@ use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema};
 use tokio::sync::mpsc;
 
+use crate::codec::{BatchReader, Codec};
 use crate::error::SaciError;
-use crate::transformer::{BatchReader, Transformer};
 
 use crate::connector::http::client::Body;
 
@@ -156,13 +156,13 @@ fn over_cap(what: &str, source: &str, cap: usize) -> SaciError {
 pub(crate) fn open(
     what: &str,
     source: &str,
-    transformer: &Arc<dyn Transformer>,
+    codec: &Arc<dyn Codec>,
     spool: std::fs::File,
     declared: Option<Arc<Schema>>,
     check: bool,
     expected: &Schema,
 ) -> Result<Box<dyn BatchReader>, SaciError> {
-    let reader = transformer.open_reader(spool, declared)?;
+    let reader = codec.open_reader(spool, declared)?;
     if check {
         let carried = reader.schema();
         if carried.fields() != expected.fields() {

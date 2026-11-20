@@ -180,7 +180,7 @@ pub struct S3SinkConfig {
     /// The row/byte/age thresholds that close the open object.
     #[serde(default)]
     pub flush: Flush,
-    /// Declared Arrow schema. Required, whatever the transformer: it is the
+    /// Declared Arrow schema. Required, whatever the codec: it is the
     /// schema the rows are written with.
     #[serde(default, deserialize_with = "crate::connector::one_or_many")]
     pub schema_fields: Vec<ConfigValue>,

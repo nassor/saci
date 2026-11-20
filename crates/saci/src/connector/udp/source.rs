@@ -11,7 +11,7 @@
 //!
 //! One datagram carries exactly one payload, with no length prefix: the
 //! datagram boundary is the frame. What the payload bytes mean is the
-//! [`Transformer`] the host resolved from the source's `transformer` key.
+//! [`Codec`] the host resolved from the source's `transformer` key.
 //!
 //! A zero-length datagram is a liveness probe. The source answers it with a
 //! zero-length datagram to its sender and never decodes it, which is what lets
@@ -31,7 +31,7 @@
 //!
 //! Whether the format can decode a message at all is not a per-datagram
 //! question but a property of the config. [`new`](UdpSource::new) therefore
-//! asks the transformer for a decoder while binding and hands the refusal
+//! asks the codec for a decoder while binding and hands the refusal
 //! back, the way `TcpIngestSource::new` does.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -46,7 +46,6 @@ use tokio::task::JoinHandle;
 
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
 
 use crate::connector::udp::DATAGRAM_BUFFER_BYTES;
 
@@ -61,7 +60,7 @@ pub struct UdpSource {
     socket: Option<std::net::UdpSocket>,
     local_addr: SocketAddr,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// Moved into the receive task with the socket, so `rx` closes exactly
     /// when that task ends.
     tx: Option<mpsc::Sender<RecordBatch>>,
@@ -77,13 +76,13 @@ impl UdpSource {
     /// channel.
     ///
     /// `buffer` is the number of decoded batches that may queue before the
-    /// receive loop stops reading the socket. `transformer` decodes each
+    /// receive loop stops reading the socket. `codec` decodes each
     /// datagram; one decoder is opened here to settle whether this format can
     /// decode a message against `schema` at all.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `transformer` cannot open a
+    /// Returns [`SaciError::Configuration`] if `codec` cannot open a
     /// message decoder for `schema`, if `bind` cannot be bound, or if
     /// `multicast_group` is not a multicast address, is of a different IP
     /// family than `bind`, or cannot be joined.
@@ -92,13 +91,13 @@ impl UdpSource {
         multicast_group: Option<IpAddr>,
         schema: Arc<Schema>,
         buffer: usize,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         // Opening a decoder reads `schema` and nothing else, so every datagram
         // would get this same answer. Asking here is what makes a format with
         // no message decoder a config error the caller is told about, rather
         // than a socket that receives and delivers nothing at all.
-        transformer.open_message_decoder(Arc::clone(&schema))?;
+        codec.open_message_decoder(Arc::clone(&schema))?;
 
         let socket = std::net::UdpSocket::bind(bind).map_err(|e| {
             SaciError::configuration(format!("UdpSource: cannot bind '{bind}': {e}"))
@@ -120,7 +119,7 @@ impl UdpSource {
             socket: Some(socket),
             local_addr,
             schema,
-            transformer,
+            codec,
             tx: Some(tx),
             rx,
             task: None,
@@ -150,10 +149,10 @@ impl UdpSource {
         })?;
 
         let schema = Arc::clone(&self.schema);
-        let transformer = Arc::clone(&self.transformer);
+        let codec = Arc::clone(&self.codec);
         let local_addr = self.local_addr;
         self.task = Some(tokio::spawn(async move {
-            receive(socket, tx, schema, transformer, local_addr).await
+            receive(socket, tx, schema, codec, local_addr).await
         }));
         Ok(())
     }
@@ -200,10 +199,10 @@ async fn receive(
     socket: UdpSocket,
     tx: mpsc::Sender<RecordBatch>,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     local_addr: SocketAddr,
 ) -> SaciError {
-    let mut decoder = match transformer.open_message_decoder(Arc::clone(&schema)) {
+    let mut decoder = match codec.open_message_decoder(Arc::clone(&schema)) {
         Ok(decoder) => decoder,
         Err(e) => return e,
     };
@@ -280,7 +279,7 @@ async fn receive(
                 // rather than only for the formats whose own `flush` refuses
                 // a partial record. A fresh one costs nothing.
                 if spent {
-                    decoder = match transformer.open_message_decoder(Arc::clone(&schema)) {
+                    decoder = match codec.open_message_decoder(Arc::clone(&schema)) {
                         Ok(decoder) => decoder,
                         Err(e) => return e,
                     };
@@ -348,12 +347,12 @@ impl Drop for UdpSource {
     }
 }
 
-#[cfg(all(test, feature = "transformer-arrow-ipc"))]
+#[cfg(all(test, feature = "codec-arrow-ipc"))]
 mod tests {
     use super::*;
-    use crate::transformer::arrow_ipc::ArrowIpcTransformer;
-    use crate::transformer::ndjson::NdjsonTransformer;
-    use crate::transformer::{MessageDecoder, MessageShape};
+    use crate::codec::arrow_ipc::ArrowIpcCodec;
+    use crate::codec::ndjson::NdjsonCodec;
+    use crate::codec::{MessageDecoder, MessageShape};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
     use std::time::Duration;
@@ -363,14 +362,14 @@ mod tests {
     }
 
     /// The datagram rule is what this crate owns; the payload codec is the
-    /// transformer's, and its own tests cover the decode paths.
-    fn arrow_ipc() -> Arc<dyn Transformer> {
-        Arc::new(ArrowIpcTransformer::new())
+    /// codec's, and its own tests cover the decode paths.
+    fn arrow_ipc() -> Arc<dyn Codec> {
+        Arc::new(ArrowIpcCodec::new())
     }
 
     /// One message per row, so a batch of three rows is three datagrams.
-    fn ndjson() -> Arc<dyn Transformer> {
-        Arc::new(NdjsonTransformer::new(64))
+    fn ndjson() -> Arc<dyn Codec> {
+        Arc::new(NdjsonCodec::new(64))
     }
 
     fn batch(values: &[i64]) -> RecordBatch {
@@ -381,8 +380,8 @@ mod tests {
         .expect("build batch")
     }
 
-    fn encode(transformer: &Arc<dyn Transformer>, values: &[i64]) -> Vec<Vec<u8>> {
-        transformer
+    fn encode(codec: &Arc<dyn Codec>, values: &[i64]) -> Vec<Vec<u8>> {
+        codec
             .encode_messages(&batch(values))
             .expect("encode messages")
     }
@@ -422,7 +421,7 @@ mod tests {
     /// message surface, so the gate is exercised against a stand-in.
     struct StreamOnly;
 
-    impl Transformer for StreamOnly {
+    impl Codec for StreamOnly {
         fn format(&self) -> &'static str {
             "stream-only"
         }
@@ -724,9 +723,9 @@ mod tests {
     /// A format whose decoder carries a buffer across `push` calls: real
     /// enough to show that the receive loop's decoder replacement covers an
     /// empty flush, not only a failed one.
-    struct BufferingTransformer;
+    struct BufferingCodec;
 
-    impl Transformer for BufferingTransformer {
+    impl Codec for BufferingCodec {
         fn format(&self) -> &'static str {
             "buffering-test"
         }
@@ -737,7 +736,7 @@ mod tests {
         ) -> Result<Box<dyn MessageDecoder>, SaciError> {
             Ok(Box::new(BufferingDecoder {
                 buf: Vec::new(),
-                inner: NdjsonTransformer::new(64).open_message_decoder(schema)?,
+                inner: NdjsonCodec::new(64).open_message_decoder(schema)?,
             }))
         }
 
@@ -756,7 +755,7 @@ mod tests {
             None,
             test_schema(),
             4,
-            Arc::new(BufferingTransformer),
+            Arc::new(BufferingCodec),
         )
         .expect("bind");
         let addr = source.local_addr();

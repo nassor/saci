@@ -1,6 +1,6 @@
 //! The HTTP source, sink and push source factories.
 //!
-//! All three resolve their byte format through the transformer the host bound
+//! All three resolve their byte format through the codec the host bound
 //! to this connector instance via a declared `transformer` key. The schema is
 //! where they differ: a document mode source hands the format whatever
 //! `schema_fields` says, including nothing, and lets the format decide, while a
@@ -387,8 +387,8 @@ fn client_options(
 ///   `"body"` withholds it and checks the body's own schema against it field
 ///   for field. `kind="document"` only.
 ///
-/// The byte format is whatever transformer the `source` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
+/// The byte format is whatever codec the `source` node's `transformer`
+/// key names; see [`ConnectorContext::codec`].
 pub struct HttpSourceFactory;
 
 impl SourceFactory for HttpSourceFactory {
@@ -402,10 +402,10 @@ impl SourceFactory for HttpSourceFactory {
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
         let url = required_url(config, "HttpSource")?;
-        let transformer = ctx.transformer("HttpSource")?;
+        let codec = ctx.codec("HttpSource")?;
         Ok(Box::new(HttpSource::new(
             url,
-            transformer,
+            codec,
             HttpSourceOptions {
                 client: client_options(config, ctx, "HttpSource")?,
                 declared: parse_optional_schema_fields(config, "HttpSource")?,
@@ -445,8 +445,8 @@ impl SourceFactory for HttpSourceFactory {
 /// - `schema_fields` (list, required): the Arrow schema each body is written
 ///   with.
 ///
-/// The byte format is whatever transformer the `sink` node's `transformer` key
-/// names; see [`ConnectorContext::transformer`].
+/// The byte format is whatever codec the `sink` node's `transformer` key
+/// names; see [`ConnectorContext::codec`].
 pub struct HttpSinkFactory;
 
 impl SinkFactory for HttpSinkFactory {
@@ -460,7 +460,7 @@ impl SinkFactory for HttpSinkFactory {
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
         let url = required_url(config, "HttpSink")?;
-        let transformer = ctx.transformer("HttpSink")?;
+        let codec = ctx.codec("HttpSink")?;
         let schema = parse_schema_fields(config, "HttpSink")?;
         let method = match config.get("method") {
             None => DEFAULT_METHOD,
@@ -471,7 +471,7 @@ impl SinkFactory for HttpSinkFactory {
         Ok(Box::new(HttpSink::new(
             url,
             schema,
-            transformer,
+            codec,
             HttpSinkOptions {
                 client: client_options(config, ctx, "HttpSink")?,
                 method: method.to_string(),
@@ -513,8 +513,8 @@ impl SinkFactory for HttpSinkFactory {
 /// - `schema_from` (`"config"` or `"body"`, optional, default `"config"`): as
 ///   on [`HttpSourceFactory`].
 ///
-/// The byte format is whatever transformer the `source` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
+/// The byte format is whatever codec the `source` node's `transformer`
+/// key names; see [`ConnectorContext::codec`].
 pub struct HttpPushSourceFactory;
 
 impl SourceFactory for HttpPushSourceFactory {
@@ -531,7 +531,7 @@ impl SourceFactory for HttpPushSourceFactory {
         let bind = config.get("bind").and_then(|v| v.as_str()).ok_or_else(|| {
             SaciError::configuration(format!("{what} config requires a 'bind' string"))
         })?;
-        let transformer = ctx.transformer(what)?;
+        let codec = ctx.codec(what)?;
         let declared = parse_schema_fields(config, what)?;
 
         let path = match config.get("path") {
@@ -564,7 +564,7 @@ impl SourceFactory for HttpPushSourceFactory {
 
         Ok(Box::new(HttpPushSource::new(
             bind,
-            transformer,
+            codec,
             HttpPushOptions {
                 declared,
                 schema_from: schema_from(config, what)?,
@@ -661,27 +661,27 @@ fn push_bearer(config: &ConfigValue, what: &str) -> Result<Option<String>, SaciE
     }
 }
 
-#[cfg(all(test, feature = "transformer-csv", feature = "transformer-ndjson"))]
+#[cfg(all(test, feature = "codec-csv", feature = "codec-ndjson"))]
 mod tests {
     use std::sync::Arc;
 
+    use crate::codec::csv::CsvCodecFactory;
+    use crate::codec::ndjson::NdjsonCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::csv::CsvTransformerFactory;
-    use crate::transformer::ndjson::NdjsonTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
 
     use super::*;
 
-    fn csv_transformer() -> Arc<dyn Transformer> {
-        CsvTransformerFactory
+    fn csv_codec() -> Arc<dyn Codec> {
+        CsvCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("csv transformer builds")
+            .expect("csv codec builds")
     }
 
-    fn ndjson_transformer() -> Arc<dyn Transformer> {
-        NdjsonTransformerFactory
+    fn ndjson_codec() -> Arc<dyn Codec> {
+        NdjsonCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("ndjson transformer builds")
+            .expect("ndjson codec builds")
     }
 
     fn empty_config() -> ConfigValue {
@@ -697,7 +697,7 @@ mod tests {
     /// Build a source from `raw` and expect a configuration error whose
     /// message contains `fragment`.
     fn source_refuses(raw: &str, fragment: &str) {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         let Err(err) = HttpSourceFactory.build(&config(raw), &ctx) else {
             panic!("expected a refusal naming {fragment}");
         };
@@ -707,7 +707,7 @@ mod tests {
 
     /// The same for a sink.
     fn sink_refuses(raw: &str, fragment: &str) {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         let Err(err) = HttpSinkFactory.build(&config(raw), &ctx) else {
             panic!("expected a refusal naming {fragment}");
         };
@@ -717,7 +717,7 @@ mod tests {
 
     /// The same for a push source, which needs a message-capable format.
     fn push_refuses(raw: &str, fragment: &str) {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let Err(err) = HttpPushSourceFactory.build(&config(raw), &ctx) else {
             panic!("expected a refusal naming {fragment}");
         };
@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn a_missing_url_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
 
         let Err(err) = HttpSourceFactory.build(&empty_config(), &ctx) else {
             panic!("url is required");
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn a_missing_bind_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let Err(err) = HttpPushSourceFactory.build(&empty_config(), &ctx) else {
             panic!("a listener needs an address");
         };
@@ -784,7 +784,7 @@ mod tests {
     /// schema, so this is what distinguishes it from the default.
     #[test]
     fn schema_from_body_reaches_the_source() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         source_refuses(
             "url \"https://example.invalid/orders.csv\"\nschema_from \"body\"",
             "schema_fields",
@@ -796,12 +796,12 @@ mod tests {
     }
 
     #[test]
-    fn a_source_with_no_bound_transformer_is_a_configuration_error() {
+    fn a_source_with_no_bound_codec_is_a_configuration_error() {
         let ctx = ConnectorContext::new(None);
         let raw = format!("url \"http://127.0.0.1:1/data.csv\"\n{SCHEMA}");
 
         let Err(err) = HttpSourceFactory.build(&config(&raw), &ctx) else {
-            panic!("a source that moves bytes needs a bound transformer");
+            panic!("a source that moves bytes needs a bound codec");
         };
         assert_eq!(
             err.message(),
@@ -810,12 +810,12 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_with_no_bound_transformer_is_a_configuration_error() {
+    fn a_sink_with_no_bound_codec_is_a_configuration_error() {
         let ctx = ConnectorContext::new(None);
         let raw = format!("url \"http://127.0.0.1:1/ingest\"\n{SCHEMA}");
 
         let Err(err) = HttpSinkFactory.build(&config(&raw), &ctx) else {
-            panic!("a sink that moves bytes needs a bound transformer");
+            panic!("a sink that moves bytes needs a bound codec");
         };
         assert_eq!(
             err.message(),
@@ -832,7 +832,7 @@ mod tests {
     /// exist still builds, so `validate` never depends on the network.
     #[test]
     fn both_halves_build_against_an_endpoint_that_is_down() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         let raw = format!(
             r#"
 url "http://127.0.0.1:1/data.csv"
@@ -857,7 +857,7 @@ headers {{
 
     #[test]
     fn a_source_without_schema_fields_reports_an_empty_schema() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         let source = HttpSourceFactory
             .build(&config("url \"http://127.0.0.1:1/data.csv\"\n"), &ctx)
             .expect("the format decides whether it needs a declared schema");
@@ -932,7 +932,7 @@ headers {{
 
     #[test]
     fn every_http_version_spelling_is_accepted_and_nothing_else_is() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         for version in ["auto", "1.1", "2"] {
             HttpSourceFactory
                 .build(
@@ -1024,7 +1024,7 @@ headers {{
 
     #[test]
     fn a_non_positive_window_key_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let Err(err) = HttpSourceFactory.build(
             &config(&format!(
                 "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\" batch_size=0\n{SCHEMA}"
@@ -1042,7 +1042,7 @@ headers {{
 
     #[test]
     fn a_non_string_mode_event_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let Err(err) = HttpSourceFactory.build(
             &config(&format!(
                 "url \"http://127.0.0.1:1/live\"\nmode kind=\"events\" event=7\n{SCHEMA}"
@@ -1059,7 +1059,7 @@ headers {{
 
     #[test]
     fn an_event_filter_on_the_lines_kind_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let Err(err) = HttpSourceFactory.build(
             &config(&format!(
                 "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\" event=\"x\"\n{SCHEMA}"
@@ -1089,7 +1089,7 @@ headers {{
 
     #[test]
     fn pagination_and_conditional_are_refused_next_to_a_streaming_kind() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         for (key, fragment) in [
             (
                 "pagination \"link\"",
@@ -1114,7 +1114,7 @@ headers {{
 
     #[test]
     fn a_streaming_kind_without_schema_fields_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let Err(err) = HttpSourceFactory.build(
             &config("url \"http://127.0.0.1:1/live\"\nmode kind=\"events\""),
             &ctx,
@@ -1129,7 +1129,7 @@ headers {{
 
     #[test]
     fn schema_from_body_is_refused_next_to_a_streaming_kind() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let Err(err) = HttpSourceFactory.build(
             &config(&format!(
                 "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\"\nschema_from \"body\"\n{SCHEMA}"
@@ -1151,7 +1151,7 @@ headers {{
     fn a_format_with_no_message_decoder_is_refused_for_a_streaming_kind() {
         struct StreamOnly;
 
-        impl Transformer for StreamOnly {
+        impl Codec for StreamOnly {
             fn format(&self) -> &'static str {
                 "stream-only"
             }
@@ -1203,7 +1203,7 @@ headers {{
 
     #[test]
     fn a_push_source_binds_and_reports_the_declared_schema() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         let source = HttpPushSourceFactory
             .build(
                 &config(&format!(
@@ -1295,7 +1295,7 @@ headers {{
     /// refused, matching `tcp` and `udp`.
     #[test]
     fn a_zero_buffer_is_clamped_rather_than_refused() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         HttpPushSourceFactory
             .build(
                 &config(&format!("bind \"127.0.0.1:0\"\nbuffer 0\n{SCHEMA}")),

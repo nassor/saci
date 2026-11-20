@@ -1,4 +1,4 @@
-//! [`HttpSink`]: one HTTP request per batch, the body written by a transformer.
+//! [`HttpSink`]: one HTTP request per batch, the body written by a codec.
 //!
 //! Each batch gets a fresh writer over a fresh in-memory buffer, so every
 //! request body is a self-contained document in the configured format: a csv
@@ -7,7 +7,7 @@
 //! which is why [`Sink::finish`] has nothing to do.
 //!
 //! The `content-type` a peer needs to read that document follows from the
-//! transformer's format, so one is supplied unless `headers` already names it.
+//! codec's format, so one is supplied unless `headers` already names it.
 //! `content_encoding` compresses the finished document and declares what it
 //! did; the encoding is the whole body's, so a peer decompresses once and then
 //! reads the same document.
@@ -24,7 +24,6 @@ use reqwest::{Method, StatusCode};
 
 use crate::error::SaciError;
 use crate::io::sink::Sink;
-use crate::transformer::Transformer;
 
 use crate::connector::http::client::{self, HttpClient};
 use crate::connector::http::metrics::Instruments;
@@ -58,7 +57,7 @@ impl ContentEncoding {
     }
 }
 
-/// Everything [`HttpSink::new`] takes past the url, schema and transformer.
+/// Everything [`HttpSink::new`] takes past the url, schema and codec.
 ///
 /// The url is followed across `307` and `308` only, up to ten hops, because
 /// those are the two redirects that keep the method and the body. A `301`,
@@ -97,7 +96,7 @@ pub(crate) fn content_type_for(format: &str) -> Option<&'static str> {
         // The Avro specification's own HTTP media type; no IANA registration
         // exists for the container file.
         "avro" => Some("avro/binary"),
-        // The transformer writes the stream encapsulation, not the file one.
+        // The codec writes the stream encapsulation, not the file one.
         "arrow-ipc" => Some("application/vnd.apache.arrow.stream"),
         _ => None,
     }
@@ -105,8 +104,8 @@ pub(crate) fn content_type_for(format: &str) -> Option<&'static str> {
 
 /// A `std::io::Write` handle onto a shared byte buffer.
 ///
-/// [`Transformer::open_writer`] takes ownership of the handle and
-/// [`BatchWriter::finish`](crate::transformer::BatchWriter::finish) consumes the
+/// [`Codec::open_writer`] takes ownership of the handle and
+/// [`BatchWriter::finish`](crate::codec::BatchWriter::finish) consumes the
 /// writer, so the sink keeps a second handle on the same bytes to read the
 /// finished document back out. The same trick `S3Sink` plays, and `FileSink`
 /// with `File::try_clone`.
@@ -133,7 +132,7 @@ impl std::io::Write for SharedBuffer {
     }
 }
 
-/// HTTP [`Sink`]: one request per batch, the transformer writes the body.
+/// HTTP [`Sink`]: one request per batch, the codec writes the body.
 ///
 /// [`new`](Self::new) opens nothing, so `saci-service validate` passes while the
 /// endpoint is down. The first request happens on the first batch, which is
@@ -141,7 +140,7 @@ impl std::io::Write for SharedBuffer {
 /// and no retry: a request the server refuses fails the run.
 ///
 /// A format with no stream write surface fails on the first batch with the
-/// transformer contract's own error rather than at build.
+/// codec contract's own error rather than at build.
 ///
 /// # Example
 ///
@@ -150,7 +149,7 @@ impl std::io::Write for SharedBuffer {
 ///
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::http::{HttpSink, HttpSinkOptions, HttpVersion};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 /// let mut options = HttpSinkOptions::default();
@@ -158,7 +157,7 @@ impl std::io::Write for SharedBuffer {
 /// let sink = HttpSink::new(
 ///     "https://example.invalid/ingest",
 ///     schema,
-///     Arc::new(CsvTransformer::new(true)),
+///     Arc::new(CsvCodec::new(true)),
 ///     options,
 /// )
 /// .unwrap();
@@ -170,7 +169,7 @@ pub struct HttpSink {
     /// Cloned onto every request: the map is built once in the constructor.
     headers: HeaderMap,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     content_encoding: Option<ContentEncoding>,
     metrics: Instruments,
 }
@@ -179,7 +178,7 @@ impl HttpSink {
     /// Prepare the sink without making a request.
     ///
     /// `schema` is the schema the rows are written with. A `content-type` is
-    /// added from the transformer's format unless `options.client.headers`
+    /// added from the codec's format unless `options.client.headers`
     /// already carries one.
     ///
     /// # Errors
@@ -193,7 +192,7 @@ impl HttpSink {
     pub fn new(
         url: &str,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
         options: HttpSinkOptions,
     ) -> Result<Self, SaciError> {
         let HttpSinkOptions {
@@ -224,7 +223,7 @@ impl HttpSink {
                 "HttpSink: 'content-encoding' is set by content_encoding; remove it from headers",
             ));
         }
-        if !declares_type && let Some(media) = content_type_for(transformer.format()) {
+        if !declares_type && let Some(media) = content_type_for(codec.format()) {
             headers.push(("content-type".to_string(), media.to_string()));
         }
         if let Some(encoding) = content_encoding {
@@ -246,7 +245,7 @@ impl HttpSink {
             method: parsed_method,
             headers: client::header_map(WHAT, headers)?,
             schema,
-            transformer,
+            codec,
             content_encoding,
             metrics: Instruments::new("sink", client_options.identity.as_ref()),
         })
@@ -262,7 +261,7 @@ impl HttpSink {
     fn encode(&self, batch: &RecordBatch) -> Result<Vec<u8>, SaciError> {
         let buffer = SharedBuffer::default();
         let mut writer = self
-            .transformer
+            .codec
             .open_writer(Box::new(buffer.clone()), Arc::clone(&self.schema))?;
         writer.write_batch(batch)?;
         // Consumes the writer, so the format's own trailer reaches the buffer.
@@ -335,7 +334,7 @@ impl Sink for HttpSink {
     ///
     /// # Errors
     ///
-    /// Returns the transformer's error when the format cannot write a stream or
+    /// Returns the codec's error when the format cannot write a stream or
     /// the batch cannot be encoded, and [`SaciError::Generic`] when the request
     /// fails or the server answers outside 2xx.
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
@@ -401,12 +400,12 @@ mod tests {
         )
     }
 
-    /// A transformer with no surfaces at all. Every registered format
+    /// A codec with no surfaces at all. Every registered format
     /// implements `open_writer`, so the contract's defaulted refusal is
     /// reached through a stand-in declared here.
     struct NoStream;
 
-    impl Transformer for NoStream {
+    impl Codec for NoStream {
         fn format(&self) -> &'static str {
             "no-stream"
         }

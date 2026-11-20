@@ -219,7 +219,7 @@ impl KafkaSinkConfig {
         validate_topic(what, &self.topic)?;
 
         // Whether `key_field` is honourable depends on the format's message
-        // shape, which only the resolved transformer knows, so `KafkaSink::new`
+        // shape, which only the resolved codec knows, so `KafkaSink::new`
         // checks it rather than this method.
 
         if self.tombstones && self.key_field.is_none() {

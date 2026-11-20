@@ -1,15 +1,15 @@
 //! One transport, two formats, chosen in config: a CSV `FileSource` and a Parquet
 //! `FileSink` over one component, driven by `run_standalone`.
 //!
-//! This is the behaviour the connector-versus-transformer split exists for. No
+//! This is the behaviour the connector-versus-codec split exists for. No
 //! build of SACI before it could read one byte format and write another through
 //! the same connector, because the format was baked into the `type` name.
 
 #![cfg(all(
     feature = "connector-file",
     feature = "service",
-    feature = "transformer-csv",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-parquet"
 ))]
 
 use std::sync::Arc;
@@ -25,7 +25,6 @@ use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
-use saci::transformer::parquet::ParquetTransformer;
 
 const COMPONENT: &str = "Order";
 
@@ -119,7 +118,7 @@ async fn a_csv_source_and_a_parquet_sink_share_one_file_connector() {
     let built = register_builtin_factories(ServiceBuilder::new())
         .with_runtime("transform", Box::new(build_pipeline()))
         .build_all(&config)
-        .expect("both formats resolve through the transformer registry")
+        .expect("both formats resolve through the codec registry")
         .remove(0);
 
     let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
@@ -131,7 +130,7 @@ async fn a_csv_source_and_a_parquet_sink_share_one_file_connector() {
 
     // Read the Parquet output back. Its schema comes from the file, which is
     // itself proof the footer was written.
-    let mut readback = FileSource::open(&output_path, Arc::new(ParquetTransformer::new()), None)
+    let mut readback = FileSource::open(&output_path, Arc::new(ParquetCodec::new()), None)
         .expect("the sink wrote a readable Parquet file");
     assert_eq!(readback.estimated_rows(), Some(4));
 
@@ -160,7 +159,7 @@ async fn a_csv_source_and_a_parquet_sink_share_one_file_connector() {
 
 /// The same shape as [`config_kdl`], with an `ndjson` sink: a format without a
 /// footer, so two runs can write one file.
-#[cfg(feature = "transformer-ndjson")]
+#[cfg(feature = "codec-ndjson")]
 fn append_config_kdl(input: &str, output: &str, data_dir: &str) -> String {
     format!(
         r#"
@@ -207,7 +206,7 @@ observability log_level="warn"
 
 /// No `truncate` key, so each run's sink opens the same path for appending and
 /// the second run's rows land after the first run's.
-#[cfg(feature = "transformer-ndjson")]
+#[cfg(feature = "codec-ndjson")]
 #[tokio::test]
 async fn two_runs_against_one_path_keep_both_runs_rows() {
     let dir = tempfile::tempdir().expect("tempdir");

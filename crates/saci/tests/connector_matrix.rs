@@ -1,4 +1,4 @@
-//! The connector/transformer/processor matrix, one test per slice.
+//! The connector/codec/processor matrix, one test per slice.
 //!
 //! Every `{source connector, sink connector, byte format, processor runtime}`
 //! combination is built from KDL, assembled through the real factory registry,
@@ -41,9 +41,9 @@
     feature = "connector-udp",
     feature = "plugin-host",
     feature = "service",
-    feature = "transformer-avro",
-    feature = "transformer-csv",
-    feature = "transformer-parquet",
+    feature = "codec-avro",
+    feature = "codec-csv",
+    feature = "codec-parquet",
     feature = "wasm-host"
 ))]
 
@@ -52,10 +52,10 @@ use std::time::Instant;
 
 use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
+use saci::codec::{ConfigMap, ConfigValue, unsupported};
 use saci::error::SaciError;
 use saci::service::builder::ServiceBuilder;
 use saci::service::factories::register_builtin_factories;
-use saci::transformer::{ConfigMap, ConfigValue, unsupported};
 
 #[path = "common/matrix.rs"]
 mod matrix;
@@ -275,15 +275,15 @@ fn every_slice_has_a_test() {
 /// through `Connector::source_type` and the sink names are the same array
 /// through `Connector::sink_type`, which answers `None` for that one entry.
 ///
-/// Without this test, registering one more connector or transformer
+/// Without this test, registering one more connector or codec
 /// format compiles and runs clean: the matrix simply never builds a case for
 /// it. This test builds the real registry the way [`run_case`] does and
 /// compares its shape against the matrix's own lists, so a factory
 /// registered outside them fails here instead of silently losing coverage.
 ///
-/// [`Registry`] and [`TransformerRegistry`] both enumerate what they hold:
+/// [`Registry`] and [`CodecRegistry`] both enumerate what they hold:
 /// `Registry::source_names`, `Registry::sink_names` and
-/// [`TransformerRegistry::formats`] each answer with a sorted list of
+/// [`CodecRegistry::names`] each answer with a sorted list of
 /// registered keys, so all three dimensions are compared as name sets. A count
 /// would pass a connector renamed or swapped for another, which is exactly the
 /// coverage this test exists to pin.
@@ -292,8 +292,8 @@ fn every_slice_has_a_test() {
 /// config, container, or running service involved.
 ///
 /// [`Registry`]: saci::service::registry::Registry
-/// [`TransformerRegistry`]: saci::transformer::TransformerRegistry
-/// [`TransformerRegistry::formats`]: saci::transformer::TransformerRegistry::formats
+/// [`CodecRegistry`]: saci::codec::CodecRegistry
+/// [`CodecRegistry::names`]: saci::codec::CodecRegistry::names
 #[test]
 fn dimensions_cover_the_registry() {
     let builder = register_builtin_factories(ServiceBuilder::new());
@@ -339,16 +339,16 @@ fn dimensions_cover_the_registry() {
         .filter(|label| *label != "none")
         .collect();
     expected_formats.sort_unstable();
-    let actual_formats = registry.transformers().formats();
+    let actual_formats = registry.codecs().names();
     assert_eq!(
         actual_formats, expected_formats,
-        "register_builtin_factories registered transformer formats {actual_formats:?} but \
+        "register_builtin_factories registered codec formats {actual_formats:?} but \
          common/matrix.rs's FORMATS names {expected_formats:?}; add the missing format's key to \
          FORMATS (or drop a stale entry) so the matrix covers every registered format",
     );
 }
 
-/// A one-column, one-row batch. `Transformer::encode_messages` needs a batch to
+/// A one-column, one-row batch. `Codec::encode_messages` needs a batch to
 /// answer at all, and a single non-null `Int64` column is what every format
 /// with an encoder can write.
 fn probe_batch() -> RecordBatch {
@@ -357,26 +357,26 @@ fn probe_batch() -> RecordBatch {
         .expect("probe batch matches its own schema")
 }
 
-/// Is `err` the `Transformer` contract's refusal of `capability`, rather than a
+/// Is `err` the `Codec` contract's refusal of `capability`, rather than a
 /// real failure from a format that does implement it?
 ///
-/// A transformer that has the method answers: `Ok`, or its own error. Only the
+/// A codec that has the method answers: `Ok`, or its own error. Only the
 /// trait's default body produces `unsupported`, so that exact message is what
 /// separates "no such surface" from "surface present, this input rejected".
 fn refuses(err: &SaciError, format: &str, capability: &str) -> bool {
     err.message() == unsupported(format, capability).message()
 }
 
-/// Every registered transformer's [`Transformer::message_shape`] must agree
+/// Every registered codec's [`Codec::message_shape`] must agree
 /// with whether it really answers both message calls.
 ///
 /// `message_shape()` is a declaration, and six connector call sites
 /// (`KafkaSource`, `KafkaSink`, `NatsSource`, `NatsSink`, `TcpIngestSource`,
 /// `TcpSink`) refuse a config at *build* time on its `is_none()`. Nothing in
-/// the type system ties that declaration to the methods: a transformer
+/// the type system ties that declaration to the methods: a codec
 /// declaring `Some` without an encoder passes a message sink's gate and fails
 /// on the first batch, and one declaring `None` with both methods is refused
-/// for no reason. This test is what ties them together, for every transformer
+/// for no reason. This test is what ties them together, for every codec
 /// the registry can build.
 ///
 /// The surfaces are probed rather than read off each `impl` block: calling
@@ -384,58 +384,58 @@ fn refuses(err: &SaciError, format: &str, capability: &str) -> bool {
 /// refusal is the only check that cannot be fooled by an override that forwards
 /// to a default.
 ///
-/// One `message_shape()` answers for both directions, so a transformer that
+/// One `message_shape()` answers for both directions, so a codec that
 /// implements exactly one of the two message methods cannot be declared
 /// honestly at all; that is the first assertion, and it fails loudly instead of
 /// letting a half surface hide behind `None`.
 ///
 /// Docker-free and not `#[ignore]`d, like [`dimensions_cover_the_registry`]: it
-/// builds transformers straight from the registry, with no config, container or
+/// builds codecs straight from the registry, with no config, container or
 /// running service involved.
 ///
-/// [`Transformer`]: saci::transformer::Transformer
-/// [`Transformer::message_shape`]: saci::transformer::Transformer::message_shape
-/// [`unsupported`]: saci::transformer::unsupported
+/// [`Codec`]: saci::codec::Codec
+/// [`Codec::message_shape`]: saci::codec::Codec::message_shape
+/// [`unsupported`]: saci::codec::unsupported
 #[test]
 fn message_shape_agrees_with_the_message_surface() {
     let builder = register_builtin_factories(ServiceBuilder::new());
-    let transformers = builder.registry().transformers();
+    let codecs = builder.registry().codecs();
     let batch = probe_batch();
 
-    for format in transformers.formats() {
-        let transformer = transformers
+    for format in codecs.names() {
+        let codec = codecs
             .get(format)
             .expect("a format the registry lists resolves to its factory")
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .unwrap_or_else(|e| panic!("transformer '{format}' builds from empty options: {e}"));
+            .unwrap_or_else(|e| panic!("codec '{format}' builds from empty options: {e}"));
 
-        let decodes = match transformer.open_message_decoder(batch.schema()) {
+        let decodes = match codec.open_message_decoder(batch.schema()) {
             Ok(_) => true,
             Err(e) => !refuses(&e, format, "decoding discrete messages"),
         };
-        let encodes = match transformer.encode_messages(&batch) {
+        let encodes = match codec.encode_messages(&batch) {
             Ok(_) => true,
             Err(e) => !refuses(&e, format, "encoding discrete messages"),
         };
-        let declared = transformer.message_shape();
+        let declared = codec.message_shape();
 
         assert_eq!(
             decodes, encodes,
-            "transformer '{format}' implements open_message_decoder={decodes} and \
+            "codec '{format}' implements open_message_decoder={decodes} and \
              encode_messages={encodes}: half a message surface. One message_shape() answers \
-             for both directions, so no declaration describes this transformer; implement the \
+             for both directions, so no declaration describes this codec; implement the \
              missing method, or make message_shape() direction-aware and split the connector \
              gates that read it",
         );
         assert_eq!(
             declared.is_some(),
             decodes,
-            "transformer '{format}' declares message_shape()={declared:?} but implements \
+            "codec '{format}' declares message_shape()={declared:?} but implements \
              open_message_decoder={decodes} and encode_messages={encodes}; a message connector \
              refuses a config at build on message_shape().is_none(), so a Some declaration \
              without the methods fails on the first batch and a None declaration with them \
              refuses a config that would work. Fix whichever of the two is wrong in \
-             the `{format}` transformer (feature `transformer-{format}`)",
+             the `{format}` codec (feature `codec-{format}`)",
         );
     }
 }

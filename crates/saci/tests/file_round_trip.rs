@@ -1,15 +1,15 @@
 //! One transport, three formats: a [`FileSink`] write followed by a
 //! [`FileSource`] read for csv, ndjson and parquet.
 //!
-//! This is what the connector-versus-transformer split buys. The connector code
-//! under test is identical in all three cases; only the `Arc<dyn Transformer>`
+//! This is what the connector-versus-codec split buys. The connector code
+//! under test is identical in all three cases; only the `Arc<dyn Codec>`
 //! differs.
 
 #![cfg(all(
     feature = "connector-file",
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-ndjson",
+    feature = "codec-parquet"
 ))]
 
 use std::sync::Arc;
@@ -18,13 +18,13 @@ use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use tempfile::TempDir;
 
+use saci::codec::Codec;
+use saci::codec::csv::CsvCodec;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::codec::parquet::ParquetCodec;
 use saci::connector::file::{FileSink, FileSource};
 use saci::io::sink::Sink;
 use saci::io::source::Source;
-use saci::transformer::Transformer;
-use saci::transformer::csv::CsvTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
-use saci::transformer::parquet::ParquetTransformer;
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -51,13 +51,13 @@ fn batch_range(start: i64, end: i64) -> RecordBatch {
     .expect("batch")
 }
 
-/// Drain every batch `path` holds, read through `transformer`.
+/// Drain every batch `path` holds, read through `codec`.
 async fn read_back(
     path: &std::path::Path,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     declared: Option<Arc<Schema>>,
 ) -> Vec<RecordBatch> {
-    let mut source = FileSource::open_async(path, transformer, declared)
+    let mut source = FileSource::open_async(path, codec, declared)
         .await
         .expect("source opens");
 
@@ -71,19 +71,19 @@ async fn read_back(
 /// Write `rows` rows in `format`, read them back, and return what came back.
 async fn round_trip(
     file_name: &str,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     declared_on_read: bool,
     rows: i64,
 ) -> Vec<RecordBatch> {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(file_name);
 
-    let mut sink = FileSink::create(&path, Arc::clone(&transformer), schema()).expect("sink opens");
+    let mut sink = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
     sink.write_batch(&batch(rows)).await.expect("write");
     sink.finish().await.expect("finish");
 
     let declared = declared_on_read.then(schema);
-    read_back(&path, transformer, declared).await
+    read_back(&path, codec, declared).await
 }
 
 fn total_rows(batches: &[RecordBatch]) -> usize {
@@ -118,20 +118,14 @@ fn ids(batches: &[RecordBatch]) -> Vec<i64> {
 
 #[tokio::test]
 async fn csv_round_trips_through_one_file_connector() {
-    let batches = round_trip("out.csv", Arc::new(CsvTransformer::new(true)), true, 64).await;
+    let batches = round_trip("out.csv", Arc::new(CsvCodec::new(true)), true, 64).await;
     assert_eq!(total_rows(&batches), 64);
     assert!((first_value(&batches, 3) - 4.5).abs() < 1e-9);
 }
 
 #[tokio::test]
 async fn ndjson_round_trips_through_one_file_connector() {
-    let batches = round_trip(
-        "out.ndjson",
-        Arc::new(NdjsonTransformer::default()),
-        true,
-        64,
-    )
-    .await;
+    let batches = round_trip("out.ndjson", Arc::new(NdjsonCodec::default()), true, 64).await;
     assert_eq!(total_rows(&batches), 64);
     assert!((first_value(&batches, 3) - 4.5).abs() < 1e-9);
 }
@@ -139,13 +133,7 @@ async fn ndjson_round_trips_through_one_file_connector() {
 #[tokio::test]
 async fn parquet_round_trips_through_one_file_connector() {
     // Parquet carries its own schema, so nothing is declared on the read.
-    let batches = round_trip(
-        "out.parquet",
-        Arc::new(ParquetTransformer::new()),
-        false,
-        64,
-    )
-    .await;
+    let batches = round_trip("out.parquet", Arc::new(ParquetCodec::new()), false, 64).await;
     assert_eq!(total_rows(&batches), 64);
     assert!((first_value(&batches, 3) - 4.5).abs() < 1e-9);
 }
@@ -155,25 +143,21 @@ async fn only_parquet_reports_estimated_rows() {
     let dir = TempDir::new().expect("temp dir");
 
     let parquet_path = dir.path().join("rows.parquet");
-    let mut sink = FileSink::create(&parquet_path, Arc::new(ParquetTransformer::new()), schema())
+    let mut sink = FileSink::create(&parquet_path, Arc::new(ParquetCodec::new()), schema())
         .expect("sink opens");
     sink.write_batch(&batch(42)).await.expect("write");
     sink.finish().await.expect("finish");
-    let parquet = FileSource::open(&parquet_path, Arc::new(ParquetTransformer::new()), None)
-        .expect("source opens");
+    let parquet =
+        FileSource::open(&parquet_path, Arc::new(ParquetCodec::new()), None).expect("source opens");
     assert_eq!(parquet.estimated_rows(), Some(42));
 
     let csv_path = dir.path().join("rows.csv");
-    let mut sink = FileSink::create(&csv_path, Arc::new(CsvTransformer::new(true)), schema())
-        .expect("sink opens");
+    let mut sink =
+        FileSink::create(&csv_path, Arc::new(CsvCodec::new(true)), schema()).expect("sink opens");
     sink.write_batch(&batch(42)).await.expect("write");
     sink.finish().await.expect("finish");
-    let csv = FileSource::open(
-        &csv_path,
-        Arc::new(CsvTransformer::new(true)),
-        Some(schema()),
-    )
-    .expect("source opens");
+    let csv = FileSource::open(&csv_path, Arc::new(CsvCodec::new(true)), Some(schema()))
+        .expect("source opens");
     assert_eq!(csv.estimated_rows(), None);
 }
 
@@ -183,7 +167,7 @@ async fn a_write_after_finish_is_an_error_naming_the_sink() {
     let path = dir.path().join("closed.parquet");
 
     let mut sink =
-        FileSink::create(&path, Arc::new(ParquetTransformer::new()), schema()).expect("sink opens");
+        FileSink::create(&path, Arc::new(ParquetCodec::new()), schema()).expect("sink opens");
     sink.write_batch(&batch(1)).await.expect("write");
     sink.finish().await.expect("finish");
 
@@ -201,8 +185,7 @@ async fn a_write_after_finish_is_an_error_naming_the_sink() {
 async fn opening_a_missing_file_names_the_path() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("absent.csv");
-    let Err(err) = FileSource::open(&path, Arc::new(CsvTransformer::new(true)), Some(schema()))
-    else {
+    let Err(err) = FileSource::open(&path, Arc::new(CsvCodec::new(true)), Some(schema())) else {
         panic!("a missing file must not open");
     };
     assert!(
@@ -216,21 +199,19 @@ async fn opening_a_missing_file_names_the_path() {
 async fn appending_to_an_existing_file_preserves_prior_rows() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("appended.ndjson");
-    let transformer: Arc<dyn Transformer> = Arc::new(NdjsonTransformer::default());
+    let codec: Arc<dyn Codec> = Arc::new(NdjsonCodec::default());
 
-    let mut first =
-        FileSink::create(&path, Arc::clone(&transformer), schema()).expect("sink opens");
+    let mut first = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
     first.write_batch(&batch_range(1, 4)).await.expect("write");
     first.finish().await.expect("finish");
 
     // A second sink on the same path: the default open mode keeps what the
     // first one wrote.
-    let mut second =
-        FileSink::create(&path, Arc::clone(&transformer), schema()).expect("sink opens");
+    let mut second = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
     second.write_batch(&batch_range(4, 7)).await.expect("write");
     second.finish().await.expect("finish");
 
-    let batches = read_back(&path, transformer, Some(schema())).await;
+    let batches = read_back(&path, codec, Some(schema())).await;
     assert_eq!(ids(&batches), vec![1, 2, 3, 4, 5, 6]);
 }
 
@@ -238,19 +219,18 @@ async fn appending_to_an_existing_file_preserves_prior_rows() {
 async fn truncating_mode_replaces_the_file() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("replaced.ndjson");
-    let transformer: Arc<dyn Transformer> = Arc::new(NdjsonTransformer::default());
+    let codec: Arc<dyn Codec> = Arc::new(NdjsonCodec::default());
 
-    let mut first =
-        FileSink::create(&path, Arc::clone(&transformer), schema()).expect("sink opens");
+    let mut first = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
     first.write_batch(&batch_range(1, 4)).await.expect("write");
     first.finish().await.expect("finish");
 
     let mut second =
-        FileSink::create_truncating(&path, Arc::clone(&transformer), schema()).expect("sink opens");
+        FileSink::create_truncating(&path, Arc::clone(&codec), schema()).expect("sink opens");
     second.write_batch(&batch_range(4, 7)).await.expect("write");
     second.finish().await.expect("finish");
 
-    let batches = read_back(&path, transformer, Some(schema())).await;
+    let batches = read_back(&path, codec, Some(schema())).await;
     assert_eq!(ids(&batches), vec![4, 5, 6]);
 }
 
@@ -259,9 +239,9 @@ async fn a_sink_that_cannot_open_its_path_names_the_mode() {
     let dir = TempDir::new().expect("temp dir");
     // A directory is not a file either mode can open, on Windows or on Unix.
     let path = dir.path().to_path_buf();
-    let transformer: Arc<dyn Transformer> = Arc::new(NdjsonTransformer::default());
+    let codec: Arc<dyn Codec> = Arc::new(NdjsonCodec::default());
 
-    let Err(err) = FileSink::create(&path, Arc::clone(&transformer), schema()) else {
+    let Err(err) = FileSink::create(&path, Arc::clone(&codec), schema()) else {
         panic!("a directory must not open as a sink");
     };
     assert!(
@@ -270,7 +250,7 @@ async fn a_sink_that_cannot_open_its_path_names_the_mode() {
     );
     assert!(err.message().contains("for append"), "got: {err}");
 
-    let Err(err) = FileSink::create_truncating(&path, transformer, schema()) else {
+    let Err(err) = FileSink::create_truncating(&path, codec, schema()) else {
         panic!("a directory must not open as a sink");
     };
     assert!(

@@ -623,7 +623,7 @@ mod tests {
             workflows: vec![WorkflowSpec {
                 id: "cluster-test".to_string(),
                 name: None,
-                transformers: Vec::new(),
+                codecs: Vec::new(),
                 sources: Vec::new(),
                 wasm: Vec::new(),
                 plugin: Vec::new(),
@@ -924,7 +924,7 @@ mod tests {
             workflows: vec![WorkflowSpec {
                 id: "w".to_string(),
                 name: None,
-                transformers: Vec::new(),
+                codecs: Vec::new(),
                 sources: Vec::new(),
                 wasm: Vec::new(),
                 plugin: Vec::new(),

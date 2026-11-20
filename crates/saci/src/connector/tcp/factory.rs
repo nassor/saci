@@ -10,7 +10,7 @@
 //! rule reads source nodes only, so a `tcp` sink runs in every mode.
 //!
 //! Producers write a `u32` big-endian length plus one payload per frame, and
-//! [`TcpSink`] writes the same. What the payload bytes are is the transformer's
+//! [`TcpSink`] writes the same. What the payload bytes are is the codec's
 //! business: the node's `transformer` key names a declared `transformer` node,
 //! and that node's format decides how each frame encodes or decodes. There is
 //! no default.
@@ -37,7 +37,7 @@ const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// - `max_frame_bytes` (usize, optional, default `8388608`): per-frame cap.
 /// - `schema_fields` (list, required): Arrow schema definition.
 ///
-/// Each frame's payload is decoded by the transformer the host bound to this
+/// Each frame's payload is decoded by the codec the host bound to this
 /// node from its `transformer` key, reached through the [`ConnectorContext`]
 /// rather than read out of `config`.
 pub struct TcpSourceFactory;
@@ -69,14 +69,14 @@ impl SourceFactory for TcpSourceFactory {
             .unwrap_or(DEFAULT_MAX_FRAME_BYTES);
 
         let schema = parse_schema_fields(config, "tcp")?;
-        let transformer = ctx.transformer("tcp")?;
+        let codec = ctx.codec("tcp")?;
 
         Ok(Box::new(TcpIngestSource::new(
             bind,
             schema,
             buffer,
             max_frame_bytes,
-            transformer,
+            codec,
         )?))
     }
 
@@ -95,7 +95,7 @@ impl SourceFactory for TcpSourceFactory {
 ///   `"collector.internal:9500"`.
 /// - `schema_fields` (list, required): Arrow schema definition.
 ///
-/// Each batch is encoded by the transformer the host bound to this node from
+/// Each batch is encoded by the codec the host bound to this node from
 /// its `transformer` key, reached through the [`ConnectorContext`] rather than
 /// read out of `config`. The address is resolved here and dialled on the first
 /// batch, so a peer that is down fails at serve time, not at validate time.
@@ -119,9 +119,9 @@ impl SinkFactory for TcpSinkFactory {
             })?;
 
         let schema = parse_schema_fields(config, "tcp")?;
-        let transformer = ctx.transformer("tcp")?;
+        let codec = ctx.codec("tcp")?;
 
-        Ok(Box::new(TcpSink::connect(connect, schema, transformer)?))
+        Ok(Box::new(TcpSink::connect(connect, schema, codec)?))
     }
 
     /// One socket serves the sink's whole life and a fresh instance dials
@@ -134,16 +134,16 @@ impl SinkFactory for TcpSinkFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::arrow_ipc::ArrowIpcCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::arrow_ipc::ArrowIpcTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
     use std::sync::Arc;
 
-    /// A built transformer, the way the host hands one to a factory.
-    fn transformer() -> Arc<dyn Transformer> {
-        ArrowIpcTransformerFactory
+    /// A built codec, the way the host hands one to a factory.
+    fn codec() -> Arc<dyn Codec> {
+        ArrowIpcCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("build arrow-ipc transformer")
+            .expect("build arrow-ipc codec")
     }
 
     fn config(extra: &str) -> ConfigValue {
@@ -161,7 +161,7 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn builds_with_defaults() {
         let source = TcpSourceFactory
-            .build(&config(""), &ConnectorContext::new(Some(transformer())))
+            .build(&config(""), &ConnectorContext::new(Some(codec())))
             .expect("build");
         assert_eq!(source.schema().fields().len(), 1);
     }
@@ -183,7 +183,7 @@ schema_fields "v" type="Int64"
     }
 
     #[test]
-    fn a_missing_transformer_is_a_configuration_error() {
+    fn a_missing_codec_is_a_configuration_error() {
         let err = TcpSourceFactory
             .build(&config(""), &ConnectorContext::new(None))
             .err()
@@ -217,7 +217,7 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn the_sink_builds_from_connect_and_schema_fields() {
         let sink = TcpSinkFactory
-            .build(&sink_config(), &ConnectorContext::new(Some(transformer())))
+            .build(&sink_config(), &ConnectorContext::new(Some(codec())))
             .expect("build");
         assert_eq!(sink.schema().fields().len(), 1);
     }
@@ -257,7 +257,7 @@ schema_fields "v" type="Int64"
     }
 
     #[test]
-    fn a_sink_missing_its_transformer_is_a_configuration_error() {
+    fn a_sink_missing_its_codec_is_a_configuration_error() {
         let err = TcpSinkFactory
             .build(&sink_config(), &ConnectorContext::new(None))
             .err()

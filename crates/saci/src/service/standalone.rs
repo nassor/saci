@@ -1726,7 +1726,7 @@ mod tests {
             workflows: vec![crate::service::config::WorkflowSpec {
                 id: "w".to_string(),
                 name: None,
-                transformers: Vec::new(),
+                codecs: Vec::new(),
                 sources: Vec::new(),
                 wasm: Vec::new(),
                 plugin: Vec::new(),
@@ -3625,7 +3625,7 @@ mod tests {
         let spec = crate::service::config::WorkflowSpec {
             id: "dlqwf".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),

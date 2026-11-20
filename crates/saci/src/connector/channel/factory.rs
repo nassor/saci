@@ -59,7 +59,7 @@ impl SourceFactory for ChannelSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let bridge = ctx.channel_bridge().ok_or_else(|| {
+        let bridge = ctx.channels().ok_or_else(|| {
             SaciError::configuration(
                 "ChannelSource requires a channel bridge; register one via \
                  ServiceBuilder::with_channel_bridge",
@@ -100,7 +100,7 @@ impl SinkFactory for ChannelSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let bridge = ctx.channel_bridge().ok_or_else(|| {
+        let bridge = ctx.channels().ok_or_else(|| {
             SaciError::configuration(
                 "ChannelSink requires a channel bridge; register one via \
                  ServiceBuilder::with_channel_bridge",

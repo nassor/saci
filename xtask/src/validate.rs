@@ -34,7 +34,7 @@
 //! placeholder that does not exist in the repository, so pass 1's build gate
 //! cannot load them and they are not in the registry above.
 //! `saci-service validate --connectors-only` builds every declared source,
-//! sink and transformer with no processor artifact needed: every built-in
+//! sink and codec with no processor artifact needed: every built-in
 //! connector's factory parses and validates its own `deny_unknown_fields`
 //! config synchronously, with no network or broker connection, so a
 //! misspelled or misplaced key still fails this pass.

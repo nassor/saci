@@ -10,8 +10,8 @@
 //! `target/release`, where the next build with other features would replace it.
 //!
 //! ```text
-//! cargo xtask server --connectors=kafka,postgresql --transformers=ndjson --processors=wasm
-//! cargo xtask server --connectors=file --transformers=csv,parquet --features=windows,mimalloc --out=dist/saci-service
+//! cargo xtask server --connectors=kafka,postgresql --codecs=ndjson --processors=wasm
+//! cargo xtask server --connectors=file --codecs=csv,parquet --features=windows,mimalloc --out=dist/saci-service
 //! ```
 //!
 //! | code | meaning                                 |
@@ -32,7 +32,7 @@ usage: cargo xtask server [options]
 Build a saci-service binary with only the parts named here. `service` is always on.
 
   --connectors=LIST    connectors, e.g. file,kafka,postgresql
-  --transformers=LIST  byte formats, e.g. csv,ndjson,parquet
+  --codecs=LIST        byte formats, e.g. csv,ndjson,parquet
   --processors=LIST    processor hosts: wasm, plugin
   --features=LIST      any other saci feature, e.g. windows,mimalloc,service-cluster
   --out=PATH           where the binary is copied, relative to the repository root
@@ -52,7 +52,7 @@ const PROCESSORS: [(&str, &str); 2] = [("wasm", "wasm-host"), ("plugin", "plugin
 #[derive(Default)]
 struct Selection<'a> {
     connectors: &'a str,
-    transformers: &'a str,
+    codecs: &'a str,
     processors: &'a str,
     features: &'a str,
 }
@@ -67,8 +67,8 @@ pub fn run(args: &[String]) -> Result<()> {
         let arg = arg.as_str();
         if let Some(value) = arg.strip_prefix("--connectors=") {
             selection.connectors = value;
-        } else if let Some(value) = arg.strip_prefix("--transformers=") {
-            selection.transformers = value;
+        } else if let Some(value) = arg.strip_prefix("--codecs=") {
+            selection.codecs = value;
         } else if let Some(value) = arg.strip_prefix("--processors=") {
             selection.processors = value;
         } else if let Some(value) = arg.strip_prefix("--features=") {
@@ -139,11 +139,11 @@ fn cargo_features(known: &[&str], selection: &Selection) -> Result<Vec<String>, 
     };
     for (list, prefix, what) in [
         (selection.connectors, "connector-", "connector"),
-        (selection.transformers, "transformer-", "transformer"),
+        (selection.codecs, "codec-", "codec"),
     ] {
         for name in items(list) {
             let feature = format!("{prefix}{name}");
-            if name == "contract" || !known.contains(&feature.as_str()) {
+            if name == "api" || !known.contains(&feature.as_str()) {
                 let names = prefixed(known, prefix).join(", ");
                 return Err(format!("unknown {what} '{name}'; known: {names}"));
             }
@@ -176,12 +176,12 @@ fn items(list: &str) -> impl Iterator<Item = &str> {
         .filter(|item| !item.is_empty())
 }
 
-/// The short names behind every `<prefix><name>` feature, contracts excluded.
+/// The short names behind every `<prefix><name>` feature, `api` features excluded.
 fn prefixed<'a>(known: &[&'a str], prefix: &str) -> Vec<&'a str> {
     known
         .iter()
         .filter_map(|key| key.strip_prefix(prefix))
-        .filter(|name| *name != "contract")
+        .filter(|name| *name != "api")
         .collect()
 }
 
@@ -191,16 +191,13 @@ fn print_names(known: &[&str]) {
         .copied()
         .filter(|key| {
             !key.starts_with("connector-")
-                && !key.starts_with("transformer-")
+                && !key.starts_with("codec-")
                 && !PROCESSORS.iter().any(|(_, feature)| feature == key)
                 && !matches!(*key, "default" | "service")
         })
         .collect();
     println!("connectors:   {}", prefixed(known, "connector-").join(", "));
-    println!(
-        "transformers: {}",
-        prefixed(known, "transformer-").join(", ")
-    );
+    println!("codecs:       {}", prefixed(known, "codec-").join(", "));
     println!("processors:   wasm, plugin");
     println!("features:     {}", other.join(", "));
 }
@@ -221,7 +218,7 @@ mod tests {
             "server",
             "connector-http",
             "connector-kafka",
-            "transformer-csv",
+            "codec-csv",
             "wasm-host",
             "mimalloc",
         ] {
@@ -240,7 +237,7 @@ mod tests {
         let known = feature_names(MANIFEST);
         let selection = Selection {
             connectors: "kafka, file,kafka",
-            transformers: "csv",
+            codecs: "csv",
             processors: "wasm,plugin",
             features: "windows",
         };
@@ -250,7 +247,7 @@ mod tests {
                 "service",
                 "connector-kafka",
                 "connector-file",
-                "transformer-csv",
+                "codec-csv",
                 "wasm-host",
                 "plugin-host",
                 "windows",
@@ -268,11 +265,11 @@ mod tests {
                 ..Selection::default()
             },
             Selection {
-                connectors: "contract",
+                connectors: "api",
                 ..Selection::default()
             },
             Selection {
-                transformers: "xml",
+                codecs: "xml",
                 ..Selection::default()
             },
             Selection {
@@ -295,6 +292,6 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(err.contains("kafka") && !err.contains("contract"), "{err}");
+        assert!(err.contains("kafka") && !err.contains("api"), "{err}");
     }
 }

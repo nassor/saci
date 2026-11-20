@@ -25,8 +25,8 @@
 //! peer and fails only when the batch reached nobody. A live peer therefore
 //! never receives the runner's retry of a batch it already took.
 //!
-//! Payload bytes come from the transformer's message surface
-//! ([`encode_messages`](Transformer::encode_messages)), the same surface the
+//! Payload bytes come from the codec's message surface
+//! ([`encode_messages`](Codec::encode_messages)), the same surface the
 //! Kafka, NATS and TCP sinks publish from. Whether the format has a message
 //! surface at all is a property of the config, so
 //! [`connect`](UdpSink::connect) settles it while building rather than on the
@@ -44,7 +44,6 @@ use tokio::task::JoinHandle;
 
 use crate::error::SaciError;
 use crate::io::sink::Sink;
-use crate::transformer::Transformer;
 
 use crate::connector::udp::DATAGRAM_BUFFER_BYTES;
 use crate::connector::udp::probe::{self, Liveness, OnFailure, ProbeSettings};
@@ -66,7 +65,7 @@ pub struct UdpSink {
     max_datagram_bytes: usize,
     probe: Option<ProbeSettings>,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// `Some` once the sockets opened with a `probe` configured.
     probe_task: Option<JoinHandle<()>>,
     opened: bool,
@@ -106,8 +105,8 @@ impl UdpSink {
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `transformer` declares no
-    /// [`message_shape`](Transformer::message_shape), if `connect` is empty or
+    /// Returns [`SaciError::Configuration`] if `codec` declares no
+    /// [`message_shape`](Codec::message_shape), if `connect` is empty or
     /// an address cannot be resolved, if `max_datagram_bytes` is zero or above
     /// [`MAX_DATAGRAM_BYTES`], if `probe` is combined with `broadcast` or a
     /// multicast address, or if a probe interval or timeout is zero.
@@ -117,15 +116,15 @@ impl UdpSink {
         max_datagram_bytes: usize,
         probe: Option<ProbeSettings>,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         // The declaration is the whole answer for every batch this sink will
         // ever encode, so asking once here is what makes a format with no
         // message surface a config error rather than a failed first write.
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "UdpSink: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
 
@@ -185,7 +184,7 @@ impl UdpSink {
             max_datagram_bytes,
             probe,
             schema,
-            transformer,
+            codec,
             probe_task: None,
             opened: false,
         })
@@ -396,7 +395,7 @@ impl Sink for UdpSink {
     /// Encode `batch` and send one datagram per message to every peer,
     /// opening the sockets first if this is the first batch.
     ///
-    /// A batch the transformer encodes to no payloads sends nothing and
+    /// A batch the codec encodes to no payloads sends nothing and
     /// succeeds, whatever the peers are doing: there is nothing for one to
     /// refuse. A batch holding a message above `max_datagram_bytes` sends
     /// nothing either: the check runs before the first send, so such a batch
@@ -404,12 +403,12 @@ impl Sink for UdpSink {
     ///
     /// # Errors
     ///
-    /// Returns the transformer's error when the batch cannot be encoded, and
+    /// Returns the codec's error when the batch cannot be encoded, and
     /// [`SaciError::Generic`] when a message exceeds `max_datagram_bytes`,
     /// when a socket cannot be opened, or when no peer accepted the batch,
     /// naming every peer and why.
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
-        let payloads = self.transformer.encode_messages(batch)?;
+        let payloads = self.codec.encode_messages(batch)?;
 
         // Nothing to deliver, so no peer can fail to take it. Reporting a
         // write error here would hand an empty batch to `retry`, `heal` and
@@ -493,13 +492,13 @@ impl Drop for UdpSink {
     }
 }
 
-#[cfg(all(test, feature = "transformer-arrow-ipc"))]
+#[cfg(all(test, feature = "codec-arrow-ipc"))]
 mod tests {
     use super::*;
+    use crate::codec::arrow_ipc::ArrowIpcCodec;
+    use crate::codec::ndjson::NdjsonCodec;
+    use crate::codec::{MessageDecoder, MessageShape};
     use crate::connector::udp::probe::ProbeKind;
-    use crate::transformer::arrow_ipc::ArrowIpcTransformer;
-    use crate::transformer::ndjson::NdjsonTransformer;
-    use crate::transformer::{MessageDecoder, MessageShape};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
     use std::sync::atomic::AtomicUsize;
@@ -511,14 +510,14 @@ mod tests {
     }
 
     /// The datagram rule is what this crate owns; the payload codec is the
-    /// transformer's, and its own tests cover the encode paths.
-    fn arrow_ipc() -> Arc<dyn Transformer> {
-        Arc::new(ArrowIpcTransformer::new())
+    /// codec's, and its own tests cover the encode paths.
+    fn arrow_ipc() -> Arc<dyn Codec> {
+        Arc::new(ArrowIpcCodec::new())
     }
 
     /// One message per row, so a three-row batch is three datagrams.
-    fn ndjson() -> Arc<dyn Transformer> {
-        Arc::new(NdjsonTransformer::new(64))
+    fn ndjson() -> Arc<dyn Codec> {
+        Arc::new(NdjsonCodec::new(64))
     }
 
     fn batch(values: &[i64]) -> RecordBatch {
@@ -546,11 +545,11 @@ mod tests {
     /// only way to observe "no payloads, no datagrams" without a real codec
     /// that does it. It declares a shape, so it must carry a whole message
     /// surface: the decoder half is `arrow-ipc`'s, unexercised here but real,
-    /// because [`Transformer::message_shape`] answers for both directions at
+    /// because [`Codec::message_shape`] answers for both directions at
     /// once.
     struct NoMessages;
 
-    impl Transformer for NoMessages {
+    impl Codec for NoMessages {
         fn format(&self) -> &'static str {
             "no-messages"
         }
@@ -559,7 +558,7 @@ mod tests {
             &self,
             schema: Arc<Schema>,
         ) -> Result<Box<dyn MessageDecoder>, SaciError> {
-            ArrowIpcTransformer::new().open_message_decoder(schema)
+            ArrowIpcCodec::new().open_message_decoder(schema)
         }
 
         fn encode_messages(&self, _batch: &RecordBatch) -> Result<Vec<Vec<u8>>, SaciError> {
@@ -576,7 +575,7 @@ mod tests {
     /// surface, so the gate is exercised against a stand-in.
     struct NoMessageSurface;
 
-    impl Transformer for NoMessageSurface {
+    impl Codec for NoMessageSurface {
         fn format(&self) -> &'static str {
             "no-surface"
         }
@@ -776,7 +775,7 @@ mod tests {
     }
 
     /// The datagram rule: one message, one datagram, and the payload bytes are
-    /// the transformer's own.
+    /// the codec's own.
     #[tokio::test]
     async fn write_batch_sends_one_datagram_per_message() {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");

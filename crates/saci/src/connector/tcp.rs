@@ -8,7 +8,7 @@
 //! received frame. [`TcpSink`] dials `connect` and writes one frame per encoded
 //! message. A frame is a `u32` big-endian length prefix followed by that many
 //! payload bytes, so the two halves are wire compatible; the
-//! [`Transformer`](crate::transformer::Transformer) the host resolved from the
+//! [`Codec`](crate::codec::Codec) the host resolved from the
 //! node's `transformer` key decodes or encodes them.
 //!
 //! Framing is transport and belongs here; decoding is format and does not. That

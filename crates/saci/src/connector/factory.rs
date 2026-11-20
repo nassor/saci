@@ -23,9 +23,9 @@ pub trait SourceFactory: Send + Sync + 'static {
 
     /// Build a source instance from the user-supplied config value.
     ///
-    /// `ctx` carries the transformer registry, so a connector that moves bytes
+    /// `ctx` carries the codec registry, so a connector that moves bytes
     /// resolves its byte format through
-    /// [`ConnectorContext::transformer`] instead of owning a format list.
+    /// [`ConnectorContext::codec`] instead of owning a format list.
     ///
     /// # Errors
     ///
@@ -68,9 +68,9 @@ pub trait SinkFactory: Send + Sync + 'static {
 
     /// Build a sink instance from the user-supplied config value.
     ///
-    /// `ctx` carries the transformer registry, so a connector that moves bytes
+    /// `ctx` carries the codec registry, so a connector that moves bytes
     /// resolves its byte format through
-    /// [`ConnectorContext::transformer`] instead of owning a format list.
+    /// [`ConnectorContext::codec`] instead of owning a format list.
     ///
     /// # Errors
     ///

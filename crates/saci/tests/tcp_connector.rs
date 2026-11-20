@@ -23,8 +23,6 @@ use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
 
 const COMPONENT: &str = "Tick";
 
@@ -73,9 +71,9 @@ async fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
     payload
 }
 
-/// Decode a frame payload through the same transformer the config names.
+/// Decode a frame payload through the same codec the config names.
 fn decode(payload: &[u8]) -> RecordBatch {
-    let mut decoder = ArrowIpcTransformer::new()
+    let mut decoder = ArrowIpcCodec::new()
         .open_message_decoder(schema())
         .expect("decoder");
     decoder.push(payload).expect("push");

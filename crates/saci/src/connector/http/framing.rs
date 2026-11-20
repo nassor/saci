@@ -4,7 +4,7 @@
 //! A live body arrives in chunks that have nothing to do with message
 //! boundaries, so a framer holds the tail of the last chunk and hands out whole
 //! frames only. Framing is transport, the way the TCP connector's length prefix
-//! is; what a frame's bytes mean is the transformer's.
+//! is; what a frame's bytes mean is the codec's.
 //!
 //! `max_body_bytes` caps one frame. A chunk is whatever the transport handed
 //! over, and hyper's HTTP/1 read buffer hands back a few hundred kilobytes of

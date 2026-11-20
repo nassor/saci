@@ -14,7 +14,7 @@
 #![cfg(all(
     feature = "connector-udp",
     feature = "service",
-    feature = "transformer-arrow-ipc",
+    feature = "codec-arrow-ipc",
     feature = "wasm-host"
 ))]
 
@@ -41,8 +41,6 @@ use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::registry::{SinkFactory, SourceFactory};
 use saci::service::run_standalone;
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
 
 const COMPONENT: &str = "Tick";
 
@@ -76,9 +74,9 @@ fn datagram(values: &[i64]) -> Vec<u8> {
     payload
 }
 
-/// Decode a datagram through the same transformer the config names.
+/// Decode a datagram through the same codec the config names.
 fn decode(payload: &[u8]) -> RecordBatch {
-    let mut decoder = ArrowIpcTransformer::new()
+    let mut decoder = ArrowIpcCodec::new()
         .open_message_decoder(schema())
         .expect("decoder");
     decoder.push(payload).expect("push");

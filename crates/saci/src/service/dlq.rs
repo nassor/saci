@@ -17,7 +17,7 @@
 //!
 //! One letter is one row of [`envelope_schema`]. The failed batch travels in
 //! the `payload` column as one Arrow IPC stream, encoded by
-//! [`ArrowIpcTransformer`]: IPC is already the host to processor wire format,
+//! [`ArrowIpcCodec`]: IPC is already the host to processor wire format,
 //! reproduces the batch and its schema metadata exactly, and needs no encode
 //! pass over the values. The other seven columns are what
 //! the dashboard groups and filters on, so a reader never decodes a payload
@@ -64,8 +64,6 @@ use crate::error::{SaciError, SaciResult};
 use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
 use crate::io::sink::Sink;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
-use crate::transformer::arrow_ipc::ArrowIpcTransformer;
 
 use super::config::{DlqBlock, DlqReplayPoint, RetryConfig, ServiceConfig, WorkflowSpec};
 use super::heal::{HealSettings, Rebuilder};
@@ -232,7 +230,7 @@ impl Letter {
     ///
     /// # Errors
     ///
-    /// Returns whatever [`Transformer::encode_messages`] refused the batch
+    /// Returns whatever [`Codec::encode_messages`] refused the batch
     /// with, and [`SaciError::Generic`] when it yielded no payload, which
     /// `arrow-ipc` never does: it splits `PerBatch`.
     pub(crate) fn from_failure(
@@ -240,7 +238,7 @@ impl Letter {
         sink: &str,
         component: &str,
         error: &SaciError,
-        ipc: &ArrowIpcTransformer,
+        ipc: &ArrowIpcCodec,
     ) -> Result<Self, SaciError> {
         let mut payloads = ipc.encode_messages(batch)?;
         let payload = payloads.pop().ok_or_else(|| {
@@ -343,7 +341,7 @@ impl Letter {
     pub(crate) fn payload_batch(
         &self,
         schema: Arc<Schema>,
-        ipc: &ArrowIpcTransformer,
+        ipc: &ArrowIpcCodec,
     ) -> Result<RecordBatch, SaciError> {
         let mut decoder = ipc.open_message_decoder(schema)?;
         decoder.push(&self.payload)?;
@@ -609,7 +607,7 @@ pub struct DeadLetterQueue {
     sink_attempt: u32,
     /// When the next rebuild of the recording half may be tried.
     sink_down_until: Option<Instant>,
-    ipc: Arc<ArrowIpcTransformer>,
+    ipc: Arc<ArrowIpcCodec>,
     shared: Arc<DlqShared>,
     /// Whether the startup replay has run.
     started_once: bool,
@@ -676,7 +674,7 @@ impl DeadLetterQueue {
         let injected = injected_keys(store, data_dir, &workflow.id);
         let sink_config = half_config(block, &block.sink, &injected.sink);
         let source_config = half_config(block, &block.source, &injected.source);
-        let ipc: Arc<dyn Transformer> = Arc::new(ArrowIpcTransformer::new());
+        let ipc: Arc<dyn Codec> = Arc::new(ArrowIpcCodec::new());
         let node_id = format!("{}/dlq", workflow.id);
 
         let sink_rebuilder = Rebuilder::new(
@@ -725,7 +723,7 @@ impl DeadLetterQueue {
             sink: Some(sink),
             sink_attempt: 0,
             sink_down_until: None,
-            ipc: Arc::new(ArrowIpcTransformer::new()),
+            ipc: Arc::new(ArrowIpcCodec::new()),
             shared,
             started_once: false,
             pending_letters: 0,
@@ -1551,7 +1549,7 @@ mod tests {
 
     #[test]
     fn an_envelope_round_trips_a_batch_carrying_binary_columns() {
-        let ipc = ArrowIpcTransformer::new();
+        let ipc = ArrowIpcCodec::new();
         let original = payload_batch();
         let letter = Letter::from_failure(
             &original,
@@ -2208,7 +2206,7 @@ mod tests {
         WorkflowSpec {
             id: "orders".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),

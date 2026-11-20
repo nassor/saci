@@ -39,7 +39,6 @@ use saci::service::flow::FlowPlan;
 use saci::service::registry::Registry;
 use saci::service::standalone::run_standalone;
 use saci::service::stream::run_stream;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
 use saci::{Dataset, SaciResult};
 
 const COMP: &str = "values";
@@ -629,7 +628,7 @@ async fn stream_ingests_tcp_frames_and_survives_a_bad_connection() {
         Arc::clone(&schema),
         8,
         4096,
-        Arc::new(ArrowIpcTransformer::new()),
+        Arc::new(ArrowIpcCodec::new()),
     )
     .unwrap();
     let addr = tcp.local_addr();
@@ -729,7 +728,7 @@ fn stream_config() -> ServiceConfig {
         workflows: vec![WorkflowSpec {
             id: "test".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),

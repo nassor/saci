@@ -8,8 +8,8 @@
 //! reader consumes. The two halves are wire compatible, so a `TcpSink` in one
 //! service feeds a `TcpIngestSource` in another when both name the same format.
 //!
-//! Payload bytes come from the transformer's message surface
-//! ([`encode_messages`](Transformer::encode_messages)), the same surface the
+//! Payload bytes come from the codec's message surface
+//! ([`encode_messages`](Codec::encode_messages)), the same surface the
 //! Kafka and NATS sinks publish from. Framing is transport and belongs here;
 //! what a payload means does not.
 //!
@@ -20,7 +20,7 @@
 //! question is put differently only because the trait offers nothing else:
 //! there is no encoder to open, and `encode_messages` needs a batch, so what
 //! is answerable without one is
-//! [`message_shape`](Transformer::message_shape), whose contract is that
+//! [`message_shape`](Codec::message_shape), whose contract is that
 //! `None` means the format has no message surface. That is the same gate the
 //! Kafka and NATS sinks already stand on. A sink that deferred the answer
 //! would build, dial, and fail its first write with the pipeline already
@@ -37,7 +37,6 @@ use tokio::net::TcpStream;
 
 use crate::error::SaciError;
 use crate::io::sink::Sink;
-use crate::transformer::Transformer;
 
 /// Client-mode TCP sink: one encoded message out, one length-prefixed frame on
 /// the wire.
@@ -57,27 +56,27 @@ pub struct TcpSink {
     /// config error rather than a first-batch one.
     peer: SocketAddr,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
 }
 
 impl TcpSink {
     /// Resolve `connect` and prepare the sink without opening a socket.
     ///
     /// `connect` is a `host:port` string. Its first resolved address is the
-    /// peer for the sink's lifetime. `transformer` encodes each batch into the
+    /// peer for the sink's lifetime. `codec` encodes each batch into the
     /// payloads to frame, and a format that declares no message shape has no
     /// message surface to encode with: that is settled here rather than on the
     /// first batch, because no batch can change the answer.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `transformer` declares no
-    /// [`message_shape`](Transformer::message_shape), if `connect` cannot be
+    /// Returns [`SaciError::Configuration`] if `codec` declares no
+    /// [`message_shape`](Codec::message_shape), if `connect` cannot be
     /// parsed or resolved, or if it resolves to no address at all.
     pub fn connect(
         connect: &str,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         // The declaration is the whole answer for every batch this sink will
         // ever encode, so asking once here is what makes a format with no
@@ -85,10 +84,10 @@ impl TcpSink {
         // a sink that builds, dials, and fails its first write. There is no
         // encoder to open the way the source opens a decoder: `encode_messages`
         // is the only encode entry point and it needs a batch.
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "TcpSink: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
 
@@ -110,7 +109,7 @@ impl TcpSink {
             stream: None,
             peer,
             schema,
-            transformer,
+            codec,
         })
     }
 
@@ -155,15 +154,15 @@ impl Sink for TcpSink {
     /// Encode `batch` and write one frame per payload, dialling the peer first
     /// if this is the first batch.
     ///
-    /// A batch the transformer encodes to no payloads writes no frames.
+    /// A batch the codec encodes to no payloads writes no frames.
     ///
     /// # Errors
     ///
-    /// Returns the transformer's error when the batch cannot be encoded, and
+    /// Returns the codec's error when the batch cannot be encoded, and
     /// [`SaciError::Generic`] when the dial fails, a payload exceeds the `u32`
     /// length prefix, or a socket write fails.
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
-        let payloads = self.transformer.encode_messages(batch)?;
+        let payloads = self.codec.encode_messages(batch)?;
 
         // The connection moves out of `self` for the write and back in after,
         // so the frame loop owns it outright instead of reborrowing an option.
@@ -212,8 +211,8 @@ impl Sink for TcpSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transformer::arrow_ipc::ArrowIpcTransformer;
-    use crate::transformer::{MessageDecoder, MessageShape};
+    use crate::codec::arrow_ipc::ArrowIpcCodec;
+    use crate::codec::{MessageDecoder, MessageShape};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
     use tokio::io::AsyncReadExt;
@@ -223,10 +222,10 @@ mod tests {
         Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]))
     }
 
-    /// Framing is what this crate owns; the payload codec is the transformer's,
+    /// Framing is what this crate owns; the payload encoding is the codec's,
     /// and its own tests cover the encode paths.
-    fn arrow_ipc() -> Arc<dyn Transformer> {
-        Arc::new(ArrowIpcTransformer::new())
+    fn arrow_ipc() -> Arc<dyn Codec> {
+        Arc::new(ArrowIpcCodec::new())
     }
 
     fn batch(values: &[i64]) -> RecordBatch {
@@ -241,10 +240,10 @@ mod tests {
     /// only way to observe "no payloads, no frames" without a real codec that
     /// does it. It declares a shape, so it must carry a whole message surface:
     /// the decoder half is `arrow-ipc`'s, unexercised here but real, because
-    /// [`Transformer::message_shape`] answers for both directions at once.
+    /// [`Codec::message_shape`] answers for both directions at once.
     struct NoMessages;
 
-    impl Transformer for NoMessages {
+    impl Codec for NoMessages {
         fn format(&self) -> &'static str {
             "no-messages"
         }
@@ -253,7 +252,7 @@ mod tests {
             &self,
             schema: Arc<Schema>,
         ) -> Result<Box<dyn MessageDecoder>, SaciError> {
-            ArrowIpcTransformer::new().open_message_decoder(schema)
+            ArrowIpcCodec::new().open_message_decoder(schema)
         }
 
         fn encode_messages(&self, _batch: &RecordBatch) -> Result<Vec<Vec<u8>>, SaciError> {
@@ -270,7 +269,7 @@ mod tests {
     /// surface, so the gate is exercised against a stand-in.
     struct NoMessageSurface;
 
-    impl Transformer for NoMessageSurface {
+    impl Codec for NoMessageSurface {
         fn format(&self) -> &'static str {
             "no-surface"
         }

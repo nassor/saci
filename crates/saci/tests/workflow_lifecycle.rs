@@ -23,11 +23,7 @@
 //! cargo nextest run -p saci --all-features --test workflow_lifecycle
 //! ```
 
-#![cfg(all(
-    feature = "connector-file",
-    feature = "service",
-    feature = "transformer-csv"
-))]
+#![cfg(all(feature = "connector-file", feature = "service", feature = "codec-csv"))]
 
 use std::cell::RefCell;
 use std::rc::Rc;

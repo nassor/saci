@@ -235,7 +235,7 @@ fn config_with(run_mode: RunMode, flow: FlowControlConfig) -> ServiceConfig {
         workflows: vec![WorkflowSpec {
             id: "flow".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),

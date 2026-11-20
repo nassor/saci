@@ -1,7 +1,7 @@
-//! [`FileSource`]: a local file read through a transformer.
+//! [`FileSource`]: a local file read through a codec.
 //!
-//! One dedicated OS thread drives the transformer's
-//! [`BatchReader`](crate::transformer::BatchReader) and pushes batches down a
+//! One dedicated OS thread drives the codec's
+//! [`BatchReader`](crate::codec::BatchReader) and pushes batches down a
 //! bounded channel; [`Source::next_batch`] awaits that channel. The executor
 //! never blocks on the disk and the file is never materialised in full.
 
@@ -15,13 +15,12 @@ use tokio::sync::mpsc;
 
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
 
 /// Batches the reader thread may queue before it blocks. Four lets it stay
 /// slightly ahead of the pipeline without holding much memory.
 const CHANNEL_CAPACITY: usize = 4;
 
-/// Local-file [`Source`]. The transformer decodes; this type owns the file
+/// Local-file [`Source`]. The codec decodes; this type owns the file
 /// handle, the reader thread and the channel.
 ///
 /// # Example
@@ -31,12 +30,12 @@ const CHANNEL_CAPACITY: usize = 4;
 /// use std::sync::Arc;
 ///
 /// use saci::connector::file::FileSource;
-/// use saci::transformer::parquet::ParquetTransformer;
+/// use saci::codec::parquet::ParquetCodec;
 ///
 /// // Parquet carries its own schema, so nothing is declared here.
 /// let src = FileSource::open(
 ///     Path::new("trades.parquet"),
-///     Arc::new(ParquetTransformer::new()),
+///     Arc::new(ParquetCodec::new()),
 ///     None,
 /// )
 /// .unwrap();
@@ -48,7 +47,7 @@ pub struct FileSource {
 }
 
 impl FileSource {
-    /// Open `path`, hand the handle to `transformer`, and spawn the reader
+    /// Open `path`, hand the handle to `codec`, and spawn the reader
     /// thread. Returns once the format has reported its schema, which for a
     /// self-describing format means its metadata has been read.
     ///
@@ -59,15 +58,15 @@ impl FileSource {
     /// # Errors
     ///
     /// Returns [`SaciError::Generic`] when the file cannot be opened, or the
-    /// transformer's own error when it cannot read this handle.
+    /// codec's own error when it cannot read this handle.
     pub fn open(
         path: &Path,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
         declared: Option<Arc<Schema>>,
     ) -> Result<Self, SaciError> {
         let file = std::fs::File::open(path)
             .map_err(|e| SaciError::generic(format!("FileSource: cannot open {path:?}: {e}")))?;
-        let mut reader = transformer.open_reader(file, declared)?;
+        let mut reader = codec.open_reader(file, declared)?;
         let schema = reader.schema();
         let estimated_rows = reader.estimated_rows();
 
@@ -109,11 +108,11 @@ impl FileSource {
     /// the blocking task panics.
     pub async fn open_async(
         path: &Path,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
         declared: Option<Arc<Schema>>,
     ) -> Result<Self, SaciError> {
         let path: PathBuf = path.to_owned();
-        tokio::task::spawn_blocking(move || Self::open(&path, transformer, declared))
+        tokio::task::spawn_blocking(move || Self::open(&path, codec, declared))
             .await
             .map_err(|e| SaciError::generic(format!("FileSource: spawn_blocking panic: {e}")))?
     }

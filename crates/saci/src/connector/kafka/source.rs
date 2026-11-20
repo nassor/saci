@@ -33,7 +33,6 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::{MessageShape, Transformer};
 
 use crate::connector::kafka::admin::ensure_topics;
 use crate::connector::kafka::config::{KafkaSourceConfig, client_config};
@@ -195,7 +194,7 @@ pub struct KafkaSource {
     /// the source's life: `Source` is `Send + Sync`, and a decoder need only be
     /// `Send`, which `arrow_json`'s is and no more. Opening one costs an
     /// allocation per schema, not per row.
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// Effective fetch size for the next collection window or
     /// compacted-snapshot chunk. `batch_size` from config seeds this, but a
     /// host that sends [`Source::request_batch_rows`] overwrites it before the
@@ -253,20 +252,20 @@ impl KafkaSource {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] when `cfg` fails validation,
-    /// `transformer` has no message codec, `compacted` is set against a
+    /// `codec` has no message codec, `compacted` is set against a
     /// format that emits one message per batch or a `key_field` the declared
     /// schema cannot hold a raw key in, or librdkafka rejects a property in
     /// `cfg.properties`.
     pub fn new(
         cfg: KafkaSourceConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         cfg.validate()?;
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "KafkaSource: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
         let topics = cfg.topics();
@@ -277,8 +276,7 @@ impl KafkaSource {
                     "KafkaSource config: 'compacted' needs 'key_field'",
                 ));
             };
-            let (index, decode_schema) =
-                compacted_key_column(key_field, &schema, transformer.as_ref())?;
+            let (index, decode_schema) = compacted_key_column(key_field, &schema, codec.as_ref())?;
             (Some(index), decode_schema)
         } else {
             (None, Arc::clone(&schema))
@@ -302,7 +300,7 @@ impl KafkaSource {
             client_config,
             topics,
             schema,
-            transformer,
+            codec,
             cfg,
             started: false,
             buffer: Vec::new(),
@@ -494,11 +492,9 @@ impl KafkaSource {
     /// Feed a whole window through one decoder and take the batch out.
     ///
     /// Each push names the message it failed on, keeping per-message
-    /// attribution; the transformer names the format that rejected it.
+    /// attribution; the codec names the format that rejected it.
     fn decode_window(&self, messages: &[ReceivedMessage]) -> Result<RecordBatch, SaciError> {
-        let mut decoder = self
-            .transformer
-            .open_message_decoder(Arc::clone(&self.schema))?;
+        let mut decoder = self.codec.open_message_decoder(Arc::clone(&self.schema))?;
         for message in messages {
             let Some(payload) = &message.payload else {
                 continue; // tombstone, already excluded from the buffer
@@ -695,7 +691,7 @@ impl KafkaSource {
 
     /// Decode one chunk of survivors and attach their keys.
     ///
-    /// The transformer sees the values alone, exactly as it does for a live
+    /// The codec sees the values alone, exactly as it does for a live
     /// window, and the raw keys are written over the key column afterwards:
     /// the key is not in the payload, which is why `decode_schema` makes that
     /// column nullable and why the format has to emit one message per row.
@@ -706,7 +702,7 @@ impl KafkaSource {
             ));
         };
         let mut decoder = self
-            .transformer
+            .codec
             .open_message_decoder(Arc::clone(&self.decode_schema))?;
         for entry in entries {
             decoder.push(&entry.value).map_err(|e| {
@@ -785,13 +781,13 @@ fn is_unknown_topic(err: &KafkaError) -> bool {
 fn compacted_key_column(
     key_field: &str,
     schema: &Arc<Schema>,
-    transformer: &dyn Transformer,
+    codec: &dyn Codec,
 ) -> Result<(usize, Arc<Schema>), SaciError> {
-    if transformer.message_shape() != Some(MessageShape::PerRow) {
+    if codec.message_shape() != Some(MessageShape::PerRow) {
         return Err(SaciError::configuration(format!(
             "KafkaSource config: 'compacted' needs a row-per-message format; '{}' emits one \
              message per batch, which carries no per-row key",
-            transformer.format()
+            codec.format()
         )));
     }
     let Ok(index) = schema.index_of(key_field) else {
@@ -931,8 +927,8 @@ impl Source for KafkaSource {
 mod tests {
     use super::*;
 
+    use crate::codec::CodecFactory;
     use crate::connector::{ConfigMap, ConfigValue};
-    use crate::transformer::TransformerFactory;
     use arrow_array::{Array, Int64Array};
     use arrow_schema::Fields;
 
@@ -1149,10 +1145,10 @@ mod tests {
         assert!(err.message().contains("'id'"), "got: {err}");
     }
 
-    fn transformer(factory: impl TransformerFactory) -> Arc<dyn Transformer> {
+    fn codec(factory: impl CodecFactory) -> Arc<dyn Codec> {
         factory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("a transformer factory must build from empty options")
+            .expect("a codec factory must build from empty options")
     }
 
     fn declared(key_type: DataType) -> Arc<Schema> {
@@ -1168,7 +1164,7 @@ mod tests {
         let (index, decode_schema) = compacted_key_column(
             "id",
             &schema,
-            transformer(crate::transformer::ndjson::NdjsonTransformerFactory).as_ref(),
+            codec(crate::codec::ndjson::NdjsonCodecFactory).as_ref(),
         )
         .expect("a declared key column");
 
@@ -1186,7 +1182,7 @@ mod tests {
         let err = compacted_key_column(
             "missing",
             &declared(DataType::Int64),
-            transformer(crate::transformer::ndjson::NdjsonTransformerFactory).as_ref(),
+            codec(crate::codec::ndjson::NdjsonCodecFactory).as_ref(),
         )
         .expect_err("an undeclared key column");
 
@@ -1194,13 +1190,13 @@ mod tests {
         assert!(err.message().contains("\"id\""), "got: {err}");
     }
 
-    #[cfg(feature = "transformer-arrow-ipc")]
+    #[cfg(feature = "codec-arrow-ipc")]
     #[test]
     fn a_batch_per_message_format_cannot_be_compacted() {
         let err = compacted_key_column(
             "id",
             &declared(DataType::Int64),
-            transformer(crate::transformer::arrow_ipc::ArrowIpcTransformerFactory).as_ref(),
+            codec(crate::codec::arrow_ipc::ArrowIpcCodecFactory).as_ref(),
         )
         .expect_err("arrow-ipc carries one message per batch");
 
@@ -1213,7 +1209,7 @@ mod tests {
         let err = compacted_key_column(
             "id",
             &declared(DataType::Struct(Fields::empty())),
-            transformer(crate::transformer::ndjson::NdjsonTransformerFactory).as_ref(),
+            codec(crate::codec::ndjson::NdjsonCodecFactory).as_ref(),
         )
         .expect_err("a struct column cannot hold a message key");
 

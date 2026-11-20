@@ -6,12 +6,12 @@
 //! This module moves object bytes over any S3-compatible endpoint (AWS, MinIO,
 //! R2, Ceph RGW, RustFS) and nothing else: the object client, the row/byte/age
 //! flush thresholds, and the timestamped key layout. The byte format comes from
-//! a [`Transformer`](crate::transformer::Transformer), resolved by the host from
+//! a [`Codec`](crate::codec::Codec), resolved by the host from
 //! the `transformer` key naming a declared `transformer` node, so csv, ndjson
 //! and parquet are one connector rather than three.
 //!
 //! A source lists its prefix once and streams each object through a
-//! transformer, reaching EOF when the listing is exhausted. A sink accumulates
+//! codec, reaching EOF when the listing is exhausted. A sink accumulates
 //! encoded rows in memory and uploads them as one object when a flush threshold
 //! fires — enough rows, enough encoded bytes, or enough wall-clock time since
 //! the object took its first batch. Every object key is prefixed with a

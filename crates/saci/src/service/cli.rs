@@ -190,7 +190,7 @@ pub struct ValidateArgs {
     /// registration can supply it.
     #[arg(long)]
     pub strict: bool,
-    /// Build only sources, sinks and transformers; skip processor nodes and
+    /// Build only sources, sinks and codecs; skip processor nodes and
     /// the workflow-graph check that needs their built components.
     ///
     /// For a config naming a processor module not present on disk (a

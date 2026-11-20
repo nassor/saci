@@ -6,7 +6,7 @@
 //!
 //! One redb file under a directory the config names, one table inside it, one
 //! entry per batch. Each value is a self-contained document in whatever byte
-//! format the node's [`Transformer`](crate::transformer::Transformer) supplies,
+//! format the node's [`Codec`](crate::codec::Codec) supplies,
 //! so csv, ndjson, parquet, avro and Arrow IPC are one connector rather than
 //! five. Keys are `{key_prefix}{seq:020}{key_suffix}`, so the table's own
 //! lexicographic order is insertion order, and a reopened sink resumes the

@@ -25,7 +25,7 @@ use crate::connector::nats::{NatsSink, NatsSinkConfig, NatsSource, NatsSourceCon
 ///
 /// The `config` node is [`NatsSourceConfig`]: a `connection` node, a `mode`
 /// node selecting core NATS or JetStream, and `schema_fields` entries
-/// declaring the Arrow schema. The payload codec is whatever transformer the
+/// declaring the Arrow schema. The payload codec is whatever codec the
 /// node's `transformer` key names.
 pub struct NatsSourceFactory;
 
@@ -42,8 +42,8 @@ impl SourceFactory for NatsSourceFactory {
         let cfg = NatsSourceConfig::deserialize(config.clone())
             .map_err(|e| SaciError::configuration(format!("NatsSource config: {e}")))?;
         let schema = parse_schema_fields(config, "NatsSource")?;
-        let transformer = ctx.transformer("NatsSource")?;
-        Ok(Box::new(NatsSource::new(cfg, schema, transformer)?))
+        let codec = ctx.codec("NatsSource")?;
+        Ok(Box::new(NatsSource::new(cfg, schema, codec)?))
     }
 
     /// JetStream re-delivers whatever a dropped instance pulled and never
@@ -57,7 +57,7 @@ impl SourceFactory for NatsSourceFactory {
 ///
 /// The `config` node is [`NatsSinkConfig`]: a `connection` node, a `mode`
 /// node selecting core NATS or JetStream, and `schema_fields` entries
-/// declaring the Arrow schema. The payload codec is whatever transformer the
+/// declaring the Arrow schema. The payload codec is whatever codec the
 /// node's `transformer` key names.
 pub struct NatsSinkFactory;
 
@@ -74,8 +74,8 @@ impl SinkFactory for NatsSinkFactory {
         let cfg = NatsSinkConfig::deserialize(config.clone())
             .map_err(|e| SaciError::configuration(format!("NatsSink config: {e}")))?;
         let schema = parse_schema_fields(config, "NatsSink")?;
-        let transformer = ctx.transformer("NatsSink")?;
-        Ok(Box::new(NatsSink::new(cfg, schema, transformer)?))
+        let codec = ctx.codec("NatsSink")?;
+        Ok(Box::new(NatsSink::new(cfg, schema, codec)?))
     }
 
     /// A publish is awaited before `write_batch` returns, so a failed write
@@ -90,9 +90,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::codec::Codec;
+    use crate::codec::ndjson::NdjsonCodec;
     use crate::connector::from_kdl_str;
-    use crate::transformer::Transformer;
-    use crate::transformer::ndjson::NdjsonTransformer;
 
     const SOURCE: &str = r#"
 connection {
@@ -115,9 +115,9 @@ schema_fields "id" type="int64" nullable=#false
 "#;
 
     /// The context a host hands a node whose `transformer` key named a
-    /// declared transformer.
-    fn bound(transformer: Arc<dyn Transformer>) -> ConnectorContext {
-        ConnectorContext::new(Some(transformer))
+    /// declared codec.
+    fn bound(codec: Arc<dyn Codec>) -> ConnectorContext {
+        ConnectorContext::new(Some(codec))
     }
 
     /// The context a host hands a node that declared no `transformer` key.
@@ -125,8 +125,8 @@ schema_fields "id" type="int64" nullable=#false
         ConnectorContext::new(None)
     }
 
-    fn ndjson() -> Arc<dyn Transformer> {
-        Arc::new(NdjsonTransformer::default())
+    fn ndjson() -> Arc<dyn Codec> {
+        Arc::new(NdjsonCodec::default())
     }
 
     #[test]
@@ -178,7 +178,7 @@ mode kind="core" subject="orders"
     }
 
     #[test]
-    fn a_node_with_no_transformer_is_a_configuration_error() {
+    fn a_node_with_no_codec_is_a_configuration_error() {
         for (what, body) in [("NatsSource", SOURCE), ("NatsSink", SINK)] {
             let value = from_kdl_str(body).expect("parse kdl");
             let err = if what == "NatsSource" {
@@ -186,29 +186,29 @@ mode kind="core" subject="orders"
             } else {
                 NatsSinkFactory.build(&value, &unbound()).err()
             }
-            .unwrap_or_else(|| panic!("{what} moves bytes, so it needs a transformer"));
+            .unwrap_or_else(|| panic!("{what} moves bytes, so it needs a codec"));
             assert_eq!(err.category(), "configuration");
             assert!(err.message().starts_with(what), "got: {err}");
             assert!(err.message().contains("'transformer'"), "got: {err}");
         }
     }
 
-    /// A stream-only format: every message method keeps the [`Transformer`]
+    /// A stream-only format: every message method keeps the [`Codec`]
     /// contract's `unsupported` default. Every format SACI registers implements
     /// the message surface, so the gate is exercised against a stand-in rather
     /// than a shipped format.
     struct StreamOnly;
 
-    impl Transformer for StreamOnly {
+    impl Codec for StreamOnly {
         fn format(&self) -> &'static str {
             "stream-only"
         }
     }
 
     #[test]
-    fn a_transformer_with_no_message_codec_is_rejected() {
+    fn a_codec_with_no_message_codec_is_rejected() {
         let value = from_kdl_str(SINK).expect("parse kdl");
-        let stream_only: Arc<dyn Transformer> = Arc::new(StreamOnly);
+        let stream_only: Arc<dyn Codec> = Arc::new(StreamOnly);
 
         let Err(err) = NatsSinkFactory.build(&value, &bound(stream_only)) else {
             panic!("a format with no message surface must be refused");
@@ -218,7 +218,7 @@ mode kind="core" subject="orders"
         assert!(err.message().contains("'stream-only'"), "got: {err}");
     }
 
-    #[cfg(feature = "transformer-arrow-ipc")]
+    #[cfg(feature = "codec-arrow-ipc")]
     #[test]
     fn a_subject_field_against_a_batch_per_message_format_is_rejected() {
         let raw = r#"
@@ -231,8 +231,7 @@ mode kind="core" subject="orders-out" subject_field="id"
 schema_fields "id" type="int64" nullable=#false
 "#;
         let value = from_kdl_str(raw).expect("parse kdl");
-        let arrow_ipc: Arc<dyn Transformer> =
-            Arc::new(crate::transformer::arrow_ipc::ArrowIpcTransformer::new());
+        let arrow_ipc: Arc<dyn Codec> = Arc::new(crate::codec::arrow_ipc::ArrowIpcCodec::new());
         let Err(err) = NatsSinkFactory.build(&value, &bound(arrow_ipc)) else {
             panic!("arrow-ipc emits one message per batch, so there is no row to route");
         };

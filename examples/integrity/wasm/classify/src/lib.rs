@@ -423,7 +423,7 @@ mod tests {
     }
 
     /// The emitted rows, read back off the dataset the way a sink's
-    /// transformer would.
+    /// codec would.
     fn emitted(data: &Dataset) -> Vec<(i64, f64, bool, String, i64)> {
         let batch = data
             .batch_named("ClassifiedOrder")

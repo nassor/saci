@@ -47,7 +47,6 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::error::SaciError;
 use crate::io::source::Source;
-use crate::transformer::Transformer;
 
 use crate::connector::nats::config::{AckPolicyConfig, NatsSourceConfig, SourceMode};
 use crate::connector::nats::connect::{connect, jetstream_context};
@@ -158,7 +157,7 @@ pub struct NatsSource {
     /// The payload codec. A decoder is opened per window rather than held for
     /// the source's life: `Source` is `Send + Sync`, and a decoder need only be
     /// `Send`.
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// How a JetStream message is acknowledged. [`AckMode::Never`] in core mode,
     /// which has no acks at all.
     ack_mode: AckMode,
@@ -188,17 +187,17 @@ impl NatsSource {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] when `cfg` fails validation or
-    /// `transformer` has no message codec.
+    /// `codec` has no message codec.
     pub fn new(
         cfg: NatsSourceConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         cfg.validate()?;
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "{WHAT}: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
         let ack_mode = match &cfg.mode {
@@ -230,7 +229,7 @@ impl NatsSource {
         Ok(Self {
             cfg,
             schema,
-            transformer,
+            codec,
             ack_mode,
             state: None,
             buffer: Vec::new(),
@@ -372,14 +371,14 @@ impl NatsSource {
     /// Feed a whole window through one decoder and take the batch out.
     ///
     /// Each push names the message it failed on, keeping per-message
-    /// attribution; the transformer names the format that rejected it. That
+    /// attribution; the codec names the format that rejected it. That
     /// attribution is also what [`retire_exhausted`](Self::retire_exhausted)
     /// bounds redelivery by, so the failure carries the offending message's
     /// index rather than only its label.
     fn decode_window(&self, received: &[Received]) -> Result<RecordBatch, DecodeFailure> {
         let whole_window = |error| DecodeFailure { index: None, error };
         let mut decoder = self
-            .transformer
+            .codec
             .open_message_decoder(Arc::clone(&self.schema))
             .map_err(whole_window)?;
         for (index, message) in received.iter().enumerate() {

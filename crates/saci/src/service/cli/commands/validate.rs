@@ -29,7 +29,7 @@
 //!
 //! ## `--connectors-only`
 //!
-//! Runs Gate 1, then builds every source, sink and transformer
+//! Runs Gate 1, then builds every source, sink and codec
 //! ([`ServiceBuilder::build_connectors_only`](crate::service::builder::ServiceBuilder::build_connectors_only))
 //! instead of Gate 2: every connector config still gets checked against its
 //! `deny_unknown_fields` struct, but a processor node's module or library is
@@ -61,7 +61,7 @@
 //! | Config is structurally valid but some types are unknown (default mode) | 0 (warnings printed to stderr) |
 //! | Unknown types present and `--strict` is set | 1 |
 //! | A declared type is a built-in connector this binary lacks the feature for | 1 |
-//! | A `transformer` node's `format` that no transformer is registered for, whether this crate ships it and the feature is off or the name is unknown | 1 |
+//! | A `transformer` node's `format` that no codec is registered for, whether this crate ships it and the feature is off or the name is unknown | 1 |
 //! | A declared `wasm`/`plugin` node, or `mode "cluster"`, needs a host this binary lacks the feature for | 1 |
 //! | Config fails structural validation | 1 |
 //! | Workflow graph mismatch (link component/schema disagreement) | 1 |
@@ -149,7 +149,7 @@ pub async fn run(
     report_unknown_warnings(&unknown_warnings, args)
 }
 
-/// `--connectors-only`: Gate 1, then every source, sink and transformer,
+/// `--connectors-only`: Gate 1, then every source, sink and codec,
 /// skipping the processor and workflow-graph gate entirely.
 fn run_connectors_only(
     builder: ServiceBuilder,
@@ -169,7 +169,7 @@ fn run_connectors_only(
 
     println!("OK: config is structurally valid");
     if built {
-        println!("OK: every source, sink and transformer built");
+        println!("OK: every source, sink and codec built");
     }
     for workflow in &config.workflows {
         println!(
@@ -281,7 +281,7 @@ mod tests {
         WorkflowSpec {
             id: "test".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources,
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -332,7 +332,7 @@ mod tests {
                 id: "sink1".to_string(),
                 name: None,
                 type_name: "ClickHouseSink".to_string(), // not built-in
-                transformer: None,
+                codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
                 config: ConfigValue::Object(ConfigMap::new()),
@@ -356,7 +356,7 @@ mod tests {
                 id: "src1".to_string(),
                 name: None,
                 type_name: "MongoSource".to_string(), // not built-in
-                transformer: None,
+                codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
                 config: ConfigValue::Object(ConfigMap::new()),
@@ -399,7 +399,7 @@ mod tests {
                 id: "src1".to_string(),
                 name: None,
                 type_name: "MongoSource".to_string(),
-                transformer: None,
+                codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
                 config: ConfigValue::Object(ConfigMap::new()),

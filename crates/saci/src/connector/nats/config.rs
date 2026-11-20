@@ -1130,7 +1130,7 @@ impl NatsSinkConfig {
     /// Check every cross-field invariant this config must satisfy.
     ///
     /// Whether `subject_field`, `header_fields` and `message_id_field` are
-    /// honourable depends on the resolved transformer's message shape, which
+    /// honourable depends on the resolved codec's message shape, which
     /// only [`NatsSink::new`](crate::connector::nats::NatsSink::new) knows, so those checks live
     /// there.
     ///

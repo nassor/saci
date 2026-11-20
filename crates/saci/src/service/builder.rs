@@ -4,7 +4,7 @@
 //! `ServiceBuilder` is the integration point between the configuration file and
 //! the SACI runtime. It holds a [`Registry`] of user-provided IO factories and,
 //! given a [`ServiceConfig`], instantiates every declared node of every
-//! declared `workflow`: sources, sinks, transformers, and `wasm`/`plugin`
+//! declared `workflow`: sources, sinks, codecs, and `wasm`/`plugin`
 //! processors.
 //!
 //! ## Usage
@@ -29,19 +29,18 @@ use crate::io::source::Source;
 use crate::runtime::PipelineRuntime;
 
 use super::config::{
-    HealConfig, NodeKind, RunMode, ServiceConfig, ServiceMode, TransformerSpec, WorkflowSpec,
+    CodecSpec, HealConfig, NodeKind, RunMode, ServiceConfig, ServiceMode, WorkflowSpec,
 };
 use super::dlq::{DeadLetterQueue, DlqRegistry, DlqShared};
-use super::factories::{missing_factory_error, missing_transformer_error};
+use super::factories::{missing_codec_error, missing_factory_error};
 use super::heal::{HealSettings, HealingSink, HealingSource, Rebuilder};
 #[cfg(feature = "wasm-host")]
 use super::loader::{LocalModuleResolver, PipelineRuntimeLoader};
 #[cfg(feature = "plugin-host")]
 use super::plugin_loader::load_plugin_runtime;
-use super::registry::{Registry, SinkFactory, SourceFactory, TransformerFactory};
+use super::registry::{CodecFactory, Registry, SinkFactory, SourceFactory};
 use crate::connector::{ChannelBridge, NodeIdentity};
 use crate::inspector::Inspector;
-use crate::transformer::Transformer;
 #[cfg(feature = "wasm-host")]
 use crate::wasm_host::WasmEngine;
 
@@ -184,7 +183,7 @@ fn resolve_heal(
 /// shared half.
 struct NodeBuild<'a> {
     registry: &'a Arc<Registry>,
-    transformers: &'a HashMap<String, Arc<dyn Transformer>>,
+    codecs: &'a HashMap<String, Arc<dyn Codec>>,
     heal: &'a HealConfig,
     /// `node.label()`, the service name a peer-facing connector announces.
     service: &'a str,
@@ -520,9 +519,9 @@ impl ServiceBuilder {
         self
     }
 
-    /// Register a transformer factory (builder-style chaining).
-    pub fn register_transformer<F: TransformerFactory>(mut self, factory: F) -> Self {
-        self.registry.register_transformer(factory);
+    /// Register a codec factory (builder-style chaining).
+    pub fn codec<F: CodecFactory>(mut self, factory: F) -> Self {
+        self.registry.register_codec(factory);
         self
     }
 
@@ -535,12 +534,6 @@ impl ServiceBuilder {
     /// Mutably register a sink factory.
     pub fn register_sink_mut<F: SinkFactory>(&mut self, factory: F) -> &mut Self {
         self.registry.register_sink(factory);
-        self
-    }
-
-    /// Mutably register a transformer factory.
-    pub fn register_transformer_mut<F: TransformerFactory>(&mut self, factory: F) -> &mut Self {
-        self.registry.register_transformer(factory);
         self
     }
 
@@ -597,7 +590,7 @@ impl ServiceBuilder {
         }
     }
 
-    /// Build every declared source, sink and transformer across every
+    /// Build every declared source, sink and codec across every
     /// workflow, skipping processor nodes and the workflow-graph check that
     /// needs their built components.
     ///
@@ -614,7 +607,7 @@ impl ServiceBuilder {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] naming the workflow, node id and
-    /// offending key for the first source, sink or transformer that fails to
+    /// offending key for the first source, sink or codec that fails to
     /// build. An unregistered factory type is one such error, exactly as it
     /// is in `build_all`; the caller distinguishes it the same way
     /// (`saci-service validate`'s `is_unknown_factory_error`).
@@ -622,10 +615,10 @@ impl ServiceBuilder {
         let registry = Arc::new(std::mem::replace(&mut self.registry, Registry::new()));
         let service = config.node.label();
         for workflow in &config.workflows {
-            let transformers = build_transformers(&registry, &workflow.transformers)?;
+            let codecs = build_codecs(&registry, &workflow.codecs)?;
             let build = NodeBuild {
                 registry: &registry,
-                transformers: &transformers,
+                codecs: &codecs,
                 heal: &config.heal,
                 service: &service,
             };
@@ -649,7 +642,7 @@ impl ServiceBuilder {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] if:
-    /// - A transformer names an unregistered format.
+    /// - A codec names an unregistered format.
     /// - A source or sink names an unregistered connector `type`.
     /// - A source or sink factory returns an error.
     /// - A `wasm`/`plugin` node names a module/library that cannot be
@@ -670,10 +663,10 @@ impl ServiceBuilder {
         data_dir: &std::path::Path,
         service: &str,
     ) -> Result<BuiltService, SaciError> {
-        let transformers = build_transformers(registry, &workflow.transformers)?;
+        let codecs = build_codecs(registry, &workflow.codecs)?;
         let build = NodeBuild {
             registry,
-            transformers: &transformers,
+            codecs: &codecs,
             heal,
             service,
         };
@@ -787,10 +780,7 @@ impl ServiceBuilder {
             &spec.id,
             &spec.type_name,
         )?;
-        let bound = spec
-            .transformer
-            .as_deref()
-            .map(|tid| build.transformers[tid].clone());
+        let bound = spec.codec.as_deref().map(|tid| build.codecs[tid].clone());
         let rebuilder = Rebuilder::new(
             build.registry.clone(),
             &spec.type_name,
@@ -850,10 +840,7 @@ impl ServiceBuilder {
             &spec.id,
             &spec.type_name,
         )?;
-        let bound = spec
-            .transformer
-            .as_deref()
-            .map(|tid| build.transformers[tid].clone());
+        let bound = spec.codec.as_deref().map(|tid| build.codecs[tid].clone());
         let rebuilder = Rebuilder::new(
             build.registry.clone(),
             &spec.type_name,
@@ -1143,18 +1130,18 @@ impl Default for ServiceBuilder {
 ///
 /// # Errors
 ///
-/// Returns [`SaciError::Configuration`] when a transformer names an
+/// Returns [`SaciError::Configuration`] when a codec names an
 /// unregistered format, or when its factory rejects its `options`. The
 /// unregistered-format wording, feature hint included, belongs to
-/// [`missing_transformer_error`].
-fn build_transformers(
+/// [`missing_codec_error`].
+fn build_codecs(
     registry: &Registry,
-    specs: &[TransformerSpec],
-) -> SaciResult<HashMap<String, Arc<dyn Transformer>>> {
+    specs: &[CodecSpec],
+) -> SaciResult<HashMap<String, Arc<dyn Codec>>> {
     let mut out = HashMap::with_capacity(specs.len());
     for spec in specs {
-        let factory = registry.transformers().get(&spec.format).ok_or_else(|| {
-            missing_transformer_error(&spec.id, &spec.format, &registry.transformers().formats())
+        let factory = registry.codecs().get(&spec.format).ok_or_else(|| {
+            missing_codec_error(&spec.id, &spec.format, &registry.codecs().names())
         })?;
         out.insert(spec.id.clone(), factory.build(&spec.options)?);
     }
@@ -1260,7 +1247,7 @@ mod tests {
         WorkflowSpec {
             id: id.to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -1280,7 +1267,7 @@ mod tests {
             id: "src1".to_string(),
             name: None,
             type_name: "NoopSource".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1290,7 +1277,7 @@ mod tests {
             id: "sink1".to_string(),
             name: None,
             type_name: "NoopSink".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1334,7 +1321,7 @@ mod tests {
             id: "bad_src".to_string(),
             name: None,
             type_name: "GhostSource".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1477,7 +1464,7 @@ mod tests {
             id: "bad_sink".to_string(),
             name: None,
             type_name: "GhostSink".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1588,7 +1575,7 @@ mod tests {
                 id: "src1".to_string(),
                 name: None,
                 type_name: "StrictSource".to_string(),
-                transformer: None,
+                codec: None,
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
                 config: source_config,
@@ -1598,7 +1585,7 @@ mod tests {
                 id: "sink1".to_string(),
                 name: None,
                 type_name: "NoopSink".to_string(),
-                transformer: None,
+                codec: None,
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
                 config: ConfigValue::Object(ConfigMap::new()),
@@ -1854,7 +1841,7 @@ workflow "w" {
             id: "src1".to_string(),
             name: None,
             type_name: "FlakySource".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp1".to_string(),
             retry: source_retry,
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1864,7 +1851,7 @@ workflow "w" {
             id: "sink1".to_string(),
             name: None,
             type_name: "FlakySink".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp1".to_string(),
             retry: sink_retry,
             config: ConfigValue::Object(ConfigMap::new()),
@@ -2125,7 +2112,7 @@ workflow "w" {
             id: "src1".to_string(),
             name: None,
             type_name: "HealableSource".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig {
                 max_attempts: 1,
@@ -2138,7 +2125,7 @@ workflow "w" {
             id: "sink1".to_string(),
             name: None,
             type_name: "FlakySink".to_string(),
-            transformer: None,
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),

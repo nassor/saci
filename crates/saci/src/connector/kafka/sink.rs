@@ -14,7 +14,6 @@ use rdkafka::util::Timeout;
 
 use crate::error::SaciError;
 use crate::io::sink::Sink;
-use crate::transformer::{MessageShape, Transformer};
 
 use crate::connector::kafka::admin::ensure_topics;
 use crate::connector::kafka::config::{KafkaSinkConfig, client_config};
@@ -33,8 +32,8 @@ pub struct KafkaSink {
     client_config: ClientConfig,
     topic: String,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
-    /// Cached from the transformer at construction, where the capability check
+    codec: Arc<dyn Codec>,
+    /// Cached from the codec at construction, where the capability check
     /// already proved it is `Some`.
     shape: MessageShape,
     cfg: KafkaSinkConfig,
@@ -55,14 +54,14 @@ impl KafkaSink {
     pub fn new(
         cfg: KafkaSinkConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         cfg.validate()?;
 
         // Both capability checks happen here rather than in `validate`: only
-        // the resolved transformer knows its message shape.
-        let format = transformer.format();
-        let Some(shape) = transformer.message_shape() else {
+        // the resolved codec knows its message shape.
+        let format = codec.format();
+        let Some(shape) = codec.message_shape() else {
             return Err(SaciError::configuration(format!(
                 "KafkaSink: format '{format}' has no message codec"
             )));
@@ -84,7 +83,7 @@ impl KafkaSink {
             client_config,
             topic,
             schema,
-            transformer,
+            codec,
             shape,
             cfg,
             provisioned: false,
@@ -170,11 +169,11 @@ impl KafkaSink {
     /// every delivery is awaited concurrently: that is the durability boundary,
     /// and it also bounds the producer queue without extra config.
     async fn publish(&self, batch: &RecordBatch) -> Result<(), SaciError> {
-        let payloads = self.transformer.encode_messages(batch)?;
+        let payloads = self.codec.encode_messages(batch)?;
         if self.shape == MessageShape::PerRow && payloads.len() != batch.num_rows() {
             return Err(SaciError::generic(format!(
                 "KafkaSink: format '{}' produced {} messages for {} rows",
-                self.transformer.format(),
+                self.codec.format(),
                 payloads.len(),
                 batch.num_rows()
             )));

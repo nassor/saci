@@ -54,7 +54,6 @@ use crate::error::SaciError;
 use crate::io::retry::{RetryingSink, RetryingSource};
 use crate::io::{sink::Sink, source::Source};
 use crate::retry::RetryMode;
-use crate::transformer::Transformer;
 
 use super::factories::missing_factory_error;
 use super::registry::Registry;
@@ -161,14 +160,14 @@ impl Role {
 ///
 /// `Send + Sync` because every part is: [`Registry`] holds
 /// `Box<dyn SourceFactory>` and both factory traits are `Send + Sync +
-/// 'static`, [`Transformer`] and [`ChannelBridge`] likewise, and
+/// 'static`, [`Codec`] and [`ChannelBridge`] likewise, and
 /// [`ConfigValue`] is a `serde_json::Value`.
 pub(crate) struct Rebuilder {
     registry: Arc<Registry>,
     type_name: String,
     node_id: String,
     config: ConfigValue,
-    transformer: Option<Arc<dyn Transformer>>,
+    codec: Option<Arc<dyn Codec>>,
     channels: Option<Arc<dyn ChannelBridge>>,
     /// Where this node sits, for a connector that names itself to a peer.
     /// `None` for a node built outside a workflow, such as a dead-letter
@@ -189,7 +188,7 @@ impl Rebuilder {
         type_name: &str,
         node_id: &str,
         config: ConfigValue,
-        transformer: Option<Arc<dyn Transformer>>,
+        codec: Option<Arc<dyn Codec>>,
         channels: Option<Arc<dyn ChannelBridge>>,
         retry: Option<RetryMode>,
     ) -> Self {
@@ -198,7 +197,7 @@ impl Rebuilder {
             type_name: type_name.to_string(),
             node_id: node_id.to_string(),
             config,
-            transformer,
+            codec,
             channels,
             identity: None,
             retry,
@@ -216,7 +215,7 @@ impl Rebuilder {
     }
 
     fn context(&self) -> ConnectorContext {
-        let mut ctx = ConnectorContext::new(self.transformer.clone());
+        let mut ctx = ConnectorContext::new(self.codec.clone());
         if let Some(channels) = &self.channels {
             ctx = ctx.with_channels(channels.clone());
         }

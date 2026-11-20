@@ -8,7 +8,7 @@
 //!
 //! [`HttpSource`] reads. Its default `mode kind="document"` is one GET of a
 //! finite resource: the body is spooled to a temp file as it arrives, decoded
-//! through the transformer's stream read surface, and the source reports EOF
+//! through the codec's stream read surface, and the source reports EOF
 //! when that stream ends and re-arms, so every run mode can drive it and
 //! `interval` re-reads the resource per tick. `pagination "link"` follows
 //! `Link` headers across pages first, and `conditional #true` sends the last
@@ -18,7 +18,7 @@
 //! frames; both are live sources for `run_mode kind="stream"`.
 //!
 //! [`HttpSink`] writes: one request per batch, where the body is a
-//! self-contained document the transformer writes, a csv with its header row,
+//! self-contained document the codec writes, a csv with its header row,
 //! a block of ndjson, one whole parquet or avro container. The `content-type`
 //! follows from the format unless `headers` names one, and `content_encoding`
 //! compresses the whole body.
@@ -37,7 +37,7 @@
 //! Response bodies are decompressed transparently, and a `headers` entry for
 //! `accept-encoding` is how a source asks for that not to happen.
 //!
-//! The byte format comes from a [`Transformer`](crate::transformer::Transformer),
+//! The byte format comes from a [`Codec`](crate::codec::Codec),
 //! resolved by the host from the `transformer` key naming a declared
 //! `transformer` node, so csv, ndjson, parquet and avro are one connector
 //! rather than four.

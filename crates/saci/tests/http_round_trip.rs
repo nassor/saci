@@ -1,5 +1,5 @@
 //! One transport, every direction: an [`HttpSource`] read decoded by a
-//! transformer, an [`HttpSink`] request whose body decodes back to the rows
+//! codec, an [`HttpSink`] request whose body decodes back to the rows
 //! that went in, and an [`HttpPushSource`] that accepts what the sink sends.
 //!
 //! Three servers, each the smallest thing that proves its point.
@@ -14,9 +14,9 @@
 
 #![cfg(all(
     feature = "connector-http",
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-ndjson",
+    feature = "codec-parquet"
 ))]
 
 use std::io::{Read, Write};
@@ -36,10 +36,6 @@ use saci::connector::http::{
 };
 use saci::io::sink::Sink;
 use saci::io::source::Source;
-use saci::transformer::Transformer;
-use saci::transformer::csv::CsvTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
-use saci::transformer::parquet::ParquetTransformer;
 
 // ── the hand-rolled HTTP/1.1 test server ────────────────────────────────────
 
@@ -222,16 +218,16 @@ fn schema() -> Arc<Schema> {
     ]))
 }
 
-fn csv() -> Arc<dyn Transformer> {
-    Arc::new(CsvTransformer::new(true))
+fn csv() -> Arc<dyn Codec> {
+    Arc::new(CsvCodec::new(true))
 }
 
-fn ndjson() -> Arc<dyn Transformer> {
-    Arc::new(NdjsonTransformer::default())
+fn ndjson() -> Arc<dyn Codec> {
+    Arc::new(NdjsonCodec::default())
 }
 
-fn parquet() -> Arc<dyn Transformer> {
-    Arc::new(ParquetTransformer::new())
+fn parquet() -> Arc<dyn Codec> {
+    Arc::new(ParquetCodec::new())
 }
 
 fn batch(ids: &[i64]) -> RecordBatch {

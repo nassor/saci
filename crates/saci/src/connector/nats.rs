@@ -7,8 +7,8 @@
 //! `kind="core"` is plain subject pub/sub with no persistence;
 //! `kind="jetstream"` is a durable stream, read through a pull consumer and
 //! written with publish acks. What a message payload means is the
-//! [`Transformer`](crate::transformer::Transformer) the node's `transformer` key
-//! names, and its [`MessageShape`](crate::transformer::MessageShape) decides
+//! [`Codec`](crate::codec::Codec) the node's `transformer` key
+//! names, and its [`MessageShape`](crate::codec::MessageShape) decides
 //! whether a batch becomes one message per row or one message in total.
 //!
 //! Both sides are declarative: the Arrow schema is written in the service

@@ -39,7 +39,7 @@ struct Entry {
 /// Register one instance with [`ServiceBuilder::with_channel_bridge`]
 /// (under the service, `connector-channel` registers a default instance
 /// automatically); the channel factories reach it through
-/// [`ConnectorContext::channel_bridge`](crate::connector::ConnectorContext::channel_bridge).
+/// [`ConnectorContext::channels`](crate::connector::ConnectorContext::channels).
 ///
 /// [`ServiceBuilder::with_channel_bridge`]: crate::service::builder::ServiceBuilder::with_channel_bridge
 #[derive(Default)]
