@@ -315,11 +315,12 @@ impl System for WindowedSystem {
         let key_hash = self.key_hash(&batch)?;
 
         let window_ids: Int64Array = match &self.spec {
-            WindowSpec::Tumbling { size_ms, offset_ms } => time_ms
-                .values()
-                .iter()
-                .map(|&ts| tumbling_id(ts, *size_ms, *offset_ms))
-                .collect(),
+            WindowSpec::Tumbling { size_ms, offset_ms } => Int64Array::from_iter_values(
+                time_ms
+                    .values()
+                    .iter()
+                    .map(|&ts| tumbling_id(ts, *size_ms, *offset_ms)),
+            ),
             WindowSpec::Session { gap_ms } => assign_sessions(&time_ms, &key_hash, *gap_ms)?,
             WindowSpec::Sliding { .. } => {
                 sliding_window_ids.expect("sliding_window_ids always Some for Sliding spec")
