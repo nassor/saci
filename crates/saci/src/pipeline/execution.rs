@@ -363,13 +363,27 @@ async fn exec(
     data: &mut Dataset,
 ) -> SaciResult<RunStats> {
     let start = Instant::now();
-    if plan.stages.is_empty() {
-        return Ok(RunStats {
-            elapsed: start.elapsed(),
-            ..RunStats::default()
-        });
-    }
     let rows_before = data.live_rows() as isize;
+    let (systems_run, retries) = exec_stages(name, systems, plan, data).await?;
+    Ok(RunStats {
+        rows_produced: data.live_rows() as isize - rows_before,
+        systems_run,
+        elapsed: start.elapsed(),
+        retries,
+    })
+}
+
+/// [`exec`] without the timing and row accounting, for a caller that runs it
+/// once per stream item and measures the whole stream instead.
+async fn exec_stages(
+    name: &str,
+    systems: &[SystemEntry],
+    plan: &Plan,
+    data: &mut Dataset,
+) -> SaciResult<(usize, u32)> {
+    if plan.stages.is_empty() {
+        return Ok((0, 0));
+    }
 
     #[cfg(feature = "tracing")]
     let span = info_span!(
@@ -382,16 +396,8 @@ async fn exec(
     let _ = name;
     let fut = run_stages(systems, plan, data);
     #[cfg(feature = "tracing")]
-    let (systems_run, retries) = fut.instrument(span).await?;
-    #[cfg(not(feature = "tracing"))]
-    let (systems_run, retries) = fut.await?;
-
-    Ok(RunStats {
-        rows_produced: data.live_rows() as isize - rows_before,
-        systems_run,
-        elapsed: start.elapsed(),
-        retries,
-    })
+    let fut = fut.instrument(span);
+    fut.await
 }
 
 impl Pipeline {
@@ -506,9 +512,9 @@ impl Pipeline {
         while let Some(batch) = source.next_batch().await? {
             data.clear();
             data.append_record_batch(comp, batch)?;
-            let stats = exec(name, systems, plan, data).await?;
-            total.systems_run += stats.systems_run;
-            total.retries += stats.retries;
+            let (systems_run, retries) = exec_stages(name, systems, plan, data).await?;
+            total.systems_run += systems_run;
+            total.retries += retries;
 
             for (sink_comp, sink) in sinks.iter_mut() {
                 drain_dataset(data, sink_comp, sink.as_mut()).await?;
