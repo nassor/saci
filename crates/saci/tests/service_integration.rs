@@ -443,9 +443,10 @@ async fn test_serve_health_endpoint_returns_200() {
 
 /// `/metrics` must carry series that real code writes, not just descriptors.
 ///
-/// `saci_workflow_runs_total` comes from the standalone runner's iteration
+/// `saci_workflow_passes_total` comes from the standalone runner's pass
 /// counter and the three service gauges come from the HTTP watchdog tick, so a
-/// body containing all four proves both writers ran.
+/// body containing all four proves both writers ran. The pass counter is
+/// recorded once per workflow, so every sample of it names its `workflow`.
 #[tokio::test]
 async fn test_metrics_endpoint_exposes_written_series() {
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -454,8 +455,8 @@ async fn test_metrics_endpoint_exposes_written_series() {
     let mut service = Service::spawn(config.path());
     let metrics_url = service.url("/metrics");
     let expected = [
-        "saci_workflow_runs_total",
-        "saci_liveness_counter",
+        "saci_workflow_passes_total{",
+        "saci_watchdog_ticks_total",
         "saci_ready",
         "saci_uptime_seconds",
     ];
@@ -471,6 +472,20 @@ async fn test_metrics_endpoint_exposes_written_series() {
         assert!(
             body.contains(name),
             "/metrics should carry {name}, body was:\n{body}"
+        );
+    }
+    let passes: Vec<&str> = body
+        .lines()
+        .filter(|line| line.starts_with("saci_workflow_passes_total{"))
+        .collect();
+    assert!(
+        !passes.is_empty(),
+        "/metrics should carry a saci_workflow_passes_total sample, body was:\n{body}"
+    );
+    for line in &passes {
+        assert!(
+            line.contains("workflow=\""),
+            "every saci_workflow_passes_total sample names its workflow: {line}"
         );
     }
     assert!(

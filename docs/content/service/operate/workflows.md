@@ -94,7 +94,7 @@ Invoke-RestMethod http://localhost:8080/api/workflows | ConvertTo-Json -Depth 5
 
 `GET /api/workflows/orders` returns that one entry, and `404` for an id no
 config declares. `runs` counts the runners started for this workflow, so a
-restart takes it to `2`. `saci_workflow_runs_total` counts passes instead and a
+restart takes it to `2`. `saci_workflow_passes_total` counts passes instead and a
 restart leaves it where it was.
 
 ## 2. Pause and resume one workflow

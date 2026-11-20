@@ -137,6 +137,7 @@ use crate::error::SaciError;
 use crate::inspector::Inspector;
 use crate::inspector_wire::{FlowDecision, FlowDecisionKind};
 use crate::io::{Sink, Source};
+use crate::metrics::{ProcessorMetrics, SinkMetrics, SourceMetrics};
 use crate::runtime::PipelineRuntime;
 
 use super::builder::{BuiltNodeKind, BuiltWorkflow, RunOptions};
@@ -205,7 +206,7 @@ pub struct WorkflowStats {
     /// Total number of completed workflow passes.
     ///
     /// Under an admission credit a pass is one credit-sized admission rather
-    /// than one drain to EOF, so this counter and `saci_workflow_runs_total`
+    /// than one drain to EOF, so this counter and `saci_workflow_passes_total`
     /// are per pass while `source_batches_drained` and a source node's
     /// `batches` are per arrival. A pass is one whole drain again where no
     /// credit applies: `flow_control { enabled #false }` and
@@ -477,6 +478,7 @@ async fn write_staged(
     sink: &mut dyn Sink,
     staged: &mut Vec<RecordBatch>,
     id: &str,
+    metrics: &SinkMetrics,
     component: &str,
     workflow_id: &str,
     node_stat: &mut NodeStats,
@@ -490,7 +492,7 @@ async fn write_staged(
                 node_stat.rows += rows;
                 node_stat.batches += 1;
                 stats.sink_batches_written += 1;
-                crate::metrics::instruments().sink_write(id, rows);
+                metrics.write(rows);
             }
             Err(e) => {
                 #[cfg(feature = "tracing")]
@@ -544,6 +546,7 @@ async fn flush_and_finish_all(
     sinks: &mut [Option<Box<dyn Sink>>],
     staged: &mut [Vec<RecordBatch>],
     ids: &[String],
+    sink_metrics: &[Option<SinkMetrics>],
     components: &[Option<&'static str>],
     workflow_id: &str,
     node_stats: &mut [NodeStats],
@@ -551,13 +554,14 @@ async fn flush_and_finish_all(
     mut dlq: Option<&mut DeadLetterQueue>,
 ) {
     for i in 0..sinks.len() {
-        let Some(sink) = sinks[i].as_mut() else {
+        let (Some(sink), Some(metrics)) = (sinks[i].as_mut(), sink_metrics[i].as_ref()) else {
             continue;
         };
         write_staged(
             sink.as_mut(),
             &mut staged[i],
             &ids[i],
+            metrics,
             components[i].unwrap_or_default(),
             workflow_id,
             &mut node_stats[i],
@@ -628,7 +632,7 @@ pub(super) async fn finish_all_sources(
 /// - Source errors: log WARN, increment `iteration_errors`, stop draining that
 ///   source this iteration, continue to the next node.
 /// - Processor errors: log ERROR, increment `iteration_errors`, record
-///   `workflow_error`, skip its fan-out so a failed processor feeds nothing
+///   `saci_workflow_pass_errors_total`, skip its fan-out so a failed processor feeds nothing
 ///   downstream, still clear its dataset, continue.
 /// - Sink errors: log ERROR, increment `iteration_errors`, continue.
 /// - A `forward_into` or `append_record_batch` fan-out error: log WARN naming
@@ -672,6 +676,12 @@ pub(crate) async fn run(
     let mut datasets: Vec<Option<Dataset>> = Vec::with_capacity(n);
     let mut sinks: Vec<Option<Box<dyn Sink>>> = Vec::with_capacity(n);
     let mut node_stats: Vec<NodeStats> = Vec::with_capacity(n);
+    // One bound metrics handle per node, of the node's own kind (`None`
+    // elsewhere), and one for the workflow, so a write builds no attribute.
+    let workflow_metrics = crate::metrics::instruments().workflow(&workflow_id);
+    let mut source_metrics: Vec<Option<SourceMetrics>> = Vec::with_capacity(n);
+    let mut processor_metrics: Vec<Option<ProcessorMetrics>> = Vec::with_capacity(n);
+    let mut sink_metrics: Vec<Option<SinkMetrics>> = Vec::with_capacity(n);
     // One flag per healed sink node, `None` elsewhere. A sink that just came
     // back is when a dead letter replay is most likely to land.
     let mut recovered: Vec<Option<Arc<std::sync::atomic::AtomicBool>>> = Vec::with_capacity(n);
@@ -705,6 +715,14 @@ pub(crate) async fn run(
             BuiltNodeKind::Sink(sink) => (NodeRunKind::Sink, None, None, None, Some(sink)),
         };
         kinds.push(kind);
+        {
+            let id = ids.last().expect("just pushed");
+            let instruments = crate::metrics::instruments();
+            source_metrics.push((kind == NodeRunKind::Source).then(|| instruments.source(id)));
+            processor_metrics
+                .push((kind == NodeRunKind::Processor).then(|| instruments.processor(id)));
+            sink_metrics.push((kind == NodeRunKind::Sink).then(|| instruments.sink(id)));
+        }
         sources.push(source);
         runtimes.push(runtime);
         datasets.push(dataset);
@@ -850,6 +868,7 @@ pub(crate) async fn run(
                 &mut sinks,
                 &mut staged,
                 &ids,
+                &sink_metrics,
                 &components,
                 &workflow_id,
                 &mut node_stats,
@@ -904,6 +923,9 @@ pub(crate) async fn run(
                 NodeRunKind::Source => {
                     let component =
                         components[i].expect("a source node always declares a component");
+                    let metrics = source_metrics[i]
+                        .as_ref()
+                        .expect("a source node binds its metrics");
                     #[cfg(feature = "tracing")]
                     let drain_span = batch_span.in_scope(|| {
                         tracing::debug_span!(
@@ -1033,7 +1055,7 @@ pub(crate) async fn run(
                         admitted_bytes[i] += (rows as f64 * bytes_per_row) as u64;
                         stats.rows_processed += rows;
                         node_stats[i].rows += rows;
-                        crate::metrics::instruments().rows(&ids[i], rows);
+                        metrics.rows(rows);
                         // Rows are counted per chunk so the totals match what
                         // passed through the workflow; the arrival counters
                         // count source batches, so a batch split into chunks
@@ -1041,7 +1063,7 @@ pub(crate) async fn run(
                         if fresh_batch {
                             stats.source_batches_drained += 1;
                             node_stats[i].batches += 1;
-                            crate::metrics::instruments().source_batch(&ids[i]);
+                            metrics.batch();
                         }
 
                         for edge in &downstream[i] {
@@ -1083,6 +1105,9 @@ pub(crate) async fn run(
                 }
 
                 NodeRunKind::Processor => {
+                    let metrics = processor_metrics[i]
+                        .as_ref()
+                        .expect("a processor node binds its metrics");
                     // The fan-in merge is complete once every upstream node has
                     // run: sources appended their batches directly and upstream
                     // processors forwarded their datasets. A windowed node's
@@ -1103,12 +1128,12 @@ pub(crate) async fn run(
                                     tracker.watermark_ms(),
                                 ));
                                 if tracker.has_watermark() {
-                                    crate::metrics::instruments()
-                                        .window_watermark(&ids[i], tracker.watermark_seconds());
+                                    metrics.window_watermark(tracker.watermark_seconds());
                                 }
                                 super::windowing::report_watermark_advance(
                                     &workflow_id,
                                     &ids[i],
+                                    metrics,
                                     tracker,
                                     advance,
                                 );
@@ -1246,8 +1271,7 @@ pub(crate) async fn run(
                                     continue;
                                 }
                                 if let Some(branch) = &edge.branch {
-                                    crate::metrics::instruments()
-                                        .processor_branch_rows(&ids[i], branch, rows_out);
+                                    metrics.branch_rows(branch, rows_out);
                                 }
                                 match kinds[d] {
                                     NodeRunKind::Processor => {
@@ -1299,7 +1323,7 @@ pub(crate) async fn run(
                             );
                             stats.iteration_errors += 1;
                             node_stats[i].errors += 1;
-                            crate::metrics::instruments().workflow_error(&workflow_id);
+                            workflow_metrics.pass_error();
                             // Fall through to clear() without fanning out.
                         }
                     }
@@ -1324,10 +1348,14 @@ pub(crate) async fn run(
                     });
                     let rows_before: u64 = staged[i].iter().map(|b| b.num_rows() as u64).sum();
                     let sink = sinks[i].as_mut().expect("sink node keeps its sink");
+                    let metrics = sink_metrics[i]
+                        .as_ref()
+                        .expect("a sink node binds its metrics");
                     let write = write_staged(
                         sink.as_mut(),
                         &mut staged[i],
                         &ids[i],
+                        metrics,
                         component,
                         &workflow_id,
                         &mut node_stats[i],
@@ -1351,6 +1379,7 @@ pub(crate) async fn run(
                 &mut sinks,
                 &mut staged,
                 &ids,
+                &sink_metrics,
                 &components,
                 &workflow_id,
                 &mut node_stats,
@@ -1430,17 +1459,23 @@ pub(crate) async fn run(
         // per-sink value means anything to a reader.
         let mut sink_pending: Option<u64> = None;
         for i in 0..n {
-            let Some(pending) = sinks[i].as_ref().and_then(|sink| sink.pending_rows()) else {
+            let (Some(sink), Some(metrics)) = (sinks[i].as_ref(), sink_metrics[i].as_ref()) else {
+                continue;
+            };
+            let Some(pending) = sink.pending_rows() else {
                 continue;
             };
             let pending = pending as u64;
-            crate::metrics::instruments().sink_pending_rows(&ids[i], pending);
+            metrics.pending_rows(pending);
             sink_pending = Some(sink_pending.map_or(pending, |seen| seen.max(pending)));
         }
         for i in 0..n {
             let Some(controller) = controllers[i].as_mut() else {
                 continue;
             };
+            let metrics = source_metrics[i]
+                .as_ref()
+                .expect("a source node binds its metrics");
             let rows = admitted_rows[i];
             let elapsed = if rows == 0 || total_admitted == 0 {
                 Duration::ZERO
@@ -1467,7 +1502,7 @@ pub(crate) async fn run(
                 adjustment,
                 FlowAdjustment::BackedOff(_) | FlowAdjustment::HeldAtFloor(_)
             ) {
-                crate::metrics::instruments().flow_backoff(&ids[i]);
+                metrics.flow_backoff();
             }
             record_flow_decision(
                 inspector,
@@ -1489,11 +1524,7 @@ pub(crate) async fn run(
             // the flow-control target would be indistinguishable from flow
             // control being on at that size.
             if controller.enabled() {
-                crate::metrics::instruments().flow_state(
-                    &ids[i],
-                    controller.target_rows(),
-                    controller.throughput(),
-                );
+                metrics.flow_state(controller.target_rows(), controller.throughput());
             }
         }
 
@@ -1522,7 +1553,7 @@ pub(crate) async fn run(
         }
 
         stats.iterations += 1;
-        crate::metrics::instruments().workflow_run(&workflow_id);
+        workflow_metrics.pass();
         let iter_ms = iter_start.elapsed().as_millis() as u64;
 
         if let Some(shared) = &live_stats {
@@ -1636,6 +1667,7 @@ pub(crate) async fn run(
             &mut sinks,
             &mut staged,
             &ids,
+            &sink_metrics,
             &components,
             &workflow_id,
             &mut node_stats,

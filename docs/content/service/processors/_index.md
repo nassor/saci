@@ -180,7 +180,7 @@ throughput and latency are one selector away:
 | `saci_processor_batch_duration_seconds` | histogram | how long one batch took |
 | `saci_processor_systems_run_total` | counter | steps the processor ran |
 | `saci_processor_retries_total` | counter | retries it reported |
-| `saci_processor_metric` | histogram | a metric the processor named itself, labelled `metric` |
+| `saci_processor_custom` | histogram | a metric the processor named itself, labelled `metric` |
 
 [The live dashboard](@/service/operate/dashboard.md) draws the same numbers per node and
 prints what the processor says about itself: its name, its version, whether it is stateful,

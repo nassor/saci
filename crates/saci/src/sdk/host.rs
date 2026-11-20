@@ -59,7 +59,7 @@ pub fn error(target: &str, message: &str) {
 }
 
 /// Observe a named metric. The host records it as the
-/// `saci_processor_metric` histogram, labelled `metric="<name>"`.
+/// `saci_processor_custom` histogram, labelled `metric="<name>"`.
 pub fn metric(name: &str, value: f64) {
     with_active(|host| host.metric(name, value));
 }

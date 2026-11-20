@@ -70,6 +70,7 @@ use tracing::Instrument as _;
 use crate::dataset::Dataset;
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
+use crate::metrics::{ProcessorMetrics, SinkMetrics, SourceMetrics};
 use crate::runtime::PipelineRuntime;
 
 use super::builder::{BuiltNodeKind, BuiltWorkflow, RunOptions};
@@ -196,6 +197,12 @@ pub(crate) async fn run(
     let mut datasets: Vec<Option<Dataset>> = Vec::with_capacity(n);
     let mut sinks: Vec<Option<Box<dyn Sink>>> = Vec::with_capacity(n);
     let mut node_stats: Vec<NodeStats> = Vec::with_capacity(n);
+    // One bound metrics handle per node, of the node's own kind (`None`
+    // elsewhere), and one for the workflow, so a write builds no attribute.
+    let workflow_metrics = crate::metrics::instruments().workflow(&workflow_id);
+    let mut source_metrics: Vec<Option<SourceMetrics>> = Vec::with_capacity(n);
+    let mut processor_metrics: Vec<Option<ProcessorMetrics>> = Vec::with_capacity(n);
+    let mut sink_metrics: Vec<Option<SinkMetrics>> = Vec::with_capacity(n);
     // One flag per healed sink node, `None` elsewhere. See the standalone
     // runner's own binding.
     let mut recovered: Vec<Option<Arc<std::sync::atomic::AtomicBool>>> = Vec::with_capacity(n);
@@ -231,6 +238,14 @@ pub(crate) async fn run(
             BuiltNodeKind::Sink(sink) => (NodeRunKind::Sink, None, None, None, Some(sink)),
         };
         kinds.push(kind);
+        {
+            let id = ids.last().expect("just pushed");
+            let instruments = crate::metrics::instruments();
+            source_metrics.push((kind == NodeRunKind::Source).then(|| instruments.source(id)));
+            processor_metrics
+                .push((kind == NodeRunKind::Processor).then(|| instruments.processor(id)));
+            sink_metrics.push((kind == NodeRunKind::Sink).then(|| instruments.sink(id)));
+        }
         sources.push(source);
         runtimes.push(runtime);
         datasets.push(dataset);
@@ -598,9 +613,12 @@ pub(crate) async fn run(
             rows = rows
         );
 
+        let current_source = source_metrics[source_index]
+            .as_ref()
+            .expect("a source node binds its metrics");
         stats.rows_processed += rows;
         node_stats[source_index].rows += rows;
-        crate::metrics::instruments().rows(&ids[source_index], rows);
+        current_source.rows(rows);
         let errors_before = stats.iteration_errors;
         // Rows are counted per chunk so the totals match what passed through
         // the workflow; the arrival counters and the persisted cursor count
@@ -608,7 +626,7 @@ pub(crate) async fn run(
         if fresh_batch {
             stats.source_batches_drained += 1;
             node_stats[source_index].batches += 1;
-            crate::metrics::instruments().source_batch(&ids[source_index]);
+            current_source.batch();
             // Persist the source cursor so a restart resumes from here. Best
             // effort: memory stays authoritative and an at-least-once source
             // covers a missed write with one replay.
@@ -674,6 +692,9 @@ pub(crate) async fn run(
                 // Another source: it contributes its own item, not this one.
                 NodeRunKind::Source => continue,
                 NodeRunKind::Processor => {
+                    let metrics = processor_metrics[i]
+                        .as_ref()
+                        .expect("a processor node binds its metrics");
                     // Same fan-in watermark advance as the standalone runner:
                     // by the time this processor runs, every upstream node has
                     // delivered into its dataset for this item.
@@ -692,12 +713,12 @@ pub(crate) async fn run(
                                     tracker.watermark_ms(),
                                 ));
                                 if tracker.has_watermark() {
-                                    crate::metrics::instruments()
-                                        .window_watermark(&ids[i], tracker.watermark_seconds());
+                                    metrics.window_watermark(tracker.watermark_seconds());
                                 }
                                 super::windowing::report_watermark_advance(
                                     &workflow_id,
                                     &ids[i],
+                                    metrics,
                                     tracker,
                                     advance,
                                 );
@@ -816,8 +837,7 @@ pub(crate) async fn run(
                                     continue;
                                 }
                                 if let Some(branch) = &edge.branch {
-                                    crate::metrics::instruments()
-                                        .processor_branch_rows(&ids[i], branch, rows_out);
+                                    metrics.branch_rows(branch, rows_out);
                                 }
                                 match kinds[d] {
                                     NodeRunKind::Processor => {
@@ -871,7 +891,7 @@ pub(crate) async fn run(
                             );
                             stats.iteration_errors += 1;
                             node_stats[i].errors += 1;
-                            crate::metrics::instruments().workflow_error(&workflow_id);
+                            workflow_metrics.pass_error();
                         }
                     }
 
@@ -882,6 +902,9 @@ pub(crate) async fn run(
                 }
                 NodeRunKind::Sink => {
                     let component = components[i].expect("a sink node always declares a component");
+                    let metrics = sink_metrics[i]
+                        .as_ref()
+                        .expect("a sink node binds its metrics");
                     #[cfg(feature = "tracing")]
                     let write_span = batch_span.in_scope(|| {
                         tracing::debug_span!(
@@ -901,7 +924,7 @@ pub(crate) async fn run(
                                 node_stats[i].rows += rows;
                                 node_stats[i].batches += 1;
                                 stats.sink_batches_written += 1;
-                                crate::metrics::instruments().sink_write(&ids[i], rows);
+                                metrics.write(rows);
                             }
                             Err(e) => {
                                 #[cfg(feature = "tracing")]
@@ -966,7 +989,7 @@ pub(crate) async fn run(
 
         let item_micros = item_start.elapsed().as_micros() as u64;
         stats.iterations += 1;
-        crate::metrics::instruments().workflow_run(&workflow_id);
+        workflow_metrics.pass();
         stats.total_busy_micros += item_micros;
 
         // Each sink's own backlog is published under its own id; the maximum
@@ -975,11 +998,14 @@ pub(crate) async fn run(
         // policy and only the per-sink value means anything to a reader.
         let mut sink_pending: Option<u64> = None;
         for i in 0..n {
-            let Some(pending) = sinks[i].as_ref().and_then(|sink| sink.pending_rows()) else {
+            let (Some(sink), Some(metrics)) = (sinks[i].as_ref(), sink_metrics[i].as_ref()) else {
+                continue;
+            };
+            let Some(pending) = sink.pending_rows() else {
                 continue;
             };
             let pending = pending as u64;
-            crate::metrics::instruments().sink_pending_rows(&ids[i], pending);
+            metrics.pending_rows(pending);
             sink_pending = Some(sink_pending.map_or(pending, |seen| seen.max(pending)));
         }
         // Feed the chunk back to this source's controller. `item_start` opens
@@ -1009,7 +1035,7 @@ pub(crate) async fn run(
                 adjustment,
                 FlowAdjustment::BackedOff(_) | FlowAdjustment::HeldAtFloor(_)
             ) {
-                crate::metrics::instruments().flow_backoff(&ids[source_index]);
+                current_source.flow_backoff();
             }
             record_flow_decision(
                 inspector,
@@ -1031,11 +1057,7 @@ pub(crate) async fn run(
             // the flow-control target would be indistinguishable from flow
             // control being on at that size.
             if controller.enabled() {
-                crate::metrics::instruments().flow_state(
-                    &ids[source_index],
-                    controller.target_rows(),
-                    controller.throughput(),
-                );
+                current_source.flow_state(controller.target_rows(), controller.throughput());
             }
         }
         stats.max_item_micros = stats.max_item_micros.max(item_micros);

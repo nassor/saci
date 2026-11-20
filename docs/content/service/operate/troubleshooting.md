@@ -236,7 +236,7 @@ downstream of it is fed. Every one of them logs and increments
 | Condition | What happens |
 |---|---|
 | A source fails to read | That source stops draining for this pass; the pass continues with the others |
-| A processor call fails | That processor's downstream nodes are fed nothing this pass, and `saci_workflow_errors_total` increments |
+| A processor call fails | That processor's downstream nodes are fed nothing this pass, and `saci_workflow_pass_errors_total` increments |
 | More than 128 processor calls run at once | The 129th fails to instantiate with `processor trap (instantiate): maximum concurrent limit of 128 for component instances reached`, and that batch is treated as failed |
 | A sink fails to write | The write is retried with backoff first; the error reaches the runner only after the last attempt |
 | The next chunk would exceed `max_chunk_bytes` | The source's admission target is divided: [Flow control](@/service/operate/flow-control.md) |
@@ -250,7 +250,7 @@ Three places answer "what went wrong", in increasing detail:
 
 - `iteration_errors` on `/status`, per workflow, is the fastest yes or no. It
   counts every failure below, source, processor and sink alike.
-- `saci_workflow_errors_total` on `/metrics`, under `workflow="<id>"`, is the
+- `saci_workflow_pass_errors_total` on `/metrics`, under `workflow="<id>"`, is the
   narrower signal for an alert: a processor call that failed, and in cluster
   mode a claim the node could not renew. A source or sink failure never
   reaches it, so pair it with `iteration_errors`:

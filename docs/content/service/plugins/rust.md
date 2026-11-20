@@ -240,7 +240,7 @@ sdk::host::info("smoketest", &format!("numbered {rows} rows through {advanced}")
 ```
 
 A metric the plugin names goes out as a trace event on the service's own
-subscriber, not as a Prometheus series. `saci_processor_metric` belongs to the
+subscriber, not as a Prometheus series. `saci_processor_custom` belongs to the
 WebAssembly path, and the other five `saci_processor_*` names carry the
 per-batch numbers, which a plugin reports into exactly the same series a
 processor does. Return a `SaciError` from a system rather than panicking.

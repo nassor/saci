@@ -84,7 +84,7 @@ CPU-bound guest compute off Tokio's worker pool so the epoch ticker cannot starv
 result back. `bindings.rs` is a `wasmtime::component::bindgen!` pointed at `crates/saci/wit` with
 `exports: { default: async }`, so host bindings cannot drift.
 `host_impl.rs` implements the `host-io` imports (`log`, `metric`, `get-config`); `metric` records
-the `saci_processor_metric` histogram, and `runner.rs` records the five `run-metrics` numbers off
+the `saci_processor_custom` histogram, and `runner.rs` records the five `run-metrics` numbers off
 every `run-result`.
 
 `wasm-host` is the feature: the wasmtime host, `WasmEngine`, `WasmPipelineRuntime`, the `bindgen!`

@@ -264,8 +264,8 @@ Linux/macOS:
 
 ```bash,name=Scrape the endpoint
 curl -s localhost:8080/metrics | grep '^saci_'
-# saci_liveness_counter{otel_scope_name="saci"} 6
-# saci_workflow_runs_total{otel_scope_name="saci"} 50
+# saci_watchdog_ticks_total{otel_scope_name="saci"} 6
+# saci_workflow_passes_total{workflow="orders",otel_scope_name="saci"} 50
 # saci_ready{otel_scope_name="saci"} 1
 # saci_uptime_seconds{otel_scope_name="saci"} 5.0141387
 ```
@@ -276,13 +276,12 @@ Windows (PowerShell):
 curl.exe -s localhost:8080/metrics | Select-String '^saci_'
 ```
 
-Nineteen of the thirty-two series are written twice, and eighteen of those
-pair an attribute-free form with one under the id of the node or workflow that
-wrote it. `saci_processor_metric` is the exception: both its writes carry
-`metric=` and only the second adds `processor=`. The unattributed value is
-already the sum across every node of that kind, so a dashboard adds one form or
-the other, never both. Select the empty attribute value, `source=""`,
-`processor=""`, `sink=""` or `workflow=""`, for the process-wide number.
+A series that belongs to one node or one workflow is written once per event,
+under the id of that node or workflow, so every sample names what wrote it. A
+process-wide total is the sum over the label, for example
+`sum(saci_source_rows_total)`. `saci_processor_rows_out_total` also has one
+sample per labelled link, under `processor` and `branch`, so its total is
+`sum(saci_processor_rows_out_total{branch=""})`.
 
 ## 4. Export spans over OTLP
 
@@ -333,31 +332,31 @@ service manager that stops the process any other way gets no drain.
 
 Each entry names the series, then its type and its labels, then what moves it.
 
-`saci_workflow_runs_total` <small>counter, labels `workflow`, plus an unattributed total</small>
+`saci_workflow_passes_total` <small>counter, labels `workflow`</small>
 :   one workflow pass, which under an admission credit is one credit-sized admission per source rather than one drain to EOF
 
-`saci_workflow_errors_total` <small>counter, labels `workflow`, plus an unattributed total</small>
+`saci_workflow_pass_errors_total` <small>counter, labels `workflow`</small>
 :   a processor run that failed, plus a lease renewal or a post-run persist failure in cluster mode. Source and sink failures stay on `/status`, so a processor alert is not diluted by them
 
 `saci_stage_duration_seconds` <small>histogram, no labels</small>
 :   the lifetime of one stage inside a native pipeline
 
-`saci_source_batches_drained_total` <small>counter, labels `source`, plus an unattributed total</small>
+`saci_source_batches_total` <small>counter, labels `source`</small>
 :   one non-empty source drain, or one claimed partition in a cluster
 
-`saci_sink_batches_written_total` <small>counter, labels `sink`, plus an unattributed total</small>
+`saci_sink_batches_total` <small>counter, labels `sink`</small>
 :   one batch written to a sink. A cluster has no sinks, so it stays at zero there
 
-`saci_sink_rows_written_total` <small>counter, labels `sink`, plus an unattributed total</small>
+`saci_sink_rows_total` <small>counter, labels `sink`</small>
 :   the rows in each written batch, which is the comparable measure of what a sink is moving
 
 `saci_sink_pending_rows` <small>gauge, labels `sink` only</small>
 :   one pass per sink that reports a backlog. This is the number flow control reads as congestion
 
-`saci_rows_processed_total` <small>counter, labels `source`, plus an unattributed total</small>
+`saci_source_rows_total` <small>counter, labels `source`</small>
 :   rows a source admitted into the workflow
 
-`saci_liveness_counter` <small>gauge, no labels</small>
+`saci_watchdog_ticks_total` <small>gauge, no labels</small>
 :   the watchdog, once a second
 
 `saci_ready` <small>gauge, no labels</small>
@@ -375,22 +374,22 @@ Each entry names the series, then its type and its labels, then what moves it.
 `saci_raft_leader_id` <small>gauge, no labels</small>
 :   the same. It reports `-1` when there is no leader, so a lost election shows up instead of a stale id
 
-`saci_processor_batch_duration_seconds` <small>histogram, labels `processor`, plus an unattributed total</small>
+`saci_processor_batch_duration_seconds` <small>histogram, labels `processor`</small>
 :   one processor call. This is the dashboard's per-node latency
 
-`saci_processor_rows_in_total` <small>counter, labels `processor`, plus an unattributed total</small>
+`saci_processor_rows_in_total` <small>counter, labels `processor`</small>
 :   the rows one processor call received
 
-`saci_processor_rows_out_total` <small>counter, labels `processor`, and `branch` on a labelled link, plus an unattributed total</small>
+`saci_processor_rows_out_total` <small>counter, labels `processor`, and `branch` on a labelled link</small>
 :   the rows one processor call returned. This is what rates a processor's outbound edge on the dashboard
 
-`saci_processor_systems_run_total` <small>counter, labels `processor`, plus an unattributed total</small>
+`saci_processor_systems_run_total` <small>counter, labels `processor`</small>
 :   the transforms one processor call ran
 
-`saci_processor_retries_total` <small>counter, labels `processor`, plus an unattributed total</small>
+`saci_processor_retries_total` <small>counter, labels `processor`</small>
 :   a retry inside one processor call
 
-`saci_processor_metric` <small>histogram, labels `metric`, and `processor` on the second record</small>
+`saci_processor_custom` <small>histogram, labels `metric` and `processor`</small>
 :   a value the processor itself reported. Distinct names are capped at 256
 
 `saci_window_watermark_seconds` <small>gauge, labels `processor` only</small>
@@ -405,28 +404,28 @@ Each entry names the series, then its type and its labels, then what moves it.
 `saci_flow_throughput_rows_per_second` <small>gauge, labels `source` only</small>
 :   the same cadence: that source's smoothed rate
 
-`saci_flow_backoff_total` <small>counter, labels `source`, plus an unattributed total</small>
+`saci_flow_backoff_total` <small>counter, labels `source`</small>
 :   one flow-control guard trip; see [Flow control](@/service/operate/flow-control.md)
 
-`saci_connector_heals_total` <small>counter, labels `source` or `sink`, plus an unattributed total</small>
+`saci_connector_heals_total` <small>counter, labels `source` or `sink`</small>
 :   one rebuild whose connector returned an instance, counted before that instance has run anything; see [Self-healing](@/service/operate/self-healing.md)
 
-`saci_connector_heal_failures_total` <small>counter, labels `source` or `sink`, plus an unattributed total</small>
+`saci_connector_heal_failures_total` <small>counter, labels `source` or `sink`</small>
 :   one rebuild the connector refused. A fresh instance that fails its first operation is not counted here; it just schedules the next attempt
 
-`saci_dlq_letters_recorded_total` <small>counter, labels `sink`, plus an unattributed total</small>
+`saci_dlq_letters_recorded_total` <small>counter, labels `sink`</small>
 :   one batch a sink refused that the dead letter queue stored; see [Dead letter queue](@/service/operate/dead-letter-queue.md)
 
-`saci_dlq_rows_recorded_total` <small>counter, labels `sink`, plus an unattributed total</small>
+`saci_dlq_rows_recorded_total` <small>counter, labels `sink`</small>
 :   the rows in each stored batch
 
-`saci_dlq_letters_replayed_total` <small>counter, labels `sink`, plus an unattributed total</small>
+`saci_dlq_letters_replayed_total` <small>counter, labels `sink`</small>
 :   one stored batch a replay delivered to its sink
 
-`saci_dlq_letters_lost_total` <small>counter, labels `sink`, plus an unattributed total</small>
+`saci_dlq_letters_lost_total` <small>counter, labels `sink`</small>
 :   one letter the store itself would not take. The batch is gone, because nothing is buffered in memory waiting for the store
 
-`saci_dlq_letters` <small>gauge, labels `workflow` only</small>
+`saci_dlq_letters_pending` <small>gauge, labels `workflow` only</small>
 :   after every record and every replay: the letters that workflow is holding
 
 The dashboard reads these same thirty-two series and introduces none of its
@@ -443,15 +442,14 @@ own, so a dashboard number and a `/metrics` number are always the same value.
 - **A native plugin's own metric names are log lines.** A plugin's metric call
   emits a trace event and writes no series. Five of the six `saci_processor_*`
   names carry the per-batch numbers the host reports, and a plugin records
-  those exactly like a WebAssembly processor. `saci_processor_metric` is the
+  those exactly like a WebAssembly processor. `saci_processor_custom` is the
   sixth, and it stays empty for a plugin, because only a component's
   `host-io::metric` writes it.
 - **`saci_stage_duration_seconds` follows the log filter.** It is derived from a
   span, and the filter is process-wide, so a filter that suppresses the
   engine's spans stops the histogram too.
-- **An attributed series overlaps its own total.** Summing both forms counts
-  every value twice. Select the empty attribute value for the process-wide
-  number.
+- **There is no process-wide copy of a per-node series.** Sum over the label
+  for the total, and select `branch=""` for `saci_processor_rows_out_total`.
 
 ## Next
 

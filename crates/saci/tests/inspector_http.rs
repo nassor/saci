@@ -348,7 +348,7 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
 
     // Neither stub source nor the stub sink is ever drained in this test:
     // `run_on` is called directly against a hand-populated dataset. So no
-    // `saci_rows_processed_total`/`saci_sink_batches_written_total` sample
+    // `saci_source_rows_total`/`saci_sink_batches_total` sample
     // exists yet, and every edge is correctly omitted rather than reported
     // as a stand-in zero.
     assert!(

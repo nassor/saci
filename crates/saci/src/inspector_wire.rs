@@ -171,9 +171,8 @@ pub struct BridgeEdge {
 pub const SOURCE_ATTR: &str = "source";
 /// The attribute key carrying a processor node's id on its metric series.
 ///
-/// Attribution is additive: every processor metric is recorded once with no
-/// attributes, which is the process-wide total a `/metrics` consumer has
-/// always seen, and once more under `processor="<id>"`.
+/// Every `saci_processor_*` sample is recorded once, under `processor="<id>"`;
+/// a process-wide total is the sum over the attribute.
 pub const PROCESSOR_ATTR: &str = "processor";
 /// The attribute key carrying a sink node's id on its metric series.
 pub const SINK_ATTR: &str = "sink";
@@ -181,10 +180,9 @@ pub const SINK_ATTR: &str = "sink";
 pub const BRANCH_ATTR: &str = "branch";
 /// The attribute key carrying a workflow's declared id on its metric series.
 ///
-/// Attribution is additive, as for the node keys: `saci_workflow_runs_total`
-/// and `saci_workflow_errors_total` are each recorded once unattributed — the
-/// process-wide total every `/metrics` consumer has always read — and once
-/// more under `workflow="<id>"`. Summing both forms double counts.
+/// `saci_workflow_passes_total` and `saci_workflow_pass_errors_total` are
+/// recorded once per event, under `workflow="<id>"`; a process-wide total is
+/// the sum over the attribute.
 pub const WORKFLOW_ATTR: &str = "workflow";
 
 /// What kind of instrument produced a series.
@@ -204,7 +202,7 @@ pub enum SeriesKind {
 /// One instrument's value at one export interval.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeriesPoint {
-    /// Instrument name, e.g. `saci_rows_processed_total`.
+    /// Instrument name, e.g. `saci_source_rows_total`.
     pub name: String,
     /// Which instrument kind it came from.
     pub kind: SeriesKind,
@@ -741,7 +739,7 @@ mod tests {
     #[test]
     fn series_kind_is_lowercase_on_the_wire() {
         let point = SeriesPoint {
-            name: "saci_rows_processed_total".to_string(),
+            name: "saci_source_rows_total".to_string(),
             kind: SeriesKind::Counter,
             attrs: Vec::new(),
             value: 12.0,

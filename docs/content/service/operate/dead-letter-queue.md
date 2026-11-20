@@ -245,11 +245,10 @@ curl -s localhost:8080/metrics | grep saci_dlq
 ```
 
 ```text,name=Expected output
-saci_dlq_letters_recorded_total{otel_scope_name="saci"} 1
 saci_dlq_letters_recorded_total{sink="orders_out",otel_scope_name="saci"} 1
-saci_dlq_rows_recorded_total{otel_scope_name="saci"} 5
-saci_dlq_letters_replayed_total{otel_scope_name="saci"} 1
-saci_dlq_letters{workflow="orders",otel_scope_name="saci"} 0
+saci_dlq_rows_recorded_total{sink="orders_out",otel_scope_name="saci"} 5
+saci_dlq_letters_replayed_total{sink="orders_out",otel_scope_name="saci"} 1
+saci_dlq_letters_pending{workflow="orders",otel_scope_name="saci"} 0
 ```
 
 `saci_dlq_letters_lost_total` is the one to alert on: a letter the store

@@ -35,6 +35,7 @@ use crate::dataset::Dataset;
 use crate::distributed::checkpoint::CheckpointStore;
 use crate::distributed::partition::{MAX_LOG_ENTRY_BYTES, PartitionSource};
 use crate::distributed::strategy::CheckpointStrategy;
+use crate::metrics::{SourceMetrics, WorkflowMetrics};
 #[cfg(test)]
 use crate::pipeline::Pipeline;
 
@@ -103,6 +104,8 @@ pub struct DistributedRunner<S> {
     store: S,
     runtime: Box<dyn PipelineRuntime>,
     config: RunnerConfig,
+    workflow_metrics: WorkflowMetrics,
+    source_metrics: SourceMetrics,
 }
 
 impl<S> DistributedRunner<S>
@@ -113,7 +116,10 @@ where
     ///
     /// Per-partition data comes from `world_factory` on each call to [`run`](Self::run).
     pub fn new(store: S, runtime: Box<dyn PipelineRuntime>, config: RunnerConfig) -> Self {
+        let instruments = crate::metrics::instruments();
         Self {
+            workflow_metrics: instruments.workflow(&config.workflow_id),
+            source_metrics: instruments.source(&config.processor_id),
             store,
             runtime,
             config,
@@ -352,9 +358,8 @@ where
                 }
             };
 
-            crate::metrics::instruments().source_batch(&self.config.processor_id);
-            crate::metrics::instruments()
-                .rows(&self.config.processor_id, partition_data.rows() as u64);
+            self.source_metrics.batch();
+            self.source_metrics.rows(partition_data.rows() as u64);
 
             #[cfg(feature = "tracing")]
             batch_span.record("rows", partition_data.rows() as u64);
@@ -399,7 +404,7 @@ where
             let run_result: SaciResult<RuntimeOutput> = match outcome {
                 RunOutcome::Ran(r) => r,
                 RunOutcome::RenewalFailed => {
-                    crate::metrics::instruments().workflow_error(&self.config.workflow_id);
+                    self.workflow_metrics.pass_error();
                     Self::release_with_log(&self.store, &claim).await;
                     continue;
                 }
@@ -494,13 +499,13 @@ where
                         error = %e,
                         "skipping ack: claim was released on a post-run persist failure"
                     );
-                    crate::metrics::instruments().workflow_error(&self.config.workflow_id);
+                    self.workflow_metrics.pass_error();
                     let _ = e;
                     continue;
                 }
                 (Some(e), false) => {
                     Self::release_with_log(&self.store, &claim).await;
-                    crate::metrics::instruments().workflow_error(&self.config.workflow_id);
+                    self.workflow_metrics.pass_error();
                     return Err(e);
                 }
                 (None, _) => {
@@ -508,7 +513,7 @@ where
                         .ack_claim(claim.claim_id, claim.instance_id)
                         .await?;
                     processed += 1;
-                    crate::metrics::instruments().workflow_run(&self.config.workflow_id);
+                    self.workflow_metrics.pass();
                 }
             }
         }

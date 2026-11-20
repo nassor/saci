@@ -5,6 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::metrics::ProcessorMetrics;
 use crate::plugin_abi::{SaciBuffer, SaciRunMetrics, SaciRunResult, SaciSlice, SaciStatus};
 use crate::runtime::RuntimeOutput;
 use crate::{Dataset, SaciError, SaciResult};
@@ -80,6 +81,9 @@ pub struct NativePluginRuntime {
     /// `processor.batch` span.
     workflow_id: String,
     processor_id: String,
+    /// This node's metric writers, bound once by
+    /// [`with_identity`](Self::with_identity).
+    processor_metrics: ProcessorMetrics,
     /// Size of the last input IPC payload. The next batch's buffer is
     /// presized to it, which saves the growth reallocations of a
     /// `Vec::new()`. Relaxed because a stale or racing value only costs one
@@ -176,6 +180,7 @@ impl NativePluginRuntime {
             last_metrics: Mutex::new(None),
             workflow_id: String::new(),
             processor_id: String::new(),
+            processor_metrics: crate::metrics::instruments().processor(""),
             last_ipc_len: std::sync::atomic::AtomicUsize::new(0),
         })
     }
@@ -189,6 +194,7 @@ impl NativePluginRuntime {
     #[must_use]
     pub fn with_identity(mut self, workflow_id: String, processor_id: String) -> Self {
         self.workflow_id = workflow_id;
+        self.processor_metrics = crate::metrics::instruments().processor(&processor_id);
         self.processor_id = processor_id;
         self
     }
@@ -216,8 +222,7 @@ impl NativePluginRuntime {
         host_impl::record_metric(target, "plugin.systems_run", f64::from(metrics.systems_run));
         host_impl::record_metric(target, "plugin.retries", f64::from(metrics.retries));
 
-        crate::metrics::instruments().processor_batch(
-            &self.processor_id,
+        self.processor_metrics.batch(
             metrics.wall_ns,
             metrics.rows_in,
             metrics.rows_out,

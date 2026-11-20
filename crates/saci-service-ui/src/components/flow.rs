@@ -111,7 +111,7 @@ fn node_table(
                 "rows/s",
                 Some(
                     "Rows admitted per second of wall-clock time, from this source's own \
-                     saci_rows_processed_total.",
+                     saci_source_rows_total.",
                 ),
             ),
             ("batches/s", None),
@@ -143,7 +143,7 @@ fn node_table(
             ("sink", None),
             (
                 "rows/s",
-                Some("Rows written per second, from this sink's own saci_sink_rows_written_total."),
+                Some("Rows written per second, from this sink's own saci_sink_rows_total."),
             ),
             ("batches/s", None),
             (
@@ -274,13 +274,13 @@ fn measures(_id: &str, is_source: bool) -> Vec<Measure> {
     if is_source {
         vec![
             Measure {
-                name: "saci_rows_processed_total",
+                name: "saci_source_rows_total",
                 key: SOURCE_ATTR,
                 rate: true,
                 watch_trend: false,
             },
             Measure {
-                name: "saci_source_batches_drained_total",
+                name: "saci_source_batches_total",
                 key: SOURCE_ATTR,
                 rate: true,
                 watch_trend: false,
@@ -309,13 +309,13 @@ fn measures(_id: &str, is_source: bool) -> Vec<Measure> {
     } else {
         vec![
             Measure {
-                name: "saci_sink_rows_written_total",
+                name: "saci_sink_rows_total",
                 key: SINK_ATTR,
                 rate: true,
                 watch_trend: false,
             },
             Measure {
-                name: "saci_sink_batches_written_total",
+                name: "saci_sink_batches_total",
                 key: SINK_ATTR,
                 rate: true,
                 watch_trend: false,
@@ -410,7 +410,7 @@ fn chart(
     let rows: Vec<Vec<PointAt>> = source_ids
         .iter()
         .filter_map(|id| {
-            attributed(snapshot, "saci_rows_processed_total", SOURCE_ATTR, id)
+            attributed(snapshot, "saci_source_rows_total", SOURCE_ATTR, id)
                 .map(|reading| reading.rate_points())
         })
         .filter(|points| !points.is_empty())

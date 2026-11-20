@@ -205,7 +205,7 @@ pub fn build_router(state: ServiceState) -> Router {
 /// deadlocks the watchdog stops ticking, the `/health` counter goes stale, and
 /// the health-check orchestrator restarts the pod.
 ///
-/// The same tick is the single writer for `saci_liveness_counter`, `saci_ready`
+/// The same tick is the single writer for `saci_watchdog_ticks_total`, `saci_ready`
 /// and `saci_uptime_seconds`.
 ///
 /// The task exits cleanly when `cancel` is cancelled.

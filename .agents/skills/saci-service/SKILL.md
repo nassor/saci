@@ -698,38 +698,33 @@ it pairs with the `saci-service listening on <addr>` banner, a `println!` for th
 Thirty-two series, twenty-six service and six `saci_processor_*`, each with a real writer. The
 full table of series to writers lives in `src/metrics.rs`'s module doc.
 
-Attribution is additive: nineteen of the thirty-two are recorded twice, and eighteen of those
-pair an unattributed form with an attributed one. `saci_processor_metric` is the exception, because
-both its writes carry `metric=` and only the second adds `processor=`, so it has no
-attribute-free form. `saci_rows_processed_total`,
-`saci_source_batches_drained_total` and `saci_flow_backoff_total` are each recorded once with no
-attributes (the process-wide total every `/metrics` consumer reads) and once more
-under `saci::inspector_wire::SOURCE_ATTR` (`source="<id>"`) naming the source node that produced
-them. `saci_sink_batches_written_total` and `saci_sink_rows_written_total` do the same under
-`SINK_ATTR` (`sink="<id>"`), the other five `saci_processor_*` series do the same under
-`PROCESSOR_ATTR` (`processor="<id>"`), and `saci_workflow_runs_total` and
-`saci_workflow_errors_total` do the same under `WORKFLOW_ATTR` (`workflow="<id>"`), the one key
-that names a workflow rather than a node. The unattributed value is the sum across every node or
-workflow, so a query that adds both forms double counts. `saci_processor_metric` carries both
-keys when attributed, sorted by key: `[("metric", <name>), ("processor", <id>)]`.
-`saci_processor_rows_out_total` takes a third attributed form, `processor="<id>", branch="<name>"`
-(`BRANCH_ATTR`), written by `Instruments::processor_branch_rows` per labelled outbound edge: the
-same instrument, no new series, and one more form that must not be summed with the others.
-`saci_flow_target_rows` and `saci_flow_throughput_rows_per_second` are attributed-only gauges under
+Every series that belongs to a node or a workflow is recorded once per event, under that id. There
+is no unattributed copy: a process-wide total is `sum()` over the attribute. The keys are
+`saci::inspector_wire::SOURCE_ATTR` (`source="<id>"`) for `saci_source_rows_total`,
+`saci_source_batches_total` and `saci_flow_backoff_total`; `SINK_ATTR` (`sink="<id>"`) for
+`saci_sink_batches_total`, `saci_sink_rows_total` and the sink-side heal and dead-letter counters;
+`PROCESSOR_ATTR` (`processor="<id>"`) for the six `saci_processor_*` series; and `WORKFLOW_ATTR`
+(`workflow="<id>"`), the one key that names a workflow rather than a node, for
+`saci_workflow_passes_total` and `saci_workflow_pass_errors_total`. `saci_processor_custom`
+carries both `metric` and `processor`, sorted by key: `[("metric", <name>), ("processor", <id>)]`.
+`saci_processor_rows_out_total` takes a second attributed form, `processor="<id>", branch="<name>"`
+(`BRANCH_ATTR`), written by `ProcessorMetrics::branch_rows` per labelled outbound edge: the
+same instrument, no new series, and one more form that must not be summed with the node's own: a
+total over processors selects `branch=""`.
+`saci_flow_target_rows` and `saci_flow_throughput_rows_per_second` are gauges under
 `SOURCE_ATTR`, `saci_sink_pending_rows` is one under `SINK_ATTR`, and
 `saci_window_watermark_seconds` plus `saci_window_late_arrivals_total` are two under
-`PROCESSOR_ATTR`, and `saci_dlq_letters` is one under `WORKFLOW_ATTR`: no unattributed form,
-because a target, a rate, a backlog, a watermark, the
+`PROCESSOR_ATTR`, and `saci_dlq_letters_pending` is one under `WORKFLOW_ATTR`: summing any of them
+across nodes is meaningless, because a target, a rate, a backlog, a watermark, the
 arrivals one watermark rejects, or a queue depth each belong to exactly one node or workflow.
-`saci_connector_heals_total` and `saci_connector_heal_failures_total` are the other additive
-pair: each is recorded unattributed and once more under `SOURCE_ATTR` or `SINK_ATTR` depending on
-which half the healed node is, written by `HealingSource`/`HealingSink` in `src/service/heal.rs`
-per rebuild of a failing connector. A rebuild attempt lands in exactly one of the two, so their
-sum is every attempt and their ratio is whether the connector is coming back.
-`saci_dlq_letters_recorded_total`, `saci_dlq_rows_recorded_total`,
-`saci_dlq_letters_replayed_total` and `saci_dlq_letters_lost_total` are four more additive
-counters under `SINK_ATTR`, written by `DeadLetterQueue` in `src/service/dlq.rs` per batch a
-sink refused and per letter a replay delivered or the store dropped.
+`saci_connector_heals_total` and `saci_connector_heal_failures_total` are written by
+`HealingSource`/`HealingSink` in `src/service/heal.rs` per rebuild of a failing connector, under
+`SOURCE_ATTR` or `SINK_ATTR` depending on which half the healed node is. A rebuild attempt lands
+in exactly one of the two, so their sum is every attempt and their ratio is whether the connector
+is coming back. `saci_dlq_letters_recorded_total`, `saci_dlq_rows_recorded_total`,
+`saci_dlq_letters_replayed_total` and `saci_dlq_letters_lost_total` are counters under
+`SINK_ATTR`, written by `DeadLetterQueue` in `src/service/dlq.rs` per batch a sink refused and per
+letter a replay delivered or the store dropped.
 
 `saci_window_late_arrivals_total` is the one series that names a condition rather than a
 quantity of work: `WindowTracker::advance_from` classifies each arrival against
@@ -748,26 +743,30 @@ previous run of the stream did. See
 `docs/content/service/processors/windowing/_index.md`'s "When the sinks go quiet".
 
 A sink's rows counter is what makes a sink's throughput readable: a batch is whatever row count
-the upstream handed over, so `saci_sink_batches_written_total` alone moves with the admission
+the upstream handed over, so `saci_sink_batches_total` alone moves with the admission
 target rather than with the data. `saci_sink_pending_rows` is the same number the adaptive flow
 controller reads as congestion, taken from `Sink::pending_rows`; a sink that answers `None`
 records nothing rather than zero.
 
-`Instruments` copies the dual-impl shape of `crates/saci/src/connector/postgresql/metrics.rs`: one
-real struct under `metrics`, one zero-sized no-op struct without it, identical method surface.
-Instruments are process-global, because `ServiceConfig::validate` enforces node ids unique across
-every declared workflow, so there is no per-workflow handle to thread through
-`WasmPipelineRuntime`, `HostState` or `DistributedRunner`. What those types carry
-is the declared id instead: `WasmPipelineRuntime::with_identity(workflow_id, processor_id)` and
-`NativePluginRuntime::with_identity`, set by `ServiceBuilder` from the node's own id, and
-`HostState.processor_id`, which attributes a `host-io::metric` call.
+`Instruments` is the process-global set of instruments. `Instruments::{workflow,source,processor,sink}(id)`
+bind a handle (`WorkflowMetrics`, `SourceMetrics`, `ProcessorMetrics`, `SinkMetrics`) holding
+`&'static Instruments` and one `[KeyValue; 1]`, so a write builds no attribute. With `metrics` off
+each handle is a zero-sized type with the same `#[inline]` empty methods, the dual-impl shape of
+`crates/saci/src/connector/postgresql/metrics.rs`. A handle is bound once per node: the standalone
+and stream runners bind one per node beside `ids`, `DistributedRunner::new` binds its workflow and
+source handles, `Healer` in `src/service/heal.rs` binds the healed node's, `DeadLetterQueue` binds
+its workflow's and one per sink a letter names, and `WasmPipelineRuntime::with_identity(workflow_id,
+processor_id)` and `NativePluginRuntime::with_identity` bind the processor handle (set by
+`ServiceBuilder` from the node's own id) that `HostState.metrics` carries into a `host-io::metric`
+call. A bare node id is a sound attribute because `ServiceConfig::validate` enforces node ids
+unique across every declared workflow.
 
 Four constraints that are not visible from a call site:
 
 - Instruments bind to whichever meter provider is installed when they are first built, so
   `saci::metrics::init()` must run **after** `opentelemetry::global::set_meter_provider`.
 - The Prometheus exporter is built with `without_counter_suffixes()`. Instrument names already end
-  in `_total`; without it the endpoint exports `saci_workflow_runs_total_total`.
+  in `_total`; without it the endpoint exports `saci_workflow_passes_total_total`.
 - Installing a meter provider is a process-global one-shot, and many `saci` lib tests write
   metrics. A lib test that asserts on a series reads `crate::metrics::test_registry()` rather than
   installing its own; an integration test that needs its own provider gets its own test binary,
@@ -781,7 +780,7 @@ Four constraints that are not visible from a call site:
 `MAX_PROCESSOR_METRIC_NAMES` (256) and further names are dropped after one warning. The native
 plugin ABI's `metric` callback is the counterpart of `host-io::metric` but writes no series;
 `NativePluginRuntime` records the five per-batch `saci_processor_*` series exactly as the wasm
-host does, and `saci_processor_metric` stays empty for a plugin.
+host does, and `saci_processor_custom` stays empty for a plugin.
 
 ## In-process inspector (`src/inspector/`, `inspector` feature)
 
@@ -834,14 +833,14 @@ collector, a scraper or external storage. Nothing leaves the process.
 - Edge rates come from whichever end of the edge measures what crossed it. An edge between two
   processors is rated from the upstream processor's `PROCESSOR_ATTR`-attributed
   `saci_processor_rows_out_total`; a processor-to-sink edge is rated from the sink's own
-  `SINK_ATTR`-attributed `saci_sink_rows_written_total` and nothing else, because rows-out is the
+  `SINK_ATTR`-attributed `saci_sink_rows_total` and nothing else, because rows-out is the
   row count of the processor's whole output dataset while a sink node takes one component (a
   windowing processor returning its input alongside its reduced component would rate the edge at
-  its input rate beside a sink card at zero). `saci_sink_batches_written_total` rates nothing: a
-  batch is whatever row count the upstream handed over, and `Instruments::sink_write` records both
+  its input rate beside a sink card at zero). `saci_sink_batches_total` rates nothing: a
+  batch is whatever row count the upstream handed over, and `SinkMetrics::write` records both
   counters on the same write, so a sink can never hold batches without rows. A labelled edge reads
   only its own branch series, with no sink fallback. A source-to-processor edge reads the source's
-  own `SOURCE_ATTR`-attributed `saci_rows_processed_total`. An edge whose end has not sampled is
+  own `SOURCE_ATTR`-attributed `saci_source_rows_total`. An edge whose end has not sampled is
   omitted rather than reported as zero, so `Snapshot::edges` is a lookup by `(from, to)`, not a
   fixed one-entry-per-edge list.
 - No new metric series. The inspector reads the existing thirty-two and adds `Snapshot::span_stats`,

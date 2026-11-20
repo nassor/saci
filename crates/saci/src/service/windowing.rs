@@ -133,6 +133,7 @@
 use crate::SaciResult;
 use crate::dataset::Dataset;
 use crate::error::SaciError;
+use crate::metrics::ProcessorMetrics;
 
 use super::builder::BuiltEdge;
 use super::config::WindowConfig;
@@ -407,6 +408,7 @@ impl WindowTracker {
 pub(super) fn report_watermark_advance(
     workflow_id: &str,
     processor_id: &str,
+    metrics: &ProcessorMetrics,
     tracker: &WindowTracker,
     advance: WatermarkAdvance,
 ) {
@@ -433,7 +435,7 @@ pub(super) fn report_watermark_advance(
             behind_ms,
             first,
         } => {
-            crate::metrics::instruments().window_late_arrival(processor_id);
+            metrics.window_late_arrival();
             if first {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::metrics::ProcessorMetrics;
 use crate::runtime::RuntimeOutput;
 use crate::{Dataset, SaciError, SaciResult};
 use async_trait::async_trait;
@@ -57,6 +58,10 @@ pub struct WasmPipelineRuntime {
     /// never given an identity.
     workflow_id: String,
     processor_id: String,
+    /// This node's metric writers, bound once by
+    /// [`with_identity`](Self::with_identity) and shared with every per-call
+    /// `HostState`.
+    metrics: ProcessorMetrics,
     /// Cached descriptor, populated on first `describe()` call.
     descriptor: Mutex<Option<PipelineDescriptor>>,
     /// Component names extracted from the descriptor, for `declared_components()`.
@@ -87,7 +92,7 @@ struct CallParts {
     name: String,
     config: Arc<HashMap<String, String>>,
     epoch_deadline: u64,
-    processor_id: String,
+    metrics: ProcessorMetrics,
 }
 
 impl WasmPipelineRuntime {
@@ -119,6 +124,7 @@ impl WasmPipelineRuntime {
             .unwrap_or(u64::MAX),
             workflow_id: String::new(),
             processor_id: String::new(),
+            metrics: crate::metrics::instruments().processor(""),
             descriptor: Mutex::new(None),
             component_names: OnceLock::new(),
             last_ipc_len: std::sync::atomic::AtomicUsize::new(0),
@@ -137,6 +143,7 @@ impl WasmPipelineRuntime {
     #[must_use]
     pub fn with_identity(mut self, workflow_id: String, processor_id: String) -> Self {
         self.workflow_id = workflow_id;
+        self.metrics = crate::metrics::instruments().processor(&processor_id);
         self.processor_id = processor_id;
         self
     }
@@ -172,10 +179,10 @@ impl WasmPipelineRuntime {
             name,
             config,
             epoch_deadline,
-            processor_id,
+            metrics,
         } = parts;
 
-        let host = HostState::new(name, config, processor_id);
+        let host = HostState::new(name, config, metrics);
         let mut store = Store::new(&engine.engine, host);
         store.set_epoch_deadline(epoch_deadline);
 
@@ -194,7 +201,7 @@ impl WasmPipelineRuntime {
             name: self.name.clone(),
             config: Arc::clone(&self.config),
             epoch_deadline: self.epoch_deadline,
-            processor_id: self.processor_id.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 
@@ -324,14 +331,8 @@ impl crate::runtime::PipelineRuntime for WasmPipelineRuntime {
         match joined? {
             Ok(result) => {
                 let m = &result.metrics;
-                crate::metrics::instruments().processor_batch(
-                    &self.processor_id,
-                    m.wall_ns,
-                    m.rows_in,
-                    m.rows_out,
-                    m.systems_run,
-                    m.retries,
-                );
+                self.metrics
+                    .batch(m.wall_ns, m.rows_in, m.rows_out, m.systems_run, m.retries);
                 #[cfg(feature = "tracing")]
                 {
                     batch_span.record("rows_out", m.rows_out);

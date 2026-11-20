@@ -51,7 +51,7 @@ reports the plugin manifest's name as `name()`. Metric attribution rides
 `NativePluginRuntime::with_identity`, set by `ServiceBuilder` from the node's own id. The native
 plugin ABI's `metric` callback is the counterpart of `host-io::metric` but writes no series;
 `NativePluginRuntime` records the five per-batch `saci_processor_*` series exactly as the wasm host
-does, and `saci_processor_metric` stays empty for a plugin.
+does, and `saci_processor_custom` stays empty for a plugin.
 
 `processor.batch` is the `debug` span the plugin host opens under `runtime.run`.
 

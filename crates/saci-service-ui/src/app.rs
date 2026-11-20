@@ -305,16 +305,19 @@ fn Rail(
             .map_or_else(|| "…".to_string(), |s| format_duration(s.uptime_secs))
     };
     let ready = move || snapshot.get().is_some_and(|s| s.ready);
-    let series_value = move |name: &'static str| {
-        snapshot.get().and_then(|s| {
+    // Both counters are recorded once per workflow, so the rail shows the sum
+    // over the `workflow` attribute.
+    let series_total = move |name: &'static str| {
+        snapshot.get().map_or(0.0, |s| {
             s.series
                 .iter()
-                .find(|series| series.name == name && series.attrs.is_empty())
+                .filter(|series| series.name == name)
                 .map(|series| series.value)
+                .sum()
         })
     };
-    let runs = move || series_value("saci_workflow_runs_total").unwrap_or(0.0);
-    let errors = move || series_value("saci_workflow_errors_total").unwrap_or(0.0);
+    let runs = move || series_total("saci_workflow_passes_total");
+    let errors = move || series_total("saci_workflow_pass_errors_total");
     let buffers = move || snapshot.get().map(|s| s.buffers);
     // One accessor for four counters of two widths: `BufferStats` counts
     // occupancy as `usize` and the drop total as `u64`.

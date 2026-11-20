@@ -166,7 +166,8 @@ Then open http://localhost:8080/ui in a browser.
 ## 4. Read the four tabs
 
 A fixed left rail carries node id, mode, uptime, a ready badge, the workflow
-count, the workflow run counter, an error badge and the buffer counters.
+count, the workflow run counter and an error badge (each summed over every
+workflow), and the buffer counters.
 Beside it, four tabs.
 
 Each tab is addressed by the URL fragment, so `/ui#pipelines`, `/ui#traces`,
@@ -298,36 +299,35 @@ An edge is rated from whichever end of it measures what actually crossed.
 
 | Edge | Reads | Unit |
 |---|---|---|
-| out of a source | `saci_rows_processed_total` under `source="<id>"` | rows |
+| out of a source | `saci_source_rows_total` under `source="<id>"` | rows |
 | processor to processor | `saci_processor_rows_out_total` under `processor="<id>"` | rows |
 | out of a processor, on a labelled link | the same series under `processor="<id>", branch="<name>"` | rows |
-| processor to sink | `saci_sink_rows_written_total` under `sink="<id>"` | rows |
+| processor to sink | `saci_sink_rows_total` under `sink="<id>"` | rows |
 
 A processor-to-sink edge reads the sink's end, because
 `saci_processor_rows_out_total` counts every row of the processor's output
 dataset while a sink node takes one component. A windowing processor that
 returns its input alongside its window totals would otherwise rate that edge
 at its input rate beside a sink card reading zero.
-`saci_sink_batches_written_total` rates no edge at all, because a batch is
+`saci_sink_batches_total` rates no edge at all, because a batch is
 whatever row count the upstream handed over. An edge whose end has not
 sampled is omitted rather than shown as zero, and an unchosen branch shows no
-number until it carries traffic. Every node writes its own attributed copy, so
+number until it carries traffic. Every node writes its own series, so
 two sources feeding one processor rate their two edges separately.
 
 ## What the node numbers mean
 
-Each box reads the copy of its series carrying its own id.
+Each box reads the series carrying its own id.
 
 | Box | Shows | Traces |
 |---|---|---|
-| source | records per second from `saci_rows_processed_total` | the same series |
+| source | records per second from `saci_source_rows_total` | the same series |
 | wasm or plugin processor | mean batch latency from `saci_processor_batch_duration_seconds`, plus a retry badge from `saci_processor_retries_total` | `saci_processor_rows_in_total` |
-| a processor supplied from code | `saci_stage_duration_seconds`, which carries no attributes, so every such box shows the same process-wide mean | `saci_workflow_runs_total` under `workflow="<id>"`, its own workflow |
-| sink | records per second from `saci_sink_rows_written_total` under `sink="<id>"` | the same series |
+| a processor supplied from code | `saci_stage_duration_seconds`, which carries no attributes, so every such box shows the same process-wide mean | `saci_workflow_passes_total` under `workflow="<id>"`, its own workflow |
+| sink | records per second from `saci_sink_rows_total` under `sink="<id>"` | the same series |
 
-No box shows the unattributed copy of a series: that is the process-wide sum a
-`/metrics` consumer reads. A sink reads its own two series rather than its
-upstream's. Rows written come from `saci_sink_rows_written_total` under
+No box sums a series over its label. A sink reads its own two series rather
+than its upstream's. Rows written come from `saci_sink_rows_total` under
 `sink="<id>"`, and the backlog from `saci_sink_pending_rows` under the same id.
 The sinks table shows that backlog, and it is absent, not zero, for a
 connector that reports none.

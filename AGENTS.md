@@ -498,9 +498,12 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
 - All async traits use `#[async_trait]`; `PipelineRuntime` uses `#[async_trait(?Send)]`.
 - Tracing instrumentation is behind `#[cfg(feature = "tracing")]`, and every such site keeps a
   `#[cfg(not(feature = "tracing"))]` fallback so the value is still consumed.
-- Metric call sites carry no `#[cfg]`: `crate::metrics::Instruments` has an identical, `#[inline]`,
-  empty method surface when the `metrics` feature is off. Do not wrap a metric call in
-  `#[cfg(feature = "metrics")]`.
+- Metric call sites carry no `#[cfg]`: `crate::metrics::Instruments` and the four handles it
+  binds (`WorkflowMetrics`, `SourceMetrics`, `ProcessorMetrics`, `SinkMetrics`) have an identical,
+  `#[inline]`, empty method surface when the `metrics` feature is off. Bind a handle once per node
+  and reuse it; the id's attribute is built once, in the handle. Only values that vary per call
+  (a branch name, a processor-chosen metric name) build an attribute at the call. Do not wrap a
+  metric call in `#[cfg(feature = "metrics")]`.
 - `saci::prelude` is the documented entry point for a downstream embedder: the engine types plus
   whatever the enabled `processor`, `connector-*` and `codec-*` features add.
   An authoring crate (wasm processor or native plugin) writes `use saci::prelude::*;` and reaches

@@ -48,6 +48,7 @@
 //! write-back loses the letters that failed again. A broker loses the same
 //! window the same way. The window is one replay wide in both cases.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -65,6 +66,7 @@ use crate::connector::{ConfigMap, ConfigValue, parse_fields, schema_of};
 use crate::error::{SaciError, SaciResult};
 use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
 use crate::io::{Sink, Source};
+use crate::metrics::{SinkMetrics, WorkflowMetrics};
 
 use super::config::{DlqBlock, DlqReplayPoint, RetryConfig, ServiceConfig, WorkflowSpec};
 use super::heal::{HealSettings, Rebuilder};
@@ -615,6 +617,13 @@ pub struct DeadLetterQueue {
     /// error. Mirrors [`DlqSummary::known`], cached here so the pass path
     /// reads a bool instead of cloning the whole summary out of its lock.
     known: bool,
+    /// The workflow's own metric writers, for the pending gauge.
+    metrics: WorkflowMetrics,
+    /// One bound writer per sink a letter can name, so recording, replaying
+    /// and losing a letter build no attribute. Seeded with the workflow's
+    /// sinks and extended on the first letter that names another (a letter
+    /// recorded under an earlier config outlives the sink it was for).
+    sink_handles: HashMap<String, SinkMetrics>,
 }
 
 /// Counts and identity only: the two rebuilders hold trait objects that are
@@ -724,6 +733,17 @@ impl DeadLetterQueue {
             auto_attempt: 0,
             next_auto_replay: None,
             known,
+            metrics: crate::metrics::instruments().workflow(&workflow.id),
+            sink_handles: workflow
+                .sinks
+                .iter()
+                .map(|sink| {
+                    (
+                        sink.id.clone(),
+                        crate::metrics::instruments().sink(&sink.id),
+                    )
+                })
+                .collect(),
         })
     }
 
@@ -786,7 +806,7 @@ impl DeadLetterQueue {
                 self.sink_attempt = 0;
                 self.pending_letters += 1;
                 stats.dead_letters_recorded += 1;
-                crate::metrics::instruments().dlq_recorded(sink, rows);
+                self.sink_metrics(sink).dlq_recorded(rows);
                 self.add_to_summary(&letter);
                 self.schedule_auto_replay();
                 #[cfg(feature = "tracing")]
@@ -1137,8 +1157,9 @@ impl DeadLetterQueue {
                         node_stats[index].batches += 1;
                         stats.sink_batches_written += 1;
                         stats.dead_letters_replayed += 1;
-                        crate::metrics::instruments().sink_write(&ids[index], rows);
-                        crate::metrics::instruments().dlq_replayed(&ids[index]);
+                        let metrics = self.sink_metrics(&ids[index]);
+                        metrics.write(rows);
+                        metrics.dlq_replayed();
                     }
                     Err(e) => {
                         refused.push(index);
@@ -1172,7 +1193,7 @@ impl DeadLetterQueue {
         if !self.reopen_record_half() {
             report.lost += retained.len() as u64;
             for letter in retained.iter() {
-                crate::metrics::instruments().dlq_lost(&letter.sink);
+                self.sink_metrics(&letter.sink).dlq_lost();
             }
             #[cfg(feature = "tracing")]
             tracing::error!(
@@ -1223,7 +1244,7 @@ impl DeadLetterQueue {
         for &index in lost.iter().rev() {
             let letter = retained.remove(index);
             report.lost += 1;
-            crate::metrics::instruments().dlq_lost(&letter.sink);
+            self.sink_metrics(&letter.sink).dlq_lost();
         }
     }
 
@@ -1305,8 +1326,17 @@ impl DeadLetterQueue {
 
     /// Count one letter the store would not take. The batch is gone: nothing
     /// is buffered in memory waiting for the store to come back.
-    fn count_lost(&self, sink: &str) {
-        crate::metrics::instruments().dlq_lost(sink);
+    fn count_lost(&mut self, sink: &str) {
+        self.sink_metrics(sink).dlq_lost();
+    }
+
+    /// The bound writers of sink `sink`, built on first use.
+    fn sink_metrics(&mut self, sink: &str) -> &SinkMetrics {
+        if !self.sink_handles.contains_key(sink) {
+            self.sink_handles
+                .insert(sink.to_owned(), crate::metrics::instruments().sink(sink));
+        }
+        &self.sink_handles[sink]
     }
 
     /// Put the schedule one backoff step out when nothing is scheduled.
@@ -1376,7 +1406,7 @@ impl DeadLetterQueue {
             now_unix_ms() + remaining.as_millis() as u64
         });
         summary.replay_pending = self.shared.has_request();
-        crate::metrics::instruments().dlq_pending(&self.workflow_id, summary.letters);
+        self.metrics.dlq_pending(summary.letters);
         self.shared.publish(summary);
     }
 }

@@ -162,8 +162,7 @@ above still takes the top-level `multiplier`, `max_delay_ms`, `jitter` and
 
 ## 4. Read whether it happened
 
-Two counters, each recorded once with no attributes and once under the node's
-own id:
+Two counters, each recorded under the node's own id:
 
 ```bash,name=Linux/macOS
 curl -s localhost:8080/metrics | grep saci_connector_heal
@@ -174,9 +173,7 @@ curl -s localhost:8080/metrics | grep saci_connector_heal
 ```
 
 ```text,name=Expected output
-saci_connector_heals_total{otel_scope_name="saci"} 1
 saci_connector_heals_total{sink="collector",otel_scope_name="saci"} 1
-saci_connector_heal_failures_total{otel_scope_name="saci"} 2
 saci_connector_heal_failures_total{sink="collector",otel_scope_name="saci"} 2
 ```
 

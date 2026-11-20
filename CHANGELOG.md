@@ -156,6 +156,15 @@
   `--log-level` and `--otlp-endpoint`; `status` and `cluster status` take `--url` (replaces
   `--addr`/`SACI_ADDR`) or read the bind address from `--config`; `cluster join` and
   `cluster leave` are removed. `GET /api/snapshot` takes `window_ms` (was `window_secs`).
+- `metrics`: series renamed: `saci_workflow_runs_total` → `saci_workflow_passes_total`,
+  `saci_workflow_errors_total` → `saci_workflow_pass_errors_total`, `saci_rows_processed_total`
+  → `saci_source_rows_total`, `saci_source_batches_drained_total` → `saci_source_batches_total`,
+  `saci_sink_batches_written_total` → `saci_sink_batches_total`, `saci_sink_rows_written_total`
+  → `saci_sink_rows_total`, `saci_liveness_counter` → `saci_watchdog_ticks_total`,
+  `saci_dlq_letters` → `saci_dlq_letters_pending`, `saci_processor_metric` →
+  `saci_processor_custom`.
+- `metrics`: each event is recorded once, with its node or workflow attribute; the unattributed
+  duplicate sample is gone. A process-wide total is `sum()` over the attribute.
 
 ### Added
 
@@ -179,6 +188,9 @@
   pointer first.
 - `service`: the standalone and stream runners copy per-node stats only when they publish them,
   and weigh a carried batch only for a source under flow control.
+- `metrics`: the runners, the distributed runner, the healing wrapper, the dead letter queue and
+  the processor hosts bind one metric handle per node, so recording a sample allocates no
+  attribute.
 
 ## 0.2.0 - 2026-11-19
 

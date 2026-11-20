@@ -113,7 +113,7 @@ processor gets:
   and the processor's `target`. Without the `tracing` feature it falls back to
   stderr.
 - `metric` routes to the exporter the service layer owns, recording the
-  `saci_processor_metric` histogram under the name the processor passed. Names are
+  `saci_processor_custom` histogram under the name the processor passed. Names are
   processor-chosen, so distinct names are capped at `MAX_PROCESSOR_METRIC_NAMES`,
   256, and anything past that is dropped after one warning.
 - `get-config` is a lookup in the `wasm` node's `config` keys, cloned per call.
@@ -130,7 +130,7 @@ not as a capability grant, which is why the host builds its `WasiCtx` with no
 `run-metrics` numbers become the `saci_processor_batch_duration_seconds`,
 `saci_processor_rows_in_total`, `saci_processor_rows_out_total`,
 `saci_processor_systems_run_total` and `saci_processor_retries_total` series, which
-with `saci_processor_metric` are the six `saci_processor_*` series on `/metrics`.
+with `saci_processor_custom` are the six `saci_processor_*` series on `/metrics`.
 
 `routes` decides delivery. The host reads it after the systems run and delivers
 the output only to the links whose `branch` names one of those values; absent, it
@@ -164,7 +164,7 @@ host privileges, it cannot be interrupted, and a memory error in it is a memory
 error in the host. The ABI's `metric` callback writes no series of its own, and
 neither does the host on a plugin's behalf. A plugin gets the five
 `saci_processor_*` series its per-batch metrics carry, and
-`saci_processor_metric` stays empty, because only a component's
+`saci_processor_custom` stays empty, because only a component's
 `host-io::metric` writes it.
 
 [Plugins in a workflow](@/service/plugins/_index.md) is the node that names one,

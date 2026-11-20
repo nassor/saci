@@ -189,4 +189,4 @@ it got there.
 
 [Tracing & metrics](@/library/tracing.md) has the spans and which module writes each
 series; [Logs, metrics and traces](@/service/operate/observability.md) lists every series
-and covers attribution and the double count.
+and covers attribution.

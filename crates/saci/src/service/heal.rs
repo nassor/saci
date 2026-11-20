@@ -53,6 +53,7 @@ use crate::codec::Codec;
 use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity, Role};
 use crate::error::SaciError;
 use crate::io::{RetryingSink, RetryingSource, Sink, Source};
+use crate::metrics::{SinkMetrics, SourceMetrics};
 use crate::retry::RetryMode;
 
 use super::factories::lookup_connector;
@@ -123,19 +124,35 @@ impl HealSettings {
     }
 }
 
-/// Record a successful heal of the `role` node `id`.
-fn role_healed(role: Role, id: &str) {
-    match role {
-        Role::Source => crate::metrics::instruments().source_heal(id),
-        Role::Sink => crate::metrics::instruments().sink_heal(id),
-    }
+/// The heal counters of the node a [`Healer`] watches, bound to its role.
+enum HealMetrics {
+    Source(SourceMetrics),
+    Sink(SinkMetrics),
 }
 
-/// Record a failed heal attempt of the `role` node `id`.
-fn role_heal_failed(role: Role, id: &str) {
-    match role {
-        Role::Source => crate::metrics::instruments().source_heal_failure(id),
-        Role::Sink => crate::metrics::instruments().sink_heal_failure(id),
+impl HealMetrics {
+    fn bind(role: Role, id: &str) -> Self {
+        let instruments = crate::metrics::instruments();
+        match role {
+            Role::Source => Self::Source(instruments.source(id)),
+            Role::Sink => Self::Sink(instruments.sink(id)),
+        }
+    }
+
+    /// Record a successful heal.
+    fn healed(&self) {
+        match self {
+            Self::Source(metrics) => metrics.heal(),
+            Self::Sink(metrics) => metrics.heal(),
+        }
+    }
+
+    /// Record a failed heal attempt.
+    fn heal_failed(&self) {
+        match self {
+            Self::Source(metrics) => metrics.heal_failure(),
+            Self::Sink(metrics) => metrics.heal_failure(),
+        }
     }
 }
 
@@ -272,6 +289,7 @@ struct Healer {
     role: Role,
     workflow_id: String,
     node_id: String,
+    metrics: HealMetrics,
     /// Why the connector has no instance, set when a rebuild's build failed.
     down: Option<String>,
     /// Latched `true` the moment a rebuilt instance's first operation
@@ -297,6 +315,7 @@ impl Healer {
             role,
             workflow_id: workflow_id.to_string(),
             node_id: node_id.to_string(),
+            metrics: HealMetrics::bind(role, node_id),
             down: None,
             recovered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -325,7 +344,7 @@ impl Healer {
     fn built(&mut self, attempt: u32) {
         self.down = None;
         self.state = HealState::Probing { attempt };
-        role_healed(self.role, &self.node_id);
+        self.metrics.healed();
         #[cfg(feature = "tracing")]
         tracing::warn!(
             target: HEAL_TARGET,
@@ -340,7 +359,7 @@ impl Healer {
     /// Record that attempt `attempt` produced nothing usable, and schedule
     /// the next one.
     fn build_failed(&mut self, attempt: u32, error: String) {
-        role_heal_failed(self.role, &self.node_id);
+        self.metrics.heal_failed();
         #[cfg(feature = "tracing")]
         tracing::warn!(
             target: HEAL_TARGET,
@@ -1234,7 +1253,7 @@ mod tests {
 
     #[cfg(feature = "metrics")]
     #[tokio::test(start_paused = true)]
-    async fn a_heal_writes_both_the_unattributed_and_the_attributed_counters() {
+    async fn a_heal_writes_only_the_attributed_counters() {
         use prometheus::TextEncoder;
 
         let script = Script::new(0);
@@ -1273,8 +1292,10 @@ mod tests {
                 "{series} must carry the source attribute:\n{text}"
             );
             assert!(
-                lines.iter().any(|line| !line.contains("source=")),
-                "{series} must keep its unattributed form:\n{text}"
+                lines
+                    .iter()
+                    .all(|line| line.contains("source=") || line.contains("sink=")),
+                "{series} must have no unattributed sample:\n{text}"
             );
         }
     }

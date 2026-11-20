@@ -36,15 +36,15 @@
 //! Every name below already exists in [`crate::metrics`]; the inspector reads
 //! them and introduces none.
 //!
-//! | `saci_workflow_runs_total` | left-rail run counter and, under `workflow="<id>"`, each workflow card's run badge. One per workflow *pass*, which under flow control is one credit-sized admission per source rather than one drain to EOF, so this number and the batch counters below have different denominators |
-//! | `saci_workflow_errors_total` | left-rail error badge and, under `workflow="<id>"`, each workflow card's error badge |
+//! | `saci_workflow_passes_total` | left-rail run counter, summed over `workflow`, and, under `workflow="<id>"`, each workflow card's run badge. One per workflow *pass*, which under flow control is one credit-sized admission per source rather than one drain to EOF, so this number and the batch counters below have different denominators |
+//! | `saci_workflow_pass_errors_total` | left-rail error badge, summed over `workflow`, and, under `workflow="<id>"`, each workflow card's error badge |
 //! | `saci_stage_duration_seconds` | per-system latency, native runtime only |
-//! | `saci_rows_processed_total` | source node throughput, source-to-processor/sink edge rate, and a sink node's throughput when a source feeds it directly |
-//! | `saci_source_batches_drained_total` | source node detail |
-//! | `saci_sink_batches_written_total` | sink node detail only. A batch is whatever row count the upstream handed over, so it rates nothing |
-//! | `saci_sink_rows_written_total` | sink node throughput, and the processor-to-sink edge rate: those are the rows the runner handed to that sink, where the processor's rows-out counts its whole output dataset |
+//! | `saci_source_rows_total` | source node throughput, source-to-processor/sink edge rate, and a sink node's throughput when a source feeds it directly |
+//! | `saci_source_batches_total` | source node detail |
+//! | `saci_sink_batches_total` | sink node detail only. A batch is whatever row count the upstream handed over, so it rates nothing |
+//! | `saci_sink_rows_total` | sink node throughput, and the processor-to-sink edge rate: those are the rows the runner handed to that sink, where the processor's rows-out counts its whole output dataset |
 //! | `saci_sink_pending_rows` | sink node backlog, under `sink="<id>"` only |
-//! | `saci_liveness_counter` | omitted: a watchdog-internal heartbeat is not a user-facing number |
+//! | `saci_watchdog_ticks_total` | omitted: a watchdog-internal heartbeat is not a user-facing number |
 //! | `saci_ready` | left-rail ready badge |
 //! | `saci_uptime_seconds` | left-rail uptime |
 //! | `saci_raft_commit_index`, `saci_raft_term`, `saci_raft_leader_id` | cluster facts row, shown only in cluster mode |
@@ -53,7 +53,7 @@
 //! | `saci_processor_rows_out_total` | processor node rows out, the processor-to-processor edge rate, the labelled-edge rate under `branch`, and the processor-to-sink edge rate only before that sink has written |
 //! | `saci_processor_systems_run_total` | processor node detail |
 //! | `saci_processor_retries_total` | processor node retry badge |
-//! | `saci_processor_metric` | processor-defined metric list in the node's detail sheet |
+//! | `saci_processor_custom` | processor-defined metric list in the node's detail sheet |
 //! | `saci_window_watermark_seconds` | the live watermark in a windowed processor node's detail sheet, beside the window geometry, under `processor="<id>"` only |
 //! | `saci_window_late_arrivals_total` | the dropped-arrival count in the same sheet section, beside the watermark, under `processor="<id>"` only. Absent while the count is zero, so a healthy node carries no row for it |
 //! | `saci_flow_target_rows`, `saci_flow_throughput_rows_per_second`, `saci_flow_backoff_total` | source node detail: its admission target, its smoothed rate, and how often a guard has tripped |
@@ -69,15 +69,13 @@
 //! is what keeps the sequence readable and the buffer small.
 //! `saci_flow_backoff_total` counts the trips.
 //!
-//! Thirteen series carry a node or workflow id attribute in addition to their
-//! unattributed, process-wide-total form: the three source series, the two
-//! sink counters, the six `saci_processor_*` series and the two
-//! `saci_workflow_*` counters. A workflow can declare several nodes of one
-//! kind, and a process several workflows, so only the attributed form
-//! identifies which node or workflow produced a sample. [`Snapshot::edges`]
-//! rates every edge from its upstream node's own attributed series, source or
-//! processor; an edge whose upstream node has not sampled yet is omitted
-//! rather than reported as zero.
+//! Every series above that belongs to a node or a workflow is recorded once,
+//! under that id alone: a sample names the node or workflow that produced it,
+//! and a process-wide figure is the sum over the attribute. A workflow can
+//! declare several nodes of one kind, and a process several workflows.
+//! [`Snapshot::edges`] rates every edge from its upstream node's own series,
+//! source or processor; an edge whose upstream node has not sampled yet is
+//! omitted rather than reported as zero.
 
 pub mod buffer;
 pub mod layer;
@@ -103,9 +101,9 @@ use crate::inspector_wire::{
 use record::{level_rank, now_unix_ms};
 
 /// Series the edge rates are read from.
-const ROWS_PROCESSED: &str = "saci_rows_processed_total";
+const ROWS_PROCESSED: &str = "saci_source_rows_total";
 const PROCESSOR_ROWS_OUT: &str = "saci_processor_rows_out_total";
-const SINK_ROWS: &str = "saci_sink_rows_written_total";
+const SINK_ROWS: &str = "saci_sink_rows_total";
 
 /// Span names [`Snapshot::span_stats`] groups.
 const STAGE_SPAN: &str = "pipeline.stage";
@@ -506,7 +504,7 @@ fn percentile(sorted: &[u64], q: f64) -> u64 {
 /// `(name, attrs)` pair.
 ///
 /// Series are keyed on their attributes as well as their name, because
-/// `saci_processor_metric` carries a processor-chosen `metric` attribute and its
+/// `saci_processor_custom` carries a processor-chosen `metric` attribute and its
 /// values are distinct series to the dashboard.
 fn summarize_series(samples: &[MetricSample]) -> Vec<SeriesSummary> {
     // Insertion-ordered accumulation, then one sort at the end: a HashMap of
@@ -655,9 +653,8 @@ fn attributed_rate_branch(
 
 /// One sink's own throughput, in rows.
 ///
-/// `Instruments::sink_write`
-/// records `saci_sink_batches_written_total` and
-/// `saci_sink_rows_written_total` on the same write, and a zero-row write
+/// `SinkMetrics::write` records `saci_sink_batches_total` and
+/// `saci_sink_rows_total` on the same write, and a zero-row write
 /// still registers the rows series, so there is no state in which a sink has
 /// batches but no rows. This reads the rows series alone: an absent one means
 /// nothing has crossed to that sink yet.
@@ -668,12 +665,12 @@ fn sink_rows(series: &[SeriesSummary], sink: &str) -> Option<f64> {
 /// Attach a throughput number to every topology edge.
 ///
 /// Rated from whichever end of the edge measures what actually crossed it:
-/// a source `from` reads `saci_rows_processed_total` under `source="<from>"`,
+/// a source `from` reads `saci_source_rows_total` under `source="<from>"`,
 /// a processor `from` reads `saci_processor_rows_out_total` under
 /// `processor="<from>"`.
 ///
 /// A processor-to-sink edge is the exception: it reads the **sink's** own
-/// `saci_sink_rows_written_total` under `sink="<to>"`, and nothing else.
+/// `saci_sink_rows_total` under `sink="<to>"`, and nothing else.
 /// `saci_processor_rows_out_total` is not used there, because it is the row
 /// count of the processor's whole output dataset, every component of it,
 /// while a sink node takes one component: a processor that returns its input
@@ -683,7 +680,7 @@ fn sink_rows(series: &[SeriesSummary], sink: &str) -> Option<f64> {
 /// The native-runtime path, which writes no `saci_processor_*` series at all,
 /// therefore rates its sink edges exactly like the wasm and plugin paths.
 ///
-/// `saci_sink_batches_written_total` rates nothing: a batch is whatever row
+/// `saci_sink_batches_total` rates nothing: a batch is whatever row
 /// count the upstream handed over, so it moves with the admission target
 /// rather than with the data, and it can never be the only sample a sink has
 /// ([`sink_rows`]).
@@ -691,14 +688,12 @@ fn sink_rows(series: &[SeriesSummary], sink: &str) -> Option<f64> {
 /// An edge whose attributed series has not been sampled yet is omitted rather
 /// than reported as zero, so the output is not always one entry per
 /// [`TopoEdge`](crate::inspector_wire::TopoEdge); a lookup by `(from, to)` is the
-/// contract, not position. With several processors the unattributed form of
-/// each `saci_processor_*` series is the workflow-wide sum, so there is no
-/// unattributed fallback here: every edge reads its own upstream node's own
+/// contract, not position. Every edge reads its own upstream node's own
 /// attributed sample or is omitted.
 ///
 /// A bridge gets its own arm, because a bridge's `from` is a `ChannelSink`
 /// whose kind the per-edge match drops. It prefers the consuming
-/// `ChannelSource`'s own `saci_rows_processed_total`, then the producing
+/// `ChannelSource`'s own `saci_source_rows_total`, then the producing
 /// sink's own rows: the same flow, measured at whichever end has sampled.
 ///
 /// A labelled edge is rated only from its own branch series, with no sink
@@ -822,8 +817,8 @@ mod tests {
     }
 
     /// A counter sample carrying one `key="value"` attribute, as a
-    /// `saci_processor_*`/`saci_rows_processed_total`/`saci_sink_batches_written_total`
-    /// series records it alongside its unattributed, process-wide-total form.
+    /// `saci_processor_*`/`saci_source_rows_total`/`saci_sink_batches_total`
+    /// series records it.
     fn attributed_counter_sample(
         at: u64,
         name: &str,
@@ -1103,7 +1098,7 @@ mod tests {
 
     /// A batch is whatever row count the upstream handed over, so a sink
     /// edge is rated in rows and the batches counter rates nothing. It can
-    /// never be a sink's only sample either: `Instruments::sink_write`
+    /// never be a sink's only sample either: `SinkMetrics::write`
     /// records both on the same write.
     #[test]
     fn sink_edge_reads_rows_and_ignores_the_sinks_batches() {
@@ -1111,14 +1106,14 @@ mod tests {
         let series = summarize_series(&[
             attributed_counter_sample(
                 1_000,
-                "saci_sink_batches_written_total",
+                "saci_sink_batches_total",
                 SINK_ATTR,
                 "settlements",
                 0.0,
             ),
             attributed_counter_sample(
                 2_000,
-                "saci_sink_batches_written_total",
+                "saci_sink_batches_total",
                 SINK_ATTR,
                 "settlements",
                 3.0,
@@ -1133,7 +1128,7 @@ mod tests {
     }
 
     /// A sink that has written nothing has neither counter, because
-    /// `Instruments::sink_write` records both on the same write. The edge is
+    /// `SinkMetrics::write` records both on the same write. The edge is
     /// then omitted rather than borrowing the upstream processor's rows-out,
     /// which would animate an edge into a sink that has never delivered.
     #[test]
