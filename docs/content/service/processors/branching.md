@@ -51,7 +51,7 @@ through different sinks if they land in different passes: see
             <rect class="hd hd-bnd" x="210" y="78" width="190" height="8"/>
             <text class="t-lbl t-bnd" x="222" y="81">classify</text>
             <text class="t-sm" x="222" y="104">wasm or plugin</text>
-            <text class="t-sm t-bnd" x="222" y="124">RouteDecision(["eu"])</text>
+            <text class="t-sm t-bnd" x="222" y="124">routes: ["eu"]</text>
         </g>
         <g class="anim anim-3">
             <path class="arw arw-data" d="M400 104 C450 104 450 54 500 54" marker-end="url(#brc-d)"/>

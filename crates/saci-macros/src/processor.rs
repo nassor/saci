@@ -1,118 +1,56 @@
-//! `#[processor]`: the WIT world, the guest exports, and the host-io shims.
+//! `#[processor]`: the WIT world and the guest exports.
 //!
 //! This is the macro that makes a processor crate cfg-free. Everything a
-//! WebAssembly component needs — the `wit_bindgen::generate!` expansion, the
-//! `Guest` impl covering `describe` and `run-batch`, the `export!` handshake,
-//! and the four host-io shims — is emitted here under
+//! WebAssembly component needs, the `wit_bindgen::generate!` expansion, the
+//! `Guest` impl covering `describe` and `run-batch`, the host-io backend and
+//! the `export!` handshake, is emitted here under
 //! `#[cfg(target_arch = "wasm32")]`, so the author's source carries no target
 //! gates at all. `fn build()` itself is left untouched and compiles for every
 //! target, which keeps the pipeline testable on the host.
 //!
-//! # Why the shims cannot be library functions
-//!
-//! `wit_bindgen::generate!` emits its bindings into the crate where it
-//! textually expands. `crate::bindings` therefore only exists inside the
-//! processor crate, and any function reading a host-io import has to be emitted
-//! there too. `saci_config_get`, `saci_config_parse`, `log` and `metric` are that
-//! set.
+//! The boundary logic lives in `saci::__private` as ordinary functions; the
+//! expansion only maps between them and the bindings, which have to be
+//! generated in the processor crate because WIT bindings are caller-side.
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::parse::{Parse, ParseStream};
-use syn::{Ident, ItemFn, LitStr, Type};
+use syn::{Ident, ItemFn};
 
 use crate::PIPELINE_WIT;
-use crate::util::eat_comma;
 
-/// `#[processor(name = "...", state = Ledger)]`.
-pub(crate) struct ProcessorArgs {
-    /// The pipeline identity the host gates config and checkpoint
-    /// compatibility on. Reported as `pipeline-descriptor.name`.
-    name: LitStr,
-    /// The one component whose rows survive across `run-batch` calls. `None`
-    /// makes the processor stateless.
-    state: Option<Type>,
-}
-
-impl Parse for ProcessorArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let mut name: Option<LitStr> = None;
-        let mut state: Option<Type> = None;
-
-        while !input.is_empty() {
-            let key: Ident = input.parse()?;
-            input.parse::<syn::Token![=]>()?;
-            match key.to_string().as_str() {
-                "name" => {
-                    if name.is_some() {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            "`name` is given more than once",
-                        ));
-                    }
-                    name = Some(input.parse()?);
-                }
-                "state" => crate::util::parse_type_arg(input, &key, &mut state)?,
-                _ => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        "unknown #[processor] argument; the two are `name = \"...\"` and \
-                         `state = <Type>`",
-                    ));
-                }
-            }
-            if !eat_comma(input)? {
-                break;
-            }
-        }
-
-        let name = name.ok_or_else(|| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "#[processor] requires `name = \"...\"`",
-            )
-        })?;
-        Ok(Self { name, state })
-    }
-}
-
-/// Expand `#[processor(...)]` over the pipeline constructor `func`.
-pub(crate) fn expand(args: ProcessorArgs, func: ItemFn) -> syn::Result<TokenStream> {
+/// Reject a pipeline constructor that is not a plain `fn() -> Pipeline`.
+pub(crate) fn check_build_fn(func: &ItemFn, macro_name: &str) -> syn::Result<()> {
     if !func.sig.inputs.is_empty() {
         return Err(syn::Error::new_spanned(
             &func.sig,
-            "#[processor] applies to a `fn() -> Pipeline`, which takes no arguments",
+            format!("{macro_name} applies to a `fn() -> Pipeline`, which takes no arguments"),
         ));
     }
     if func.sig.asyncness.is_some() {
         return Err(syn::Error::new_spanned(
             func.sig.asyncness,
-            "#[processor] applies to a synchronous `fn() -> Pipeline`",
+            format!("{macro_name} applies to a synchronous `fn() -> Pipeline`"),
         ));
     }
     if !func.sig.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             &func.sig.generics,
-            "#[processor] does not support generic parameters",
+            format!("{macro_name} does not support generic parameters"),
         ));
     }
+    Ok(())
+}
 
+/// Expand `#[processor]` over the pipeline constructor `func`.
+pub(crate) fn expand(func: ItemFn) -> syn::Result<TokenStream> {
+    check_build_fn(&func, "#[processor]")?;
     let build_fn = &func.sig.ident;
-    let ProcessorArgs { name, state } = &args;
-
-    let spec = match state {
-        Some(state) => quote! { ::saci::processor::__rt::Stateful<#state> },
-        None => quote! { ::saci::processor::__rt::NoState },
-    };
-
     let bindings = bindings_module();
-    let host_io = host_io_shims();
-    let guest = guest_impl(build_fn, name, &spec);
+    let guest = guest_impl(build_fn);
 
     Ok(quote! {
         #func
         #bindings
-        #host_io
         #guest
     })
 }
@@ -144,76 +82,42 @@ fn bindings_module() -> TokenStream {
     }
 }
 
-/// The four host-io shims, each with a host-target stand-in.
-fn host_io_shims() -> TokenStream {
-    quote! {
-        /// Read a `config` value the host injected via the `wasm` node of the
-        /// service config.
-        ///
-        /// Backed by the `saci:pipeline/host-io` `get-config` import, so the
-        /// value is available in every export including `describe`. Returns
-        /// `None` on a host build, where there is no import to call.
-        #[cfg(target_arch = "wasm32")]
-        pub fn saci_config_get(key: &str) -> ::core::option::Option<::std::string::String> {
-            crate::bindings::saci::pipeline::host_io::get_config(key)
-        }
-
-        /// Host-target stand-in: there is no host-io import to call.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub fn saci_config_get(_key: &str) -> ::core::option::Option<::std::string::String> {
-            ::core::option::Option::None
-        }
-
-        /// Read and parse a host-injected config value.
-        ///
-        /// `None` means the key was absent; `Some(Err(_))` means it was present
-        /// but did not parse as `T`.
-        pub fn saci_config_parse<T: ::core::str::FromStr>(
-            key: &str,
-        ) -> ::core::option::Option<::core::result::Result<T, T::Err>> {
-            saci_config_get(key).map(|value| value.parse::<T>())
-        }
-
-        /// Emit an info-level log line through `saci:pipeline/host-io`, bridged
-        /// to `tracing` on the host.
-        #[cfg(target_arch = "wasm32")]
-        pub fn log(target: &str, message: &str) {
-            use crate::bindings::saci::pipeline::host_io::{LogLevel, log as __saci_host_log};
-            __saci_host_log(LogLevel::Info, target, message);
-        }
-
-        /// Host-target stand-in: there is no host-io import to call.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub fn log(_target: &str, _message: &str) {}
-
-        /// Observe a named metric through `saci:pipeline/host-io`. The host
-        /// records it as the `saci_processor_metric` histogram, labelled
-        /// `metric="<name>"`.
-        #[cfg(target_arch = "wasm32")]
-        pub fn metric(name: &str, value: f64) {
-            crate::bindings::saci::pipeline::host_io::metric(name, value);
-        }
-
-        /// Host-target stand-in: there is no host-io import to call.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub fn metric(_name: &str, _value: f64) {}
-    }
-}
-
-/// The `Guest` impl covering the two WIT exports, plus the `export!`
-/// handshake.
-///
-/// A straight port of `saci::export_pipeline!`: same descriptor
-/// assembly, same state hooks, same error classification, same `RunMetrics`
-/// arithmetic, same `RouteDecision` read-back.
-fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStream {
+/// The host-io backend, the `Guest` impl covering the two WIT exports, and
+/// the `export!` handshake.
+fn guest_impl(build_fn: &Ident) -> TokenStream {
     quote! {
         #[cfg(target_arch = "wasm32")]
         const _: () = {
-            use ::saci::processor::__rt::ProcessorStateSpec as _;
+            static __SACI_PIPELINE: ::saci::__private::PipelineSlot =
+                ::saci::__private::PipelineSlot::new();
 
-            static __SACI_PIPELINE: ::saci::processor::__rt::PipelineSlot =
-                ::saci::processor::__rt::PipelineSlot::new();
+            /// `sdk::host` calls, answered through the `saci:pipeline/host-io`
+            /// imports.
+            struct __SaciHost;
+
+            impl ::saci::__private::HostIo for __SaciHost {
+                fn config(&self, key: &str) -> ::core::option::Option<::std::string::String> {
+                    crate::bindings::saci::pipeline::host_io::get_config(key)
+                }
+
+                fn log(&self, level: ::saci::__private::Level, target: &str, message: &str) {
+                    use crate::bindings::saci::pipeline::host_io::LogLevel;
+                    let level = match level {
+                        ::saci::__private::Level::Trace => LogLevel::Trace,
+                        ::saci::__private::Level::Debug => LogLevel::Debug,
+                        ::saci::__private::Level::Info => LogLevel::Info,
+                        ::saci::__private::Level::Warn => LogLevel::Warn,
+                        ::saci::__private::Level::Error => LogLevel::Error,
+                    };
+                    crate::bindings::saci::pipeline::host_io::log(level, target, message);
+                }
+
+                fn metric(&self, name: &str, value: f64) {
+                    crate::bindings::saci::pipeline::host_io::metric(name, value);
+                }
+            }
+
+            static __SACI_HOST: __SaciHost = __SaciHost;
 
             struct __SaciComponent;
 
@@ -227,54 +131,31 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                     use crate::bindings::exports::saci::pipeline::pipeline::PipelineDescriptor;
                     use crate::bindings::saci::pipeline::types::ComponentDescriptor;
 
-                    let __saci_pipeline = __SACI_PIPELINE.pipeline(#build_fn);
-                    let __saci_registry = __saci_pipeline.data().schemas();
-
-                    // Sorted by component name, so the WIT
-                    // `components: list<component-descriptor>` order is
-                    // deterministic across runs and across host and processor.
-                    let mut __saci_entries: Vec<(
-                        &'static str,
-                        ::std::sync::Arc<::saci::processor::__rt::Schema>,
-                    )> = __saci_registry
-                        .iter()
-                        .map(|(name, entry)| (*name, entry.schema.clone()))
-                        .collect();
-                    __saci_entries.sort_by_key(|(name, _)| *name);
-
-                    let components: Vec<ComponentDescriptor> = __saci_entries
-                        .into_iter()
-                        .map(|(name, schema)| {
-                            // On a schema-to-IPC failure, emit an empty
-                            // descriptor rather than trapping: the host's
-                            // load-time validation rejects zero-length schema
-                            // bytes with a clean error.
-                            let arrow_schema_ipc =
-                                ::saci::processor::__rt::schema_to_ipc_bytes(&schema)
-                                    .unwrap_or_default();
-                            ComponentDescriptor {
-                                name: name.to_string(),
-                                arrow_schema_ipc,
-                            }
-                        })
-                        .collect();
-
-                    let fingerprint =
-                        ::saci::processor::__rt::fingerprint_hex(__saci_registry.fingerprint());
-
+                    ::saci::__private::install_host(&__SACI_HOST);
+                    let descriptor = ::saci::__private::describe(
+                        __SACI_PIPELINE.pipeline(#build_fn),
+                        env!("CARGO_PKG_VERSION"),
+                    );
                     PipelineDescriptor {
-                        name: #name.to_string(),
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                        components,
-                        stateful: <#spec>::STATEFUL,
-                        schema_fingerprint: fingerprint,
+                        name: descriptor.name,
+                        version: descriptor.version,
+                        components: descriptor
+                            .components
+                            .into_iter()
+                            .map(|c| ComponentDescriptor {
+                                name: c.name,
+                                arrow_schema_ipc: c.arrow_schema_ipc,
+                            })
+                            .collect(),
+                        stateful: descriptor.stateful,
+                        schema_fingerprint: descriptor.schema_fingerprint,
                     }
                 }
 
                 async fn run_batch(
-                    input: Vec<u8>,
-                    prior: Option<Vec<u8>>,
-                ) -> Result<
+                    input: ::std::vec::Vec<u8>,
+                    prior: ::core::option::Option<::std::vec::Vec<u8>>,
+                ) -> ::core::result::Result<
                     crate::bindings::exports::saci::pipeline::pipeline::RunResult,
                     crate::bindings::exports::saci::pipeline::pipeline::RunError,
                 > {
@@ -284,62 +165,36 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                     use crate::bindings::exports::saci::pipeline::pipeline::{RunError, RunResult};
                     use crate::bindings::saci::pipeline::types::RunMetrics;
 
-                    let start = ::std::time::Instant::now();
-
-                    let mut reader: &[u8] = &input[..];
-                    let mut dataset = ::saci::processor::__rt::Dataset::read_ipc(&mut reader)
-                        .map_err(|e| RunError::Permanent(format!("ipc decode: {e}")))?;
-
-                    // Measured before the state blob is merged, so `rows_in`
-                    // reports the data plane only.
-                    let rows_in = dataset.rows() as u64;
-
-                    <#spec>::restore(&mut dataset, prior.as_deref())
-                        .map_err(|e| RunError::Permanent(format!("state restore: {e}")))?;
-
-                    let pipeline = __SACI_PIPELINE.pipeline(#build_fn);
-                    let run_result = pipeline.run_on(&mut dataset).await;
-
-                    let stats = match run_result {
-                        Ok(stats) => stats,
-                        Err(err) => {
-                            let (is_retryable, msg) =
-                                ::saci::processor::__rt::classify_run_error(&err);
-                            return Err(if is_retryable {
-                                RunError::Retryable(msg)
-                            } else {
-                                RunError::Permanent(msg)
-                            });
+                    ::saci::__private::install_host(&__SACI_HOST);
+                    match ::saci::__private::run_batch(
+                        __SACI_PIPELINE.pipeline(#build_fn),
+                        &input,
+                        prior.as_deref(),
+                    )
+                    .await
+                    {
+                        ::core::result::Result::Ok(batch) => {
+                            let m = batch.metrics;
+                            ::core::result::Result::Ok(RunResult {
+                                output: batch.output,
+                                checkpoint: batch.checkpoint,
+                                metrics: RunMetrics {
+                                    wall_ns: m.wall_ns,
+                                    rows_in: m.rows_in,
+                                    rows_out: m.rows_out,
+                                    systems_run: m.systems_run,
+                                    retries: m.retries,
+                                },
+                                routes: batch.routes,
+                            })
                         }
-                    };
-
-                    let rows_out = dataset.rows() as u64;
-
-                    let checkpoint = <#spec>::capture(&dataset)
-                        .map_err(|e| RunError::Permanent(format!("state capture: {e}")))?;
-                    let routes: Option<Vec<String>> = dataset
-                        .get_resource::<::saci::processor::__rt::RouteDecision>()
-                        .map(|decision| decision.0.clone());
-
-                    let mut output: Vec<u8> = Vec::new();
-                    dataset
-                        .write_ipc(&mut output)
-                        .map_err(|e| RunError::Permanent(format!("ipc encode: {e}")))?;
-
-                    let metrics = RunMetrics {
-                        wall_ns: start.elapsed().as_nanos() as u64,
-                        rows_in,
-                        rows_out,
-                        systems_run: stats.systems_run as u32,
-                        retries: stats.retries,
-                    };
-
-                    Ok(RunResult {
-                        output,
-                        checkpoint,
-                        metrics,
-                        routes,
-                    })
+                        ::core::result::Result::Err(e) if e.retryable => {
+                            ::core::result::Result::Err(RunError::Retryable(e.message))
+                        }
+                        ::core::result::Result::Err(e) => {
+                            ::core::result::Result::Err(RunError::Permanent(e.message))
+                        }
+                    }
                 }
             }
 
@@ -357,54 +212,48 @@ mod tests {
     }
 
     #[test]
-    fn the_embedded_wit_is_the_pipeline_world_saci_processor_owns() {
+    fn the_embedded_wit_is_the_pipeline_world_saci_owns() {
         assert!(PIPELINE_WIT.starts_with("package saci:pipeline@0.4.0;"));
         assert!(PIPELINE_WIT.contains("world saci-pipeline {"));
         assert!(PIPELINE_WIT.contains("run-batch: async func("));
     }
 
     #[test]
-    fn a_stateful_processor_selects_the_stateful_spec() {
-        let args = syn::parse_str::<ProcessorArgs>("name = \"demo\", state = Ledger").unwrap();
-        let out = expand(args, item_fn("pub fn build() -> Pipeline { todo!() }"))
+    fn the_expansion_delegates_to_the_shared_glue() {
+        let out = expand(item_fn("pub fn build() -> Pipeline { todo!() }"))
             .unwrap()
             .to_string();
 
-        assert!(out.contains("Stateful < Ledger >"), "{out}");
+        assert!(out.contains("install_host"), "{out}");
+        assert!(out.contains(":: saci :: __private :: run_batch"), "{out}");
         assert!(out.contains("inline :"), "{out}");
         assert!(out.contains("default_bindings_module"), "{out}");
         assert!(
             out.contains("export ! (__SaciComponent with_types_in crate :: bindings)"),
             "{out}"
         );
-        assert!(out.contains("\"demo\" . to_string ()"), "{out}");
-    }
-
-    #[test]
-    fn a_stateless_processor_selects_no_state() {
-        let args = syn::parse_str::<ProcessorArgs>("name = \"demo\"").unwrap();
-        let out = expand(args, item_fn("fn build() -> Pipeline { todo!() }"))
-            .unwrap()
-            .to_string();
-
-        assert!(out.contains("NoState"), "{out}");
+        assert!(!out.contains("saci_config_get"), "{out}");
         assert!(!out.contains("Stateful"), "{out}");
+        assert!(!out.contains("NoState"), "{out}");
     }
 
     #[test]
     fn every_wasm_only_item_carries_its_own_target_gate() {
-        let args = syn::parse_str::<ProcessorArgs>("name = \"demo\", state = Ledger").unwrap();
-        let out = expand(args, item_fn("pub fn build() -> Pipeline { todo!() }"))
+        let out = expand(item_fn("pub fn build() -> Pipeline { todo!() }"))
             .unwrap()
             .to_string();
 
-        // The bindings module, the guest const block, and both halves of the
-        // two gated shims: five `target_arch = "wasm32"` gates plus two
-        // negated ones.
-        let gated = out.matches("cfg (target_arch = \"wasm32\")").count();
-        let host_only = out.matches("cfg (not (target_arch = \"wasm32\"))").count();
-        assert_eq!(gated, 5, "{out}");
-        assert_eq!(host_only, 3, "{out}");
+        // The bindings module and the guest const block, nothing else.
+        assert_eq!(
+            out.matches("cfg (target_arch = \"wasm32\")").count(),
+            2,
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("cfg (not (target_arch = \"wasm32\"))").count(),
+            0,
+            "{out}"
+        );
 
         // `build` itself must stay unconditional: the host build of a processor
         // crate has to be able to construct the pipeline.
@@ -415,14 +264,7 @@ mod tests {
 
     #[test]
     fn a_processor_taking_arguments_is_rejected() {
-        let args = syn::parse_str::<ProcessorArgs>("name = \"demo\"").unwrap();
-        let err = expand(args, item_fn("fn build(x: u8) -> Pipeline { todo!() }")).unwrap_err();
+        let err = expand(item_fn("fn build(x: u8) -> Pipeline { todo!() }")).unwrap_err();
         assert!(err.to_string().contains("takes no arguments"), "{err}");
-    }
-
-    #[test]
-    fn processor_args_require_a_name() {
-        let err = crate::util::parse_err::<ProcessorArgs>("state = Ledger");
-        assert!(err.contains("requires `name"), "{err}");
     }
 }

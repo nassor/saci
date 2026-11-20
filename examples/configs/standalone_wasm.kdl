@@ -51,7 +51,7 @@ workflow "order-processing" {
     wasm "process_orders" module="target/wasm32-wasip3/release/order_processing_wasm.wasm" {
         // FX rates the processor reads through the host-io `get-config` import,
         // one key per non-USD currency. Strings; the processor parses them with
-        // `saci_config_parse`.
+        // `sdk::host::config_parse`.
         config fx_eur="1.08" fx_gbp="1.27" fx_jpy="0.0067" fx_cad="0.74"
     }
 

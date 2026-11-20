@@ -24,27 +24,12 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::ProcessorState;
-use saci::processor::arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
-use saci::processor::arrow_schema::{DataType, Field, FieldRef, Schema};
-use saci::processor::prelude::*;
-use saci::processor::windows::WindowSpec;
+use saci::arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
+use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
+use saci::prelude::*;
+use saci::window_spec::WindowSpec;
 
 /// Window size the KDL block declares, used when the host injects no
 /// `window.size_ms`.
@@ -270,39 +255,19 @@ pub struct WindowGeometry {
 
 /// Read the geometry from the injected `window.*` config keys, falling back to
 /// what `examples/integrity/integrity.kdl` declares.
-#[cfg(target_arch = "wasm32")]
 fn geometry() -> WindowGeometry {
     WindowGeometry {
-        size_ms: saci_config_parse::<i64>("window.size_ms")
+        size_ms: sdk::host::config_parse::<i64>("window.size_ms")
             .and_then(Result::ok)
             .unwrap_or(DEFAULT_SIZE_MS),
-        offset_ms: saci_config_parse::<i64>("window.offset_ms")
+        offset_ms: sdk::host::config_parse::<i64>("window.offset_ms")
             .and_then(Result::ok)
             .unwrap_or(0),
-        allowed_lateness_ms: saci_config_parse::<i64>("window.allowed_lateness_ms")
+        allowed_lateness_ms: sdk::host::config_parse::<i64>("window.allowed_lateness_ms")
             .and_then(Result::ok)
             .unwrap_or(DEFAULT_LATENESS_MS),
     }
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-fn geometry() -> WindowGeometry {
-    WindowGeometry {
-        size_ms: DEFAULT_SIZE_MS,
-        offset_ms: 0,
-        allowed_lateness_ms: DEFAULT_LATENESS_MS,
-    }
-}
-
-/// Report a metric through `host-io::metric`; a no-op outside wasm, where the
-/// host bindings do not exist.
-#[cfg(target_arch = "wasm32")]
-fn report_metric(name: &str, value: f64) {
-    crate::bindings::saci::pipeline::host_io::metric(name, value);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn report_metric(_name: &str, _value: f64) {}
 
 /// The canonical text a [`RegionTotal`]'s checksum is taken over.
 ///
@@ -369,7 +334,7 @@ pub fn aggregate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), Sa
     let payment_region = column::<StringArray>(&payments, "region")?;
     let payment_amount = column::<Float64Array>(&payments, "amount")?;
 
-    let state = data.resource_mut::<ProcessorState<AggregateState>>()?;
+    let state = data.resource_mut::<sdk::State<AggregateState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole state.
     if state.rows.is_empty() {
@@ -446,18 +411,20 @@ pub fn aggregate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), Sa
     // The borrow through `state` ends here (NLL), before `data.append` below.
 
     data.append::<RegionTotal>(&emitted)?;
-    report_metric("aggregate.open", open_count as f64);
-    report_metric("aggregate.closed", closed as f64);
-    report_metric("aggregate.late_rows", late_rows as f64);
+    sdk::host::metric("aggregate.open", open_count as f64);
+    sdk::host::metric("aggregate.closed", closed as f64);
+    sdk::host::metric("aggregate.late_rows", late_rows as f64);
     Ok(())
 }
 
 /// Build the aggregation pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
+#[processor]
 pub fn build() -> Pipeline {
     Pipeline::new("integrity-aggregate")
+        .state::<AggregateState>()
         .component::<ClassifiedOrder>()
         .component::<Payment>()
         .component::<RegionTotal>()
@@ -473,13 +440,9 @@ pub fn build() -> Pipeline {
         ))
 }
 
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build, state = AggregateState);
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci::processor::__rt::{ProcessorStateSpec, Stateful};
 
     fn geo() -> WindowGeometry {
         WindowGeometry {
@@ -494,7 +457,7 @@ mod tests {
         data.register::<ClassifiedOrder>().unwrap();
         data.register::<Payment>().unwrap();
         data.register::<RegionTotal>().unwrap();
-        <Stateful<AggregateState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
+        build().restore_state(&mut data, None).unwrap();
         data
     }
 
@@ -562,12 +525,12 @@ mod tests {
         payments: &[Payment],
     ) -> (Dataset, Vec<Total>, Option<Vec<u8>>) {
         let mut data = dataset_with_state();
-        <Stateful<AggregateState> as ProcessorStateSpec>::restore(&mut data, prior).unwrap();
+        build().restore_state(&mut data, prior).unwrap();
         data.append::<ClassifiedOrder>(orders).unwrap();
         data.append::<Payment>(payments).unwrap();
         aggregate_impl(&mut data, &geo()).unwrap();
         let emitted = totals(&data);
-        let next = <Stateful<AggregateState> as ProcessorStateSpec>::capture(&data).unwrap();
+        let next = build().capture_state(&data).unwrap();
         (data, emitted, next)
     }
 
@@ -626,7 +589,7 @@ mod tests {
         let (data, emitted, _) = run_batch(blob.as_deref(), &[], &[payment(3_000, "eu", 5.0)]);
         assert!(emitted.is_empty());
         let state = data
-            .get_resource::<ProcessorState<AggregateState>>()
+            .get_resource::<sdk::State<AggregateState>>()
             .expect("state resource");
         assert_eq!(state.rows[0].open.len(), 1);
         assert_eq!(state.rows[0].open[0].order_count, 1);
@@ -640,7 +603,7 @@ mod tests {
         let (data, emitted, _) = run_batch(blob.as_deref(), &[order(90_000, "eu", 99.0)], &[]);
         assert!(emitted.is_empty());
         let state = data
-            .get_resource::<ProcessorState<AggregateState>>()
+            .get_resource::<sdk::State<AggregateState>>()
             .expect("state resource");
         assert_eq!(state.rows[0].open.len(), 1, "window 10 stays open");
         assert_eq!(state.rows[0].open[0].order_count, 1);

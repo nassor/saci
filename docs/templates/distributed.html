@@ -751,17 +751,26 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
     <code>run-batch</code> export and returns the <code>checkpoint</code> field of the
     result. The runner stores that blob under
     <code>PROCESSOR_STATE_STAGE_SENTINEL</code> and hands it back as the next call's
-    <code>prior</code>. On the processor side, one macro form opts in:
+    <code>prior</code>. On the processor side, one builder call opts in:
 </p>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>in the processor crate</em></div>
     <pre><code class="language-rust">// Stateless: `prior` is ignored, `checkpoint` is always None.
-saci::export_pipeline!(build);
+#[processor]
+fn build() -&gt; Pipeline {
+    Pipeline::new("counter").component::&lt;Event&gt;().system(count_system())
+}
 
-// Stateful: systems read and write a `ProcessorState&lt;Counter&gt;` resource, and
+// Stateful: systems read and write an `sdk::State&lt;Counter&gt;` resource, and
 // whatever they leave in it becomes the next batch's `prior`.
-saci::export_pipeline!(build, state = Counter);</code></pre>
+#[processor]
+fn build() -&gt; Pipeline {
+    Pipeline::new("counter")
+        .component::&lt;Event&gt;()
+        .state::&lt;Counter&gt;()
+        .system(count_system())
+}</code></pre>
 </div>
 
 <p>

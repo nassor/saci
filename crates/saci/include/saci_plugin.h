@@ -74,7 +74,7 @@
  *
  * COMPILING A PLUGIN
  *
- *   Rust    crate-type = ["cdylib"]; use saci_plugin::export_plugin!
+ *   Rust    crate-type = ["cdylib"]; #[saci::plugin] on fn build() -> Pipeline
  *           cargo build --release -p my-plugin
  *
  *   Go      //export saci_abi_version and //export saci_plugin_v1 under cgo

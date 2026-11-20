@@ -8,7 +8,7 @@
 
 #![deny(missing_docs)]
 
-use saci::processor::prelude::*;
+use saci::prelude::*;
 
 /// One card authorisation row matching the Quick Start `Order` schema.
 #[derive(Component, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -40,18 +40,18 @@ pub struct Order {
 }
 
 /// Mark `row.valid` according to the host-configured `min_amount` threshold.
-#[transform(component = Order)]
-pub fn validate(row: &mut Order, config: &Config) -> Result<()> {
+#[transform]
+pub fn validate(row: &mut Order, config: &sdk::Config) -> sdk::Result<()> {
     let min_amount: f64 = config.get("min_amount", 0.0)?;
     row.valid = row.amount > min_amount;
     if !row.valid {
-        metric("validate.invalid_rows", 1.0);
+        sdk::host::metric("validate.invalid_rows", 1.0);
     }
     Ok(())
 }
 
 /// Export the Quick Start validation pipeline as a `saci:pipeline@0.4.0` component.
-#[processor(name = "quickstart-validate")]
+#[processor]
 pub fn build() -> Pipeline {
     Pipeline::new("quickstart-validate")
         .component::<Order>()

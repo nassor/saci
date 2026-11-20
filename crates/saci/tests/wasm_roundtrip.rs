@@ -17,8 +17,8 @@
 //! - **Config delivery.** The processor reads the `greeting` key through the
 //!   `host-io` `get-config` import and appends it to the pipeline name, so
 //!   `describe()` reports whether `[pipeline.wasm.config]` reached the processor.
-//! - **State across batches.** The processor is exported with
-//!   `export_pipeline!(build, state = Counter)`. The host creates a fresh
+//! - **State across batches.** The processor declares
+//!   `.state::<Counter>()` on its pipeline. The host creates a fresh
 //!   wasmtime Store per call by default, so the counter can only reach 1, 2, 3 by threading
 //!   each `run-batch` checkpoint back in as the next `prior`. A runtime built with
 //!   `with_warm_instances` keeps instances, which `count = instance` makes visible.

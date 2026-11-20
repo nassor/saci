@@ -65,7 +65,7 @@ pub(crate) fn template_dataset_from<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdk::schema_to_ipc_bytes;
+    use crate::sdk::glue::schema_to_ipc_bytes;
     use arrow_schema::{DataType, Field};
 
     fn ipc_for(fields: Vec<Field>) -> Vec<u8> {

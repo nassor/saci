@@ -2,7 +2,7 @@
 //!
 //! The native counterpart of `examples/branching/wasm`: declares one
 //! component, `Order { id, priority }`, and one system, `route_batch`, which
-//! reads the batch's first row and inserts a [`RouteDecision`] naming the
+//! reads the batch's first row and inserts a [`sdk::RouteDecision`] naming the
 //! branch that row selects:
 //!
 //! - `priority = "high"` → branch `premium`
@@ -29,10 +29,9 @@
 
 use std::sync::Arc;
 
-use saci::plugin::RouteDecision;
-use saci::plugin::arrow_array::StringArray;
-use saci::plugin::arrow_schema::{DataType, Field, Schema};
-use saci::plugin::prelude::*;
+use saci::arrow_array::StringArray;
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// A row of the demo workload: an id plus the priority that selects the branch.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -56,7 +55,7 @@ impl Component for Order {
     }
 }
 
-/// Insert a [`RouteDecision`] naming the branch the first row selects.
+/// Insert a [`sdk::RouteDecision`] naming the branch the first row selects.
 ///
 /// `high` and `low` map to the `premium` and `standard` branches in
 /// `examples/branching/branching.kdl`; an unrecognised priority or an empty
@@ -83,14 +82,15 @@ fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
             }
         }
     };
-    data.insert_resource(RouteDecision(branch));
+    data.insert_resource(sdk::RouteDecision::to(branch));
     Ok(())
 }
 
 /// Build the branching demo pipeline.
 ///
-/// Called lazily by the `export_plugin!` macro on the first `describe` or
+/// Called lazily by the `#[plugin]` thunks on the first `describe` or
 /// `run-batch` call, and constructed exactly once per loaded library.
+#[plugin]
 pub fn build() -> Pipeline {
     Pipeline::new("branching-plugin")
         .component::<Order>()
@@ -99,5 +99,3 @@ pub fn build() -> Pipeline {
             route_batch,
         ))
 }
-
-saci::export_plugin!(build);

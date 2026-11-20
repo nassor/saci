@@ -24,8 +24,8 @@ user-level skills under `~/.agents/skills/`, shared by every project.
 |---|---|
 | `saci-connectors` | touching `crates/saci/src/connector.rs` or anything under `crates/saci/src/connector/`, a `SourceFactory`/`SinkFactory` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
 | `saci-transformers` | touching `crates/saci/src/transformer.rs` or anything under `crates/saci/src/transformer/`, a `format` registration, or a transformer option |
-| `saci-processors` | touching `crates/saci/src/processor.rs` or `processor/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/arrow-ipc-conformance/`, or `examples/{wasm,quickstart,conformance}/` |
-| `saci-plugins` | touching `crates/saci/src/{plugin.rs,plugin/,plugin_abi.rs}`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
+| `saci-processors` | touching `crates/saci/src/sdk.rs` or `sdk/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/arrow-ipc-conformance/`, or `examples/{wasm,quickstart,conformance}/` |
+| `saci-plugins` | touching `crates/saci/src/sdk/plugin_rt.rs`, `crates/saci-macros/src/plugin.rs`, `crates/saci/src/plugin_abi.rs`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
 | `saci-service` | touching `crates/saci/src/{service,distributed,inspector,bin}/`, `src/metrics.rs`, `src/inspector_wire.rs`, `crates/saci-service-ui`, or `examples/{native,branching,windowing,multi_workflow,integrity,distributed_fulfillment}/` |
 | `technical-writer`, then `saci-docs` | writing or editing any `//`, `///` or `//!` comment, anything under `docs/`, `README.md`, a skill, or any other prose: the first holds the writing rules, the second the SACI surfaces, site layout, diagram classes and docs build commands |
 | `rust-best-practices` | the finishing review of every changed `.rs` file |
@@ -291,12 +291,15 @@ Engine:
 
 Authoring SDKs, each for a different artifact:
 
-- `processor`: the wasm32-wasip3 processor SDK in `saci::processor`, Component Model Async
-  execution, the `#[derive(Component)]`/`#[transform]`/`#[fold]`/`#[processor]` macros and
-  `export_pipeline!`. A processor crate depends on `saci` with
-  `default-features = false, features = ["processor"]`, so tokio stays out.
-- `plugin`: the native plugin SDK in `saci::plugin` and `export_plugin!`, for a cdylib the host
-  `dlopen`s.
+- `processor`: the wasm32-wasip3 processor SDK, Component Model Async execution. `#[processor]`
+  on a `fn build() -> Pipeline` exports the `saci:pipeline` world. A processor crate depends on
+  `saci` with `default-features = false, features = ["processor"]`, so tokio stays out.
+- `plugin`: the native plugin SDK. `#[plugin]` on a `fn build() -> Pipeline` exports the C ABI
+  in `saci::plugin_abi` from a cdylib the host `dlopen`s.
+
+Both SDKs share `saci::sdk` (`State`, `RouteDecision`, `Config`, `Error`, `Result`, `host`) and the
+`#[derive(Component)]`, `#[transform]` and `#[fold]` macros, which the `derive` feature provides.
+The macros and `sdk` are exported at the crate root and in `saci::prelude`.
 
 Connectors and formats: `connector-<name>` compiles `saci::connector::<name>`,
 `transformer-<format>` compiles `saci::transformer::<format>`. `connectors` enables the seven
@@ -494,8 +497,8 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   `#[cfg(feature = "metrics")]`.
 - `saci::prelude` is the documented entry point for a downstream embedder: the engine types plus
   whatever the enabled `processor`, `connector-*` and `transformer-*` features add.
-  `saci::processor::prelude` and `saci::plugin::prelude` are the narrower preludes of the two
-  authoring SDKs.
+  An authoring crate (wasm processor or native plugin) writes `use saci::prelude::*;` and reaches
+  the SDK types through `sdk::`.
 - An example that needs nothing outside the `saci` crate (no processor component, plugin, config
   file or external service) lives in `crates/saci/examples/`, so the published package carries
   it. Every other runnable example lives under the top-level `examples/` directory, grouped by

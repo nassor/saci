@@ -71,7 +71,7 @@
 //! - It does nothing for memory corruption, a wedged thread, or anything else
 //!   that is not a clean unwind.
 //!
-//! `export_plugin!` already wraps every call into user code in `catch_unwind`
+//! `#[plugin]` already wraps every call into user code in `catch_unwind`
 //! and reports [`SaciStatus::PERMANENT`], so a plugin built with it never
 //! actually exercises the host-side catch. The extern-ABI change exists for
 //! the plugin that does not: it turns an otherwise-unconditional process

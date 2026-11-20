@@ -18,7 +18,7 @@
 //!   is written by the plugin, so both directions of the Arrow IPC round-trip
 //!   are observed in one batch.
 //! - **State across batches.** The plugin's running total lives in a
-//!   `ProcessorState` resource, not in the dataset, so the second batch can only
+//!   `sdk::State` resource, not in the dataset, so the second batch can only
 //!   continue from the first when the checkpoint blob crosses the boundary both
 //!   ways.
 //! - **Config delivery.** `smoketest.multiplier` reaches the plugin through the

@@ -1,7 +1,7 @@
 //! Order processing pipeline as a WebAssembly Component Model processor.
 //!
 //! A 2-stage field-granular DAG (Validate and Enrich in parallel, then Report)
-//! running inside a WASM processor via `saci::processor`. It mirrors
+//! running inside a WASM processor via `#[processor]`. It mirrors
 //! `crates/saci/examples/scheduler_etl.rs`, with two differences the
 //! WASM model forces:
 //!
@@ -36,25 +36,11 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::arrow_array::{BooleanArray, Float64Array, RecordBatch};
-use saci::processor::arrow_schema::{DataType, Field, Schema};
-use saci::processor::prelude::*;
+use saci::arrow_array::{BooleanArray, Float64Array, RecordBatch};
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// A financial transaction in columnar form.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -116,10 +102,9 @@ impl FxRates {
     /// back to [`DEFAULT`](Self::DEFAULT) per missing key. A present but
     /// unparseable value keeps the default and warns on stderr rather than
     /// trapping the processor mid-`describe`.
-    #[cfg(target_arch = "wasm32")]
     fn from_config() -> Self {
         fn rate(key: &str, default: f64) -> f64 {
-            match crate::saci_config_parse::<f64>(key) {
+            match sdk::host::config_parse::<f64>(key) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => {
                     eprintln!("[config] {key} is not a valid f64 ({e}); using {default}");
@@ -156,7 +141,7 @@ impl FxRates {
 /// the same stage.
 struct ValidateSystem;
 
-#[saci::processor::prelude::async_trait]
+#[async_trait]
 impl System for ValidateSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("validate")
@@ -183,16 +168,15 @@ impl System for ValidateSystem {
             .index_of("valid")
             .map_err(|e| SaciError::generic(format!("Transaction.valid missing: {e}")))?;
 
-        let new_columns: Vec<Arc<dyn saci::processor::arrow_array::Array>> =
-            (0..schema.fields().len())
-                .map(|i| {
-                    if i == valid_idx {
-                        new_valid.clone() as Arc<dyn saci::processor::arrow_array::Array>
-                    } else {
-                        batch.column(i).clone()
-                    }
-                })
-                .collect();
+        let new_columns: Vec<Arc<dyn saci::arrow_array::Array>> = (0..schema.fields().len())
+            .map(|i| {
+                if i == valid_idx {
+                    new_valid.clone() as Arc<dyn saci::arrow_array::Array>
+                } else {
+                    batch.column(i).clone()
+                }
+            })
+            .collect();
 
         let new_batch = RecordBatch::try_new(schema, new_columns)
             .map_err(|e| SaciError::generic(format!("RecordBatch rebuild error: {e}")))?;
@@ -216,7 +200,7 @@ struct EnrichSystem {
     rates: FxRates,
 }
 
-#[saci::processor::prelude::async_trait]
+#[async_trait]
 impl System for EnrichSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("enrich")
@@ -249,16 +233,15 @@ impl System for EnrichSystem {
             .index_of("usd_amount")
             .map_err(|e| SaciError::generic(format!("Transaction.usd_amount missing: {e}")))?;
 
-        let new_columns: Vec<Arc<dyn saci::processor::arrow_array::Array>> =
-            (0..schema.fields().len())
-                .map(|i| {
-                    if i == usd_idx {
-                        new_usd.clone() as Arc<dyn saci::processor::arrow_array::Array>
-                    } else {
-                        batch.column(i).clone()
-                    }
-                })
-                .collect();
+        let new_columns: Vec<Arc<dyn saci::arrow_array::Array>> = (0..schema.fields().len())
+            .map(|i| {
+                if i == usd_idx {
+                    new_usd.clone() as Arc<dyn saci::arrow_array::Array>
+                } else {
+                    batch.column(i).clone()
+                }
+            })
+            .collect();
 
         let new_batch = RecordBatch::try_new(schema, new_columns)
             .map_err(|e| SaciError::generic(format!("RecordBatch rebuild error: {e}")))?;
@@ -331,7 +314,7 @@ fn make_report_system() -> impl System {
 
 /// Build the order_processing pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
 ///
 /// FX rates come from the host's `[pipeline.wasm.config]` table via the
@@ -339,13 +322,9 @@ fn make_report_system() -> impl System {
 /// `fx_cad`), each falling back to `FxRates::DEFAULT` when absent. They stay
 /// a field on `EnrichSystem` because resources do not round-trip through Arrow
 /// IPC.
+#[processor]
 pub fn build() -> Pipeline {
-    // `saci_config_parse` is emitted into this crate by `export_pipeline!` and
-    // only exists on wasm32, where `crate::bindings` exists.
-    #[cfg(target_arch = "wasm32")]
     let rates = FxRates::from_config();
-    #[cfg(not(target_arch = "wasm32"))]
-    let rates = FxRates::DEFAULT;
 
     Pipeline::new("order_processing")
         .component::<Transaction>()
@@ -353,6 +332,3 @@ pub fn build() -> Pipeline {
         .system(EnrichSystem { rates })
         .system(make_report_system())
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build);

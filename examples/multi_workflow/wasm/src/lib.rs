@@ -3,7 +3,7 @@
 //! Declares one component, `Sale { timestamp_ms, symbol, amount }` — the
 //! exact schema `examples/windowing/tumbling/wasm` declares, so rows bridge
 //! into the windowed processor unchanged — and one system, `route_batch`,
-//! which reads the batch's first row and inserts a [`RouteDecision`] naming
+//! which reads the batch's first row and inserts a [`sdk::RouteDecision`] naming
 //! the branch that row selects:
 //!
 //! - `amount >= 100.0` → branch `rush`
@@ -30,26 +30,11 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::RouteDecision;
-use saci::processor::arrow_array::Float64Array;
-use saci::processor::arrow_schema::{DataType, Field, Schema};
-use saci::processor::prelude::*;
+use saci::arrow_array::Float64Array;
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// Batches whose first-row amount is at least this land in the `rush` branch.
 const RUSH_THRESHOLD: f64 = 100.0;
@@ -82,7 +67,7 @@ impl Component for Sale {
     }
 }
 
-/// Insert a [`RouteDecision`] naming the branch the first row selects.
+/// Insert a [`sdk::RouteDecision`] naming the branch the first row selects.
 ///
 /// `rush` and `standard` map to the same-named branches in
 /// `examples/multi_workflow/multi_workflow.kdl`; an empty batch routes the
@@ -113,14 +98,15 @@ fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
             }
         }
     };
-    data.insert_resource(RouteDecision(branch));
+    data.insert_resource(sdk::RouteDecision::to(branch));
     Ok(())
 }
 
 /// Build the multi-workflow routing demo pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
+#[processor]
 pub fn build() -> Pipeline {
     Pipeline::new("multi-workflow-router")
         .component::<Sale>()
@@ -129,6 +115,3 @@ pub fn build() -> Pipeline {
             route_batch,
         ))
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build);

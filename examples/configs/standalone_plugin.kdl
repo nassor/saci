@@ -43,7 +43,7 @@ workflow "counter" {
     // Windows. Override SACI_PLUGIN_LIB to pick another one.
     plugin "process_counter" library="${SACI_PLUGIN_LIB:-target/debug/libsaci_plugin_smoketest.so}" {
         // Read by the plugin through the host's `get_config` callback. Strings;
-        // the plugin parses them with `saci_config_parse`.
+        // the plugin parses them with `sdk::host::config_parse`.
         config "smoketest.multiplier"="1"
     }
 

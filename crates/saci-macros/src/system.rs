@@ -2,117 +2,57 @@
 //!
 //! Both leave the annotated function exactly as written and add a hidden
 //! zero-sized `System` around it, so the business logic stays a plain function
-//! that a unit test can call directly.
+//! that a unit test can call directly. Neither takes arguments: the component
+//! and state types are read from the function's parameters.
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::parse::{Parse, ParseStream};
-use syn::{Ident, ItemFn, Type};
+use syn::ItemFn;
 
-use crate::util::{
-    SystemImpl, check_callable, decode_rows, eat_comma, map_user_error, parse_type_arg,
-};
+use crate::util::{SystemImpl, check_callable, decode_rows, map_user_error, param_ref_type};
 
-/// `#[transform(component = Order)]`.
-pub(crate) struct TransformArgs {
-    component: Type,
-}
+const TRANSFORM_SHAPE: &str = "#[transform] takes `fn(row: &mut Row) -> sdk::Result<()>` or \
+     `fn(row: &mut Row, config: &sdk::Config) -> sdk::Result<()>`";
 
-impl Parse for TransformArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let mut component = None;
-        while !input.is_empty() {
-            let key: Ident = input.parse()?;
-            input.parse::<syn::Token![=]>()?;
-            match key.to_string().as_str() {
-                "component" => parse_type_arg(input, &key, &mut component)?,
-                _ => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        "unknown #[transform] argument; the only one is `component = <Type>`",
-                    ));
-                }
-            }
-            if !eat_comma(input)? {
-                break;
-            }
-        }
-        let component = component.ok_or_else(|| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "#[transform] requires `component = <Type>`",
-            )
-        })?;
-        Ok(Self { component })
-    }
-}
+const FOLD_SHAPE: &str = "#[fold] takes `fn(rows: &[Row], state: &mut State) -> sdk::Result<()>`";
 
-/// How many parameters the annotated transform takes.
-///
-/// Detected syntactically from the parameter count: one is `&mut Row`, two is
-/// `(&mut Row, &Config)`. No type inference is involved, so the author may
-/// write the config parameter as `&Config`, `&saci::processor::Config`, or any
-/// alias of it.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TransformArity {
-    /// `fn(row: &mut Row) -> Result<()>`
-    Row,
-    /// `fn(row: &mut Row, config: &Config) -> Result<()>`
-    RowAndConfig,
-}
-
-/// Classify a `#[transform]` function by parameter count.
-pub(crate) fn transform_arity(func: &ItemFn) -> syn::Result<TransformArity> {
-    match func.sig.inputs.len() {
-        1 => Ok(TransformArity::Row),
-        2 => Ok(TransformArity::RowAndConfig),
-        other => Err(syn::Error::new_spanned(
-            &func.sig,
-            format!(
-                "#[transform] takes `fn(row: &mut Row) -> Result<()>` or \
-                 `fn(row: &mut Row, config: &Config) -> Result<()>`, found {other} parameter(s)"
-            ),
-        )),
-    }
-}
-
-/// Expand `#[transform(component = C)]` over `func`.
-pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result<TokenStream> {
+/// Expand `#[transform]` over `func`.
+pub(crate) fn expand_transform(func: ItemFn) -> syn::Result<TokenStream> {
     check_callable(&func, "transform")?;
-    let arity = transform_arity(&func)?;
+    let arity = func.sig.inputs.len();
+    if arity != 1 && arity != 2 {
+        return Err(syn::Error::new_spanned(&func.sig, TRANSFORM_SHAPE));
+    }
+    let Some(component) = param_ref_type(&func, 0, true) else {
+        return Err(syn::Error::new_spanned(&func.sig.inputs, TRANSFORM_SHAPE));
+    };
 
-    let component = &args.component;
     let fn_name = &func.sig.ident;
     let system_name = fn_name.to_string();
     let decode = decode_rows(component);
     let map_err = map_user_error();
 
-    // `crate::saci_config_get` is emitted by `#[processor]` into the processor
-    // crate's root. It cannot live in `saci::processor`: the WIT bindings it reads
-    // through are caller-side, so only the crate that expanded
-    // `wit_bindgen::generate!` can name them.
-    let (setup, call) = match arity {
-        TransformArity::Row => (
+    let (setup, call) = if arity == 1 {
+        (
             quote! {},
             quote! { #fn_name(__saci_row).map_err(#map_err)?; },
-        ),
-        TransformArity::RowAndConfig => (
-            quote! {
-                let __saci_config = ::saci::processor::Config::new(crate::saci_config_get);
-            },
+        )
+    } else {
+        (
+            quote! { let __saci_config = ::saci::__private::Config::new(); },
             quote! { #fn_name(__saci_row, &__saci_config).map_err(#map_err)?; },
-        ),
-    };
-
-    let meta = quote! {
-        ::saci::processor::__rt::SystemMeta::new(#system_name)
-            .reads_all_named(<#component as ::saci::processor::__rt::Component>::name())
-            .writes_all_named(<#component as ::saci::processor::__rt::Component>::name())
+        )
     };
 
     // Whole-component read *and* write over-declaration is always safe: the DAG
     // expands both into every field of the component, which can only add edges
     // and therefore only cost parallelism.
+    let meta = quote! {
+        ::saci::__private::SystemMeta::new(#system_name)
+            .reads_all::<#component>()
+            .writes_all::<#component>()
+    };
+
     let body = quote! {
         let mut __saci_rows = #decode;
         #setup
@@ -120,7 +60,7 @@ pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result
             #call
         }
         __saci_data.replace_batch::<#component>(
-            <#component as ::saci::processor::__rt::Component>::to_record_batch(&__saci_rows)?,
+            <#component as ::saci::__private::Component>::to_record_batch(&__saci_rows)?,
         )
     };
 
@@ -138,68 +78,29 @@ pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result
     })
 }
 
-/// `#[fold(reads = Order, state = Ledger)]`.
-pub(crate) struct FoldArgs {
-    reads: Type,
-    state: Type,
-}
-
-impl Parse for FoldArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let mut reads = None;
-        let mut state = None;
-        while !input.is_empty() {
-            let key: Ident = input.parse()?;
-            input.parse::<syn::Token![=]>()?;
-            match key.to_string().as_str() {
-                "reads" => parse_type_arg(input, &key, &mut reads)?,
-                "state" => parse_type_arg(input, &key, &mut state)?,
-                _ => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        "unknown #[fold] argument; the two are `reads = <Type>` and \
-                         `state = <Type>`",
-                    ));
-                }
-            }
-            if !eat_comma(input)? {
-                break;
-            }
-        }
-        let span = proc_macro2::Span::call_site();
-        Ok(Self {
-            reads: reads
-                .ok_or_else(|| syn::Error::new(span, "#[fold] requires `reads = <Type>`"))?,
-            state: state
-                .ok_or_else(|| syn::Error::new(span, "#[fold] requires `state = <Type>`"))?,
-        })
-    }
-}
-
-/// Expand `#[fold(reads = C, state = S)]` over `func`.
-pub(crate) fn expand_fold(args: FoldArgs, func: ItemFn) -> syn::Result<TokenStream> {
+/// Expand `#[fold]` over `func`.
+pub(crate) fn expand_fold(func: ItemFn) -> syn::Result<TokenStream> {
     check_callable(&func, "fold")?;
     if func.sig.inputs.len() != 2 {
-        return Err(syn::Error::new_spanned(
-            &func.sig,
-            format!(
-                "#[fold] takes `fn(rows: &[Row], state: &mut State) -> Result<()>`, \
-                 found {} parameter(s)",
-                func.sig.inputs.len()
-            ),
-        ));
+        return Err(syn::Error::new_spanned(&func.sig, FOLD_SHAPE));
     }
+    let reads = match param_ref_type(&func, 0, false) {
+        Some(syn::Type::Slice(slice)) => slice.elem.as_ref(),
+        _ => return Err(syn::Error::new_spanned(&func.sig.inputs, FOLD_SHAPE)),
+    };
+    let Some(state) = param_ref_type(&func, 1, true) else {
+        return Err(syn::Error::new_spanned(&func.sig.inputs, FOLD_SHAPE));
+    };
 
-    let FoldArgs { reads, state } = &args;
     let fn_name = &func.sig.ident;
     let system_name = fn_name.to_string();
     let decode = decode_rows(reads);
     let map_err = map_user_error();
 
     let meta = quote! {
-        ::saci::processor::__rt::SystemMeta::new(#system_name)
-            .reads_all_named(<#reads as ::saci::processor::__rt::Component>::name())
-            .writes_resource::<::saci::processor::__rt::ProcessorState<#state>>()
+        ::saci::__private::SystemMeta::new(#system_name)
+            .reads_all::<#reads>()
+            .writes_resource::<::saci::__private::State<#state>>()
     };
 
     // The rows are decoded into an owned `Vec` inside a block so the immutable
@@ -208,7 +109,7 @@ pub(crate) fn expand_fold(args: FoldArgs, func: ItemFn) -> syn::Result<TokenStre
     let body = quote! {
         let __saci_rows = #decode;
         let __saci_state =
-            ::saci::processor::__rt::ProcessorState::<#state>::get_or_insert_default(__saci_data)?;
+            ::saci::__private::State::<#state>::get_or_insert_default(__saci_data)?;
         #fn_name(&__saci_rows, __saci_state).map_err(#map_err)
     };
 
@@ -235,109 +136,27 @@ mod tests {
     }
 
     #[test]
-    fn a_one_parameter_transform_is_the_row_only_form() {
-        let func = item_fn("fn settle(row: &mut Order) -> Result<()> { Ok(()) }");
-        assert_eq!(transform_arity(&func).unwrap(), TransformArity::Row);
-    }
-
-    #[test]
-    fn a_two_parameter_transform_takes_the_config() {
-        let func = item_fn("fn settle(row: &mut Order, config: &Config) -> Result<()> { Ok(()) }");
-        assert_eq!(
-            transform_arity(&func).unwrap(),
-            TransformArity::RowAndConfig
-        );
-    }
-
-    #[test]
-    fn arity_detection_is_syntactic_not_type_directed() {
-        // A fully qualified config type, an alias, and a plain `&Config` must
-        // all classify the same: only the parameter count is read.
-        for source in [
-            "fn f(row: &mut Order, config: &saci::processor::Config) -> Result<()> { Ok(()) }",
-            "fn f(row: &mut Order, config: &Cfg) -> Result<()> { Ok(()) }",
-        ] {
-            assert_eq!(
-                transform_arity(&item_fn(source)).unwrap(),
-                TransformArity::RowAndConfig
-            );
-        }
-    }
-
-    #[test]
-    fn zero_and_three_parameter_transforms_are_rejected() {
-        for source in [
-            "fn f() -> Result<()> { Ok(()) }",
-            "fn f(a: &mut Order, b: &Config, c: u8) -> Result<()> { Ok(()) }",
-        ] {
-            let err = transform_arity(&item_fn(source)).unwrap_err();
-            assert!(
-                err.to_string().contains("#[transform] takes"),
-                "unexpected message: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_async_or_generic_transform_is_rejected_at_the_signature() {
-        let err = check_callable(
-            &item_fn("async fn f(row: &mut Order) -> Result<()> { Ok(()) }"),
-            "transform",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("remove `async`"), "{err}");
-
-        let err = check_callable(
-            &item_fn("fn f<T>(row: &mut T) -> Result<()> { Ok(()) }"),
-            "transform",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("generic parameters"), "{err}");
-    }
-
-    #[test]
-    fn transform_args_require_the_component() {
-        let err = crate::util::parse_err::<TransformArgs>("");
-        assert!(err.contains("component = <Type>"), "{err}");
-
-        let err = crate::util::parse_err::<TransformArgs>("state = Ledger");
-        assert!(err.contains("unknown #[transform]"), "{err}");
-    }
-
-    #[test]
-    fn fold_args_require_both_reads_and_state() {
-        let args = syn::parse_str::<FoldArgs>("reads = Order, state = Ledger").unwrap();
-        let (reads, state) = (&args.reads, &args.state);
-        assert_eq!(quote! { #reads }.to_string(), "Order");
-        assert_eq!(quote! { #state }.to_string(), "Ledger");
-
-        let err = crate::util::parse_err::<FoldArgs>("reads = Order");
-        assert!(err.contains("state = <Type>"), "{err}");
-    }
-
-    #[test]
     fn a_transform_expansion_keeps_the_original_function_and_adds_a_constructor() {
-        let args = syn::parse_str::<TransformArgs>("component = Order").unwrap();
         let func = item_fn("pub fn settle(row: &mut Order) -> Result<()> { Ok(()) }");
-        let out = expand_transform(args, func).unwrap().to_string();
+        let out = expand_transform(func).unwrap().to_string();
 
         assert!(out.contains("pub fn settle (row : & mut Order)"), "{out}");
         assert!(out.contains("pub fn settle_system ()"), "{out}");
         assert!(out.contains("struct __SaciSystem_settle"), "{out}");
-        assert!(out.contains("reads_all_named"), "{out}");
-        assert!(out.contains("writes_all_named"), "{out}");
-        // The one-parameter form must not reach for the config getter.
-        assert!(!out.contains("saci_config_get"), "{out}");
+        assert!(out.contains("reads_all :: < Order >"), "{out}");
+        assert!(out.contains("writes_all :: < Order >"), "{out}");
+        // The one-parameter form builds no config.
+        assert!(!out.contains("Config :: new"), "{out}");
     }
 
     #[test]
-    fn a_two_parameter_transform_expansion_builds_the_config_once_per_batch() {
-        let args = syn::parse_str::<TransformArgs>("component = Order").unwrap();
+    fn a_two_parameter_transform_builds_the_config_once_per_batch() {
         let func = item_fn("fn settle(row: &mut Order, cfg: &Config) -> Result<()> { Ok(()) }");
-        let out = expand_transform(args, func).unwrap().to_string();
+        let out = expand_transform(func).unwrap().to_string();
 
-        assert!(out.contains("crate :: saci_config_get"), "{out}");
-        let config_setup = out.find("__saci_config").expect("config binding");
+        let config_setup = out
+            .find("__private :: Config :: new ()")
+            .expect("config binding");
         let row_loop = out.find("for __saci_row").expect("row loop");
         assert!(
             config_setup < row_loop,
@@ -346,16 +165,45 @@ mod tests {
     }
 
     #[test]
-    fn a_fold_expansion_reaches_for_the_processor_state() {
-        let args = syn::parse_str::<FoldArgs>("reads = Order, state = Ledger").unwrap();
+    fn a_transform_whose_first_parameter_is_not_a_mutable_reference_is_rejected() {
+        for source in [
+            "fn f(row: Order) -> Result<()> { Ok(()) }",
+            "fn f(row: &Order) -> Result<()> { Ok(()) }",
+            "fn f() -> Result<()> { Ok(()) }",
+            "fn f(a: &mut Order, b: &Config, c: u8) -> Result<()> { Ok(()) }",
+        ] {
+            let err = expand_transform(item_fn(source)).unwrap_err();
+            assert!(
+                err.to_string().contains("#[transform] takes"),
+                "`{source}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_async_or_generic_transform_is_rejected_at_the_signature() {
+        let err = expand_transform(item_fn(
+            "async fn f(row: &mut Order) -> Result<()> { Ok(()) }",
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("remove `async`"), "{err}");
+
+        let err =
+            expand_transform(item_fn("fn f<T>(row: &mut T) -> Result<()> { Ok(()) }")).unwrap_err();
+        assert!(err.to_string().contains("generic parameters"), "{err}");
+    }
+
+    #[test]
+    fn a_fold_expansion_reaches_for_the_state() {
         let func =
             item_fn("fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> { Ok(()) }");
-        let out = expand_fold(args, func).unwrap().to_string();
+        let out = expand_fold(func).unwrap().to_string();
 
         assert!(
-            out.contains("ProcessorState :: < Ledger > :: get_or_insert_default"),
+            out.contains("State :: < Ledger > :: get_or_insert_default"),
             "{out}"
         );
+        assert!(out.contains("reads_all :: < Order >"), "{out}");
         assert!(out.contains("writes_resource"), "{out}");
         assert!(out.contains("fn ledger_system ()"), "{out}");
         // A fold hands the whole slice over once; it must not loop rows.
@@ -363,10 +211,17 @@ mod tests {
     }
 
     #[test]
-    fn a_fold_with_the_wrong_parameter_count_is_rejected() {
-        let args = syn::parse_str::<FoldArgs>("reads = Order, state = Ledger").unwrap();
-        let func = item_fn("fn ledger(rows: &[Order]) -> Result<()> { Ok(()) }");
-        let err = expand_fold(args, func).unwrap_err();
-        assert!(err.to_string().contains("#[fold] takes"), "{err}");
+    fn a_fold_with_the_wrong_shape_is_rejected() {
+        for source in [
+            "fn ledger(rows: &[Order]) -> Result<()> { Ok(()) }",
+            "fn ledger(rows: Vec<Order>, state: &mut Ledger) -> Result<()> { Ok(()) }",
+            "fn ledger(rows: &[Order], state: &Ledger) -> Result<()> { Ok(()) }",
+        ] {
+            let err = expand_fold(item_fn(source)).unwrap_err();
+            assert!(
+                err.to_string().contains("#[fold] takes"),
+                "`{source}`: {err}"
+            );
+        }
     }
 }

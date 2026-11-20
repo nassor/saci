@@ -174,8 +174,8 @@ Two crates are on crates.io:
 
 - [`saci`](./crates/saci/): the engine, the connectors, the byte formats, both authoring SDKs and
   the `saci-service` host.
-- [`saci-macros`](./crates/saci-macros/): the processor SDK's derive and attribute macros, which
-  `saci::processor` re-exports.
+- [`saci-macros`](./crates/saci-macros/): the derive and attribute macros of both authoring SDKs,
+  which `saci` re-exports at its root and in `saci::prelude`.
 
 | Feature | What it adds |
 |---|---|

@@ -1,41 +1,8 @@
-//! Shared parsing and emission helpers for the four macros.
+//! Shared emission helpers for the system-authoring macros.
 
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{ItemFn, Visibility};
-
-/// Parse one `key = <type>` pair, where the value is a type path such as
-/// `Order` or `my_mod::Ledger`.
-///
-/// `syn::Type` parsing stops at the enclosing `,`, so a comma-separated
-/// attribute list needs no lookahead beyond the separator itself.
-pub(crate) fn parse_type_arg(
-    input: syn::parse::ParseStream<'_>,
-    key: &Ident,
-    slot: &mut Option<syn::Type>,
-) -> syn::Result<()> {
-    if slot.is_some() {
-        return Err(syn::Error::new(
-            key.span(),
-            format!("`{key}` is given more than once"),
-        ));
-    }
-    *slot = Some(input.parse()?);
-    Ok(())
-}
-
-/// Consume the `,` between two attribute arguments.
-///
-/// Returns `false` when the list is finished, so the caller's loop can stop
-/// without peeking twice.
-pub(crate) fn eat_comma(input: syn::parse::ParseStream<'_>) -> syn::Result<bool> {
-    if input.peek(syn::Token![,]) {
-        input.parse::<syn::Token![,]>()?;
-        Ok(!input.is_empty())
-    } else {
-        Ok(false)
-    }
-}
 
 /// Reject the function shapes the generated `System` body cannot call.
 ///
@@ -79,6 +46,30 @@ pub(crate) fn check_callable(func: &ItemFn, macro_name: &str) -> syn::Result<()>
     Ok(())
 }
 
+/// Reject any attribute argument: the macros read everything they need from
+/// the function signature.
+pub(crate) fn reject_args(attr: TokenStream, macro_name: &str) -> syn::Result<()> {
+    if attr.is_empty() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        attr,
+        format!("#[{macro_name}] takes no arguments; the types come from the function signature"),
+    ))
+}
+
+/// The type `T` behind the `index`th parameter when it is written `&mut T`
+/// (`mutable`) or `&T`.
+pub(crate) fn param_ref_type(func: &ItemFn, index: usize, mutable: bool) -> Option<&syn::Type> {
+    let syn::FnArg::Typed(pat) = func.sig.inputs.iter().nth(index)? else {
+        return None;
+    };
+    let syn::Type::Reference(reference) = pat.ty.as_ref() else {
+        return None;
+    };
+    (reference.mutability.is_some() == mutable).then_some(reference.elem.as_ref())
+}
+
 /// A `System` implementation the `#[transform]` and `#[fold]` macros emit
 /// around an author-written function.
 pub(crate) struct SystemImpl<'a> {
@@ -113,9 +104,8 @@ impl SystemImpl<'_> {
         let ctor_doc = format!(
             "The `System` that `#[{macro_name}]` generated for `{fn_name}`.\n\
              \n\
-             Pass it to `PipelineBuilder::with_system`. The system is zero-sized: all \
-             behaviour comes from `{fn_name}`, which stays callable and unit-testable on \
-             its own."
+             Pass it to `Pipeline::system`. The system is zero-sized: all behaviour \
+             comes from `{fn_name}`, which stays callable and unit-testable on its own."
         );
 
         quote! {
@@ -126,22 +116,22 @@ impl SystemImpl<'_> {
             impl #ty {
                 fn __saci_exec(
                     &self,
-                    __saci_data: &mut ::saci::processor::__rt::Dataset,
-                ) -> ::saci::processor::__rt::SaciResult<()> {
+                    __saci_data: &mut ::saci::__private::Dataset,
+                ) -> ::saci::__private::SaciResult<()> {
                     #body
                 }
             }
 
-            #[::saci::processor::__rt::async_trait]
-            impl ::saci::processor::__rt::System for #ty {
-                fn meta(&self) -> ::saci::processor::__rt::SystemMeta {
+            #[::saci::__private::async_trait]
+            impl ::saci::__private::System for #ty {
+                fn meta(&self) -> ::saci::__private::SystemMeta {
                     #meta
                 }
 
                 async fn run(
                     &self,
-                    __saci_data: &mut ::saci::processor::__rt::Dataset,
-                ) -> ::saci::processor::__rt::SaciResult<()> {
+                    __saci_data: &mut ::saci::__private::Dataset,
+                ) -> ::saci::__private::SaciResult<()> {
                     self.__saci_exec(__saci_data)
                 }
 
@@ -149,14 +139,14 @@ impl SystemImpl<'_> {
                 // never builds the boxed future `#[async_trait]` imposes.
                 fn run_sync(
                     &self,
-                    __saci_data: &mut ::saci::processor::__rt::Dataset,
-                ) -> ::core::option::Option<::saci::processor::__rt::SaciResult<()>> {
+                    __saci_data: &mut ::saci::__private::Dataset,
+                ) -> ::core::option::Option<::saci::__private::SaciResult<()>> {
                     ::core::option::Option::Some(self.__saci_exec(__saci_data))
                 }
             }
 
             #[doc = #ctor_doc]
-            #vis fn #ctor() -> impl ::saci::processor::__rt::System + 'static {
+            #vis fn #ctor() -> impl ::saci::__private::System + 'static {
                 #ty
             }
         }
@@ -171,31 +161,21 @@ pub(crate) fn decode_rows(component: &syn::Type) -> TokenStream {
     quote! {
         {
             let __saci_batch = __saci_data.batch::<#component>()?;
-            <#component as ::saci::processor::__rt::Component>::from_record_batch(__saci_batch)?
+            <#component as ::saci::__private::Component>::from_record_batch(__saci_batch)?
         }
     }
 }
 
-/// Map a `saci::processor::Error` out of an author-written function into a
-/// `saci::SaciError`.
+/// Map an `sdk::Error` out of an author-written function into a
+/// `SaciError`.
 ///
 /// `SystemExecution`, not `Generic`: a failing transform or fold is by
-/// definition a failure inside a system's own processing logic, which is the
-/// variant `classify_run_error` reports to the host as `retryable`.
+/// definition a failure inside a system's own processing logic, which is
+/// retryable.
 pub(crate) fn map_user_error() -> TokenStream {
     quote! {
-        |__saci_err| ::saci::processor::__rt::SaciError::system_execution(__saci_err.into_message())
-    }
-}
-
-/// The message from a rejected attribute-argument parse.
-///
-/// `Result::unwrap_err` is unavailable here: the `Ok` half holds `syn::Type`
-/// values, and `syn`'s `Debug` impls sit behind its `extra-traits` feature.
-#[cfg(test)]
-pub(crate) fn parse_err<T: syn::parse::Parse>(source: &str) -> String {
-    match syn::parse_str::<T>(source) {
-        Ok(_) => panic!("expected `{source}` to be rejected"),
-        Err(err) => err.to_string(),
+        |__saci_err: ::saci::__private::Error| {
+            ::saci::__private::SaciError::system_execution(__saci_err.into_message())
+        }
     }
 }

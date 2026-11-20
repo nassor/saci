@@ -16,7 +16,7 @@ proc macro must be its own crate.
 | Crate | What it gives you |
 |---|---|
 | `saci` | Everything below as feature-gated modules. `use saci::prelude::*;` is the documented entry point. The default feature is `engine`. |
-| `saci-macros` | `#[derive(Component)]`, `#[transform]`, `#[fold]` and `#[processor]`. A processor crate does not depend on it: `saci::processor` re-exports the macros and their expansions name `::saci::processor::...`. |
+| `saci-macros` | `#[derive(Component)]`, `#[transform]`, `#[fold]`, `#[processor]` and `#[plugin]`. An authoring crate does not depend on it: `saci` re-exports the macros at its root and in `saci::prelude`, and their expansions name `::saci::__private::...`. |
 
 The workspace also holds crates that are not published: `saci-processor-smoketest`,
 `saci-plugin-smoketest`, the crates under `examples/`, `xtask`, and `saci-service-ui`, the
@@ -54,8 +54,7 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 | `saci::connector::tcp` | `connector-tcp` | `TcpIngestSource`, `TcpSink`: live length-prefixed frames, decoded and encoded by a transformer. |
 | `saci::connector::udp` | `connector-udp` | `UdpSource`, `UdpSink`: fire-and-forget datagrams, one message each, decoded and encoded by a transformer. The sink's optional `probe` block is what tells it whether a peer is still there. |
 | `saci::connector::saci` | `connector-saci` | `SaciSource`, `SaciSink`: one SACI service pushing `RecordBatch`es to another over Arrow IPC. A session opens with a hello naming the sending service, workflow and sink node, which the receiving side puts in its own series labels and span fields. |
-| `saci::processor` | `processor` | The processor SDK: the `export_pipeline!` macro, the `Component`, `transform`, `fold` and `processor` macros, and `Config`, `Error`, `Result`, `ProcessorState`, `RouteDecision`. `saci::processor::prelude` is its import set. The canonical WIT package is `crates/saci/wit/pipeline.wit`. |
-| `saci::plugin` | `plugin` | The Rust plugin SDK: `export_plugin!` wires a `fn() -> Pipeline` into a cdylib exporting the C ABI in `saci::plugin_abi`. The host that `dlopen`s that cdylib is `plugin-host`, not this module. |
+| `saci::sdk` | always | The authoring module shared by wasm processors and native plugins: `sdk::State`, `sdk::RouteDecision`, `sdk::Config`, `sdk::Error`, `sdk::Result` and `sdk::host` (`config`, `config_parse`, `trace` to `error`, `metric`, `with_config`). `#[transform]` and `#[fold]` need `derive`, `#[processor]` needs `processor` and `#[plugin]` needs `plugin`; all four are in `saci::prelude`. The canonical WIT package is `crates/saci/wit/pipeline.wit`. |
 | `saci::plugin_abi` | `plugin` or `plugin-host` | The C ABI itself: the two symbols a plugin exports, `saci_abi_version` and `saci_plugin_v1`, the `SaciPluginV1` and `SaciHostV1` vtables they fill, and their layout. The C header is `crates/saci/include/saci_plugin.h`. |
 | `saci::inspector_wire` | `metrics` | The inspector's JSON contract: `Topology`, `Snapshot`, `SpanRecord` and friends. serde only, so both the host and the browser compile it. |
 | `saci::wasm_host` | `wasm-host` | The wasmtime host: `WasmEngine`, `WasmPipelineRuntime` and the `bindgen!` host bindings. |
@@ -255,7 +254,7 @@ saci = { version = "0.1", features = ["connector-file", "transformer-csv"] }
 ```
 
 A wasm processor crate depends on the SDK feature alone, with the default features off, and gets
-the derive and attribute macros from `saci::processor`:
+the derive and attribute macros from `saci::prelude`:
 
 ```toml
 [dependencies]

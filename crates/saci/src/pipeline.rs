@@ -69,10 +69,19 @@ pub struct Pipeline {
     /// The first construction error, returned by every later `plan`,
     /// `validate` and `run*` call.
     pending_error: Option<SaciError>,
+    /// The one component carried across batches, when declared.
+    state: Option<StateHooks>,
     #[cfg(feature = "engine")]
     sources: Vec<(&'static str, Box<dyn Source>)>,
     #[cfg(feature = "engine")]
     sinks: Vec<(&'static str, Box<dyn Sink>)>,
+}
+
+/// How a declared state component crosses a batch boundary.
+struct StateHooks {
+    component: &'static str,
+    restore: fn(&mut Dataset, Option<&[u8]>) -> SaciResult<()>,
+    capture: fn(&Dataset) -> SaciResult<Option<Vec<u8>>>,
 }
 
 impl Pipeline {
@@ -84,6 +93,7 @@ impl Pipeline {
             systems: Vec::new(),
             plan: OnceLock::new(),
             pending_error: None,
+            state: None,
             #[cfg(feature = "engine")]
             sources: Vec::new(),
             #[cfg(feature = "engine")]
@@ -104,10 +114,80 @@ impl Pipeline {
     /// from the next [`validate`](Self::validate), [`plan`](Self::plan) or
     /// run.
     pub fn component<C: Component>(mut self) -> Self {
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.component == C::name())
+        {
+            self.record(Err(state_is_component(C::name())));
+            return self;
+        }
         let result = self.data.register::<C>();
         self.record(result);
         self.plan = OnceLock::new();
         self
+    }
+
+    /// Declare `C` as the one component whose rows survive across batches.
+    ///
+    /// Before each batch the rows the previous one left behind arrive as a
+    /// [`sdk::State<C>`](crate::sdk::State) resource; afterwards whatever the
+    /// systems left there is the checkpoint
+    /// ([`restore_state`](Self::restore_state),
+    /// [`capture_state`](Self::capture_state)). `C` is state, not a batch
+    /// component: registering it with [`component`](Self::component) too, or
+    /// declaring a second state type, is a configuration error.
+    pub fn state<C>(mut self) -> Self
+    where
+        C: Component + serde::Serialize + for<'de> serde::Deserialize<'de>,
+    {
+        if self.state.is_some() {
+            self.record(Err(SaciError::configuration(
+                "a pipeline carries one state type",
+            )));
+            return self;
+        }
+        if self.data.schemas().contains(C::name()) {
+            self.record(Err(state_is_component(C::name())));
+            return self;
+        }
+        self.state = Some(StateHooks {
+            component: C::name(),
+            restore: crate::sdk::state::restore::<C>,
+            capture: crate::sdk::state::capture::<C>,
+        });
+        self
+    }
+
+    /// `true` when the pipeline declared a [`state`](Self::state) component.
+    pub fn is_stateful(&self) -> bool {
+        self.state.is_some()
+    }
+
+    /// Insert the state rows `prior` carries into `data`. A no-op for a
+    /// pipeline with no state.
+    ///
+    /// # Errors
+    ///
+    /// `prior` does not decode as the state component.
+    pub fn restore_state(&self, data: &mut Dataset, prior: Option<&[u8]>) -> SaciResult<()> {
+        match &self.state {
+            Some(state) => (state.restore)(data, prior),
+            None => Ok(()),
+        }
+    }
+
+    /// The checkpoint blob of the state rows the systems left on `data`;
+    /// `None` for a pipeline with no state.
+    ///
+    /// # Errors
+    ///
+    /// The state resource is gone from `data`, or the rows do not encode.
+    pub fn capture_state(&self, data: &Dataset) -> SaciResult<Option<Vec<u8>>> {
+        match &self.state {
+            Some(state) => (state.capture)(data),
+            None => Ok(None),
+        }
     }
 
     /// Register a component by name with a schema known only at runtime.
@@ -223,6 +303,12 @@ impl Pipeline {
     }
 }
 
+fn state_is_component(name: &str) -> SaciError {
+    SaciError::configuration(format!(
+        "{name} is this pipeline's state; do not also register it as a component"
+    ))
+}
+
 /// The cached plan, built from `systems` and `schemas` on first use.
 fn ensure_plan<'a>(
     cell: &'a OnceLock<Result<Plan, SaciError>>,
@@ -308,5 +394,64 @@ mod tests {
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("LateOrder"), "{err}");
         assert_eq!(p.plan().unwrap_err(), err);
+    }
+
+    #[test]
+    fn declared_state_round_trips_through_capture_and_restore() {
+        let p = Pipeline::new("stateful").state::<RootOrder>();
+        assert!(p.is_stateful());
+
+        let mut data = Dataset::new();
+        p.restore_state(&mut data, None).unwrap();
+        data.resource_mut::<crate::sdk::State<RootOrder>>()
+            .unwrap()
+            .rows
+            .push(RootOrder { id: 9 });
+        let blob = p
+            .capture_state(&data)
+            .unwrap()
+            .expect("a stateful pipeline checkpoints");
+
+        let mut next = Dataset::new();
+        p.restore_state(&mut next, Some(&blob)).unwrap();
+        let rows = &next
+            .resource::<crate::sdk::State<RootOrder>>()
+            .unwrap()
+            .rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 9);
+    }
+
+    #[test]
+    fn a_stateless_pipeline_captures_nothing() {
+        let p = Pipeline::new("stateless");
+        let mut data = Dataset::new();
+        p.restore_state(&mut data, Some(&[1u8, 2, 3][..])).unwrap();
+        assert_eq!(p.capture_state(&data).unwrap(), None);
+        assert!(!p.is_stateful());
+    }
+
+    #[test]
+    fn state_that_is_also_a_component_fails_validate() {
+        for p in [
+            Pipeline::new("a")
+                .state::<RootOrder>()
+                .component::<RootOrder>(),
+            Pipeline::new("b")
+                .component::<RootOrder>()
+                .state::<RootOrder>(),
+        ] {
+            let err = p.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("is this pipeline's state"),
+                "{err}"
+            );
+        }
+        let err = Pipeline::new("c")
+            .state::<RootOrder>()
+            .state::<LateOrder>()
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("one state type"), "{err}");
     }
 }

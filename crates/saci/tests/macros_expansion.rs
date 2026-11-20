@@ -5,21 +5,10 @@
 //! exercised here: its output is `#[cfg(target_arch = "wasm32")]`, so the gate
 //! that proves it is the `wasm32-wasip3` build of a processor crate.
 
-#![cfg(feature = "processor")]
+#![cfg(feature = "derive")]
 
-use saci::processor::arrow_schema::{DataType, Field, Schema};
-use saci::processor::prelude::*;
-
-/// Stand-in for the `saci_config_get` that `#[processor]` emits into a real
-/// processor crate; a two-parameter `#[transform]` reads it through
-/// `crate::saci_config_get`.
-pub fn saci_config_get(key: &str) -> Option<String> {
-    match key {
-        "fee_rate" => Some("0.10".to_string()),
-        "mangled" => Some("not-a-number".to_string()),
-        _ => None,
-    }
-}
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// One row covering the four Arrow types the wire format carries.
 #[derive(Component, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -38,29 +27,29 @@ pub struct Totals {
     pub amount_sum: f64,
 }
 
-#[transform(component = Row)]
-pub fn stamp(row: &mut Row) -> saci::processor::Result<()> {
+#[transform]
+pub fn stamp(row: &mut Row) -> sdk::Result<()> {
     row.label = format!("id-{}", row.id);
     Ok(())
 }
 
-#[transform(component = Row)]
-pub fn apply_fee(row: &mut Row, config: &Config) -> saci::processor::Result<()> {
+#[transform]
+pub fn apply_fee(row: &mut Row, config: &sdk::Config) -> sdk::Result<()> {
     let rate: f64 = config.get("fee_rate", 0.0)?;
     row.amount -= row.amount * rate;
     Ok(())
 }
 
-#[transform(component = Row)]
-pub fn reject_invalid(row: &mut Row) -> saci::processor::Result<()> {
+#[transform]
+pub fn reject_invalid(row: &mut Row) -> sdk::Result<()> {
     if !row.valid {
         return Err(format!("row {} is invalid", row.id).into());
     }
     Ok(())
 }
 
-#[fold(reads = Row, state = Totals)]
-pub fn totals(rows: &[Row], state: &mut Totals) -> saci::processor::Result<()> {
+#[fold]
+pub fn totals(rows: &[Row], state: &mut Totals) -> sdk::Result<()> {
     state.rows_seen += rows.len() as i64;
     state.amount_sum += rows.iter().map(|row| row.amount).sum::<f64>();
     Ok(())
@@ -70,7 +59,7 @@ fn seeded(rows: Vec<Row>) -> Dataset {
     let mut data = Dataset::new();
     data.register::<Row>().expect("register Row");
     data.append(&rows).expect("append rows");
-    data.insert_resource(saci::processor::ProcessorState::<Totals>::default());
+    data.insert_resource(sdk::State::<Totals>::default());
     data
 }
 
@@ -166,7 +155,9 @@ fn a_two_parameter_transform_reads_the_host_config() {
     let pipeline = Pipeline::new("config")
         .component::<Row>()
         .system(apply_fee_system());
-    block_on(pipeline.run_on(&mut data)).expect("run");
+    sdk::host::with_config(&[("fee_rate", "0.10")], || {
+        block_on(pipeline.run_on(&mut data)).expect("run");
+    });
 
     assert_eq!(rows_of(&data)[0].amount, 180.0);
 }
@@ -199,7 +190,7 @@ fn a_fold_accumulates_into_the_processor_state_across_batches() {
         .component::<Row>()
         .system(totals_system());
 
-    let mut state = saci::processor::ProcessorState::<Totals>::default();
+    let mut state = sdk::State::<Totals>::default();
     for amount in [10.0, 32.0] {
         let mut data = Dataset::new();
         data.register::<Row>().expect("register Row");
@@ -217,11 +208,11 @@ fn a_fold_accumulates_into_the_processor_state_across_batches() {
         // and the host hands back as the next batch's `prior`.
         let rows = std::mem::take(
             &mut data
-                .get_resource_mut::<saci::processor::ProcessorState<Totals>>()
+                .get_resource_mut::<sdk::State<Totals>>()
                 .expect("state survives the batch")
                 .rows,
         );
-        state = saci::processor::ProcessorState::new(rows);
+        state = sdk::State::new(rows);
     }
 
     assert_eq!(
@@ -279,7 +270,7 @@ fn a_fold_declares_a_component_read_and_a_state_resource_write() {
             "{:?}",
             SystemMeta::new("totals")
                 .reads_all::<Row>()
-                .writes_resource::<saci::processor::ProcessorState<Totals>>()
+                .writes_resource::<sdk::State<Totals>>()
         ),
         "a fold reads the component and writes the state resource"
     );

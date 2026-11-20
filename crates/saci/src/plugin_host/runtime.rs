@@ -80,6 +80,11 @@ pub struct NativePluginRuntime {
     /// `processor.batch` span.
     workflow_id: String,
     processor_id: String,
+    /// Size of the last input IPC payload. The next batch's buffer is
+    /// presized to it, which saves the growth reallocations of a
+    /// `Vec::new()`. Relaxed because a stale or racing value only costs one
+    /// resize.
+    last_ipc_len: std::sync::atomic::AtomicUsize,
 }
 
 /// Reports what the plugin declared about itself, not the pointers behind it.
@@ -171,6 +176,7 @@ impl NativePluginRuntime {
             last_metrics: Mutex::new(None),
             workflow_id: String::new(),
             processor_id: String::new(),
+            last_ipc_len: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -255,8 +261,11 @@ impl NativePluginRuntime {
         #[cfg(feature = "tracing")]
         let _batch_guard = batch_span.enter();
 
-        let mut input: Vec<u8> = Vec::new();
+        let mut input: Vec<u8> =
+            Vec::with_capacity(self.last_ipc_len.load(std::sync::atomic::Ordering::Relaxed));
         data.write_ipc(&mut input)?;
+        self.last_ipc_len
+            .store(input.len(), std::sync::atomic::Ordering::Relaxed);
 
         let prior_slice = prior.map_or_else(SaciSlice::empty, SaciSlice::from_bytes);
         let mut result = SaciRunResult::empty();
@@ -316,7 +325,9 @@ impl NativePluginRuntime {
             )));
         }
 
-        let output = self.plugin.take_buffer(result.output);
+        let decoded = self
+            .plugin
+            .read_buffer(result.output, |bytes| Dataset::read_ipc(&mut &bytes[..]));
         let checkpoint = if result.has_checkpoint == 0 {
             // Not flagged, so there is nothing to persist. A plugin that
             // allocated one anyway must still not leak it.
@@ -342,7 +353,7 @@ impl NativePluginRuntime {
         };
         drop(self.plugin.take_buffer(err));
 
-        *data = Dataset::read_ipc(&mut output.as_slice())?;
+        *data = decoded?;
         let metrics: PluginBatchMetrics = result.metrics.into();
         #[cfg(feature = "tracing")]
         {
@@ -503,7 +514,7 @@ fn run_batch_error(status: SaciStatus, message: &[u8]) -> SaciError {
 /// `describe` and `run_batch` are `extern "C-unwind"` specifically so this is
 /// possible: an unguarded plugin's panic reaches here as a catchable unwind
 /// instead of aborting the process (see the `# Unwinding` section on
-/// `crate::plugin_abi`). A plugin built with `export_plugin!` never exercises
+/// `crate::plugin_abi`). A plugin built with `#[plugin]` never exercises
 /// the `Err` arm here, because its own internal guard already turned the
 /// panic into a normal `PERMANENT` status before this call could see it. This
 /// is the fallback for a plugin that does not guard itself.

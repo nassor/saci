@@ -50,11 +50,28 @@
 - Root exports: connector and transformer types are named by module path
   (`saci::connector::file::FileSource`); `saci::async_trait` is re-exported, so a crate needs no
   `async-trait` dependency; `saci::partition` and `saci::resource` are private.
+- Authoring SDK: `saci::processor` and `saci::plugin` are replaced by one `saci::sdk` module
+  (`sdk::Config`, `sdk::Error`, `sdk::Result`, `sdk::State`, `sdk::RouteDecision`, `sdk::host`),
+  and every macro is reached through `saci::prelude::*`. `export_pipeline!` and `export_plugin!`
+  are removed: `#[processor]` exports a WebAssembly component and the new `#[plugin]` a native
+  plugin, neither taking arguments; the pipeline's name is the descriptor name. A crate no longer
+  writes its own `mod bindings`.
+- State is declared on the pipeline with `Pipeline::state::<C>()` (`is_stateful`,
+  `restore_state`, `capture_state`), not as a macro argument; `ProcessorState` is `sdk::State`.
+- `#[transform]` and `#[fold]` take no arguments: the component and state types come from the
+  function's parameters (`fn(row: &mut T)`, `fn(rows: &[T], state: &mut S)`).
+- `sdk::host` (`trace`/`debug`/`info`/`warn`/`error`, `metric`, `config`, `config_parse`,
+  `with_config` for tests) replaces the generated `saci_config_get`, `saci_config_parse`, `log`
+  and `metric` functions and `saci::plugin::host`. `sdk::Config::new()` reads through it and
+  fetches each key once.
+- `RouteDecision(vec![..])` is `RouteDecision::to([..])` and `RouteDecision::none()`.
 
 ### Changed
 
 - `Dataset::append` drops the zero-row registration chunk, so a component read after one append
   needs no concatenation; `clone_empty` keeps the prebuilt empty templates `clear` uses.
+- `plugin-host`: the output IPC of a native plugin is decoded in place instead of copied first,
+  and the input buffer is presized from the previous batch.
 
 ## 0.2.0 - 2026-11-19
 

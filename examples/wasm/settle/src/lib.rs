@@ -5,7 +5,7 @@
 //! a cross-batch [`Ledger`] of settled volume net of fees.
 //!
 //! Writing a `Utf8` column (`settlement`) rewrites the offsets buffer, values
-//! buffer, and RecordBatch metadata via `saci::processor` and `arrow-rs`.
+//! buffer, and RecordBatch metadata via `saci::sdk` and `arrow-rs`.
 //!
 //! # Shape
 //!
@@ -22,7 +22,7 @@
 //!
 //! ```text
 //! stage 0:  settle  reads Order            writes Order
-//! stage 1:  ledger  reads Order            writes ProcessorState<Ledger>
+//! stage 1:  ledger  reads Order            writes sdk::State<Ledger>
 //! ```
 //!
 //! `ledger` reads what `settle` writes, so the scheduler is forced to sequence
@@ -38,7 +38,7 @@
 
 #![deny(missing_docs)]
 
-use saci::processor::prelude::*;
+use saci::prelude::*;
 
 /// Settlement outcome for an invalid row.
 const REJECTED: &str = "REJECTED";
@@ -111,8 +111,8 @@ pub struct Order {
 /// Running total of settled orders, carried across `run-batch` calls.
 ///
 /// This is the *state* component, not a batch component: it lives in a
-/// `ProcessorState<Ledger>` resource, is never registered on the batch dataset,
-/// and therefore never appears in the output IPC. `#[processor(state = Ledger)]`
+/// `sdk::State<Ledger>` resource, is never registered on the batch dataset,
+/// and therefore never appears in the output IPC. `.state::<Ledger>()`
 /// serialises it into `run-result.checkpoint` after every batch and restores it
 /// from `prior` before the next one. `Default` is the cold start: zero rows
 /// settled, zero volume.
@@ -138,8 +138,8 @@ pub struct Ledger {
 ///
 /// Returns an error, failing the whole batch, when `review_tier` carries a
 /// value no stage assigns.
-#[transform(component = Order)]
-pub fn settle(row: &mut Order) -> Result<()> {
+#[transform]
+pub fn settle(row: &mut Order) -> sdk::Result<()> {
     row.settlement = if !row.valid {
         REJECTED.to_string()
     } else {
@@ -171,8 +171,8 @@ pub fn settle(row: &mut Order) -> Result<()> {
 /// # Errors
 ///
 /// Infallible today; the signature keeps the `#[fold]` contract.
-#[fold(reads = Order, state = Ledger)]
-pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
+#[fold]
+pub fn ledger(rows: &[Order], state: &mut Ledger) -> sdk::Result<()> {
     let mut held = 0usize;
     let mut reviewed = 0usize;
     let mut rejected = 0usize;
@@ -195,10 +195,10 @@ pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
     state.settled_count += batch_count;
     state.settled_usd += batch_usd;
 
-    metric("settle.held_rows", held as f64);
-    metric("settle.review_rows", reviewed as f64);
-    metric("settle.rejected_rows", rejected as f64);
-    log(
+    sdk::host::metric("settle.held_rows", held as f64);
+    sdk::host::metric("settle.review_rows", reviewed as f64);
+    sdk::host::metric("settle.rejected_rows", rejected as f64);
+    sdk::host::info(
         "settle",
         &format!(
             "{held} held, {reviewed} in review, {rejected} rejected out of {}",
@@ -206,9 +206,9 @@ pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
         ),
     );
 
-    metric("settle.settled_usd_total", state.settled_usd);
-    metric("settle.settled_count_total", state.settled_count as f64);
-    log(
+    sdk::host::metric("settle.settled_usd_total", state.settled_usd);
+    sdk::host::metric("settle.settled_count_total", state.settled_count as f64);
+    sdk::host::info(
         "ledger",
         &format!(
             "batch settled {batch_count} rows / {batch_usd:.2} USD net; \
@@ -225,9 +225,10 @@ pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
 /// batch dataset: `Dataset`'s IPC format requires every registered component to
 /// hold exactly the dataset's row count, while ledger rows are independent of
 /// batch rows.
-#[processor(name = "settle", state = Ledger)]
+#[processor]
 pub fn build() -> Pipeline {
     Pipeline::new("settle")
+        .state::<Ledger>()
         .component::<Order>()
         .system(settle_system())
         .system(ledger_system())
@@ -237,7 +238,7 @@ pub fn build() -> Pipeline {
 mod tests {
     use super::*;
     use pollster::block_on;
-    use saci::processor::arrow_schema::{DataType, Field, Schema};
+    use saci::arrow_schema::{DataType, Field, Schema};
 
     fn order(id: i64, valid: bool, review_tier: i64) -> Order {
         Order {
@@ -400,7 +401,7 @@ mod tests {
             order(5, false, TIER_CLEAR),
         ])
         .expect("append rows");
-        data.insert_resource(saci::processor::ProcessorState::<Ledger>::default());
+        data.insert_resource(sdk::State::<Ledger>::default());
 
         block_on(build().run_on(&mut data)).expect("run the pipeline");
 
@@ -414,7 +415,7 @@ mod tests {
         // `ledger` runs in a later stage than `settle`, so it saw the written
         // column rather than the empty one the batch arrived with.
         let state = data
-            .get_resource::<saci::processor::ProcessorState<Ledger>>()
+            .resource::<sdk::State<Ledger>>()
             .expect("state resource");
         assert_eq!(
             state.rows,

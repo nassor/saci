@@ -24,8 +24,8 @@ serde = { workspace = true }
 # serde_arrow's encoding exactly.
 serde_arrow = { workspace = true }
 
-# The bindings generator. Gated on wasm32 because `src/lib.rs` gates the
-# generated module the same way: the host build of this crate is an empty cdylib
+# The bindings generator, invoked by the `#[processor]` expansion. Gated on wasm32
+# because that expansion is: the host build of this crate is an empty cdylib
 # and has no use for the generator or its proc-macro dependency tree.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wit-bindgen = { workspace = true }

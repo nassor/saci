@@ -489,25 +489,15 @@ crate-type = ["cdylib"]
 saci = { path = "../crates/saci", default-features = false, features = ["processor"] }
 serde = { version = "1", features = ["derive"] }
 
-# The bindings generator, wasm32-only like the `bindings` module in lib.rs.
+# The bindings generator, invoked by the `#[processor]` expansion on wasm32 only.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = "0.63.0"
+wit-bindgen = { version = "0.63.0", features = ["async"] }
 ```
 
 ```rust,name=Export the build function
 use saci::prelude::*;
 
-// The WIT bindings, generated from the same package the host compiles against.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
+#[processor]
 fn build() -> Pipeline {
     Pipeline::new("order-pipeline")
         .component::<Order>()
@@ -516,15 +506,13 @@ fn build() -> Pipeline {
         .system(FlagExpress)
         .system(make_summary_system())
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build);
 ```
 
-`export_pipeline!` writes the `describe` and `run-batch` exports plus the
-`saci_config_get` and `saci_config_parse` accessors, all referencing
-`crate::bindings`. That is why the bindings module and the wasm32-only
-`wit-bindgen` dependency live in this crate.
+`#[processor]` writes the WIT bindings and the `describe` and `run-batch`
+exports, all on wasm32 only. It takes no arguments: the pipeline's name,
+`order-pipeline`, is the name the component describes itself with and the
+name the host checks. The wasm32-only `wit-bindgen` dependency is the one the
+expansion calls.
 
 The `Order` component and the four systems from steps 3 to 5 move into this
 crate. Their `arrow_array::` imports become `saci::arrow_array::`, because `saci` re-exports

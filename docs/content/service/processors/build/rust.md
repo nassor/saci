@@ -1,6 +1,6 @@
 +++
 title = "A Rust processor"
-description = "Plain wasm32-wasip3 cargo build, the saci processor feature with Component Model Async, export_pipeline!, and a component running under saci-service."
+description = "Plain wasm32-wasip3 cargo build, the saci processor feature with Component Model Async, the #[processor] attribute, and a component running under saci-service."
 template = "page.html"
 weight = 1
 aliases = ["/processors/rust/", "/guests/rust/"]
@@ -91,8 +91,8 @@ Runs the same on Linux, macOS and Windows (PowerShell).
 
 Rust needs no separate SDK package. The `saci` crate with its `processor`
 feature carries the Arrow handling, re-exports `arrow_array` and
-`arrow_schema` at the version the host uses, and provides the four authoring
-macros.
+`arrow_schema` at the version the host uses, and provides the authoring
+macros and the `sdk` module.
 
 ## 1. Create the project
 
@@ -134,7 +134,7 @@ The row type is the schema. `#[derive(Component)]` traces the Arrow schema off
 the Rust types, so nothing declares a field twice and nothing can drift.
 
 ```rust,name=The Order row in src/lib.rs
-use saci::processor::prelude::*;
+use saci::prelude::*;
 
 #[derive(Component, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Order {
@@ -171,8 +171,8 @@ processor is handed a batch and hands one back; it does not add columns.
 `&mut Order` and writes into it.
 
 ```rust,name=The settle transform
-#[transform(component = Order)]
-pub fn settle(row: &mut Order) -> Result<()> {
+#[transform]
+pub fn settle(row: &mut Order) -> sdk::Result<()> {
     row.settlement = if !row.valid {
         REJECTED.to_string()
     } else {
@@ -204,10 +204,11 @@ world, the async guest exports and the host-io bridges, so nothing in this file
 is target-gated by hand.
 
 ```rust,name=The processor entry point
-#[processor(name = "settle", state = Ledger)]
+#[processor]
 pub fn build() -> Pipeline {
     Pipeline::new("settle")
         .component::<Order>()
+        .state::<Ledger>()
         .system(settle_system())
         .system(ledger_system())
 }
@@ -216,12 +217,14 @@ pub fn build() -> Pipeline {
 `settle_system()` and `ledger_system()` are what `#[transform]` and `#[fold]`
 generate from the two functions: one constructor per annotated function, named
 after it. `component::<Order>()` registers the row type, which is what a workflow's
-`component="Order"` is checked against.
+`component="Order"` is checked against. The pipeline's name, `settle`, is the
+descriptor name the host checks.
 
-`state = Ledger` names the type carried across batches, declared in
-[Config, logs and state](#config-logs-and-state). Only `Order` is registered.
-Registering `Ledger` would be wrong. A registered component holds exactly the
-dataset's row count, while ledger rows are independent of batch rows.
+`state::<Ledger>()` names the type carried across batches, declared in
+[Config, logs and state](#config-logs-and-state). Only `Order` is registered as a
+component. Registering `Ledger` too is a configuration error, because a registered
+component holds exactly the dataset's row count, while ledger rows are independent
+of batch rows.
 
 ## 5. Build and validate
 
@@ -293,14 +296,14 @@ carry `review_tier` `0`, so they settle.
 
 ## Config, logs and state
 
-A `#[transform]` that takes a second `&Config` parameter is handed typed access
+A `#[transform]` that takes a second `&sdk::Config` parameter is handed typed access
 to the `config` keys the `wasm` node injected. An absent key yields the default,
 and a present but unparseable value is an error so typos never hide behind
 defaults.
 
 ```rust,name=Reading a config key with a default
-#[transform(component = Order)]
-pub fn settle(row: &mut Order, config: &Config) -> Result<()> {
+#[transform]
+pub fn settle(row: &mut Order, config: &sdk::Config) -> sdk::Result<()> {
     let floor: f64 = config.get("min_amount", 0.0)?;
     row.valid = row.amount > floor;
     Ok(())
@@ -308,9 +311,10 @@ pub fn settle(row: &mut Order, config: &Config) -> Result<()> {
 ```
 
 `println!` from a processor goes nowhere. The host gives the component no
-stdout and no stderr, so both are discarded. `log(target, message)` and
-`metric(name, value)`, emitted into your crate by `#[processor]`, are the only
-channels out. The host records each metric under the processor's own label.
+stdout and no stderr, so both are discarded. `sdk::host::info(target, message)`
+(also `trace`, `debug`, `warn` and `error`) and `sdk::host::metric(name, value)`
+are the only channels out. The host records each metric under the processor's own
+label.
 
 `#[fold]` is the batch-level hook. It sees the whole row slice and a `&mut` to
 the state type, which is the only place a count over the batch can live.
@@ -322,8 +326,8 @@ pub struct Ledger {
     pub settled_usd: f64,
 }
 
-#[fold(reads = Order, state = Ledger)]
-pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
+#[fold]
+pub fn ledger(rows: &[Order], state: &mut Ledger) -> sdk::Result<()> {
     let mut batch_count = 0i64;
     let mut batch_usd = 0.0f64;
 
@@ -337,9 +341,9 @@ pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
     state.settled_count += batch_count;
     state.settled_usd += batch_usd;
 
-    metric("settle.settled_usd_total", state.settled_usd);
-    metric("settle.settled_count_total", state.settled_count as f64);
-    log(
+    sdk::host::metric("settle.settled_usd_total", state.settled_usd);
+    sdk::host::metric("settle.settled_count_total", state.settled_count as f64);
+    sdk::host::info(
         "ledger",
         &format!(
             "batch settled {batch_count} rows / {batch_usd:.2} USD net; \
@@ -352,10 +356,10 @@ pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
 ```
 
 The state blob a processor returns survives across batches.
-`#[processor(state = Ledger)]` serialises `Ledger` into the checkpoint after
+`.state::<Ledger>()` serialises `Ledger` into the checkpoint after
 every batch and restores it from the next call's prior, so `settled_count` and
 `settled_usd` accumulate. `Default` is the cold start: zero rows settled, zero
-volume.
+volume. Inside a system the state is the `sdk::State<Ledger>` resource.
 
 State never reaches the output. It lives beside the batch rather than in it, so
 it does not round-trip through Arrow and never appears in the CSV or in the

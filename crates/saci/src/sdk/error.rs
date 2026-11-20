@@ -1,6 +1,6 @@
 //! The error type author-written transforms and folds return.
 
-/// The error type for processor-authored functions.
+/// The error type for author-written functions.
 ///
 /// A message and nothing else. `?` works on anything printable because of the
 /// blanket [`From`] impl below, so an [`ArrowError`](arrow_schema::ArrowError),
@@ -9,8 +9,8 @@
 /// closure:
 ///
 /// ```ignore
-/// #[transform(component = Order)]
-/// pub fn settle(row: &mut Order) -> saci::processor::Result<()> {
+/// #[transform]
+/// pub fn settle(row: &mut Order) -> sdk::Result<()> {
 ///     let tier = TIERS.get(row.review_tier as usize).ok_or("unknown review tier")?;
 ///     row.settlement = tier.parse::<Settlement>()?.to_string();
 ///     Ok(())
@@ -105,6 +105,6 @@ mod tests {
             inner()?;
             Ok(())
         }
-        assert_eq!(outer().unwrap_err().into_message(), "inner failed");
+        assert_eq!(outer().unwrap_err().message(), "inner failed");
     }
 }

@@ -18,12 +18,11 @@
 //! - `transformer-<format>`: one byte format in `transformer::<format>`.
 //!   `transformers` enables all five: `arrow-ipc`, `avro`, `csv`, `ndjson`
 //!   and `parquet`.
-//! - `processor`: the WebAssembly Component Model processor SDK in
-//!   `processor`, with the `#[transform]`, `#[fold]` and `#[processor]`
-//!   macros and `export_pipeline!`. A processor targets wasm32-wasip3, where
-//!   tokio cannot build, so it depends on this crate with
+//! - `processor`: a WebAssembly Component Model processor built with the
+//!   authoring SDK in [`sdk`] and `#[processor]`. A processor targets
+//!   wasm32-wasip3, where tokio cannot build, so it depends on this crate with
 //!   `default-features = false, features = ["processor"]`.
-//! - `plugin`: the native plugin SDK in `plugin` and `export_plugin!`, for a
+//! - `plugin`: a native plugin built with [`sdk`] and `#[plugin]`, for a
 //!   cdylib the host `dlopen`s.
 //! - `service`: the host in `service`: KDL configuration, the factory
 //!   Registry, the standalone and distributed runners, the HTTP control
@@ -102,6 +101,12 @@ pub use runtime::{PipelineRuntime, RuntimeDescriptorInfo, RuntimeOutput};
 /// What macro expansions name. Not part of the API.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::sdk::glue::{
+        BatchError, BatchMetrics, BatchOutput, ComponentSchema, Descriptor, HostIo, HostScope,
+        PipelineSlot, describe, fingerprint_hex, install_host, run_batch, schema_to_ipc_bytes,
+    };
+    pub use crate::sdk::host::Level;
+    pub use crate::sdk::{Config, Error, RouteDecision, State};
     pub use crate::{
         Component, Dataset, FieldRef, Pipeline, SaciError, SaciResult, System, SystemMeta,
     };
@@ -109,6 +114,15 @@ pub mod __private {
     pub use async_trait::async_trait;
     pub use serde_arrow;
     pub use std::sync::LazyLock;
+
+    /// The native plugin boundary `#[plugin]` expands to.
+    #[cfg(feature = "plugin")]
+    pub mod plugin {
+        pub use crate::sdk::plugin_rt::{
+            PluginInstance, SACI_ABI_VERSION, SaciBuffer, SaciHostV1, SaciPluginV1, SaciRunResult,
+            SaciSlice, SaciStatus, describe_impl, free_buffer, run_batch_impl,
+        };
+    }
 }
 
 #[cfg(feature = "config")]
@@ -120,11 +134,12 @@ pub mod transformer;
 #[cfg(feature = "connector-contract")]
 pub mod connector;
 
-#[cfg(feature = "processor")]
-pub mod processor;
-
 #[cfg(feature = "plugin")]
-pub mod plugin;
+pub use saci_macros::plugin;
+#[cfg(feature = "processor")]
+pub use saci_macros::processor;
+#[cfg(feature = "derive")]
+pub use saci_macros::{fold, transform};
 
 #[cfg(any(feature = "plugin", feature = "plugin-host"))]
 pub mod plugin_abi;
@@ -166,17 +181,17 @@ pub mod plugin_host;
 #[cfg(feature = "service")]
 pub mod service;
 
-// `ProcessorState` and `RouteDecision` cross a batch boundary for `processor`
-// and `plugin` alike.
-#[cfg(any(feature = "processor", feature = "plugin"))]
-pub use sdk::{ProcessorState, RouteDecision};
-
 /// Convenience re-exports of the most commonly used types and traits.
 ///
 /// `use saci::prelude::*;` pulls in the engine types plus whatever the
 /// enabled `processor`, `connector-*` and `transformer-*` features add.
 pub mod prelude {
     pub use crate::column::ComponentView;
+    #[cfg(feature = "plugin")]
+    pub use crate::plugin;
+    #[cfg(feature = "processor")]
+    pub use crate::processor;
+    pub use crate::sdk;
     pub use crate::{
         Component, Dataset, FieldRef, KeyPartition, ParallelSystem, Pipeline, PipelineConfig,
         RetryMode, Row, RunStats, SaciError, SaciResult, Scheduler, SchemaRegistry, SliceWriteSet,
@@ -184,6 +199,8 @@ pub mod prelude {
     };
     #[cfg(feature = "engine")]
     pub use crate::{PipelineRuntime, RuntimeDescriptorInfo, RuntimeOutput, Sink, Source};
+    #[cfg(feature = "derive")]
+    pub use crate::{fold, transform};
 
     #[cfg(feature = "windows")]
     pub use crate::windows::{CURRENT_ACCUMULATOR_VERSION, WindowAccumulator, WindowWatermark};

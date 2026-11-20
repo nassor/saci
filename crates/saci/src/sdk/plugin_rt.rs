@@ -1,36 +1,73 @@
-//! Runtime glue referenced by [`crate::export_plugin!`] expansions.
+//! The native plugin side of the C ABI, called from the `#[plugin]` thunks.
 //!
-//! Not public API. Its contents are stable only within a single `saci`
-//! version, and the macro is the only legitimate consumer.
-//!
-//! Almost everything the boundary needs lives here as an ordinary function
-//! rather than inside the macro body, so it is unit-testable and exists once in
-//! the binary instead of once per expansion.
+//! Reachable only as `saci::__private::plugin`. Almost everything the boundary
+//! needs lives here as an ordinary function rather than inside the macro body,
+//! so it is unit-testable and exists once in the binary instead of once per
+//! expansion.
 
-use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::sdk::{PipelineSlot, classify_run_error, fingerprint_hex, schema_to_ipc_bytes};
-use crate::{Dataset, Pipeline};
 use base64::Engine as _;
+
+use super::glue::{self, HostIo, HostScope, PipelineSlot};
+use super::host::Level;
+use crate::Pipeline;
 
 pub use crate::plugin_abi::{
     SACI_ABI_VERSION, SaciBuffer, SaciHostV1, SaciPluginV1, SaciRunMetrics, SaciRunResult,
-    SaciSlice, SaciStatus, log_level,
+    SaciSlice, SaciStatus,
 };
-pub use crate::sdk::RouteDecision;
-pub use crate::sdk::{NoState, ProcessorState, ProcessorStateSpec, Stateful};
-pub use pollster;
+
+/// The host vtable as an [`sdk::host`](super::host) backend.
+struct PluginHost(SaciHostV1);
+
+impl HostIo for PluginHost {
+    fn config(&self, key: &str) -> Option<String> {
+        let host = &self.0;
+        let get_config = host.get_config?;
+        let mut out = SaciSlice::empty();
+        let found =
+            unsafe { get_config(host.ctx, SaciSlice::from_bytes(key.as_bytes()), &mut out) };
+        if found == 0 {
+            return None;
+        }
+        // The host promises this slice outlives the instance, but copying keeps
+        // the plugin's own API owned and immune to a host that gets it wrong.
+        let bytes = unsafe { out.as_bytes() };
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    fn log(&self, level: Level, target: &str, message: &str) {
+        let host = &self.0;
+        if let Some(log) = host.log {
+            unsafe {
+                log(
+                    host.ctx,
+                    level as u32,
+                    SaciSlice::from_bytes(target.as_bytes()),
+                    SaciSlice::from_bytes(message.as_bytes()),
+                );
+            }
+        }
+    }
+
+    fn metric(&self, name: &str, value: f64) {
+        let host = &self.0;
+        if let Some(metric) = host.metric {
+            unsafe { metric(host.ctx, SaciSlice::from_bytes(name.as_bytes()), value) }
+        }
+    }
+}
 
 /// One loaded plugin instance.
 ///
 /// The host may load the same library twice with different config, so the
 /// pipeline and the host vtable are per-instance rather than per-process
 /// statics. `saci_plugin_v1` boxes one of these and hands the pointer back as
-/// [`crate::plugin_abi::SaciPluginV1::instance`].
+/// [`SaciPluginV1::instance`].
 pub struct PluginInstance {
     slot: PipelineSlot,
-    host: SaciHostV1,
+    host: PluginHost,
 }
 
 impl PluginInstance {
@@ -38,7 +75,7 @@ impl PluginInstance {
     pub const fn new(host: SaciHostV1) -> Self {
         Self {
             slot: PipelineSlot::new(),
-            host,
+            host: PluginHost(host),
         }
     }
 
@@ -53,7 +90,7 @@ impl PluginInstance {
     ///
     /// `instance` must be a pointer produced by [`PluginInstance::into_raw`]
     /// that has not yet been passed to [`PluginInstance::from_raw`].
-    pub unsafe fn borrow<'a>(instance: *mut core::ffi::c_void) -> Option<&'a Self> {
+    unsafe fn borrow<'a>(instance: *mut core::ffi::c_void) -> Option<&'a Self> {
         if instance.is_null() {
             return None;
         }
@@ -74,94 +111,12 @@ impl PluginInstance {
     }
 }
 
-thread_local! {
-    /// The host vtable for the call in progress on this thread.
-    ///
-    /// Thread-local rather than a static: the host never calls one instance
-    /// concurrently, but it may drive two different instances from two threads
-    /// at once, and each has its own config map.
-    static ACTIVE_HOST: Cell<*const SaciHostV1> = const { Cell::new(core::ptr::null()) };
-}
-
-/// Publishes a host vtable for the duration of one boundary call.
-pub struct HostScope {
-    previous: *const SaciHostV1,
-}
-
-impl HostScope {
-    /// Publish `host` on this thread until the returned guard drops.
-    pub fn enter(host: &SaciHostV1) -> Self {
-        let previous = ACTIVE_HOST.replace(host as *const SaciHostV1);
-        Self { previous }
-    }
-}
-
-impl Drop for HostScope {
-    fn drop(&mut self) {
-        ACTIVE_HOST.set(self.previous);
-    }
-}
-
-fn with_host<R>(f: impl FnOnce(&SaciHostV1) -> R) -> Option<R> {
-    let ptr = ACTIVE_HOST.get();
-    if ptr.is_null() {
-        return None;
-    }
-    Some(f(unsafe { &*ptr }))
-}
-
-/// Read a config value the host injected.
-///
-/// Returns `None` outside a boundary call, when the host supplied no
-/// `get_config` callback, or when the key is absent.
-pub fn config_get(key: &str) -> Option<String> {
-    with_host(|host| {
-        let get_config = host.get_config?;
-        let mut out = SaciSlice::empty();
-        let found =
-            unsafe { get_config(host.ctx, SaciSlice::from_bytes(key.as_bytes()), &mut out) };
-        if found == 0 {
-            return None;
-        }
-        // The host promises this slice outlives the instance, but copying keeps
-        // the plugin's own API owned and immune to a host that gets it wrong.
-        let bytes = unsafe { out.as_bytes() };
-        Some(String::from_utf8_lossy(bytes).into_owned())
-    })
-    .flatten()
-}
-
-/// Emit a log line through the host, if it offered the callback.
-pub fn host_log(level: u32, target: &str, message: &str) {
-    with_host(|host| {
-        if let Some(log) = host.log {
-            unsafe {
-                log(
-                    host.ctx,
-                    level,
-                    SaciSlice::from_bytes(target.as_bytes()),
-                    SaciSlice::from_bytes(message.as_bytes()),
-                );
-            }
-        }
-    });
-}
-
-/// Record a metric through the host, if it offered the callback.
-pub fn host_metric(name: &str, value: f64) {
-    with_host(|host| {
-        if let Some(metric) = host.metric {
-            unsafe { metric(host.ctx, SaciSlice::from_bytes(name.as_bytes()), value) }
-        }
-    });
-}
-
 /// Hand a `Vec` to the host as a plugin-owned buffer.
 ///
 /// An empty vector becomes a null buffer: `Vec::new()` has a dangling pointer,
 /// and there is nothing to free, so sending null keeps
 /// `free_buffer` a clean no-op instead of reconstructing a dangling `Vec`.
-pub fn vec_into_buffer(bytes: Vec<u8>) -> SaciBuffer {
+fn vec_into_buffer(bytes: Vec<u8>) -> SaciBuffer {
     if bytes.capacity() == 0 {
         return SaciBuffer::null();
     }
@@ -179,8 +134,8 @@ pub fn vec_into_buffer(bytes: Vec<u8>) -> SaciBuffer {
 ///
 /// # Safety
 ///
-/// `buffer` must have come from [`vec_into_buffer`] in this same library and
-/// must not have been freed already.
+/// `buffer` must have come from this library and must not have been freed
+/// already.
 pub unsafe fn free_buffer(buffer: SaciBuffer) {
     if buffer.ptr.is_null() || buffer.cap == 0 {
         return;
@@ -225,9 +180,9 @@ struct ManifestComponent {
 }
 
 #[derive(serde::Serialize)]
-struct Manifest<'a> {
-    name: &'a str,
-    version: &'a str,
+struct Manifest {
+    name: String,
+    version: String,
     stateful: bool,
     schema_fingerprint: String,
     components: Vec<ManifestComponent>,
@@ -235,41 +190,28 @@ struct Manifest<'a> {
 
 /// Build the JSON manifest the host parses at load.
 ///
-/// Components are sorted by name so the order is stable across runs and
-/// matches what a host comparing two loads expects. A component whose schema
-/// fails to serialise gets empty bytes rather than aborting the whole
-/// descriptor: the host rejects a zero-length schema with a message naming the
-/// component, which beats a load failure that names nothing.
-pub fn manifest_json<S: ProcessorStateSpec>(
-    pipeline: &Pipeline,
-    version: &str,
-) -> Result<String, String> {
-    let registry = pipeline.data().schemas();
-
-    let mut entries: Vec<(&'static str, std::sync::Arc<arrow_schema::Schema>)> = registry
-        .iter()
-        .map(|(name, entry)| (*name, entry.schema.clone()))
-        .collect();
-    entries.sort_by_key(|(name, _)| *name);
-
+/// The manifest carries [`glue::describe`]'s record with each schema in
+/// base64. A component whose schema fails to serialise gets empty bytes
+/// rather than aborting the whole descriptor: the host rejects a zero-length
+/// schema with a message naming the component, which beats a load failure
+/// that names nothing.
+fn manifest_json(pipeline: &Pipeline, version: &str) -> Result<String, String> {
+    let descriptor = glue::describe(pipeline, version);
     let engine = base64::engine::general_purpose::STANDARD;
-    let components = entries
-        .into_iter()
-        .map(|(name, schema)| ManifestComponent {
-            name: name.to_string(),
-            arrow_schema_ipc_base64: engine
-                .encode(schema_to_ipc_bytes(&schema).unwrap_or_default()),
-        })
-        .collect();
-
     let manifest = Manifest {
-        name: pipeline.name(),
-        version,
-        stateful: S::STATEFUL,
-        schema_fingerprint: fingerprint_hex(registry.fingerprint()),
-        components,
+        name: descriptor.name,
+        version: descriptor.version,
+        stateful: descriptor.stateful,
+        schema_fingerprint: descriptor.schema_fingerprint,
+        components: descriptor
+            .components
+            .into_iter()
+            .map(|c| ManifestComponent {
+                name: c.name,
+                arrow_schema_ipc_base64: engine.encode(c.arrow_schema_ipc),
+            })
+            .collect(),
     };
-
     serde_json::to_string(&manifest).map_err(|e| format!("manifest encode: {e}"))
 }
 
@@ -279,7 +221,7 @@ pub fn manifest_json<S: ProcessorStateSpec>(
 ///
 /// `instance` must come from [`PluginInstance::into_raw`]. `manifest_json` and
 /// `err` must be writable or null.
-pub unsafe fn describe_impl<S: ProcessorStateSpec>(
+pub unsafe fn describe_impl(
     instance: *mut core::ffi::c_void,
     build: fn() -> Pipeline,
     version: &str,
@@ -299,7 +241,7 @@ pub unsafe fn describe_impl<S: ProcessorStateSpec>(
         let _scope = HostScope::enter(&instance.host);
         let pipeline = instance.slot.pipeline(build);
 
-        match manifest_json::<S>(pipeline, version) {
+        match manifest_json(pipeline, version) {
             Ok(json) => {
                 unsafe { *manifest_json_out = vec_into_buffer(json.into_bytes()) };
                 SaciStatus::OK
@@ -319,8 +261,7 @@ pub unsafe fn describe_impl<S: ProcessorStateSpec>(
 /// `instance` must come from [`PluginInstance::into_raw`]. `input` and `prior`
 /// must describe readable bytes for the duration of the call. `out` and `err`
 /// must be writable or null.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
+pub unsafe fn run_batch_impl(
     instance: *mut core::ffi::c_void,
     build: fn() -> Pipeline,
     input: SaciSlice,
@@ -330,8 +271,6 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
     err: *mut SaciBuffer,
 ) -> SaciStatus {
     guard(err, || {
-        let started = std::time::Instant::now();
-
         let Some(instance) = (unsafe { PluginInstance::borrow(instance) }) else {
             write_err(err, "run_batch called with a null instance");
             return SaciStatus::PERMANENT;
@@ -344,19 +283,6 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
         let _scope = HostScope::enter(&instance.host);
 
         let input_bytes = unsafe { input.as_bytes() };
-        let mut reader: &[u8] = input_bytes;
-        let mut dataset = match Dataset::read_ipc(&mut reader) {
-            Ok(dataset) => dataset,
-            Err(e) => {
-                write_err(err, &format!("ipc decode: {e}"));
-                return SaciStatus::PERMANENT;
-            }
-        };
-
-        // Measured before the state blob merges in, so `rows_in` reports the
-        // data plane only.
-        let rows_in = dataset.rows() as u64;
-
         // `has_prior` is authoritative: a zero flag means a cold start even if
         // the slice happens to be non-empty.
         let prior_bytes = if has_prior == 0 {
@@ -365,18 +291,12 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
             Some(unsafe { prior.as_bytes() })
         };
 
-        if let Err(e) = S::restore(&mut dataset, prior_bytes) {
-            write_err(err, &format!("state restore: {e}"));
-            return SaciStatus::PERMANENT;
-        }
-
         let pipeline = instance.slot.pipeline(build);
-        let stats = match pollster::block_on(pipeline.run_on(&mut dataset)) {
-            Ok(stats) => stats,
+        let batch = match pollster::block_on(glue::run_batch(pipeline, input_bytes, prior_bytes)) {
+            Ok(batch) => batch,
             Err(e) => {
-                let (is_retryable, message) = classify_run_error(&e);
-                write_err(err, &message);
-                return if is_retryable {
+                write_err(err, &e.message);
+                return if e.retryable {
                     SaciStatus::RETRYABLE
                 } else {
                     SaciStatus::PERMANENT
@@ -384,30 +304,7 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
             }
         };
 
-        let rows_out = dataset.rows() as u64;
-
-        let checkpoint = match S::capture(&dataset) {
-            Ok(checkpoint) => checkpoint,
-            Err(e) => {
-                write_err(err, &format!("state capture: {e}"));
-                return SaciStatus::PERMANENT;
-            }
-        };
-
-        let mut output: Vec<u8> = Vec::new();
-        if let Err(e) = dataset.write_ipc(&mut output) {
-            write_err(err, &format!("ipc encode: {e}"));
-            return SaciStatus::PERMANENT;
-        }
-
-        let (checkpoint_buffer, has_checkpoint) = match checkpoint {
-            Some(blob) => (vec_into_buffer(blob), 1),
-            None => (SaciBuffer::null(), 0),
-        };
-        let routes: Option<Vec<String>> = dataset
-            .get_resource::<RouteDecision>()
-            .map(|decision| decision.0.clone());
-        let (routes_buffer, has_routes) = match routes {
+        let (routes_buffer, has_routes) = match batch.routes {
             Some(list) => {
                 let json = match serde_json::to_string(&list) {
                     Ok(json) => json,
@@ -420,18 +317,23 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
             }
             None => (SaciBuffer::null(), 0),
         };
+        let (checkpoint_buffer, has_checkpoint) = match batch.checkpoint {
+            Some(blob) => (vec_into_buffer(blob), 1),
+            None => (SaciBuffer::null(), 0),
+        };
 
+        let m = batch.metrics;
         unsafe {
             *out = SaciRunResult {
-                output: vec_into_buffer(output),
+                output: vec_into_buffer(batch.output),
                 checkpoint: checkpoint_buffer,
                 has_checkpoint,
                 metrics: SaciRunMetrics {
-                    wall_ns: started.elapsed().as_nanos() as u64,
-                    rows_in,
-                    rows_out,
-                    systems_run: stats.systems_run as u32,
-                    retries: stats.retries,
+                    wall_ns: m.wall_ns,
+                    rows_in: m.rows_in,
+                    rows_out: m.rows_out,
+                    systems_run: m.systems_run,
+                    retries: m.retries,
                 },
                 routes: routes_buffer,
                 has_routes,
@@ -441,13 +343,10 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
     })
 }
 
-// Log levels reach plugin authors through the public `crate::plugin::host` module; the
-// `log_level` re-export above is what an expansion and that module both use.
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdk::NoState;
+    use crate::sdk::host;
 
     #[test]
     fn an_empty_vec_becomes_a_null_buffer_that_frees_cleanly() {
@@ -469,23 +368,12 @@ mod tests {
     }
 
     #[test]
-    fn config_get_outside_a_call_is_none() {
-        assert_eq!(config_get("anything"), None);
-    }
-
-    #[test]
-    fn host_calls_outside_a_scope_do_not_dereference_null() {
-        host_log(log_level::INFO, "t", "m");
-        host_metric("m", 1.0);
-    }
-
-    #[test]
     fn a_host_with_no_callbacks_is_tolerated() {
-        let host = SaciHostV1::empty();
+        let host = PluginHost(SaciHostV1::empty());
         let _scope = HostScope::enter(&host);
-        assert_eq!(config_get("k"), None);
-        host_log(log_level::WARN, "t", "m");
-        host_metric("m", 2.0);
+        assert_eq!(host::config("k"), None);
+        host::warn("t", "m");
+        host::metric("m", 2.0);
     }
 
     // A host that answers get_config from a fixed table, so the scope plumbing
@@ -507,22 +395,22 @@ mod tests {
         0
     }
 
-    fn table_host() -> SaciHostV1 {
-        SaciHostV1 {
+    fn table_host() -> PluginHost {
+        PluginHost(SaciHostV1 {
             ctx: core::ptr::null_mut(),
             log: None,
             metric: None,
             get_config: Some(table_get_config),
-        }
+        })
     }
 
     #[test]
-    fn config_get_reads_through_the_host_vtable() {
+    fn config_reads_through_the_host_vtable() {
         let host = table_host();
         let _scope = HostScope::enter(&host);
-        assert_eq!(config_get("multiplier").as_deref(), Some("10"));
-        assert_eq!(config_get("empty").as_deref(), Some(""));
-        assert_eq!(config_get("absent"), None);
+        assert_eq!(host::config("multiplier").as_deref(), Some("10"));
+        assert_eq!(host::config("empty").as_deref(), Some(""));
+        assert_eq!(host::config("absent"), None);
     }
 
     #[test]
@@ -530,20 +418,18 @@ mod tests {
         let host = table_host();
         {
             let _scope = HostScope::enter(&host);
-            assert!(config_get("multiplier").is_some());
+            assert!(host::config("multiplier").is_some());
         }
-        assert_eq!(config_get("multiplier"), None);
+        assert_eq!(host::config("multiplier"), None);
     }
 
     #[test]
     fn manifest_json_sorts_components_and_carries_the_fingerprint() {
-        // Two components registered out of alphabetical order, so the sort is
-        // observable in the output.
         let pipeline = Pipeline::new("demo")
             .schema("Zeta", zeta_schema())
             .schema("Alpha", alpha_schema());
 
-        let json = manifest_json::<NoState>(&pipeline, "9.9.9").expect("manifest");
+        let json = manifest_json(&pipeline, "9.9.9").expect("manifest");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
 
         assert_eq!(parsed["name"], "demo");
@@ -566,15 +452,14 @@ mod tests {
         assert_eq!(fingerprint.len(), 8, "got {fingerprint}");
         assert_eq!(
             fingerprint,
-            fingerprint_hex(pipeline.data().schemas().fingerprint())
+            glue::fingerprint_hex(pipeline.data().schemas().fingerprint())
         );
     }
 
     #[test]
-    fn manifest_json_reports_stateful_from_the_spec() {
-        let pipeline = Pipeline::new("stateful-demo");
-        let json =
-            manifest_json::<crate::sdk::Stateful<StateRow>>(&pipeline, "0.1.0").expect("manifest");
+    fn manifest_json_reports_stateful_from_the_pipeline() {
+        let pipeline = Pipeline::new("stateful-demo").state::<StateRow>();
+        let json = manifest_json(&pipeline, "0.1.0").expect("manifest");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(parsed["stateful"], true);
     }
