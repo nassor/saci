@@ -65,6 +65,16 @@
   and `metric` functions and `saci::plugin::host`. `sdk::Config::new()` reads through it and
   fetches each key once.
 - `RouteDecision(vec![..])` is `RouteDecision::to([..])` and `RouteDecision::none()`.
+- `saci::window_spec` is `saci::window`, the one path of `WindowSpec` (also in the prelude), with
+  `WindowSpec::tumbling`, `sliding`, `session`, `with_offset` and `kind`; `validate` returns
+  `SaciResult`. `assign_tumbling` and `assign_sliding` are the free functions
+  `window::tumbling_id` and `window::sliding_ids` (an iterator).
+- `windows`: `WindowedSystemBuilder` is removed. `WindowedSystem::new(T::TIME, spec, function)`
+  or `new_named(component, time_field, spec, function)` validates the geometry at construction;
+  `key_by` and `allowed_lateness_ms` chain onto it. `WindowFunction::sum`, `min`, `max`, `count`,
+  `mean` and `process` build the function. `WindowResults` fields are `on_time`, `late` and
+  `dropped`; `SideOutput` and `DroppedLate` are removed. `saci::windows` exports a flat list, with
+  `key_hash` for the key hash; an empty run publishes the same result schema as a non-empty one.
 
 ### Changed
 
@@ -72,6 +82,9 @@
   needs no concatenation; `clone_empty` keeps the prebuilt empty templates `clear` uses.
 - `plugin-host`: the output IPC of a native plugin is decoded in place instead of copied first,
   and the input buffer is presized from the previous batch.
+- `windows`: sliding windows expand rows in one pre-sized pass, session windows reuse the key hash
+  instead of hashing twice, and a `Reduce` aggregate gathers only its input column instead of
+  sorting the whole batch.
 
 ## 0.2.0 - 2026-11-19
 

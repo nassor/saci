@@ -368,7 +368,7 @@ async fn runner_window_accumulator_carries_across_claims() {
     use saci::distributed::strategy::CheckpointStrategy;
     use saci::pipeline::Pipeline;
     use saci::system::system_fn;
-    use saci::windows::accumulator::WindowAccumulator;
+    use saci::windows::WindowAccumulator;
 
     let dir = TempDir::new().expect("tempdir");
     let store = RedbSharedStore::single_node(&dir.path().join("app.redb")).expect("open store");

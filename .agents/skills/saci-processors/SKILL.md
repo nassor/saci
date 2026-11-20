@@ -15,7 +15,8 @@ description: Use when writing, building, hosting, testing or documenting a SACI 
   `saci::__private::*`, which is the only path the macro expansions name. `saci::prelude` carries
   the macros (`Component`, `transform`, `fold`, `processor` with feature `processor`, `plugin` with
   feature `plugin`) and `sdk`, so a processor crate depends only on
-  `saci = { workspace = true, features = ["processor"] }` (add `"windows"` for window specs). The
+  `saci = { workspace = true, features = ["processor"] }` (`saci::window` is always compiled, so
+  window specs need no extra feature). The
   workspace dependency is
   `default-features = false`; outside this repository it is `saci = { version = "0.1",
   default-features = false, features = ["processor"] }`. The crate also owns the canonical WIT

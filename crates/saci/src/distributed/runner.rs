@@ -231,7 +231,7 @@ where
 
                 use crate::component::Component as _;
                 use crate::distributed::accumulator_store::load_accumulator_state;
-                use crate::windows::accumulator::WindowAccumulator;
+                use crate::windows::WindowAccumulator;
 
                 // Load under the claim that last wrote an accumulator
                 // checkpoint, mirroring the processor-state chain; a fresh
@@ -1022,7 +1022,7 @@ mod tests {
     #[tokio::test]
     async fn test_accumulator_persists_across_two_runs() {
         use crate::component::Component as _;
-        use crate::windows::accumulator::WindowAccumulator;
+        use crate::windows::WindowAccumulator;
         use std::sync::atomic::AtomicU32;
 
         let store = MemoryStore::new();
@@ -1084,7 +1084,7 @@ mod tests {
     #[tokio::test]
     async fn test_accumulator_values_carry_across_claims() {
         use crate::component::Component as _;
-        use crate::windows::accumulator::WindowAccumulator;
+        use crate::windows::WindowAccumulator;
         use std::sync::atomic::AtomicU32;
 
         let store = MemoryStore::new();
@@ -1177,7 +1177,7 @@ mod tests {
     #[cfg(feature = "windows")]
     #[tokio::test]
     async fn test_accumulator_save_failure_releases_not_acks() {
-        use crate::windows::accumulator::WindowAccumulator;
+        use crate::windows::WindowAccumulator;
 
         let inner = MemoryStore::new();
         inner.register(0, 10);

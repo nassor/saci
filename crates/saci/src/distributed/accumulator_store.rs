@@ -37,7 +37,7 @@ use crate::dataset::Dataset;
 #[cfg(feature = "windows")]
 use crate::distributed::checkpoint::{ACCUMULATOR_STAGE_SENTINEL, CheckpointStore};
 #[cfg(feature = "windows")]
-use crate::windows::accumulator::{CURRENT_ACCUMULATOR_VERSION, WindowAccumulator};
+use crate::windows::{CURRENT_ACCUMULATOR_VERSION, WindowAccumulator};
 #[cfg(feature = "windows")]
 use uuid::Uuid;
 
@@ -134,7 +134,7 @@ mod tests {
     use super::*;
     use crate::SaciResult;
     use crate::distributed::checkpoint::{Checkpoint, CheckpointStore};
-    use crate::windows::accumulator::WindowAccumulator;
+    use crate::windows::WindowAccumulator;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};

@@ -14,17 +14,17 @@ use arrow_schema::DataType;
 use arrow_select::take::take;
 
 use crate::error::SaciError;
+use crate::window::sliding_ids;
 
 use super::function::ReduceAggregate;
-use crate::window_spec::WindowSpec;
 
 const SLIDING_MAX_EXPANDED_ROWS: u64 = 100_000_000;
 
 /// Expand `source_batch` so that each row appears `k = ceil(size_ms/slide_ms)` times.
 ///
 /// Returns `(expanded_batch, expanded_time_ms, window_ids)`, each of length
-/// `n_rows * k`. The window ID for expanded row `(i, j)` is
-/// `assign_sliding(ts[i])[j]`.
+/// `n_rows * k`. The window ID for expanded row `(i, j)` is the `j`th id
+/// [`sliding_ids`] yields for `ts[i]`.
 ///
 /// # Errors
 ///
@@ -48,11 +48,20 @@ pub(super) fn expand_for_sliding(
         )));
     }
 
-    // Build the repeating index array: [0,0,..(k times)..,1,1,...,N-1,..]
-    let repeat_indices: UInt32Array = (0..n_rows as u32)
-        .flat_map(|i| (0..k).map(move |_| i))
-        .collect::<Vec<u32>>()
-        .into();
+    // One pass builds the repeat index, the expanded timestamps and the window
+    // ids: [0,0,..(k times)..,1,1,...,N-1,..] with ts and id alongside.
+    let total = n_rows * k as usize;
+    let mut repeat_indices: Vec<u32> = Vec::with_capacity(total);
+    let mut expanded_ts: Vec<i64> = Vec::with_capacity(total);
+    let mut window_ids: Vec<i64> = Vec::with_capacity(total);
+    for (i, &ts) in time_ms.values().iter().enumerate().take(n_rows) {
+        for id in sliding_ids(ts, size_ms, slide_ms, offset_ms) {
+            repeat_indices.push(i as u32);
+            expanded_ts.push(ts);
+            window_ids.push(id);
+        }
+    }
+    let repeat_indices = UInt32Array::from(repeat_indices);
 
     // Expand every column.
     let expanded_batch = {
@@ -68,20 +77,8 @@ pub(super) fn expand_for_sliding(
             .map_err(|e| SaciError::generic(format!("expand_for_sliding: RecordBatch: {e}")))?
     };
 
-    let expanded_time_ms = take(time_ms as &dyn Array, &repeat_indices, None)
-        .map_err(|e| SaciError::generic(format!("expand_for_sliding: take time_ms: {e}")))?;
-    let expanded_time_ms = expanded_time_ms
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .ok_or_else(|| SaciError::generic("expand_for_sliding: downcast time_ms failed"))?
-        .clone();
-
-    let window_ids: Int64Array = time_ms
-        .values()
-        .iter()
-        .flat_map(|&ts| WindowSpec::assign_sliding(ts, size_ms, slide_ms, offset_ms))
-        .collect::<Vec<i64>>()
-        .into();
+    let expanded_time_ms = Int64Array::from(expanded_ts);
+    let window_ids = Int64Array::from(window_ids);
 
     Ok((expanded_batch, expanded_time_ms, window_ids))
 }
@@ -142,54 +139,48 @@ mod tests {
 
     use crate::dataset::Dataset;
     use crate::system::System;
-    use crate::windows::WindowedSystemBuilder;
+    use crate::window::WindowSpec;
     use crate::windows::system::tests::Trade;
 
     use super::super::function::WindowFunction;
     use super::super::result::WindowResults;
+    use super::super::system::WindowedSystem;
+
+    fn sum_price(spec: WindowSpec) -> WindowedSystem {
+        WindowedSystem::new(Trade::TIMESTAMP_MS, spec, WindowFunction::sum("price")).unwrap()
+    }
+
+    fn trades(rows: &[(i64, f64)]) -> Dataset {
+        let trades: Vec<Trade> = rows
+            .iter()
+            .map(|&(timestamp_ms, price)| Trade {
+                timestamp_ms,
+                price,
+            })
+            .collect();
+        let mut pipeline = Dataset::new();
+        pipeline.register::<Trade>().unwrap();
+        pipeline.append::<Trade>(&trades).unwrap();
+        pipeline
+    }
 
     /// size=2000ms, slide=1000ms, so k=2. ts=500 lands in windows [0, -1] and
     /// ts=1500 lands in [1, 0]. Sums per window_id: -1 is 10.0, 0 is 30.0,
     /// 1 is 20.0.
     #[tokio::test]
     async fn test_sliding_window_k2_correct_window_ids_and_sums() {
-        let trades = vec![
-            Trade {
-                timestamp_ms: 500,
-                price: 10.0,
-            },
-            Trade {
-                timestamp_ms: 1500,
-                price: 20.0,
-            },
-        ];
-
-        let mut pipeline = Dataset::new();
-        pipeline.register::<Trade>().unwrap();
-        pipeline.append::<Trade>(&trades).unwrap();
-
-        let sys = WindowedSystemBuilder::new()
-            .source("Trade", "timestamp_ms")
-            .window(WindowSpec::Sliding {
-                size_ms: 2000,
-                slide_ms: 1000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate: ReduceAggregate::Sum,
-            })
-            .build()
+        let mut pipeline = trades(&[(500, 10.0), (1500, 20.0)]);
+        sum_price(WindowSpec::sliding(2000, 1000))
+            .run(&mut pipeline)
+            .await
             .unwrap();
-
-        sys.run(&mut pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
         // 3 distinct window_ids: -1, 0, 1
-        assert_eq!(results.batches.len(), 3, "expected 3 window groups");
+        assert_eq!(results.on_time.len(), 3, "expected 3 window groups");
 
         let mut pairs: Vec<(i64, f64)> = results
-            .batches
+            .on_time
             .iter()
             .map(|b| {
                 let win_id = b
@@ -209,83 +200,33 @@ mod tests {
             .collect();
         pairs.sort_by_key(|&(w, _)| w);
 
-        assert_eq!(pairs[0].0, -1);
-        assert!(
-            (pairs[0].1 - 10.0).abs() < 1e-9,
-            "window -1 sum: {}",
-            pairs[0].1
-        );
-
-        assert_eq!(pairs[1].0, 0);
-        assert!(
-            (pairs[1].1 - 30.0).abs() < 1e-9,
-            "window 0 sum: {}",
-            pairs[1].1
-        );
-
-        assert_eq!(pairs[2].0, 1);
-        assert!(
-            (pairs[2].1 - 20.0).abs() < 1e-9,
-            "window 1 sum: {}",
-            pairs[2].1
-        );
+        let expected = [(-1, 10.0), (0, 30.0), (1, 20.0)];
+        assert_eq!(pairs.len(), expected.len());
+        for (&(id, sum), (want_id, want_sum)) in pairs.iter().zip(expected) {
+            assert_eq!(id, want_id);
+            assert!((sum - want_sum).abs() < 1e-9, "window {id} sum: {sum}");
+        }
     }
 
     /// When k=1 (size == slide), sliding behaves identically to tumbling.
     #[tokio::test]
     async fn test_sliding_equals_tumbling_when_size_eq_slide() {
-        let trades = vec![
-            Trade {
-                timestamp_ms: 100,
-                price: 10.0,
-            },
-            Trade {
-                timestamp_ms: 1100,
-                price: 20.0,
-            },
-        ];
+        let rows = [(100, 10.0), (1100, 20.0)];
+        let mut world_sliding = trades(&rows);
+        let mut world_tumbling = trades(&rows);
 
-        let mut world_sliding = Dataset::new();
-        world_sliding.register::<Trade>().unwrap();
-        world_sliding.append::<Trade>(&trades).unwrap();
-
-        let mut world_tumbling = Dataset::new();
-        world_tumbling.register::<Trade>().unwrap();
-        world_tumbling.append::<Trade>(&trades).unwrap();
-
-        let sys_sliding = WindowedSystemBuilder::new()
-            .source("Trade", "timestamp_ms")
-            .window(WindowSpec::Sliding {
-                size_ms: 1000,
-                slide_ms: 1000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate: ReduceAggregate::Sum,
-            })
-            .build()
+        sum_price(WindowSpec::sliding(1000, 1000))
+            .run(&mut world_sliding)
+            .await
             .unwrap();
-
-        let sys_tumbling = WindowedSystemBuilder::new()
-            .source("Trade", "timestamp_ms")
-            .window(WindowSpec::Tumbling {
-                size_ms: 1000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate: ReduceAggregate::Sum,
-            })
-            .build()
+        sum_price(WindowSpec::tumbling(1000))
+            .run(&mut world_tumbling)
+            .await
             .unwrap();
-
-        sys_sliding.run(&mut world_sliding).await.unwrap();
-        sys_tumbling.run(&mut world_tumbling).await.unwrap();
 
         let r_sliding = world_sliding.get_resource::<WindowResults>().unwrap();
         let r_tumbling = world_tumbling.get_resource::<WindowResults>().unwrap();
-        assert_eq!(r_sliding.batches.len(), r_tumbling.batches.len());
+        assert_eq!(r_sliding.on_time.len(), r_tumbling.on_time.len());
         assert_eq!(r_sliding.total_rows(), r_tumbling.total_rows());
     }
 
@@ -293,32 +234,13 @@ mod tests {
     #[tokio::test]
     async fn test_sliding_amplification_limit_returns_error() {
         // 1 row; size=10_000_000_000, slide=1 gives k=10^10, past the limit.
-        let trades = vec![Trade {
-            timestamp_ms: 0,
-            price: 1.0,
-        }];
-
-        let mut pipeline = Dataset::new();
-        pipeline.register::<Trade>().unwrap();
-        pipeline.append::<Trade>(&trades).unwrap();
-
-        let sys = WindowedSystemBuilder::new()
-            .source("Trade", "timestamp_ms")
-            .window(WindowSpec::Sliding {
-                size_ms: 10_000_000_000,
-                slide_ms: 1,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate: ReduceAggregate::Sum,
-            })
-            .build()
-            .unwrap();
-
-        let result = sys.run(&mut pipeline).await;
-        assert!(result.is_err(), "expected amplification error, got Ok");
-        let msg = result.unwrap_err().to_string();
+        let mut pipeline = trades(&[(0, 1.0)]);
+        let result = sum_price(WindowSpec::sliding(10_000_000_000, 1))
+            .run(&mut pipeline)
+            .await;
+        let msg = result
+            .expect_err("expected amplification error, got Ok")
+            .to_string();
         assert!(
             msg.contains("amplification"),
             "error should mention amplification, got: {msg}"
@@ -331,23 +253,12 @@ mod tests {
         let mut pipeline = Dataset::new();
         pipeline.register::<Trade>().unwrap();
 
-        let sys = WindowedSystemBuilder::new()
-            .source("Trade", "timestamp_ms")
-            .window(WindowSpec::Sliding {
-                size_ms: 2000,
-                slide_ms: 1000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate: ReduceAggregate::Sum,
-            })
-            .build()
+        sum_price(WindowSpec::sliding(2000, 1000))
+            .run(&mut pipeline)
+            .await
             .unwrap();
 
-        sys.run(&mut pipeline).await.unwrap();
-
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert!(results.batches.is_empty());
+        assert!(results.on_time.is_empty());
     }
 }

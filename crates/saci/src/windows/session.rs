@@ -1,7 +1,7 @@
 //! Session assignment: turning event timestamps into per-key session IDs.
 //!
 //! The geometry a session window is declared with lives in
-//! [`crate::window_spec::WindowSpec`], outside this feature, because a host
+//! [`crate::window::WindowSpec`], outside this feature, because a host
 //! parses the declaration whether or not it carries the engine.
 
 use std::sync::Arc;
@@ -12,39 +12,32 @@ use arrow_select::take::take;
 
 use crate::error::SaciError;
 
-use super::hash::compute_key_hash;
-
-/// Assign session IDs to every row in `batch`.
+/// Assign session IDs to every row.
 ///
 /// Algorithm:
-/// 1. Compute a per-row key hash from `key_cols` (empty slice = global, all rows same key).
-/// 2. Sort rows by `(key_hash, ts_ms)` using Arrow's lexicographic sort.
-/// 3. Scan the sorted order: start a new session whenever the key changes
+/// 1. Sort rows by `(key_hash, ts_ms)` using Arrow's lexicographic sort. The
+///    caller computes `key_hash` once and reuses it for grouping; an all-zero
+///    hash is a global (unkeyed) window.
+/// 2. Scan the sorted order: start a new session whenever the key changes
 ///    or the gap to the previous event exceeds `gap_ms`.
-/// 4. Map sorted session IDs back to the original row order.
+/// 3. Map sorted session IDs back to the original row order.
 ///
-/// Returns an `Int64Array` of length `batch.num_rows()` where `result[i]` is
-/// the session ID for original row `i`.  Session IDs are zero-based and
+/// Returns an `Int64Array` of length `ts_ms.len()` where `result[i]` is
+/// the session ID for original row `i`. Session IDs are zero-based and
 /// monotonically increasing in the sort order.
 ///
 /// # Errors
 ///
-/// Returns `SaciError::Generic` if key-hashing, sorting, or index-mapping fails.
-pub fn assign_sessions(
+/// Returns `SaciError::Generic` if sorting or index-mapping fails.
+pub(super) fn assign_sessions(
     ts_ms: &Int64Array,
-    key_cols: &[&ArrayRef],
+    key_hash: &Int64Array,
     gap_ms: i64,
 ) -> Result<Int64Array, SaciError> {
     let n = ts_ms.len();
     if n == 0 {
         return Ok(Int64Array::from(Vec::<i64>::new()));
     }
-
-    let key_hash = if key_cols.is_empty() {
-        Int64Array::from(vec![0i64; n])
-    } else {
-        compute_key_hash(key_cols)?
-    };
 
     let sort_cols = vec![
         SortColumn {
@@ -60,7 +53,7 @@ pub fn assign_sessions(
         .map_err(|e| SaciError::generic(format!("assign_sessions: sort error: {e}")))?;
 
     // Reorder key_hash and ts_ms to the sorted order.
-    let sorted_key_hash = take(&key_hash as &dyn Array, &sorted_indices, None)
+    let sorted_key_hash = take(key_hash as &dyn Array, &sorted_indices, None)
         .map_err(|e| SaciError::generic(format!("assign_sessions: take key_hash: {e}")))?;
     let sorted_ts = take(ts_ms as &dyn Array, &sorted_indices, None)
         .map_err(|e| SaciError::generic(format!("assign_sessions: take ts: {e}")))?;
@@ -108,10 +101,11 @@ mod tests {
 
     use arrow_array::{Int64Array, StringArray};
 
+    use super::super::hash::{compute_global_hash, compute_key_hash};
     use super::*;
 
-    fn str_col(values: &[&str]) -> ArrayRef {
-        Arc::new(StringArray::from(values.to_vec()))
+    fn global(ts: &Int64Array) -> Int64Array {
+        compute_global_hash(ts.len())
     }
 
     /// Single key, two clear sessions separated by a large gap.
@@ -119,7 +113,7 @@ mod tests {
     fn test_assign_sessions_single_key_two_sessions() {
         // gap_ms = 1000; events at 0, 100, 200 then 5000, 5100 → 2 sessions
         let ts = Int64Array::from(vec![0i64, 100, 200, 5000, 5100]);
-        let ids = assign_sessions(&ts, &[], 1000).unwrap();
+        let ids = assign_sessions(&ts, &global(&ts), 1000).unwrap();
         assert_eq!(ids.len(), 5);
         // All first three in session 0, last two in session 1
         assert_eq!(ids.value(0), ids.value(1));
@@ -132,7 +126,7 @@ mod tests {
     #[test]
     fn test_assign_sessions_single_key_one_session() {
         let ts = Int64Array::from(vec![0i64, 500, 999]);
-        let ids = assign_sessions(&ts, &[], 1000).unwrap();
+        let ids = assign_sessions(&ts, &global(&ts), 1000).unwrap();
         assert_eq!(ids.len(), 3);
         assert_eq!(ids.value(0), ids.value(1));
         assert_eq!(ids.value(1), ids.value(2));
@@ -143,7 +137,7 @@ mod tests {
     fn test_assign_sessions_exact_gap_boundary() {
         // gap_ms = 1000; ts diff of 1000 is not > 1000 so same session
         let ts = Int64Array::from(vec![0i64, 1000, 2001]);
-        let ids = assign_sessions(&ts, &[], 1000).unwrap();
+        let ids = assign_sessions(&ts, &global(&ts), 1000).unwrap();
         assert_eq!(ids.value(0), ids.value(1), "gap==gap_ms: same session");
         assert_ne!(ids.value(1), ids.value(2), "gap>gap_ms: new session");
     }
@@ -155,9 +149,9 @@ mod tests {
         // key B: ts 200, 300       (one session for B)
         // Interleaved in original order: A0, B0, A1, B1, A2
         let ts = Int64Array::from(vec![0i64, 200, 100, 300, 5000]);
-        let key_col = str_col(&["A", "B", "A", "B", "A"]);
-        let key_ref: ArrayRef = key_col;
-        let ids = assign_sessions(&ts, &[&key_ref], 1000).unwrap();
+        let key_col: ArrayRef = Arc::new(StringArray::from(vec!["A", "B", "A", "B", "A"]));
+        let key_hash = compute_key_hash(&[&key_col]).unwrap();
+        let ids = assign_sessions(&ts, &key_hash, 1000).unwrap();
         assert_eq!(ids.len(), 5);
 
         // A events are at original indices 0, 2, 4
@@ -177,7 +171,7 @@ mod tests {
     #[test]
     fn test_assign_sessions_single_event() {
         let ts = Int64Array::from(vec![42i64]);
-        let ids = assign_sessions(&ts, &[], 500).unwrap();
+        let ids = assign_sessions(&ts, &global(&ts), 500).unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(ids.value(0), 0);
     }
@@ -186,7 +180,7 @@ mod tests {
     #[test]
     fn test_assign_sessions_empty() {
         let ts = Int64Array::from(Vec::<i64>::new());
-        let ids = assign_sessions(&ts, &[], 1000).unwrap();
+        let ids = assign_sessions(&ts, &global(&ts), 1000).unwrap();
         assert_eq!(ids.len(), 0);
     }
 }

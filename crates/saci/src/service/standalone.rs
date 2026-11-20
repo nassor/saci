@@ -2319,7 +2319,8 @@ mod tests {
     #[cfg(feature = "windows")]
     #[tokio::test]
     async fn windowed_processor_tracks_watermark_from_merged_input() {
-        use crate::windows::{WindowSpec, WindowWatermark};
+        use crate::window::WindowSpec;
+        use crate::windows::WindowWatermark;
 
         fn trade_schema() -> Arc<Schema> {
             Arc::new(Schema::new(vec![
@@ -2414,10 +2415,7 @@ mod tests {
                 downstream: Vec::new(),
                 artifact: None,
                 window: Some(crate::service::config::WindowConfig {
-                    spec: WindowSpec::Tumbling {
-                        size_ms: 30_000,
-                        offset_ms: 0,
-                    },
+                    spec: WindowSpec::tumbling(30_000),
                     time_field: "timestamp_ms".to_string(),
                     key_fields: Vec::new(),
                     allowed_lateness_ms: 0,
@@ -2707,7 +2705,7 @@ mod tests {
     /// which is what both flow-target tests below turn on.
     #[cfg(all(feature = "metrics", feature = "windows"))]
     fn windowed_service(source_id: &str, source: ChannelSource) -> BuiltService {
-        use crate::windows::WindowSpec;
+        use crate::window::WindowSpec;
 
         struct PassThrough;
         #[async_trait(?Send)]
@@ -2755,10 +2753,7 @@ mod tests {
                     downstream: Vec::new(),
                     artifact: None,
                     window: Some(crate::service::config::WindowConfig {
-                        spec: WindowSpec::Tumbling {
-                            size_ms: 30_000,
-                            offset_ms: 0,
-                        },
+                        spec: WindowSpec::tumbling(30_000),
                         time_field: "timestamp_ms".to_string(),
                         key_fields: Vec::new(),
                         allowed_lateness_ms: 0,

@@ -26,7 +26,7 @@ use std::sync::Arc;
 use saci::arrow_array::{Float64Array, Int64Array, StringArray};
 use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
 use saci::prelude::*;
-use saci::window_spec::WindowSpec;
+use saci::window::tumbling_id;
 
 /// One row of the demo workload: a sale at an instant in time.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -232,7 +232,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
             late_rows += 1;
             continue;
         }
-        let wid = WindowSpec::assign_tumbling(ts, geo.size_ms, geo.offset_ms);
+        let wid = tumbling_id(ts, geo.size_ms, geo.offset_ms);
         let symbol = sym_col.value(i).to_string();
         let amount = amt_col.value(i);
         if let Some(open) = window_state

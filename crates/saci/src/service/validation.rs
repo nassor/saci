@@ -903,12 +903,9 @@ mod tests {
 
     #[cfg(feature = "windows")]
     fn window() -> super::super::config::WindowConfig {
-        use crate::windows::WindowSpec;
+        use crate::window::WindowSpec;
         super::super::config::WindowConfig {
-            spec: WindowSpec::Tumbling {
-                size_ms: 30_000,
-                offset_ms: 0,
-            },
+            spec: WindowSpec::tumbling(30_000),
             time_field: "timestamp_ms".to_string(),
             key_fields: Vec::new(),
             allowed_lateness_ms: 0,

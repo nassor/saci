@@ -1412,10 +1412,7 @@ mod tests {
             sha3_256: None,
             config: HashMap::new(),
             window: Some(super::super::config::WindowConfig {
-                spec: crate::window_spec::WindowSpec::Tumbling {
-                    size_ms: 30_000,
-                    offset_ms: 0,
-                },
+                spec: crate::window::WindowSpec::tumbling(30_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 0,
@@ -1456,10 +1453,7 @@ mod tests {
             sha3_256: None,
             config: HashMap::new(),
             window: Some(super::super::config::WindowConfig {
-                spec: crate::window_spec::WindowSpec::Tumbling {
-                    size_ms: 30_000,
-                    offset_ms: 0,
-                },
+                spec: crate::window::WindowSpec::tumbling(30_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 0,

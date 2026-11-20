@@ -306,7 +306,7 @@ impl WindowTracker {
     /// `WindowedSystem`'s null-timestamp handling.
     ///
     /// The returned [`WatermarkAdvance`] applies
-    /// [`WatermarkState`](crate::windows::watermark::WatermarkState)'s own
+    /// [`WatermarkState`](crate::windows::WatermarkState)'s own
     /// rule to the arrival's newest timestamp: below
     /// `watermark - allowed_lateness_ms`, the node's windowing logic has no
     /// row it can place in a window, so the whole arrival is dropped and
@@ -464,7 +464,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use crate::component::Component;
-    use crate::windows::WindowSpec;
+    use crate::window::WindowSpec;
 
     use super::*;
 
@@ -487,10 +487,7 @@ mod tests {
 
     fn config() -> WindowConfig {
         WindowConfig {
-            spec: WindowSpec::Tumbling {
-                size_ms: 30_000,
-                offset_ms: 0,
-            },
+            spec: WindowSpec::tumbling(30_000),
             time_field: "timestamp_ms".to_string(),
             key_fields: Vec::new(),
             allowed_lateness_ms: 0,

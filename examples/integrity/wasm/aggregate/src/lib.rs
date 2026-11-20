@@ -29,7 +29,7 @@ use std::sync::Arc;
 use saci::arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
 use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
 use saci::prelude::*;
-use saci::window_spec::WindowSpec;
+use saci::window::tumbling_id;
 
 /// Window size the KDL block declares, used when the host injects no
 /// `window.size_ms`.
@@ -367,7 +367,7 @@ pub fn aggregate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), Sa
             late_rows += 1;
             continue;
         }
-        let wid = WindowSpec::assign_tumbling(ts, geo.size_ms, geo.offset_ms);
+        let wid = tumbling_id(ts, geo.size_ms, geo.offset_ms);
         let group = group_for(&mut window_state.open, wid, order_region.value(i));
         group.order_count += 1;
         group.order_amount += order_total.value(i);
@@ -378,7 +378,7 @@ pub fn aggregate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), Sa
             late_rows += 1;
             continue;
         }
-        let wid = WindowSpec::assign_tumbling(ts, geo.size_ms, geo.offset_ms);
+        let wid = tumbling_id(ts, geo.size_ms, geo.offset_ms);
         let group = group_for(&mut window_state.open, wid, payment_region.value(i));
         group.payment_count += 1;
         group.payment_amount += payment_amount.value(i);

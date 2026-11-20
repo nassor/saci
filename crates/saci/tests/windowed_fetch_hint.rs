@@ -33,7 +33,7 @@ use saci::service::flow::FlowPlan;
 use saci::service::registry::Registry;
 use saci::service::standalone::run_standalone;
 use saci::service::stream::run_stream;
-use saci::windows::WindowSpec;
+use saci::window::WindowSpec;
 use saci::{Dataset, SaciResult};
 
 /// The one component both branches carry, timestamped so the windowed node's
@@ -166,10 +166,7 @@ impl PipelineRuntime for PassThrough {
 
 fn window_config() -> WindowConfig {
     WindowConfig {
-        spec: WindowSpec::Tumbling {
-            size_ms: 1_000,
-            offset_ms: 0,
-        },
+        spec: WindowSpec::tumbling(1_000),
         time_field: "ts".to_string(),
         key_fields: Vec::new(),
         allowed_lateness_ms: 1_000,

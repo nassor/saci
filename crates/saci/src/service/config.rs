@@ -425,7 +425,7 @@ impl<'de> Deserialize<'de> for StoreConfig {
 ///
 /// Declared in every build, like the `wasm` and `plugin` node kinds that
 /// carry it. The geometry is
-/// [`crate::window_spec::WindowSpec`], which sits outside the engine's
+/// [`crate::window::WindowSpec`], which sits outside the engine's
 /// `windows` feature for exactly this reason, so a binary built without the
 /// windowing engine still parses the block and
 /// [`validate_build_capabilities`](super::validation::validate_build_capabilities)
@@ -434,7 +434,7 @@ impl<'de> Deserialize<'de> for StoreConfig {
 pub struct WindowConfig {
     /// The window geometry (tumbling, sliding or session).
     #[serde(flatten)]
-    pub spec: crate::window_spec::WindowSpec,
+    pub spec: crate::window::WindowSpec,
     /// The event-time column every component delivered to this processor
     /// must carry. Supports `Int64` milliseconds and the Arrow timestamp
     /// types.
@@ -455,16 +455,18 @@ fn is_zero(value: &i64) -> bool {
 impl WindowConfig {
     /// Whether the declaration is geometrically sane and names a non-empty
     /// time field with a non-negative lateness budget.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> SaciResult<()> {
         self.spec.validate()?;
         if self.time_field.is_empty() {
-            return Err("window time_field must not be empty".to_string());
+            return Err(SaciError::configuration(
+                "window time_field must not be empty",
+            ));
         }
         if self.allowed_lateness_ms < 0 {
-            return Err(format!(
+            return Err(SaciError::configuration(format!(
                 "window allowed_lateness_ms must be >= 0, got {}",
                 self.allowed_lateness_ms
-            ));
+            )));
         }
         Ok(())
     }
@@ -474,10 +476,10 @@ impl WindowConfig {
     pub fn config_pairs(&self) -> Vec<(String, String)> {
         let mut pairs = Vec::with_capacity(6);
         let (kind, size, slide, offset, gap) = match &self.spec {
-            crate::window_spec::WindowSpec::Tumbling { size_ms, offset_ms } => {
+            crate::window::WindowSpec::Tumbling { size_ms, offset_ms } => {
                 ("tumbling", Some(*size_ms), None, Some(*offset_ms), None)
             }
-            crate::window_spec::WindowSpec::Sliding {
+            crate::window::WindowSpec::Sliding {
                 size_ms,
                 slide_ms,
                 offset_ms,
@@ -488,7 +490,7 @@ impl WindowConfig {
                 Some(*offset_ms),
                 None,
             ),
-            crate::window_spec::WindowSpec::Session { gap_ms } => {
+            crate::window::WindowSpec::Session { gap_ms } => {
                 ("session", None, None, None, Some(*gap_ms))
             }
         };
@@ -595,7 +597,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
                                 "gap_ms is only valid on a session window",
                             ));
                         }
-                        crate::window_spec::WindowSpec::Tumbling {
+                        crate::window::WindowSpec::Tumbling {
                             size_ms: size_ms.ok_or_else(|| A::Error::missing_field("size_ms"))?,
                             offset_ms: offset_ms.unwrap_or(0),
                         }
@@ -606,7 +608,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
                                 "gap_ms is only valid on a session window",
                             ));
                         }
-                        crate::window_spec::WindowSpec::Sliding {
+                        crate::window::WindowSpec::Sliding {
                             size_ms: size_ms.ok_or_else(|| A::Error::missing_field("size_ms"))?,
                             slide_ms: slide_ms
                                 .ok_or_else(|| A::Error::missing_field("slide_ms"))?,
@@ -629,7 +631,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
                                 "offset_ms is only valid on a tumbling or sliding window",
                             ));
                         }
-                        crate::window_spec::WindowSpec::Session {
+                        crate::window::WindowSpec::Session {
                             gap_ms: gap_ms.ok_or_else(|| A::Error::missing_field("gap_ms"))?,
                         }
                     }
@@ -2017,9 +2019,10 @@ fn validate_window_block(
     let Some(window) = window else {
         return Ok(());
     };
-    window.validate().map_err(|msg| {
+    window.validate().map_err(|e| {
         SaciError::configuration(format!(
-            "workflow '{workflow_id}': {kind} node '{id}' window is invalid: {msg}"
+            "workflow '{workflow_id}': {kind} node '{id}' window is invalid: {}",
+            e.message()
         ))
     })
 }
@@ -4450,10 +4453,7 @@ wasm "p" module="p.wasm" {
             .expect("window block");
         assert_eq!(
             window.spec,
-            crate::window_spec::WindowSpec::Tumbling {
-                size_ms: 30_000,
-                offset_ms: 500,
-            }
+            crate::window::WindowSpec::tumbling(30_000).with_offset(500)
         );
         assert_eq!(window.time_field, "timestamp_ms");
         assert_eq!(window.key_fields, vec!["category", "region"]);
@@ -4476,10 +4476,7 @@ wasm "p" module="p.wasm" {
             .window
             .as_ref()
             .expect("window block");
-        assert_eq!(
-            window.spec,
-            crate::window_spec::WindowSpec::Session { gap_ms: 10_000 }
-        );
+        assert_eq!(window.spec, crate::window::WindowSpec::session(10_000));
         assert_eq!(window.key_fields, vec!["category"]);
         assert_eq!(window.allowed_lateness_ms, 0, "lateness defaults to zero");
     }
@@ -5084,11 +5081,7 @@ workflow "w" {{
     #[test]
     fn window_config_pairs_cover_the_geometry() {
         let window = WindowConfig {
-            spec: crate::window_spec::WindowSpec::Sliding {
-                size_ms: 60_000,
-                slide_ms: 10_000,
-                offset_ms: 500,
-            },
+            spec: crate::window::WindowSpec::sliding(60_000, 10_000).with_offset(500),
             time_field: "timestamp_ms".to_string(),
             key_fields: vec!["category".to_string(), "region".to_string()],
             allowed_lateness_ms: 5_000,

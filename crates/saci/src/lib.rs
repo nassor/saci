@@ -70,9 +70,9 @@ pub mod runtime;
 #[cfg(feature = "engine")]
 pub mod io;
 
-/// The `window` geometry enum. Declared in every build: a host parses a
-/// window declaration whether or not it carries the engine that serves one.
-pub mod window_spec;
+/// The window geometry. Declared in every build: a host parses a window
+/// declaration whether or not it carries the engine that serves one.
+pub mod window;
 
 #[cfg(feature = "windows")]
 pub mod windows;
@@ -202,6 +202,7 @@ pub mod prelude {
     #[cfg(feature = "derive")]
     pub use crate::{fold, transform};
 
+    pub use crate::window::WindowSpec;
     #[cfg(feature = "windows")]
-    pub use crate::windows::{CURRENT_ACCUMULATOR_VERSION, WindowAccumulator, WindowWatermark};
+    pub use crate::windows::{WindowFunction, WindowResults, WindowWatermark, WindowedSystem};
 }

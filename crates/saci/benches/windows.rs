@@ -15,7 +15,8 @@ use arrow_schema::{DataType, Field, Schema};
 use criterion::{Criterion, criterion_group, criterion_main};
 use saci::System;
 use saci::dataset::Dataset;
-use saci::windows::{ReduceAggregate, WindowFunction, WindowSpec, WindowedSystemBuilder};
+use saci::window::WindowSpec;
+use saci::windows::{WindowFunction, WindowedSystem};
 
 const ROWS: usize = 1_000_000;
 const KEYS: usize = 64;
@@ -55,16 +56,9 @@ fn dataset() -> Dataset {
 
 fn bench_shape(c: &mut Criterion, group: &str, spec: WindowSpec) {
     let mut data = dataset();
-    let system = WindowedSystemBuilder::new()
-        .source("Event", "ts")
-        .keyed_by(&["key"])
-        .window(spec)
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let system = WindowedSystem::new_named("Event", "ts", spec, WindowFunction::sum("value"))
+        .unwrap()
+        .key_by(["key"]);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -78,24 +72,9 @@ fn bench_shape(c: &mut Criterion, group: &str, spec: WindowSpec) {
 }
 
 fn bench_windows(c: &mut Criterion) {
-    bench_shape(
-        c,
-        "tumbling_sum",
-        WindowSpec::Tumbling {
-            size_ms: 60_000,
-            offset_ms: 0,
-        },
-    );
-    bench_shape(
-        c,
-        "sliding_sum",
-        WindowSpec::Sliding {
-            size_ms: 60_000,
-            slide_ms: 15_000,
-            offset_ms: 0,
-        },
-    );
-    bench_shape(c, "session_sum", WindowSpec::Session { gap_ms: 30_000 });
+    bench_shape(c, "tumbling_sum", WindowSpec::tumbling(60_000));
+    bench_shape(c, "sliding_sum", WindowSpec::sliding(60_000, 15_000));
+    bench_shape(c, "session_sum", WindowSpec::session(30_000));
 }
 
 criterion_group!(benches, bench_windows);

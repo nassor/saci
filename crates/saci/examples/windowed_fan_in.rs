@@ -27,10 +27,7 @@ use saci::service::config::{
     StandaloneConfig, WorkflowSpec,
 };
 use saci::service::standalone::run_standalone;
-use saci::windows::{
-    ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowWatermark,
-    WindowedSystemBuilder,
-};
+use saci::windows::{WindowFunction, WindowResults, WindowWatermark, WindowedSystem};
 
 /// A trade event: one price at one instant, in milliseconds since the epoch.
 #[derive(Component, serde::Serialize, serde::Deserialize)]
@@ -65,7 +62,7 @@ impl System for ReportSystem {
         let results = data.resource::<WindowResults>()?;
 
         let mut rows = Vec::new();
-        for batch in &results.batches {
+        for batch in &results.on_time {
             if batch.num_rows() == 0 {
                 continue;
             }
@@ -118,19 +115,13 @@ impl System for ReportSystem {
 /// The windowed processor node's pipeline: aggregate merged trades into
 /// 30-second tumbling windows and publish the totals.
 fn build_windowed_pipeline() -> Pipeline {
-    let windowed = WindowedSystemBuilder::new()
-        .source("Trade", "timestamp_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "price",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(5_000)
-        .build()
-        .expect("windowed system builds");
+    let windowed = WindowedSystem::new(
+        Trade::TIMESTAMP_MS,
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("price"),
+    )
+    .expect("windowed system builds")
+    .allowed_lateness_ms(5_000);
 
     Pipeline::new("windowed-fan-in")
         .component::<Trade>()
@@ -220,10 +211,7 @@ async fn main() -> Result<(), SaciError> {
             artifact: None,
             #[cfg(feature = "windows")]
             window: Some(saci::service::config::WindowConfig {
-                spec: WindowSpec::Tumbling {
-                    size_ms: 30_000,
-                    offset_ms: 0,
-                },
+                spec: WindowSpec::tumbling(30_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 5_000,

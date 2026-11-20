@@ -13,9 +13,8 @@ use saci::component::Component;
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
 use saci::system::{System, SystemMeta};
-use saci::windows::{
-    ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowedSystemBuilder,
-};
+use saci::window::WindowSpec;
+use saci::windows::{WindowFunction, WindowResults, WindowedSystem};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct SalesEvent {
@@ -102,20 +101,15 @@ impl System for IngestSystem {
 
 #[tokio::test]
 async fn test_window_aggregation_produces_results_for_all_windows() {
-    let windowed = WindowedSystemBuilder::new()
-        .source("SalesEvent", "timestamp_ms")
-        .keyed_by(&["category"])
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "amount",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(5_000)
-        .build()
-        .unwrap();
+    let windowed = WindowedSystem::new_named(
+        "SalesEvent",
+        "timestamp_ms",
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("amount"),
+    )
+    .unwrap()
+    .key_by(["category"])
+    .allowed_lateness_ms(5_000);
 
     let mut pipeline = Pipeline::new("window_aggregation")
         .component::<SalesEvent>()
@@ -135,27 +129,19 @@ async fn test_window_aggregation_produces_results_for_all_windows() {
         "expected at least 3 window groups"
     );
     // Every timestamp sits inside its own window, so nothing is late.
-    assert!(
-        results.side_output.is_empty(),
-        "no events should be dropped"
-    );
+    assert!(results.dropped.is_empty(), "no events should be dropped");
 }
 
 #[tokio::test]
 async fn test_window_aggregation_stage_layout_is_valid() {
-    let windowed = WindowedSystemBuilder::new()
-        .source("SalesEvent", "timestamp_ms")
-        .keyed_by(&["category"])
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "amount",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let windowed = WindowedSystem::new_named(
+        "SalesEvent",
+        "timestamp_ms",
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("amount"),
+    )
+    .unwrap()
+    .key_by(["category"]);
 
     let mut pipeline = Pipeline::new("window_stages")
         .component::<SalesEvent>()

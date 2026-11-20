@@ -229,9 +229,9 @@ Key types:
   is the same in every build, so a node whose host is compiled out, or a `window` block in a
   build without the windowing engine, is a named feature refusal
   (`validate_build_capabilities`) rather than an unknown key. `WindowConfig` names
-  `saci::window_spec::WindowSpec`, which lives outside the `windows` feature for
-  exactly that reason; the engine under `saci::windows` stays gated and re-exports the
-  enum so `saci::windows::WindowSpec` still resolves. `nodes()`, `rebuild_blocker`, both
+  `saci::window::WindowSpec`, which lives outside the `windows` feature for
+  exactly that reason; the engine under `saci::windows` stays gated and does not re-export the
+  enum. `nodes()`, `rebuild_blocker`, both
   window checks and `WindowConfig`'s whole parse path read unconditionally for the same
   reason; only `build_processor_node`'s dispatch with its two host-gated builders,
   `BuiltNode::window` and the two host modules stay `#[cfg]`-gated.

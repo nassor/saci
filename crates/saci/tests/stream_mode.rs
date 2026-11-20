@@ -910,7 +910,8 @@ async fn stream_routing_processor_delivers_to_the_selected_branch() {
 #[cfg(feature = "windows")]
 #[tokio::test]
 async fn stream_windowed_processor_tracks_watermark_across_items() {
-    use saci::windows::{WindowSpec, WindowWatermark};
+    use saci::window::WindowSpec;
+    use saci::windows::WindowWatermark;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("timestamp_ms", DataType::Int64, false),
@@ -968,10 +969,7 @@ async fn stream_windowed_processor_tracks_watermark_across_items() {
             downstream: Vec::new(),
             artifact: None,
             window: Some(saci::service::config::WindowConfig {
-                spec: WindowSpec::Tumbling {
-                    size_ms: 1_000,
-                    offset_ms: 0,
-                },
+                spec: WindowSpec::tumbling(1_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 0,

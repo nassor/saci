@@ -16,16 +16,13 @@
 
 use std::sync::Arc;
 
-use arrow_array::{Float64Array, Int64Array, StringArray};
+use arrow_array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use serde::{Deserialize, Serialize};
 
 use saci::distributed::strategy::CheckpointStrategy;
 use saci::distributed::{DistributedRunner, KeyPartition, RedbSharedStore, RunnerConfig};
 use saci::prelude::*;
-use saci::windows::{
-    ReduceAggregate, WindowAccumulator, WindowFunction, WindowResults, WindowSpec,
-    WindowedSystemBuilder,
-};
+use saci::windows::{WindowAccumulator, WindowFunction, WindowResults, WindowedSystem, key_hash};
 
 #[derive(Component, Debug, Serialize, Deserialize)]
 struct SalesEvent {
@@ -124,67 +121,27 @@ async fn main() -> Result<(), SaciError> {
     );
 
     // WindowResults carries opaque i64 key_hash values. The reverse map comes
-    // from running each known category through a one-row Dataset and reading
-    // back the hash the windowed system assigned it.
+    // from hashing each known category with the function the windowed system
+    // keys its groups by.
     let known_categories = ["Electronics", "Books"];
-    let mut hash_to_category: std::collections::HashMap<i64, &str> = Default::default();
-
-    for cat in known_categories {
-        let row = SalesEvent {
-            timestamp_ms: 0,
-            category: cat.to_string(),
-            amount: 1.0,
-        };
-        let mut mini = Dataset::new();
-        mini.register::<SalesEvent>()?;
-        mini.append::<SalesEvent>(&[row])?;
-
-        let probe = WindowedSystemBuilder::new()
-            .source("SalesEvent", "timestamp_ms")
-            .keyed_by(&["category"])
-            .window(WindowSpec::Tumbling {
-                size_ms: 30_000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "amount",
-                aggregate: ReduceAggregate::Sum,
-            })
-            .build()?;
-
-        probe.run(&mut mini).await?;
-
-        if let Some(wr) = mini.get_resource::<WindowResults>() {
-            for batch in &wr.batches {
-                if let Ok(kh_idx) = batch.schema().index_of("key_hash") {
-                    use arrow_array::cast::AsArray;
-                    let col = batch
-                        .column(kh_idx)
-                        .as_primitive::<arrow_array::types::Int64Type>();
-                    if !col.is_empty() {
-                        hash_to_category.insert(col.value(0), cat);
-                    }
-                }
-            }
-        }
-    }
+    let names: ArrayRef = Arc::new(StringArray::from(known_categories.to_vec()));
+    let hashes = key_hash(&[&names])?;
+    let hash_to_category: std::collections::HashMap<i64, &str> = known_categories
+        .iter()
+        .enumerate()
+        .map(|(i, cat)| (hashes.value(i), *cat))
+        .collect();
     println!("key_hash map: {:?}\n", hash_to_category);
 
     // Distributed mode needs a data-free pipeline: it carries the system DAG,
     // and the runner supplies rows per claimed batch.
-    let windowed = WindowedSystemBuilder::new()
-        .source("SalesEvent", "timestamp_ms")
-        .keyed_by(&["category"])
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "amount",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(5_000)
-        .build()?;
+    let windowed = WindowedSystem::new(
+        SalesEvent::TIMESTAMP_MS,
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("amount"),
+    )?
+    .key_by(["category"])
+    .allowed_lateness_ms(5_000);
 
     let lookup = Arc::new(hash_to_category);
     let lookup_report = Arc::clone(&lookup);
@@ -198,7 +155,7 @@ async fn main() -> Result<(), SaciError> {
                     return Ok(());
                 };
                 use arrow_array::{Array, cast::AsArray};
-                for batch in &results.batches {
+                for batch in &results.on_time {
                     if batch.num_rows() == 0 {
                         continue;
                     }

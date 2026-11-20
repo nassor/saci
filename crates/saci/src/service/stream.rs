@@ -1346,10 +1346,7 @@ mod tests {
         );
         processor_node.component = None;
         processor_node.window = Some(crate::service::config::WindowConfig {
-            spec: crate::windows::WindowSpec::Tumbling {
-                size_ms: 30_000,
-                offset_ms: 0,
-            },
+            spec: crate::window::WindowSpec::tumbling(30_000),
             time_field: "timestamp_ms".to_string(),
             key_fields: Vec::new(),
             allowed_lateness_ms: 5_000,

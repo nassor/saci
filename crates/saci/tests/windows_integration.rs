@@ -18,10 +18,9 @@ use saci::dataset::Dataset;
 use saci::error::SaciError;
 use saci::pipeline::Pipeline;
 use saci::system::System;
+use saci::window::{WindowSpec, tumbling_id};
 use saci::windows::{
-    WindowResults, WindowSpec,
-    function::{ProcessWindowFn, ReduceAggregate, WindowContext, WindowFunction},
-    system::WindowedSystemBuilder,
+    ProcessWindowFn, WindowContext, WindowFunction, WindowResults, WindowedSystem,
 };
 
 // ---------------------------------------------------------------------------
@@ -70,7 +69,7 @@ impl Component for KeyedSource {
 
 fn sum_values(results: &WindowResults, col_idx: usize) -> f64 {
     results
-        .batches
+        .on_time
         .iter()
         .flat_map(|b| {
             let arr = b
@@ -83,9 +82,14 @@ fn sum_values(results: &WindowResults, col_idx: usize) -> f64 {
         .sum()
 }
 
+/// Rows dropped for arriving beyond the allowed lateness.
+fn dropped_rows(results: &WindowResults) -> usize {
+    results.dropped.iter().map(|b| b.num_rows()).sum()
+}
+
 fn all_window_ids(results: &WindowResults) -> Vec<i64> {
     results
-        .batches
+        .on_time
         .iter()
         .flat_map(|b| {
             let arr = b.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -112,32 +116,27 @@ async fn test_tumbling_non_keyed_sum() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
 
     assert_eq!(
-        results.batches.len(),
+        results.on_time.len(),
         3,
         "expected 3 window groups, got {}",
-        results.batches.len()
+        results.on_time.len()
     );
 
     let mut pairs: Vec<(i64, f64)> = results
-        .batches
+        .on_time
         .iter()
         .map(|b| {
             let win_id = b
@@ -207,19 +206,14 @@ async fn test_tumbling_keyed_sum() {
     pipeline.register::<KeyedSource>().unwrap();
     pipeline.append::<KeyedSource>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("KeyedSource", "ts_ms")
-        .keyed_by(&["key"])
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "KeyedSource",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap()
+    .key_by(["key"]);
 
     sys.run(&mut pipeline).await.unwrap();
 
@@ -227,10 +221,10 @@ async fn test_tumbling_keyed_sum() {
 
     // 3 windows × 2 keys = 6 groups (one batch per group).
     assert_eq!(
-        results.batches.len(),
+        results.on_time.len(),
         6,
         "expected 6 keyed window groups, got {}",
-        results.batches.len()
+        results.on_time.len()
     );
 
     // Total sum must equal 10+20+...+100 = 550.
@@ -277,18 +271,13 @@ async fn test_windowed_system_in_pipeline() {
         },
     ];
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 1000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(1000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     let mut p = Pipeline::new("test");
     p.data_mut().register::<SourceComponent>().unwrap();
@@ -302,14 +291,14 @@ async fn test_windowed_system_in_pipeline() {
         .expect("WindowResults should be in pipeline after run");
 
     // 3 windows: [0..999], [1000..1999], [2000..2999]
-    assert_eq!(results.batches.len(), 3, "expected 3 window result batches");
+    assert_eq!(results.on_time.len(), 3, "expected 3 window result batches");
 
-    let first_batch = &results.batches[0];
+    let first_batch = &results.on_time[0];
     assert_eq!(first_batch.schema().fields().len(), 3);
     assert_eq!(first_batch.schema().field(0).name(), "window_id");
     assert_eq!(first_batch.schema().field(1).name(), "key_hash");
 
-    for batch in &results.batches {
+    for batch in &results.on_time {
         assert_eq!(batch.num_rows(), 1, "each group batch should have 1 row");
     }
 
@@ -327,18 +316,13 @@ async fn test_empty_world_no_panic() {
     let mut pipeline = Dataset::new();
     pipeline.register::<SourceComponent>().unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
@@ -347,7 +331,7 @@ async fn test_empty_world_no_panic() {
         .expect("WindowResults resource should be inserted even for empty pipeline");
 
     assert!(
-        results.batches.is_empty(),
+        results.on_time.is_empty(),
         "empty pipeline should produce no result batches"
     );
     assert_eq!(results.total_rows(), 0);
@@ -383,24 +367,19 @@ async fn test_min_aggregation() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Min,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::min("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
-    assert_eq!(results.batches.len(), 1);
-    let min_val = results.batches[0]
+    assert_eq!(results.on_time.len(), 1);
+    let min_val = results.on_time[0]
         .column(2)
         .as_any()
         .downcast_ref::<Float64Array>()
@@ -442,24 +421,19 @@ async fn test_max_aggregation() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Max,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::max("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
-    assert_eq!(results.batches.len(), 1);
-    let max_val = results.batches[0]
+    assert_eq!(results.on_time.len(), 1);
+    let max_val = results.on_time[0]
         .column(2)
         .as_any()
         .downcast_ref::<Float64Array>()
@@ -513,26 +487,21 @@ async fn test_count_aggregation() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Count,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::count("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
-    assert_eq!(results.batches.len(), 2, "expected 2 window groups");
+    assert_eq!(results.on_time.len(), 2, "expected 2 window groups");
 
     let mut pairs: Vec<(i64, f64)> = results
-        .batches
+        .on_time
         .iter()
         .map(|b| {
             let win_id = b
@@ -586,24 +555,19 @@ async fn test_mean_aggregation() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Mean,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::mean("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
-    assert_eq!(results.batches.len(), 1);
-    let mean_val = results.batches[0]
+    assert_eq!(results.on_time.len(), 1);
+    let mean_val = results.on_time[0]
         .column(2)
         .as_any()
         .downcast_ref::<Float64Array>()
@@ -647,26 +611,21 @@ async fn test_mean_aggregation_two_windows() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Mean,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::mean("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
-    assert_eq!(results.batches.len(), 2, "expected 2 window groups");
+    assert_eq!(results.on_time.len(), 2, "expected 2 window groups");
 
     let mut pairs: Vec<(i64, f64)> = results
-        .batches
+        .on_time
         .iter()
         .map(|b| {
             let win_id = b
@@ -702,30 +661,30 @@ async fn test_mean_aggregation_two_windows() {
 #[test]
 fn test_window_assignment_correctness() {
     // 1-second windows (1000 ms), no offset
-    assert_eq!(WindowSpec::assign_tumbling(0, 1000, 0), 0);
-    assert_eq!(WindowSpec::assign_tumbling(999, 1000, 0), 0);
-    assert_eq!(WindowSpec::assign_tumbling(1000, 1000, 0), 1);
-    assert_eq!(WindowSpec::assign_tumbling(1999, 1000, 0), 1);
-    assert_eq!(WindowSpec::assign_tumbling(2000, 1000, 0), 2);
+    assert_eq!(tumbling_id(0, 1000, 0), 0);
+    assert_eq!(tumbling_id(999, 1000, 0), 0);
+    assert_eq!(tumbling_id(1000, 1000, 0), 1);
+    assert_eq!(tumbling_id(1999, 1000, 0), 1);
+    assert_eq!(tumbling_id(2000, 1000, 0), 2);
 
     // 2-second windows (2000 ms), no offset
-    assert_eq!(WindowSpec::assign_tumbling(0, 2000, 0), 0);
-    assert_eq!(WindowSpec::assign_tumbling(1999, 2000, 0), 0);
-    assert_eq!(WindowSpec::assign_tumbling(2000, 2000, 0), 1);
-    assert_eq!(WindowSpec::assign_tumbling(3999, 2000, 0), 1);
-    assert_eq!(WindowSpec::assign_tumbling(4000, 2000, 0), 2);
+    assert_eq!(tumbling_id(0, 2000, 0), 0);
+    assert_eq!(tumbling_id(1999, 2000, 0), 0);
+    assert_eq!(tumbling_id(2000, 2000, 0), 1);
+    assert_eq!(tumbling_id(3999, 2000, 0), 1);
+    assert_eq!(tumbling_id(4000, 2000, 0), 2);
 
     // 500 ms offset, 1000 ms window: aligned boundaries 500, 1500, 2500
-    assert_eq!(WindowSpec::assign_tumbling(400, 1000, 500), -1);
-    assert_eq!(WindowSpec::assign_tumbling(500, 1000, 500), 0);
-    assert_eq!(WindowSpec::assign_tumbling(1499, 1000, 500), 0);
-    assert_eq!(WindowSpec::assign_tumbling(1500, 1000, 500), 1);
+    assert_eq!(tumbling_id(400, 1000, 500), -1);
+    assert_eq!(tumbling_id(500, 1000, 500), 0);
+    assert_eq!(tumbling_id(1499, 1000, 500), 0);
+    assert_eq!(tumbling_id(1500, 1000, 500), 1);
 
     // Negative timestamps (floor division)
-    assert_eq!(WindowSpec::assign_tumbling(-1, 1000, 0), -1);
-    assert_eq!(WindowSpec::assign_tumbling(-1000, 1000, 0), -1);
-    assert_eq!(WindowSpec::assign_tumbling(-1001, 1000, 0), -2);
-    assert_eq!(WindowSpec::assign_tumbling(-500, 1000, 0), -1);
+    assert_eq!(tumbling_id(-1, 1000, 0), -1);
+    assert_eq!(tumbling_id(-1000, 1000, 0), -1);
+    assert_eq!(tumbling_id(-1001, 1000, 0), -2);
+    assert_eq!(tumbling_id(-500, 1000, 0), -1);
 }
 
 // ---------------------------------------------------------------------------
@@ -769,28 +728,26 @@ async fn test_session_single_key() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Session { gap_ms: 1000 })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::session(1000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
     assert_eq!(
-        results.batches.len(),
+        results.on_time.len(),
         2,
         "expected 2 sessions, got {}",
-        results.batches.len()
+        results.on_time.len()
     );
 
     let mut sessions: Vec<(i64, f64, i64, i64)> = results
-        .batches
+        .on_time
         .iter()
         .map(|b| {
             let session_id = b
@@ -885,19 +842,13 @@ async fn test_sliding_non_keyed_sum() {
     pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Sliding {
-            size_ms: 2000,
-            slide_ms: 1000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::sliding(2000, 1000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     sys.run(&mut pipeline).await.unwrap();
 
@@ -905,10 +856,10 @@ async fn test_sliding_non_keyed_sum() {
 
     // 5 distinct window groups: -1, 0, 1, 2, 3
     assert_eq!(
-        results.batches.len(),
+        results.on_time.len(),
         5,
         "expected 5 window groups, got {}",
-        results.batches.len()
+        results.on_time.len()
     );
 
     // Total across all groups: each value counted twice (k=2).
@@ -919,7 +870,7 @@ async fn test_sliding_non_keyed_sum() {
     );
 
     let mut pairs: Vec<(i64, f64)> = results
-        .batches
+        .on_time
         .iter()
         .map(|b| {
             let wid = b
@@ -959,19 +910,13 @@ async fn test_sliding_in_pipeline() {
         })
         .collect();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Sliding {
-            size_ms: 2000,
-            slide_ms: 1000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::sliding(2000, 1000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     let mut p = Pipeline::new("test");
     p.data_mut().register::<SourceComponent>().unwrap();
@@ -991,7 +936,7 @@ async fn test_sliding_in_pipeline() {
         "scheduler sliding total: expected 42.0, got {total}"
     );
 
-    for batch in &results.batches {
+    for batch in &results.on_time {
         assert_eq!(batch.num_rows(), 1, "each group batch should have 1 row");
     }
 }
@@ -1009,19 +954,13 @@ async fn test_sliding_amplification_limit_error() {
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     // size=10^10, slide=1 → k=10^10, far exceeds 10^8 limit.
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Sliding {
-            size_ms: 10_000_000_000,
-            slide_ms: 1,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::sliding(10_000_000_000, 1),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     let result = sys.run(&mut pipeline).await;
     assert!(result.is_err(), "expected amplification error");
@@ -1078,25 +1017,23 @@ async fn test_session_multi_key() {
     pipeline.register::<KeyedSource>().unwrap();
     pipeline.append::<KeyedSource>(&rows).unwrap();
 
-    let sys = WindowedSystemBuilder::new()
-        .source("KeyedSource", "ts_ms")
-        .keyed_by(&["key"])
-        .window(WindowSpec::Session { gap_ms: 500 })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "KeyedSource",
+        "ts_ms",
+        WindowSpec::session(500),
+        WindowFunction::sum("value"),
+    )
+    .unwrap()
+    .key_by(["key"]);
 
     sys.run(&mut pipeline).await.unwrap();
 
     let results = pipeline.get_resource::<WindowResults>().unwrap();
     assert_eq!(
-        results.batches.len(),
+        results.on_time.len(),
         3,
         "expected 3 sessions (2 for A + 1 for B), got {}",
-        results.batches.len()
+        results.on_time.len()
     );
 
     // Total sum: A(10+20+30) + B(1+2+3) = 60 + 6 = 66.
@@ -1107,7 +1044,7 @@ async fn test_session_multi_key() {
     );
 
     let mut sums: Vec<f64> = results
-        .batches
+        .on_time
         .iter()
         .map(|b| {
             b.column(2)
@@ -1150,19 +1087,14 @@ async fn test_session_multi_key() {
 ///        watermark=3000, threshold=2000. ts=1500 < 2000 → side-output.
 #[tokio::test]
 async fn test_watermark_progression_out_of_order() {
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(1000)
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap()
+    .allowed_lateness_ms(1000);
 
     // Run 1: on-time rows, watermark advances to 3000.
     {
@@ -1186,9 +1118,9 @@ async fn test_watermark_progression_out_of_order() {
         sys.run(&mut pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert_eq!(results.side_output.total_rows(), 0, "run 1: no drops");
-        assert!(results.late_batches.is_empty(), "run 1: no late firings");
-        assert!(!results.batches.is_empty());
+        assert_eq!(dropped_rows(results), 0, "run 1: no drops");
+        assert!(results.late.is_empty(), "run 1: no late firings");
+        assert!(!results.on_time.is_empty());
     }
 
     // Run 2: late-but-acceptable row (ts=2500 with watermark=3000, threshold=2000).
@@ -1203,9 +1135,9 @@ async fn test_watermark_progression_out_of_order() {
         sys.run(&mut pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert_eq!(results.side_output.total_rows(), 0, "run 2: no drops");
+        assert_eq!(dropped_rows(results), 0, "run 2: no drops");
         // Window [2000,4000) already fired, so ts=2500 re-fires it late.
-        assert_eq!(results.late_batches.len(), 1, "run 2: one late re-firing");
+        assert_eq!(results.late.len(), 1, "run 2: one late re-firing");
     }
 
     // Run 3: beyond-lateness row (ts=1500 with watermark=3000, threshold=2000).
@@ -1221,11 +1153,11 @@ async fn test_watermark_progression_out_of_order() {
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
         assert_eq!(
-            results.side_output.total_rows(),
+            dropped_rows(results),
             1,
             "run 3: 1 row dropped to side-output"
         );
-        assert!(results.batches.is_empty(), "run 3: no on-time firings");
+        assert!(results.on_time.is_empty(), "run 3: no on-time firings");
     }
 }
 
@@ -1235,19 +1167,14 @@ async fn test_watermark_progression_out_of_order() {
 /// - ts=3999 is one below the threshold and goes to side-output.
 #[tokio::test]
 async fn test_allowed_lateness_boundary() {
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(1000)
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap()
+    .allowed_lateness_ms(1000);
 
     // First run: advance watermark to 5000.
     {
@@ -1274,12 +1201,12 @@ async fn test_allowed_lateness_boundary() {
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
         assert_eq!(
-            results.side_output.total_rows(),
+            dropped_rows(results),
             0,
             "ts=4000 at threshold is NOT beyond lateness"
         );
         // Window [4000,6000) already fired, so ts=4000 re-fires it late.
-        assert_eq!(results.late_batches.len(), 1);
+        assert_eq!(results.late.len(), 1);
     }
 
     // Third run: ts=3999 (one below threshold) → beyond lateness → side-output.
@@ -1295,16 +1222,16 @@ async fn test_allowed_lateness_boundary() {
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
         assert_eq!(
-            results.side_output.total_rows(),
+            dropped_rows(results),
             1,
             "ts=3999 below threshold is beyond lateness → side-output"
         );
-        assert!(results.batches.is_empty(), "no on-time batches");
-        assert!(results.late_batches.is_empty(), "no late batches");
+        assert!(results.on_time.is_empty(), "no on-time batches");
+        assert!(results.late.is_empty(), "no late batches");
     }
 }
 
-/// Re-firings land in `late_batches`, first firings in `batches`.
+/// Re-firings land in `late`, first firings in `on_time`.
 ///
 /// Tumbling 2000 ms window, allowed_lateness 5000.
 ///
@@ -1312,19 +1239,14 @@ async fn test_allowed_lateness_boundary() {
 /// Run 2: ts=[1200] is late but within lateness, so window 0 re-fires.
 #[tokio::test]
 async fn test_window_refiring_on_late_data() {
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(5000)
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap()
+    .allowed_lateness_ms(5000);
 
     // Run 1: first firing, on time.
     {
@@ -1344,11 +1266,11 @@ async fn test_window_refiring_on_late_data() {
         sys.run(&mut pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert_eq!(results.batches.len(), 1, "one on-time window group");
-        assert!(results.late_batches.is_empty(), "no late firings yet");
-        assert_eq!(results.side_output.total_rows(), 0);
+        assert_eq!(results.on_time.len(), 1, "one on-time window group");
+        assert!(results.late.is_empty(), "no late firings yet");
+        assert_eq!(dropped_rows(results), 0);
 
-        let sum_val = results.batches[0]
+        let sum_val = results.on_time[0]
             .column(2)
             .as_any()
             .downcast_ref::<Float64Array>()
@@ -1370,14 +1292,14 @@ async fn test_window_refiring_on_late_data() {
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
         assert!(
-            results.batches.is_empty(),
-            "re-firing goes to late_batches, not batches"
+            results.on_time.is_empty(),
+            "re-firing goes to `late`, not `on_time`"
         );
-        assert_eq!(results.late_batches.len(), 1, "one late re-firing");
-        assert_eq!(results.side_output.total_rows(), 0);
+        assert_eq!(results.late.len(), 1, "one late re-firing");
+        assert_eq!(dropped_rows(results), 0);
 
         // The late re-firing contains only the new late row.
-        let late_sum = results.late_batches[0]
+        let late_sum = results.late[0]
             .column(2)
             .as_any()
             .downcast_ref::<Float64Array>()
@@ -1390,23 +1312,18 @@ async fn test_window_refiring_on_late_data() {
     }
 }
 
-/// Rows past the allowed-lateness budget land in `results.side_output`, not in
-/// `results.batches` or `results.late_batches`.
+/// Rows past the allowed-lateness budget land in `results.dropped`, not in
+/// `results.on_time` or `results.late`.
 #[tokio::test]
-async fn test_side_output_routing() {
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 1000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(500) // 500ms of tolerance
-        .build()
-        .unwrap();
+async fn test_dropped_rows_routing() {
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(1000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap()
+    .allowed_lateness_ms(500); // 500ms of tolerance
 
     // Advance watermark to 3000.
     {
@@ -1447,22 +1364,19 @@ async fn test_side_output_routing() {
         let results = pipeline.get_resource::<WindowResults>().unwrap();
 
         assert_eq!(
-            results.side_output.total_rows(),
+            dropped_rows(results),
             2,
-            "two beyond-lateness rows → side-output"
+            "two beyond-lateness rows → dropped"
         );
 
         // ts=2600 lands in window 2, [2000,3000), which has not fired yet, so it
-        // is a first firing and goes to `batches`.
+        // is a first firing and goes to `on_time`.
         assert_eq!(
-            results.batches.len(),
+            results.on_time.len(),
             1,
             "ts=2600 triggers first-time firing of window 2"
         );
-        assert!(results.late_batches.is_empty(), "no late re-firings");
-
-        let side_batch = &results.side_output.batches[0];
-        assert_eq!(side_batch.num_rows(), 2);
+        assert!(results.late.is_empty(), "no late re-firings");
     }
 }
 
@@ -1498,16 +1412,14 @@ impl ProcessWindowFn for AnnotatingFn {
 
 #[tokio::test]
 async fn test_process_window_fn_with_context() {
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 2000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Process(Box::new(AnnotatingFn)))
-        .allowed_lateness(5000)
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(2000),
+        WindowFunction::process(AnnotatingFn),
+    )
+    .unwrap()
+    .allowed_lateness_ms(5000);
 
     // Run 1: first firing (on-time).
     {
@@ -1527,11 +1439,11 @@ async fn test_process_window_fn_with_context() {
         sys.run(&mut pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert_eq!(results.batches.len(), 1, "one on-time window group");
-        assert!(results.late_batches.is_empty());
+        assert_eq!(results.on_time.len(), 1, "one on-time window group");
+        assert!(results.late.is_empty());
 
         // The output batch must have `is_late_firing = false`.
-        let batch = &results.batches[0];
+        let batch = &results.on_time[0];
         let is_late_col = batch
             .column(batch.num_columns() - 2)
             .as_any()
@@ -1557,11 +1469,11 @@ async fn test_process_window_fn_with_context() {
         sys.run(&mut pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert!(results.batches.is_empty(), "re-firing goes to late_batches");
-        assert_eq!(results.late_batches.len(), 1);
+        assert!(results.on_time.is_empty(), "re-firing goes to late");
+        assert_eq!(results.late.len(), 1);
 
         // The output batch must have `is_late_firing = true`.
-        let batch = &results.late_batches[0];
+        let batch = &results.late[0];
         let is_late_col = batch
             .column(batch.num_columns() - 2)
             .as_any()
@@ -1587,22 +1499,17 @@ async fn test_process_window_fn_with_context() {
     }
 }
 
-/// When `.allowed_lateness()` is NOT called, watermark tracking is disabled.
+/// When `.allowed_lateness_ms()` is NOT called, watermark tracking is disabled.
 /// All data passes through without any side-output or late classifications.
 #[tokio::test]
 async fn test_no_watermark_all_data_passes_through() {
-    let sys = WindowedSystemBuilder::new()
-        .source("SourceComponent", "ts_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 1000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "value",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let sys = WindowedSystem::new_named(
+        "SourceComponent",
+        "ts_ms",
+        WindowSpec::tumbling(1000),
+        WindowFunction::sum("value"),
+    )
+    .unwrap();
 
     // Mix of "old" and "new" timestamps in one batch.
     let rows = vec![
@@ -1628,15 +1535,8 @@ async fn test_no_watermark_all_data_passes_through() {
     let results = pipeline.get_resource::<WindowResults>().unwrap();
 
     // All 3 rows processed normally: 2 window groups, [0,1000) and [5000,6000).
-    assert_eq!(results.batches.len(), 2, "two window groups");
-    assert!(
-        results.late_batches.is_empty(),
-        "no late batches without watermark"
-    );
-    assert_eq!(
-        results.side_output.total_rows(),
-        0,
-        "no side-output without watermark"
-    );
+    assert_eq!(results.on_time.len(), 2, "two window groups");
+    assert!(results.late.is_empty(), "no late batches without watermark");
+    assert_eq!(dropped_rows(results), 0, "no side-output without watermark");
     assert_eq!(results.total_rows(), 2);
 }

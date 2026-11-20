@@ -282,8 +282,8 @@ Engine:
 - `derive`: `#[derive(Component)]`, `#[transform]` and `#[fold]`. Needs no tokio, so a
   wasm32-wasip3 processor carries it.
 - `windows`: windowed aggregation. `WindowedSystem`, watermarks, `WindowAccumulator`. The
-  `WindowSpec` geometry enum sits outside the feature, in `window_spec.rs`, so a host parses a
-  `window` declaration in every build; `saci::windows` re-exports it.
+  `WindowSpec` geometry enum sits outside the feature, in `window.rs`, so a host parses a
+  `window` declaration in every build; `saci::window::WindowSpec`, also in `saci::prelude`.
 - `tracing`: `tracing` crate integration across the engine, the connectors and the host. Gates
   the events and the three nested spans `pipeline/execution.rs` opens (`pipeline.run`,
   `pipeline.stage`, `system.execute`).
@@ -470,8 +470,12 @@ core and take `&RetryMode`: `run_with_retries` (async, `tokio::time::sleep`) and
 
 #### Windowed aggregation (`src/windows/`, `windows` feature)
 
-`WindowedSystem` and `WindowedSystemBuilder` assign rows to tumbling, sliding, or session windows,
-track watermarks, aggregate per key, and publish results as a `WindowResults` resource.
+`WindowedSystem` assigns rows to tumbling, sliding, or session windows,
+tracks watermarks, aggregates per key, and publishes results as a `WindowResults` resource.
+`WindowedSystem::new(FieldRef, spec, function)` or `new_named(component, time_field, spec,
+function)` builds it; `key_by` and `allowed_lateness_ms` chain on. `WindowFunction::sum`, `min`,
+`max`, `count`, `mean` and `process` build the function. The `windows` submodules are private:
+`saci::windows` exports the types flat, with `key_hash` for the window key hash.
 `WindowAccumulator` is the component that carries open-window state across batches; the host
 persists it through `CheckpointStore`.
 

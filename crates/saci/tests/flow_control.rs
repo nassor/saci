@@ -869,8 +869,8 @@ mod windowed {
 
     use arrow_array::{Array, Float64Array, StringArray};
     use saci::service::config::WindowConfig;
-    use saci::windows::WindowSpec;
-    use saci::windows::watermark::WatermarkState;
+    use saci::window::{WindowSpec, tumbling_id};
+    use saci::windows::WatermarkState;
 
     /// Inbound component: one sale at an instant in event time.
     const SALE: &str = "Sale";
@@ -995,7 +995,7 @@ mod windowed {
                 }
 
                 for i in accepted {
-                    let window_id = WindowSpec::assign_tumbling(ts.value(i), WINDOW_SIZE_MS, 0);
+                    let window_id = tumbling_id(ts.value(i), WINDOW_SIZE_MS, 0);
                     let symbol = sym.value(i);
                     match state
                         .open
@@ -1273,10 +1273,7 @@ mod windowed {
             }],
             artifact: None,
             window: Some(WindowConfig {
-                spec: WindowSpec::Tumbling {
-                    size_ms: WINDOW_SIZE_MS,
-                    offset_ms: 0,
-                },
+                spec: WindowSpec::tumbling(WINDOW_SIZE_MS),
                 time_field: "ts".to_string(),
                 key_fields: vec!["sym".to_string()],
                 allowed_lateness_ms: WINDOW_LATENESS_MS,

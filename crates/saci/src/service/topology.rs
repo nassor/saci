@@ -40,7 +40,7 @@ use crate::inspector_wire::{
     BridgeEdge, RuntimeInfo, TopoEdge, TopoNode, Topology, WorkflowTopology,
 };
 #[cfg(feature = "windows")]
-use crate::windows::WindowSpec;
+use crate::window::WindowSpec;
 
 #[cfg(all(test, feature = "connector-channel"))]
 use super::builder::BuiltEdge;
@@ -853,16 +853,13 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn windowed_processor_carries_window_info_and_detail() {
         use crate::service::config::WindowConfig;
-        use crate::windows::WindowSpec;
+        use crate::window::WindowSpec;
 
         let workflow = workflow_with_io(default_config_value(), default_config_value());
         let config = service_config(workflow);
         let mut processor = built_processor("windowed", Some("build/windowed.wasm"));
         processor.window = Some(WindowConfig {
-            spec: WindowSpec::Tumbling {
-                size_ms: 30_000,
-                offset_ms: 0,
-            },
+            spec: WindowSpec::tumbling(30_000),
             time_field: "timestamp_ms".to_string(),
             key_fields: vec!["category".to_string()],
             allowed_lateness_ms: 5_000,

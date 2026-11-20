@@ -26,7 +26,7 @@ use std::sync::Arc;
 use saci::arrow_array::{Float64Array, Int64Array, StringArray};
 use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
 use saci::prelude::*;
-use saci::window_spec::WindowSpec;
+use saci::window::sliding_ids;
 
 /// One row of the demo workload: a sale at an instant in time.
 ///
@@ -249,10 +249,10 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
             late_rows += 1;
             continue;
         }
-        // `assign_sliding` returns `ceil(size_ms / slide_ms)` ids, with
+        // `sliding_ids` yields `ceil(size_ms / slide_ms)` ids, with
         // duplicates when `size_ms` is not a multiple of `slide_ms`. The
         // dedup is load bearing: a duplicate id would merge the row twice.
-        let mut ids = WindowSpec::assign_sliding(ts, geo.size_ms, geo.slide_ms, geo.offset_ms);
+        let mut ids: Vec<i64> = sliding_ids(ts, geo.size_ms, geo.slide_ms, geo.offset_ms).collect();
         ids.sort_unstable();
         ids.dedup();
 

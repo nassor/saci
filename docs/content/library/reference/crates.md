@@ -75,8 +75,8 @@ authoring SDK.
 - `derive`: `#[derive(Component)]`, `#[transform]` and `#[fold]`. It needs no tokio, so a
   `wasm32-wasip3` build carries it.
 - `windows`: windowed aggregation. `WindowedSystem`, watermarks, `WindowAccumulator`. The
-  `WindowSpec` geometry enum is outside the feature, so a host parses a `window` declaration in
-  every build.
+  `WindowSpec` geometry enum lives in `saci::window`, outside the feature, so a host parses a
+  `window` declaration in every build.
 - `tracing`: `tracing` crate integration. Gates the events and the four nested spans
   `pipeline.run`, `pipeline.stage`, `system.execute` and `task_attempt`, the last of which opens
   only on a retry.

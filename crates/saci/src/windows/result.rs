@@ -1,8 +1,7 @@
 //! Window aggregation results container.
 //!
-//! [`WindowResults`] is an ephemeral container stored as a
-//! [`Resource`](crate::pipeline::Pipeline) after a
-//! [`WindowedSystem`](super::system::WindowedSystem) runs. Downstream systems
+//! [`WindowResults`] is an ephemeral container stored as a dataset resource
+//! after a [`WindowedSystem`](super::WindowedSystem) runs. Downstream systems
 //! consume it; it is not persisted via IPC.
 
 use std::sync::Arc;
@@ -10,103 +9,38 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-/// A side-output container for rows routed away from the main aggregation path,
-/// such as late data beyond the allowed-lateness window.
-///
-/// `T` is an opaque tag that keeps separate side-output channels apart, for
-/// instance a unit struct per channel. [`DroppedLate`] is the built-in tag for
-/// rows discarded once the lateness budget is exceeded.
-///
-/// # Example
-///
-/// ```
-/// # #[cfg(feature = "windows")]
-/// # {
-/// use saci::windows::result::{DroppedLate, SideOutput};
-///
-/// let mut out: SideOutput<DroppedLate> = SideOutput::new();
-/// // batches can be pushed by the windowed system and inspected downstream
-/// assert!(out.is_empty());
-/// # }
-/// ```
-#[derive(Debug)]
-pub struct SideOutput<T> {
-    /// Tag type identifying this side-output channel.
-    _tag: std::marker::PhantomData<T>,
-    /// Raw record batches routed to this channel.
-    pub batches: Vec<RecordBatch>,
-}
-
-impl<T> SideOutput<T> {
-    /// Create an empty side-output channel.
-    pub fn new() -> Self {
-        Self {
-            _tag: std::marker::PhantomData,
-            batches: Vec::new(),
-        }
-    }
-
-    /// Push a batch into this side-output channel.
-    pub fn push(&mut self, batch: RecordBatch) {
-        self.batches.push(batch);
-    }
-
-    /// Total rows across all batches in this channel.
-    pub fn total_rows(&self) -> usize {
-        self.batches.iter().map(|b| b.num_rows()).sum()
-    }
-
-    /// `true` when no batches have been pushed.
-    pub fn is_empty(&self) -> bool {
-        self.batches.is_empty()
-    }
-}
-
-impl<T> Default for SideOutput<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Tag for the built-in side-output channel that receives rows dropped because
-/// their event-timestamp exceeded the allowed-lateness budget.
-///
-/// Stored as a resource in the pipeline: `pipeline.get_resource::<SideOutput<DroppedLate>>()`.
-#[derive(Debug, Clone, Copy)]
-pub struct DroppedLate;
-
 /// Ephemeral container for windowed aggregation output.
 ///
-/// Produced by [`WindowedSystem`](super::system::WindowedSystem) and inserted
+/// Produced by [`WindowedSystem`](super::WindowedSystem) and inserted
 /// into the dataset as a resource via
 /// [`Dataset::insert_resource`](crate::dataset::Dataset::insert_resource).
 ///
 /// Each run replaces the previous `WindowResults` with the **finalized windows
 /// for that run only**. Cross-run accumulation belongs to the
-/// [`WindowAccumulator`](super::accumulator::WindowAccumulator) component, which
+/// [`WindowAccumulator`](super::WindowAccumulator) component, which
 /// the system updates and the distributed runner checkpoints.
 #[derive(Debug)]
 pub struct WindowResults {
     /// Schema shared by all result batches.
     ///
-    /// For `ReduceAggregate::Sum` this contains three fields:
-    /// `window_id` (Int64), `key_hash` (Int64), and the aggregated value
-    /// column (same numeric type as the source field).
+    /// For a `Reduce` aggregate this holds `window_id` (Int64), `key_hash`
+    /// (Int64) and the aggregated value column, named after the aggregate
+    /// and the field (`sum_price`); a session window adds
+    /// `session_start_ts` and `session_end_ts`. An empty run publishes the
+    /// same schema as a non-empty one.
     pub schema: Arc<Schema>,
 
-    /// Result record batches for on-time window firings, one per aggregated group.
-    ///
-    /// Each batch has exactly one row. All batches share `schema`.
-    pub batches: Vec<RecordBatch>,
+    /// Result batches of on-time window firings, one row per aggregated
+    /// group. All batches share `schema`.
+    pub on_time: Vec<RecordBatch>,
 
-    /// Result batches from late-data re-firings (within the allowed-lateness window).
-    ///
-    /// Each batch has exactly one row. All batches share `schema`.
-    pub late_batches: Vec<RecordBatch>,
+    /// Result batches of late re-firings within the allowed-lateness window,
+    /// one row per group. All batches share `schema`.
+    pub late: Vec<RecordBatch>,
 
-    /// Rows routed to the side-output because their timestamp exceeded the
-    /// allowed-lateness budget.
-    pub side_output: SideOutput<DroppedLate>,
+    /// Source rows dropped because their timestamp fell beyond the
+    /// allowed-lateness budget, in the source component's schema.
+    pub dropped: Vec<RecordBatch>,
 }
 
 impl WindowResults {
@@ -114,30 +48,25 @@ impl WindowResults {
     pub fn new(schema: Arc<Schema>) -> Self {
         Self {
             schema,
-            batches: Vec::new(),
-            late_batches: Vec::new(),
-            side_output: SideOutput::new(),
+            on_time: Vec::new(),
+            late: Vec::new(),
+            dropped: Vec::new(),
         }
     }
 
     /// Total number of on-time output rows across all result batches.
     pub fn total_rows(&self) -> usize {
-        self.batches.iter().map(|b| b.num_rows()).sum()
+        self.on_time.iter().map(|b| b.num_rows()).sum()
     }
 
     /// Total rows including both on-time and late re-firings.
     pub fn total_rows_including_late(&self) -> usize {
-        self.total_rows()
-            + self
-                .late_batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>()
+        self.total_rows() + self.late.iter().map(|b| b.num_rows()).sum::<usize>()
     }
 
     /// `true` when no on-time result batches have been produced.
     pub fn is_empty(&self) -> bool {
-        self.batches.is_empty()
+        self.on_time.is_empty()
     }
 }
 
@@ -169,20 +98,19 @@ mod tests {
 
     #[test]
     fn test_new_empty() {
-        let schema = make_schema();
-        let results = WindowResults::new(schema);
+        let results = WindowResults::new(make_schema());
         assert!(results.is_empty());
         assert_eq!(results.total_rows(), 0);
         assert_eq!(results.total_rows_including_late(), 0);
-        assert!(results.side_output.is_empty());
+        assert!(results.dropped.is_empty());
     }
 
     #[test]
     fn test_push_batch_total_rows() {
         let schema = make_schema();
         let mut results = WindowResults::new(schema.clone());
-        results.batches.push(make_batch(schema.clone(), 0, 0, 10.0));
-        results.batches.push(make_batch(schema.clone(), 1, 0, 20.0));
+        results.on_time.push(make_batch(schema.clone(), 0, 0, 10.0));
+        results.on_time.push(make_batch(schema.clone(), 1, 0, 20.0));
         assert_eq!(results.total_rows(), 2);
         assert!(!results.is_empty());
     }
@@ -191,38 +119,16 @@ mod tests {
     fn test_late_batches_count_in_total_including_late() {
         let schema = make_schema();
         let mut results = WindowResults::new(schema.clone());
-        results.batches.push(make_batch(schema.clone(), 0, 0, 10.0));
-        results
-            .late_batches
-            .push(make_batch(schema.clone(), 0, 0, 5.0));
+        results.on_time.push(make_batch(schema.clone(), 0, 0, 10.0));
+        results.late.push(make_batch(schema.clone(), 0, 0, 5.0));
         assert_eq!(results.total_rows(), 1);
         assert_eq!(results.total_rows_including_late(), 2);
     }
 
     #[test]
-    fn test_side_output_push_and_count() {
-        let schema = make_schema();
-        let results_schema = make_schema();
-        let mut results = WindowResults::new(results_schema);
-        results
-            .side_output
-            .push(make_batch(schema.clone(), 0, 0, 99.0));
-        assert_eq!(results.side_output.total_rows(), 1);
-        assert!(!results.side_output.is_empty());
-    }
-
-    #[test]
     fn test_schema_accessible() {
-        let schema = make_schema();
-        let results = WindowResults::new(schema.clone());
+        let results = WindowResults::new(make_schema());
         assert_eq!(results.schema.fields().len(), 3);
         assert_eq!(results.schema.field(0).name(), "window_id");
-    }
-
-    #[test]
-    fn test_side_output_default() {
-        let so: SideOutput<DroppedLate> = SideOutput::default();
-        assert!(so.is_empty());
-        assert_eq!(so.total_rows(), 0);
     }
 }

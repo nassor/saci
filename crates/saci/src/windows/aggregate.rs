@@ -13,20 +13,19 @@ use arrow_select::take::take;
 
 use crate::error::SaciError;
 
-use super::function::{WindowContext, WindowFunction};
-use super::result::{DroppedLate, SideOutput};
+use super::function::{ReduceAggregate, WindowContext, WindowFunction};
 use super::sliding::{aggregate_output_name, apply_reduce_aggregate};
 use super::system::WindowedSystem;
-use crate::window_spec::WindowSpec;
+use crate::window::WindowSpec;
 
 /// Parameters for aggregating a single window group slice.
 struct SliceParams<'a> {
     schema: &'a Arc<Schema>,
-    /// Sorted input column for `Reduce` aggregates, or the full sorted source
-    /// batch for `Process` functions.
+    /// Sorted input column for `Reduce` aggregates; a placeholder for
+    /// `Process` functions.
     sorted_col: &'a ArrayRef,
-    /// Full sorted source batch (used by `WindowFunction::Process`).
-    sorted_source_batch: &'a RecordBatch,
+    /// Full sorted source batch, built only for `WindowFunction::Process`.
+    sorted_source_batch: Option<&'a RecordBatch>,
     sorted_time_ms: &'a Int64Array,
     win_id: i64,
     key_hash: i64,
@@ -40,28 +39,42 @@ struct SliceParams<'a> {
     window_size_ms: i64,
 }
 
+/// `take` every column of `batch` at `indices`.
+fn take_batch(
+    batch: &RecordBatch,
+    indices: &UInt32Array,
+    what: &str,
+) -> Result<RecordBatch, SaciError> {
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|col| {
+            take(col.as_ref(), indices, None)
+                .map_err(|e| SaciError::generic(format!("{what} take: {e}")))
+        })
+        .collect::<Result<Vec<ArrayRef>, SaciError>>()?;
+    RecordBatch::try_new(batch.schema(), columns)
+        .map_err(|e| SaciError::generic(format!("{what} RecordBatch: {e}")))
+}
+
 impl WindowedSystem {
     /// Advance the watermark from all timestamps in the batch, then partition
     /// rows into:
     ///
     /// - **retained** (on-time + late-but-acceptable): returned as
     ///   `(filtered_batch, filtered_time_ms)`.
-    /// - **dropped** (beyond lateness): collected into `SideOutput<DroppedLate>`.
+    /// - **dropped** (beyond lateness): returned as one batch in the third
+    ///   element.
     ///
     /// When no watermark is configured, all rows are retained unchanged.
     pub(super) fn apply_watermark_filter(
         &self,
         batch: &RecordBatch,
         time_ms: &Int64Array,
-    ) -> Result<(RecordBatch, Int64Array, SideOutput<DroppedLate>), SaciError> {
-        let mut side_output = SideOutput::<DroppedLate>::new();
-
-        let wm_lock = match &self.watermark {
-            None => {
-                // No watermark tracking: pass through unchanged.
-                return Ok((batch.clone(), time_ms.clone(), side_output));
-            }
-            Some(m) => m,
+    ) -> Result<(RecordBatch, Int64Array, Vec<RecordBatch>), SaciError> {
+        let Some(wm_lock) = &self.watermark else {
+            // No watermark tracking: pass through unchanged.
+            return Ok((batch.clone(), time_ms.clone(), Vec::new()));
         };
 
         // Classify rows against the CURRENT (pre-advance) watermark, then
@@ -102,22 +115,11 @@ impl WindowedSystem {
 
         // If nothing is dropped, avoid a copy.
         if drop_indices.is_empty() {
-            return Ok((batch.clone(), time_ms.clone(), side_output));
+            return Ok((batch.clone(), time_ms.clone(), Vec::new()));
         }
 
-        // Build filtered batch for kept rows.
         let keep_arr = UInt32Array::from(keep_indices);
-        let filtered_cols: Result<Vec<ArrayRef>, SaciError> = batch
-            .columns()
-            .iter()
-            .map(|col| {
-                take(col.as_ref(), &keep_arr, None)
-                    .map_err(|e| SaciError::generic(format!("watermark filter take: {e}")))
-            })
-            .collect();
-        let filtered_batch = RecordBatch::try_new(batch.schema(), filtered_cols?)
-            .map_err(|e| SaciError::generic(format!("watermark filter RecordBatch: {e}")))?;
-
+        let filtered_batch = take_batch(batch, &keep_arr, "watermark filter")?;
         let filtered_time = take(time_ms as &dyn Array, &keep_arr, None)
             .map_err(|e| SaciError::generic(format!("watermark filter take time_ms: {e}")))?;
         let filtered_time = filtered_time
@@ -126,21 +128,9 @@ impl WindowedSystem {
             .ok_or_else(|| SaciError::generic("watermark filter downcast time_ms"))?
             .clone();
 
-        // Build side-output batch for dropped rows.
-        let drop_arr = UInt32Array::from(drop_indices);
-        let drop_cols: Result<Vec<ArrayRef>, SaciError> = batch
-            .columns()
-            .iter()
-            .map(|col| {
-                take(col.as_ref(), &drop_arr, None)
-                    .map_err(|e| SaciError::generic(format!("watermark drop take: {e}")))
-            })
-            .collect();
-        let drop_batch = RecordBatch::try_new(batch.schema(), drop_cols?)
-            .map_err(|e| SaciError::generic(format!("watermark drop RecordBatch: {e}")))?;
-        side_output.push(drop_batch);
+        let drop_batch = take_batch(batch, &UInt32Array::from(drop_indices), "watermark drop")?;
 
-        Ok((filtered_batch, filtered_time, side_output))
+        Ok((filtered_batch, filtered_time, vec![drop_batch]))
     }
 
     /// Walk sorted indices and produce one output `RecordBatch` per group.
@@ -199,7 +189,7 @@ impl WindowedSystem {
             let params = SliceParams {
                 schema: &result_schema,
                 sorted_col: &sorted_input_col,
-                sorted_source_batch: &sorted_source_batch,
+                sorted_source_batch: sorted_source_batch.as_ref(),
                 sorted_time_ms,
                 win_id,
                 key_hash,
@@ -232,30 +222,19 @@ impl WindowedSystem {
         Ok((result_schema, on_time_batches, late_batches))
     }
 
-    /// Build the result schema and extract the (already-sorted) input column
-    /// for the aggregate.
+    /// Build the result schema and extract the (already-sorted) aggregate
+    /// input.
     ///
     /// Returns `(result_schema, sorted_input_col, sorted_source_batch)`. For
-    /// `Reduce` variants `sorted_input_col` is the target field in sorted
-    /// order. For `Process` variants it is a placeholder, because the full
-    /// `sorted_source_batch` is what the user function receives.
+    /// `Reduce` variants only the target field is gathered into sorted order
+    /// and no batch is built. For `Process` variants the whole source batch is
+    /// sorted, because that is what the user function receives, and
+    /// `sorted_input_col` is a placeholder.
     fn prepare_aggregate_inputs(
         &self,
         source_batch: &RecordBatch,
         sorted_indices: &UInt32Array,
-    ) -> Result<(Arc<Schema>, ArrayRef, RecordBatch), SaciError> {
-        // Build a sorted copy of the entire source batch for Process functions.
-        let sorted_cols: Result<Vec<ArrayRef>, SaciError> = source_batch
-            .columns()
-            .iter()
-            .map(|col| {
-                take(col.as_ref(), sorted_indices, None)
-                    .map_err(|e| SaciError::generic(format!("WindowedSystem: take error: {e}")))
-            })
-            .collect();
-        let sorted_source_batch = RecordBatch::try_new(source_batch.schema(), sorted_cols?)
-            .map_err(|e| SaciError::generic(format!("WindowedSystem: sorted batch error: {e}")))?;
-
+    ) -> Result<(Arc<Schema>, ArrayRef, Option<RecordBatch>), SaciError> {
         match &self.function {
             WindowFunction::Reduce {
                 input_field,
@@ -264,37 +243,54 @@ impl WindowedSystem {
                 let col_idx = source_batch.schema().index_of(input_field).map_err(|_| {
                     SaciError::generic(format!(
                         "WindowedSystem: input field '{input_field}' not found \
-                                 in component '{}'",
+                         in component '{}'",
                         self.source_component
                     ))
                 })?;
-                let sorted_col = sorted_source_batch.column(col_idx).clone();
-
-                let value_type = sorted_col.data_type().clone();
-                let output_name = aggregate_output_name(*aggregate, input_field);
-                let is_session = matches!(&self.spec, WindowSpec::Session { .. });
-                let mut fields = vec![
-                    Field::new("window_id", DataType::Int64, false),
-                    Field::new("key_hash", DataType::Int64, false),
-                    Field::new(output_name, value_type, true),
-                ];
-                if is_session {
-                    fields.push(Field::new("session_start_ts", DataType::Int64, false));
-                    fields.push(Field::new("session_end_ts", DataType::Int64, false));
-                }
-                let schema = Arc::new(Schema::new(fields));
-                Ok((schema, sorted_col, sorted_source_batch))
+                let sorted_col = take(source_batch.column(col_idx).as_ref(), sorted_indices, None)
+                    .map_err(|e| SaciError::generic(format!("WindowedSystem: take error: {e}")))?;
+                let schema =
+                    self.reduce_schema(*aggregate, input_field, sorted_col.data_type().clone());
+                Ok((schema, sorted_col, None))
             }
             WindowFunction::Process(_) => {
+                let sorted_source_batch =
+                    take_batch(source_batch, sorted_indices, "WindowedSystem: sorted batch")?;
                 // A Process function's output schema comes from the batch it
                 // returns, so the schema here is an empty placeholder.
                 // `sorted_col` is unused on this path; the first column keeps
                 // `SliceParams` holding a valid reference.
                 let placeholder_col = sorted_source_batch.column(0).clone();
-                let placeholder_schema = Arc::new(Schema::empty());
-                Ok((placeholder_schema, placeholder_col, sorted_source_batch))
+                Ok((
+                    Arc::new(Schema::empty()),
+                    placeholder_col,
+                    Some(sorted_source_batch),
+                ))
             }
         }
+    }
+
+    /// The result schema of a `Reduce` aggregate over `input_field`.
+    fn reduce_schema(
+        &self,
+        aggregate: ReduceAggregate,
+        input_field: &str,
+        value_type: DataType,
+    ) -> Arc<Schema> {
+        let mut fields = vec![
+            Field::new("window_id", DataType::Int64, false),
+            Field::new("key_hash", DataType::Int64, false),
+            Field::new(
+                aggregate_output_name(aggregate, input_field),
+                value_type,
+                true,
+            ),
+        ];
+        if matches!(&self.spec, WindowSpec::Session { .. }) {
+            fields.push(Field::new("session_start_ts", DataType::Int64, false));
+            fields.push(Field::new("session_end_ts", DataType::Int64, false));
+        }
+        Arc::new(Schema::new(fields))
     }
 
     /// Aggregate rows `[group_start, group_end)` from the sorted input column.
@@ -336,26 +332,25 @@ impl WindowedSystem {
                 })
             }
             WindowFunction::Process(f) => {
-                let group_len = p.group_end - p.group_start;
-                let group_batch = p.sorted_source_batch.slice(p.group_start, group_len);
+                let group_batch = p
+                    .sorted_source_batch
+                    .expect("prepare_aggregate_inputs sorts the batch for Process")
+                    .slice(p.group_start, p.group_end - p.group_start);
                 f.process(&ctx, &group_batch)
             }
         }
     }
 
-    /// Schema returned when there are no rows to aggregate.
+    /// Schema published when there are no rows to aggregate: the one a
+    /// non-empty run of the same system publishes.
     pub(super) fn empty_result_schema(&self) -> Arc<Schema> {
-        let is_session = matches!(&self.spec, WindowSpec::Session { .. });
-        let mut fields = vec![
-            Field::new("window_id", DataType::Int64, false),
-            Field::new("key_hash", DataType::Int64, false),
-            Field::new("sum_value", DataType::Float64, true),
-        ];
-        if is_session {
-            fields.push(Field::new("session_start_ts", DataType::Int64, false));
-            fields.push(Field::new("session_end_ts", DataType::Int64, false));
+        match &self.function {
+            WindowFunction::Reduce {
+                input_field,
+                aggregate,
+            } => self.reduce_schema(*aggregate, input_field, DataType::Float64),
+            WindowFunction::Process(_) => Arc::new(Schema::empty()),
         }
-        Arc::new(Schema::new(fields))
     }
 }
 
@@ -367,10 +362,8 @@ mod tests {
 
     use crate::dataset::Dataset;
     use crate::system::System;
-    use crate::windows::WindowedSystemBuilder;
     use crate::windows::system::tests::Trade;
 
-    use super::super::function::ReduceAggregate;
     use super::super::result::WindowResults;
 
     async fn world_with_prices(prices: &[f64]) -> Dataset {
@@ -390,25 +383,27 @@ mod tests {
         pipeline
     }
 
+    fn reduce(field: &str, aggregate: ReduceAggregate) -> WindowFunction {
+        WindowFunction::Reduce {
+            input_field: field.to_string(),
+            aggregate,
+        }
+    }
+
     async fn run_aggregate(pipeline: &mut Dataset, aggregate: ReduceAggregate) -> f64 {
-        let sys = WindowedSystemBuilder::new()
-            .source("Trade", "timestamp_ms")
-            .window(WindowSpec::Tumbling {
-                size_ms: 10_000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate,
-            })
-            .build()
-            .unwrap();
+        let sys = WindowedSystem::new_named(
+            "Trade",
+            "timestamp_ms",
+            WindowSpec::tumbling(10_000),
+            reduce("price", aggregate),
+        )
+        .unwrap();
 
         sys.run(pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert_eq!(results.batches.len(), 1, "expected single window group");
-        results.batches[0]
+        assert_eq!(results.on_time.len(), 1, "expected single window group");
+        results.on_time[0]
             .column(2)
             .as_any()
             .downcast_ref::<Float64Array>()
@@ -509,67 +504,51 @@ mod tests {
         );
     }
 
-    /// Mean of [10.0, null, 20.0] must be (10.0 + 20.0) / 2 = 15.0, not
-    /// (10.0 + 20.0) / 3 ≈ 10.0.
-    #[tokio::test]
-    async fn test_mean_excludes_null_values_from_denominator() {
-        use arrow_array::builder::{Float64Builder, Int64Builder};
-
+    /// Runs `Mean` over `prices` (nullable) in one window and returns the
+    /// single result.
+    async fn mean_of(component: &str, prices: Vec<Option<f64>>) -> f64 {
         let schema = Arc::new(Schema::new(vec![
             Field::new("timestamp_ms", DataType::Int64, false),
-            Field::new("price", DataType::Float64, true), // nullable price
+            Field::new("price", DataType::Float64, true),
         ]));
-
-        let mut ts_builder = Int64Builder::new();
-        ts_builder.append_value(100); // all in window 0
-        ts_builder.append_value(200);
-        ts_builder.append_value(300);
-        let ts_array = ts_builder.finish();
-
-        let mut price_builder = Float64Builder::new();
-        price_builder.append_value(10.0);
-        price_builder.append_null(); // must not count in denominator
-        price_builder.append_value(20.0);
-        let price_array = price_builder.finish();
-
+        let ts: Int64Array = (0..prices.len() as i64).map(|i| 100 + i * 100).collect();
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(ts_array) as ArrayRef,
-                Arc::new(price_array) as ArrayRef,
+                Arc::new(ts) as ArrayRef,
+                Arc::new(Float64Array::from(prices)) as ArrayRef,
             ],
         )
         .unwrap();
 
         let mut pipeline = Dataset::new();
-        pipeline.register_schema("NullPriceTrade", schema).unwrap();
-        pipeline
-            .append_record_batch("NullPriceTrade", batch)
-            .unwrap();
+        pipeline.register_schema(component, schema).unwrap();
+        pipeline.append_record_batch(component, batch).unwrap();
 
-        let sys = WindowedSystemBuilder::new()
-            .source("NullPriceTrade", "timestamp_ms")
-            .window(WindowSpec::Tumbling {
-                size_ms: 1000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate: ReduceAggregate::Mean,
-            })
-            .build()
-            .unwrap();
-
+        let sys = WindowedSystem::new_named(
+            component,
+            "timestamp_ms",
+            WindowSpec::tumbling(1000),
+            WindowFunction::mean("price"),
+        )
+        .unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
         let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert_eq!(results.batches.len(), 1, "expected one window group");
-        let mean = results.batches[0]
+        assert_eq!(results.on_time.len(), 1, "expected one window group");
+        results.on_time[0]
             .column(2)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap()
-            .value(0);
+            .value(0)
+    }
+
+    /// Mean of [10.0, null, 20.0] must be (10.0 + 20.0) / 2 = 15.0, not
+    /// (10.0 + 20.0) / 3 ≈ 10.0.
+    #[tokio::test]
+    async fn test_mean_excludes_null_values_from_denominator() {
+        let mean = mean_of("NullPriceTrade", vec![Some(10.0), None, Some(20.0)]).await;
         assert!(
             (mean - 15.0).abs() < 1e-9,
             "expected mean 15.0 (null excluded), got {mean}"
@@ -579,59 +558,7 @@ mod tests {
     /// Mean of all-null values must be NaN (not a divide-by-zero panic).
     #[tokio::test]
     async fn test_mean_all_nulls_returns_nan() {
-        use arrow_array::builder::{Float64Builder, Int64Builder};
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp_ms", DataType::Int64, false),
-            Field::new("price", DataType::Float64, true),
-        ]));
-
-        let mut ts_builder = Int64Builder::new();
-        ts_builder.append_value(100);
-        ts_builder.append_value(200);
-        let ts_array = ts_builder.finish();
-
-        let mut price_builder = Float64Builder::new();
-        price_builder.append_null();
-        price_builder.append_null();
-        let price_array = price_builder.finish();
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(ts_array) as ArrayRef,
-                Arc::new(price_array) as ArrayRef,
-            ],
-        )
-        .unwrap();
-
-        let mut pipeline = Dataset::new();
-        pipeline.register_schema("AllNullPrice", schema).unwrap();
-        pipeline.append_record_batch("AllNullPrice", batch).unwrap();
-
-        let sys = WindowedSystemBuilder::new()
-            .source("AllNullPrice", "timestamp_ms")
-            .window(WindowSpec::Tumbling {
-                size_ms: 1000,
-                offset_ms: 0,
-            })
-            .function(WindowFunction::Reduce {
-                input_field: "price",
-                aggregate: ReduceAggregate::Mean,
-            })
-            .build()
-            .unwrap();
-
-        sys.run(&mut pipeline).await.unwrap();
-
-        let results = pipeline.get_resource::<WindowResults>().unwrap();
-        assert_eq!(results.batches.len(), 1, "expected one window group");
-        let mean = results.batches[0]
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .value(0);
+        let mean = mean_of("AllNullPrice", vec![None, None]).await;
         assert!(
             mean.is_nan(),
             "expected NaN when all values are null, got {mean}"
