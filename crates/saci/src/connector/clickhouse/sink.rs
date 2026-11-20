@@ -68,8 +68,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::SaciError;
-use crate::io::cast_batch;
-use crate::io::sink::Sink;
+use crate::io::{Sink, cast_batch};
 use arrow_array::RecordBatch;
 use arrow_cast::CastOptions;
 use arrow_ipc::writer::StreamWriter;

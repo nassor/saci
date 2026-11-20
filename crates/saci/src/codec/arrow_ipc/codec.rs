@@ -1,4 +1,4 @@
-//! [`ArrowIpcTransformer`]: the `arrow-ipc` format, both surfaces.
+//! [`ArrowIpcCodec`]: the `arrow-ipc` format, both surfaces.
 
 use std::io::{BufReader, BufWriter, Write};
 use std::sync::Arc;
@@ -10,12 +10,13 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema;
 use arrow_select::concat::concat_batches;
 
+use crate::codec::registry::reject_unknown_options;
+use crate::codec::{
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
+    ReadInput,
+};
 use crate::error::SaciError;
 use crate::io::cast_batch;
-use crate::transformer::{
-    BatchReader, BatchWriter, ConfigValue, MessageDecoder, MessageShape, Transformer,
-    TransformerFactory,
-};
 
 /// The `arrow-ipc` byte format: one Arrow IPC stream, whether that stream is a
 /// whole file or one message payload.
@@ -28,23 +29,23 @@ use crate::transformer::{
 /// spooled, so a footer index is never consulted. It would also leave the two
 /// surfaces mutually unreadable.
 #[derive(Default)]
-pub struct ArrowIpcTransformer;
+pub struct ArrowIpcCodec;
 
-impl ArrowIpcTransformer {
+impl ArrowIpcCodec {
     /// Build the format.
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Transformer for ArrowIpcTransformer {
+impl Codec for ArrowIpcCodec {
     fn format(&self) -> &'static str {
         "arrow-ipc"
     }
 
     fn open_reader(
         &self,
-        input: std::fs::File,
+        input: ReadInput,
         declared: Option<Arc<Schema>>,
     ) -> Result<Box<dyn BatchReader>, SaciError> {
         // The schema message is read here, so a handle whose bytes are not an
@@ -106,18 +107,24 @@ impl Transformer for ArrowIpcTransformer {
     fn message_shape(&self) -> Option<MessageShape> {
         Some(MessageShape::PerBatch)
     }
+
+    // The codec writes the stream encapsulation, not the file one.
+    fn media_type(&self) -> Option<&'static str> {
+        Some("application/vnd.apache.arrow.stream")
+    }
 }
 
-/// Factory for [`ArrowIpcTransformer`]. Reads no options.
-pub struct ArrowIpcTransformerFactory;
+/// Factory for [`ArrowIpcCodec`]. Reads no options, so any key is refused.
+pub struct ArrowIpcCodecFactory;
 
-impl TransformerFactory for ArrowIpcTransformerFactory {
+impl CodecFactory for ArrowIpcCodecFactory {
     fn format_name(&self) -> &'static str {
         "arrow-ipc"
     }
 
-    fn build(&self, _options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError> {
-        Ok(Arc::new(ArrowIpcTransformer::new()))
+    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
+        reject_unknown_options("arrow-ipc", options, &[])?;
+        Ok(Arc::new(ArrowIpcCodec::new()))
     }
 }
 
@@ -127,7 +134,7 @@ impl TransformerFactory for ArrowIpcTransformerFactory {
 /// `schema` requires and the batch lacks is an error. Identical fields skip the
 /// rebuild. `safe: false`: a value that does not fit the declared type is an
 /// error, never a silent null.
-fn project(batch: RecordBatch, schema: &Schema) -> Result<RecordBatch, SaciError> {
+fn project(batch: RecordBatch, schema: &Arc<Schema>) -> Result<RecordBatch, SaciError> {
     if batch.schema_ref().fields() == schema.fields() {
         return Ok(batch);
     }
@@ -140,7 +147,7 @@ fn project(batch: RecordBatch, schema: &Schema) -> Result<RecordBatch, SaciError
 }
 
 struct ArrowIpcBatchReader {
-    reader: StreamReader<BufReader<std::fs::File>>,
+    reader: StreamReader<BufReader<ReadInput>>,
     /// What [`BatchReader::schema`] reports: `declared` when the config named
     /// one, the stream's own otherwise.
     schema: Arc<Schema>,
@@ -231,7 +238,7 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use tempfile::NamedTempFile;
 
-    use crate::transformer::ConfigMap;
+    use crate::codec::ConfigMap;
 
     use super::*;
 
@@ -244,9 +251,7 @@ mod tests {
     }
 
     fn encode(batch: &RecordBatch) -> Vec<u8> {
-        let mut payloads = ArrowIpcTransformer::new()
-            .encode_messages(batch)
-            .expect("encode");
+        let mut payloads = ArrowIpcCodec::new().encode_messages(batch).expect("encode");
         assert_eq!(payloads.len(), 1, "arrow-ipc emits one message per batch");
         payloads.remove(0)
     }
@@ -254,7 +259,7 @@ mod tests {
     #[test]
     fn a_payload_round_trips_through_the_decoder() {
         let payload = encode(&batch(vec![7, 8]));
-        let mut decoder = ArrowIpcTransformer::new()
+        let mut decoder = ArrowIpcCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         decoder.push(&payload).expect("push");
@@ -266,7 +271,7 @@ mod tests {
     fn a_window_of_payloads_is_concatenated() {
         let first = encode(&batch(vec![1, 2]));
         let second = encode(&batch(vec![3]));
-        let mut decoder = ArrowIpcTransformer::new()
+        let mut decoder = ArrowIpcCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         decoder.push(&first).expect("first");
@@ -281,7 +286,7 @@ mod tests {
     fn the_decoder_projects_a_payload_carrying_extra_columns() {
         let payload = encode(&wide_batch(vec![1, 2]));
 
-        let mut decoder = ArrowIpcTransformer::new()
+        let mut decoder = ArrowIpcCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         decoder.push(&payload).expect("a superset payload projects");
@@ -300,7 +305,7 @@ mod tests {
         .expect("batch");
         let payload = encode(&sent);
 
-        let mut decoder = ArrowIpcTransformer::new()
+        let mut decoder = ArrowIpcCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         decoder
@@ -315,7 +320,7 @@ mod tests {
     fn the_decoder_refuses_a_payload_missing_a_declared_column() {
         let payload = encode(&batch(vec![1]));
 
-        let mut decoder = ArrowIpcTransformer::new()
+        let mut decoder = ArrowIpcCodec::new()
             .open_message_decoder(wide_schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(&payload) else {
@@ -326,7 +331,7 @@ mod tests {
 
     #[test]
     fn a_payload_that_is_not_an_ipc_stream_is_rejected_by_its_header() {
-        let mut decoder = ArrowIpcTransformer::new()
+        let mut decoder = ArrowIpcCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(b"not an arrow stream") else {
@@ -337,26 +342,44 @@ mod tests {
 
     #[test]
     fn the_factory_builds_the_format_and_reads_no_options() {
-        let transformer = ArrowIpcTransformerFactory
+        let codec = ArrowIpcCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
             .expect("build");
-        assert_eq!(transformer.format(), "arrow-ipc");
-        assert_eq!(transformer.message_shape(), Some(MessageShape::PerBatch));
-        assert_eq!(ArrowIpcTransformerFactory.format_name(), "arrow-ipc");
+        assert_eq!(codec.format(), "arrow-ipc");
+        assert_eq!(codec.message_shape(), Some(MessageShape::PerBatch));
+        assert_eq!(ArrowIpcCodecFactory.format_name(), "arrow-ipc");
     }
 
-    fn write_stream(transformer: &dyn Transformer, batches: &[RecordBatch]) -> NamedTempFile {
-        write_stream_with(transformer, schema(), batches)
+    #[test]
+    fn an_option_the_format_does_not_read_is_a_configuration_error() {
+        let options = crate::codec::from_kdl_str("compression \"zstd\"").expect("parse kdl");
+        let Err(err) = ArrowIpcCodecFactory.build(&options) else {
+            panic!("arrow-ipc reads no options");
+        };
+        assert_eq!(err.category(), "configuration");
+        assert_eq!(err.message(), "arrow-ipc: unknown option 'compression'");
+    }
+
+    #[test]
+    fn the_media_type_is_the_arrow_stream_encapsulation() {
+        assert_eq!(
+            ArrowIpcCodec::new().media_type(),
+            Some("application/vnd.apache.arrow.stream")
+        );
+    }
+
+    fn write_stream(codec: &dyn Codec, batches: &[RecordBatch]) -> NamedTempFile {
+        write_stream_with(codec, schema(), batches)
     }
 
     /// The same, for a stream whose own schema is not the one-column default.
     fn write_stream_with(
-        transformer: &dyn Transformer,
+        codec: &dyn Codec,
         schema: Arc<Schema>,
         batches: &[RecordBatch],
     ) -> NamedTempFile {
         let file = NamedTempFile::new().expect("temp file");
-        let mut writer = transformer
+        let mut writer = codec
             .open_writer(Box::new(file.reopen().expect("reopen for write")), schema)
             .expect("writer opens");
         for batch in batches {
@@ -368,9 +391,9 @@ mod tests {
         file
     }
 
-    fn read_all(transformer: &dyn Transformer, file: &NamedTempFile) -> Vec<RecordBatch> {
-        let mut reader = transformer
-            .open_reader(file.reopen().expect("reopen"), None)
+    fn read_all(codec: &dyn Codec, file: &NamedTempFile) -> Vec<RecordBatch> {
+        let mut reader = codec
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         let mut batches = Vec::new();
         while let Some(batch) = reader.next_batch().expect("read") {
@@ -397,16 +420,16 @@ mod tests {
 
     #[test]
     fn a_write_then_read_round_trip_preserves_every_row() {
-        let transformer = ArrowIpcTransformer::new();
-        let file = write_stream(&transformer, &[batch(vec![1, 2]), batch(vec![3])]);
-        assert_eq!(values(&read_all(&transformer, &file)), vec![1, 2, 3]);
+        let codec = ArrowIpcCodec::new();
+        let file = write_stream(&codec, &[batch(vec![1, 2]), batch(vec![3])]);
+        assert_eq!(values(&read_all(&codec, &file)), vec![1, 2, 3]);
     }
 
     #[test]
     fn one_written_batch_is_one_message_on_the_way_back() {
-        let transformer = ArrowIpcTransformer::new();
-        let file = write_stream(&transformer, &[batch(vec![1, 2]), batch(vec![3])]);
-        let shapes: Vec<usize> = read_all(&transformer, &file)
+        let codec = ArrowIpcCodec::new();
+        let file = write_stream(&codec, &[batch(vec![1, 2]), batch(vec![3])]);
+        let shapes: Vec<usize> = read_all(&codec, &file)
             .iter()
             .map(RecordBatch::num_rows)
             .collect();
@@ -415,10 +438,10 @@ mod tests {
 
     #[test]
     fn the_schema_comes_from_the_stream() {
-        let transformer = ArrowIpcTransformer::new();
-        let file = write_stream(&transformer, &[batch(vec![4])]);
-        let reader = transformer
-            .open_reader(file.reopen().expect("reopen"), None)
+        let codec = ArrowIpcCodec::new();
+        let file = write_stream(&codec, &[batch(vec![4])]);
+        let reader = codec
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         assert_eq!(reader.schema().fields(), schema().fields());
     }
@@ -443,12 +466,12 @@ mod tests {
     #[test]
     fn a_declared_schema_projects_a_wider_stream() {
         let file = write_stream_with(
-            &ArrowIpcTransformer::new(),
+            &ArrowIpcCodec::new(),
             wide_schema(),
             &[wide_batch(vec![1, 2])],
         );
-        let mut reader = ArrowIpcTransformer::new()
-            .open_reader(file.reopen().expect("reopen"), Some(schema()))
+        let mut reader = ArrowIpcCodec::new()
+            .open_reader(file.reopen().expect("reopen").into(), Some(schema()))
             .expect("a declared schema is a projection target");
 
         assert_eq!(reader.schema(), schema(), "the declared schema governs");
@@ -467,10 +490,10 @@ mod tests {
             Field::new("v", DataType::Int64, false),
             Field::new("missing", DataType::Int64, false),
         ]));
-        let file = write_stream(&ArrowIpcTransformer::new(), &[batch(vec![1])]);
+        let file = write_stream(&ArrowIpcCodec::new(), &[batch(vec![1])]);
 
-        let mut reader = ArrowIpcTransformer::new()
-            .open_reader(file.reopen().expect("reopen"), Some(declared))
+        let mut reader = ArrowIpcCodec::new()
+            .open_reader(file.reopen().expect("reopen").into(), Some(declared))
             .expect("the schema message reads; the projection applies per batch");
         let Err(err) = reader.next_batch() else {
             panic!("the stream carries no 'missing' column");
@@ -480,10 +503,10 @@ mod tests {
 
     #[test]
     fn a_run_that_writes_no_batch_still_leaves_a_readable_stream() {
-        let transformer = ArrowIpcTransformer::new();
-        let file = write_stream(&transformer, &[]);
-        let mut reader = transformer
-            .open_reader(file.reopen().expect("reopen"), None)
+        let codec = ArrowIpcCodec::new();
+        let file = write_stream(&codec, &[]);
+        let mut reader = codec
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("the schema message alone is a readable stream");
         assert!(reader.next_batch().expect("read").is_none());
     }
@@ -493,7 +516,8 @@ mod tests {
         let mut file = NamedTempFile::new().expect("temp file");
         file.write_all(b"not an arrow stream").expect("write");
         file.flush().expect("flush");
-        let Err(err) = ArrowIpcTransformer::new().open_reader(file.reopen().expect("reopen"), None)
+        let Err(err) =
+            ArrowIpcCodec::new().open_reader(file.reopen().expect("reopen").into(), None)
         else {
             panic!("a non-IPC handle must be rejected at open");
         };
@@ -502,13 +526,11 @@ mod tests {
 
     #[test]
     fn a_written_stream_decodes_through_the_message_surface() {
-        let transformer = ArrowIpcTransformer::new();
-        let file = write_stream(&transformer, &[batch(vec![5, 6])]);
+        let codec = ArrowIpcCodec::new();
+        let file = write_stream(&codec, &[batch(vec![5, 6])]);
         let bytes = std::fs::read(file.path()).expect("read back the written stream");
 
-        let mut decoder = transformer
-            .open_message_decoder(schema())
-            .expect("decoder opens");
+        let mut decoder = codec.open_message_decoder(schema()).expect("decoder opens");
         decoder.push(&bytes).expect("push the whole stream");
         let decoded = decoder.flush().expect("flush").expect("one batch");
         assert_eq!(values(&[decoded]), vec![5, 6]);
@@ -521,7 +543,36 @@ mod tests {
         file.write_all(&payload).expect("write");
         file.flush().expect("flush");
 
-        let transformer = ArrowIpcTransformer::new();
-        assert_eq!(values(&read_all(&transformer, &file)), vec![9]);
+        let codec = ArrowIpcCodec::new();
+        assert_eq!(values(&read_all(&codec, &file)), vec![9]);
+    }
+
+    #[test]
+    fn an_in_memory_document_reads_the_same_batches_as_a_file() {
+        let codec = ArrowIpcCodec::new();
+        let file = write_stream_with(
+            &codec,
+            wide_schema(),
+            &[wide_batch(vec![1, 2]), wide_batch(vec![3])],
+        );
+        let bytes = std::fs::read(file.path()).expect("read back the written stream");
+
+        for declared in [None, Some(schema())] {
+            let mut from_file = codec
+                .open_reader(file.reopen().expect("reopen").into(), declared.clone())
+                .expect("reader opens");
+            let mut from_memory = codec
+                .open_reader(bytes.clone().into(), declared)
+                .expect("reader opens");
+            assert_eq!(from_file.schema(), from_memory.schema());
+            let mut messages = 0;
+            while let Some(expected) = from_file.next_batch().expect("read") {
+                let actual = from_memory.next_batch().expect("read").expect("a batch");
+                assert_eq!(actual, expected);
+                messages += 1;
+            }
+            assert!(from_memory.next_batch().expect("read").is_none());
+            assert_eq!(messages, 2);
+        }
     }
 }

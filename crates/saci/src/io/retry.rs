@@ -24,8 +24,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 use crate::retry::RetryMode;
 #[cfg(feature = "tracing")]
 use tracing::Instrument as _;

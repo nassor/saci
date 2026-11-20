@@ -21,7 +21,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::s3::config::{S3SourceConfig, SchemaFrom};
 
@@ -57,7 +57,7 @@ const CHANNEL_CAPACITY: usize = 4;
 /// let src = S3Source::new(
 ///     config,
 ///     Arc::new(Schema::empty()),
-///     Arc::new(CsvCodec::new(true)),
+///     Arc::new(CsvCodec::new()),
 /// )
 /// .unwrap();
 /// ```
@@ -230,7 +230,7 @@ impl Source for S3Source {
             };
             let codec = Arc::clone(&self.codec);
             let (mut reader, object_schema) = tokio::task::spawn_blocking(move || {
-                let reader = codec.open_reader(spool, declared_arg)?;
+                let reader = codec.open_reader(spool.into(), declared_arg)?;
                 let schema = reader.schema();
                 Ok::<_, SaciError>((reader, schema))
             })

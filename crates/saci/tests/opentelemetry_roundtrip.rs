@@ -23,8 +23,8 @@ use saci::connector::opentelemetry::{
     OpenTelemetryMetricsSource, OpenTelemetryMetricsSourceConfig, PullMode, SourceModeConfig,
     schema,
 };
-use saci::io::sink::Sink as _;
-use saci::io::source::Source as _;
+use saci::io::Sink as _;
+use saci::io::Source as _;
 use serde_json::json;
 
 /// A canonical batch: one gauge row and one histogram row.

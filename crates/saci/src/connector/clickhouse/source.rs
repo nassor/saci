@@ -4,8 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::error::SaciError;
-use crate::io::cast_batch;
-use crate::io::source::Source;
+use crate::io::{Source, cast_batch};
 use arrow_array::temporal_conversions::{
     date32_to_datetime, date64_to_datetime, timestamp_ms_to_datetime, timestamp_us_to_datetime,
 };

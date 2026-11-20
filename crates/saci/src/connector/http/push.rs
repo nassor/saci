@@ -36,7 +36,7 @@
 //! `auth { bearer }` is set and the request's token is missing or wrong, `413`
 //! for a body over `max_body_bytes`, announced or discovered, `400` for a
 //! document the format could not read and for a body the transport could not
-//! deliver, and `500` only when the spool file could not be written. Every
+//! deliver, and `500` only when the document read task did not finish. Every
 //! error body is the reason as `text/plain`, and a document the format refused
 //! is also sent down the channel so the runner counts it.
 
@@ -58,7 +58,7 @@ use tokio::task::JoinHandle;
 
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::http::client;
 use crate::connector::http::document;
@@ -718,14 +718,6 @@ struct Answer {
     allow: bool,
 }
 
-/// Which side a document that could not be read is the fault of.
-enum ReadFailure {
-    /// The spool file could not be written: this host's, so a `500`.
-    Spool(SaciError),
-    /// The format could not read the document: the client's, so a `400`.
-    Document(SaciError),
-}
-
 /// The token an `authorization: Bearer <token>` header presents.
 ///
 /// RFC 7235 makes the scheme case-insensitive and allows more than one space
@@ -828,18 +820,23 @@ impl Handler {
         let expected = Arc::clone(&self.declared);
         let codec = Arc::clone(&self.codec);
 
-        // Spooling and decoding are blocking: the read surface needs a
-        // seekable file, and a parquet footer read is a seek.
+        // Decoding is blocking: a parquet footer read is a seek. The body is
+        // already whole in memory, so the reader gets it as it is.
         let decoded = tokio::task::spawn_blocking(move || {
-            let spool = document::spool_bytes(WHAT, &body).map_err(ReadFailure::Spool)?;
-            let mut reader =
-                document::open(WHAT, "body", &codec, spool, declared, check, &expected)
-                    .map_err(ReadFailure::Document)?;
+            let mut reader = document::open(
+                WHAT,
+                "body",
+                &codec,
+                Vec::<u8>::from(body).into(),
+                declared,
+                check,
+                &expected,
+            )?;
             let mut batches = Vec::new();
-            while let Some(batch) = reader.next_batch().map_err(ReadFailure::Document)? {
+            while let Some(batch) = reader.next_batch()? {
                 batches.push(batch);
             }
-            Ok::<_, ReadFailure>(batches)
+            Ok::<_, SaciError>(batches)
         })
         .await;
 
@@ -851,16 +848,8 @@ impl Handler {
                     allow: false,
                 };
             }
-            // A spool file this host could not write is this host's fault; a
-            // document the format could not read is the client's.
-            Ok(Err(ReadFailure::Spool(e))) => {
-                return Answer {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    body: e.message().to_string(),
-                    allow: false,
-                };
-            }
-            Ok(Err(ReadFailure::Document(e))) => {
+            // A document the format could not read is the client's fault.
+            Ok(Err(e)) => {
                 self.metrics.error("decode");
                 let body = e.message().to_string();
                 // The runner counts a source error, so a peer sending

@@ -448,11 +448,11 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
         .expect("source node present");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema()).unwrap();
-    let first = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    let first = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("first cycle");
     dataset.clear();
-    let second = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    let second = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("second cycle");
     assert_eq!(first, 100);
@@ -555,14 +555,13 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
     dataset
         .register_schema(CHANGE_COMPONENT, change_schema())
         .unwrap();
-    saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
+    saci::io::read_all(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
         .await
         .expect("first cycle");
     dataset.clear();
-    let caught_up =
-        saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
-            .await
-            .expect("second cycle");
+    let caught_up = saci::io::read_all(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
+        .await
+        .expect("second cycle");
     assert_eq!(caught_up, 0, "the position is stored and nothing is new");
     drop(source);
 

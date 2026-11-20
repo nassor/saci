@@ -24,8 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::{SaciError, SaciResult};
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
 use super::config::{
@@ -60,7 +59,7 @@ const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::wit
      or set 'module'/'library' on the node";
 
 /// Whether a config-driven source is handed to the runner wrapped in
-/// [`RetryingSource`](crate::io::retry::RetryingSource).
+/// [`RetryingSource`](crate::io::RetryingSource).
 ///
 /// Sinks always take their wrapper: a `write_batch` the runner cannot re-drive
 /// is lost rows. A source's answer depends on who owns its error policy.
@@ -547,8 +546,8 @@ impl ServiceBuilder {
     /// [`Inspector`] topology across all of them.
     ///
     /// Every sink is wrapped in a
-    /// [`RetryingSink`](crate::io::retry::RetryingSink). Sources are
-    /// wrapped in a [`RetryingSource`](crate::io::retry::RetryingSource)
+    /// [`RetryingSink`](crate::io::RetryingSink). Sources are
+    /// wrapped in a [`RetryingSource`](crate::io::RetryingSource)
     /// too, except under `run_mode kind="stream"`, where the stream runner's
     /// own re-poll is already the retry loop.
     ///

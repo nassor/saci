@@ -33,7 +33,7 @@ pub fn main() -> ExitCode {
 /// ```no_run
 /// use saci::SaciError;
 /// use saci::connector::{ConfigValue, ConnectorContext, SourceFactory};
-/// use saci::io::source::Source;
+/// use saci::io::Source;
 ///
 /// struct MySourceFactory;
 ///

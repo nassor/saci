@@ -1,8 +1,8 @@
 //! Factory registry for the SACI service layer.
 //!
 //! The registry maps string type names (from the config file) to factory
-//! objects that construct concrete [`Source`](crate::io::source::Source)
-//! and [`Sink`](crate::io::sink::Sink) instances, and format names to the
+//! objects that construct concrete [`Source`](crate::io::Source)
+//! and [`Sink`](crate::io::Sink) instances, and format names to the
 //! [`CodecFactory`] that decodes the bytes those connectors move.
 //!
 //! The runtime itself is supplied directly as a `Box<dyn PipelineRuntime>` or
@@ -148,7 +148,7 @@ mod tests {
     use crate::connector::{ConfigMap, ConnectorContext};
     use crate::error::SaciError;
     #[cfg(feature = "connector-channel")]
-    use crate::io::{sink::Sink, source::Source};
+    use crate::io::{Sink, Source};
     #[cfg(feature = "connector-channel")]
     use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;

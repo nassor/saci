@@ -1,7 +1,7 @@
 //! The channel connector: an in-memory [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! [`ChannelSource`] and [`ChannelSink`] carry `RecordBatch`es over a tokio mpsc
 //! channel, so a pipeline runs end to end without file IO. Each can be built as

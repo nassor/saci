@@ -24,7 +24,7 @@ use common::Server;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, Value};
 use saci::connector::mariadb::MariadbSink;
-use saci::io::sink::Sink;
+use saci::io::Sink;
 
 common::on_every_server!(
     append_writes_every_declared_type_and_reads_back_equal,

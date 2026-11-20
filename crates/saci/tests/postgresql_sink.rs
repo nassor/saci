@@ -22,7 +22,7 @@ use arrow_array::{
 use arrow_schema::Schema;
 use saci::connector::from_kdl_str;
 use saci::connector::postgresql::{PostgresSink, PostgresSinkConfig};
-use saci::io::sink::Sink;
+use saci::io::Sink;
 use serde::Deserialize as _;
 
 fn sink(dsn: &str, body: &str) -> PostgresSink {

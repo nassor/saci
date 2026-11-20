@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use saci::connector::{ConfigValue, ConnectorContext};
 use saci::error::SaciError;
-use saci::io::source::Source;
+use saci::io::Source;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;

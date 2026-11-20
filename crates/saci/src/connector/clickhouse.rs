@@ -1,7 +1,7 @@
 //! The ClickHouse connector: a ClickHouse [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! Both halves are declarative: the Arrow schema is written in the service
 //! configuration as `schema_fields`, not introspected at build time, because

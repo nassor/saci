@@ -62,8 +62,7 @@ use tokio_util::sync::CancellationToken;
 use crate::connector::{ConfigMap, ConfigValue, parse_schema_fields};
 use crate::error::{SaciError, SaciResult};
 use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 
 use super::config::{DlqBlock, DlqReplayPoint, RetryConfig, ServiceConfig, WorkflowSpec};
 use super::heal::{HealSettings, Rebuilder};

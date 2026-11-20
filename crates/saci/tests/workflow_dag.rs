@@ -22,7 +22,7 @@ use std::sync::Arc;
 use arrow_array::UInt64Array;
 use saci::component::Component;
 use saci::connector::file::FileSource;
-use saci::io::source::Source;
+use saci::io::Source;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
@@ -136,7 +136,7 @@ async fn a_two_processor_link_runs_two_real_wasmtime_instances() {
     // rather than the config merely parsing.
     let mut readback = FileSource::open(
         &output_path,
-        Arc::new(CsvCodec::new(true)),
+        Arc::new(CsvCodec::new()),
         Some(Ping::schema()),
     )
     .expect("the sink wrote a readable csv file");

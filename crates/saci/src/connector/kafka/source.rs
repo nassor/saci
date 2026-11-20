@@ -32,7 +32,7 @@ use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use tokio::time::{Instant, timeout_at};
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::kafka::admin::ensure_topics;
 use crate::connector::kafka::config::{KafkaSourceConfig, client_config};

@@ -1,4 +1,4 @@
-//! [`AvroTransformer`]: the `avro` format, both surfaces.
+//! [`AvroCodec`]: the `avro` format, both surfaces.
 
 use std::io::{BufReader, BufWriter, Write};
 use std::sync::Arc;
@@ -15,40 +15,75 @@ use arrow_cast::CastOptions;
 use arrow_schema::Schema;
 use arrow_select::concat::concat_batches;
 
+use crate::codec::registry::reject_unknown_options;
+use crate::codec::{
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
+    ReadInput,
+};
 use crate::error::SaciError;
 use crate::io::cast_batch;
-use crate::transformer::{
-    BatchReader, BatchWriter, ConfigValue, MessageDecoder, MessageShape, Transformer,
-    TransformerFactory,
-};
 
-/// The `avro` byte format.
-#[derive(Debug, Default)]
-pub struct AvroTransformer {
-    compression: Option<CompressionCodec>,
-    schema_id: Option<u32>,
+/// The block compression an Avro object container file is written with.
+///
+/// A reader needs no setting: the codec is recorded in the file header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvroCompression {
+    /// Deflate (RFC 1951).
+    Deflate,
+    /// Snappy.
+    Snappy,
+    /// Zstandard.
+    Zstd,
 }
 
-impl AvroTransformer {
-    /// Build the format. `compression` applies to the object container file
-    /// writer; `schema_id` is the Confluent registry id, which messages are
-    /// written under and, on the read side, the one Confluent id that resolves.
-    pub fn new(compression: Option<CompressionCodec>, schema_id: Option<u32>) -> Self {
-        Self {
-            compression,
-            schema_id,
+impl AvroCompression {
+    /// The `arrow-avro` block codec this setting selects.
+    fn block_codec(self) -> CompressionCodec {
+        match self {
+            Self::Deflate => CompressionCodec::Deflate,
+            Self::Snappy => CompressionCodec::Snappy,
+            Self::Zstd => CompressionCodec::ZStandard,
         }
     }
 }
 
-impl Transformer for AvroTransformer {
+/// The `avro` byte format.
+#[derive(Debug, Default)]
+pub struct AvroCodec {
+    compression: Option<AvroCompression>,
+    schema_id: Option<u32>,
+}
+
+impl AvroCodec {
+    /// Build the format: uncompressed container files, and messages written
+    /// in single-object framing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Compress the blocks of the object container file the writer produces.
+    /// Reading needs no setting.
+    pub fn compression(mut self, compression: AvroCompression) -> Self {
+        self.compression = Some(compression);
+        self
+    }
+
+    /// Set the Confluent registry id: messages are written under it and, on
+    /// the read side, it is the one Confluent id that resolves.
+    pub fn schema_id(mut self, schema_id: u32) -> Self {
+        self.schema_id = Some(schema_id);
+        self
+    }
+}
+
+impl Codec for AvroCodec {
     fn format(&self) -> &'static str {
         "avro"
     }
 
     fn open_reader(
         &self,
-        input: std::fs::File,
+        input: ReadInput,
         declared: Option<Arc<Schema>>,
     ) -> Result<Box<dyn BatchReader>, SaciError> {
         // `build` needs `BufRead`, and it reads the container header before any
@@ -78,7 +113,7 @@ impl Transformer for AvroTransformer {
         // The container header goes out here, so a run that writes no batch
         // still leaves a valid, readable, zero-row file.
         let writer = WriterBuilder::new(schema.as_ref().clone())
-            .with_compression(self.compression)
+            .with_compression(self.compression.map(AvroCompression::block_codec))
             .build::<_, AvroOcfFormat>(BufWriter::new(output))
             .map_err(|e| SaciError::generic(format!("avro: writer init error: {e}")))?;
         Ok(Box::new(AvroBatchWriter { writer }))
@@ -123,9 +158,15 @@ impl Transformer for AvroTransformer {
     fn message_shape(&self) -> Option<MessageShape> {
         Some(MessageShape::PerRow)
     }
+
+    // The Avro specification's own HTTP media type; no IANA registration
+    // exists for the container file.
+    fn media_type(&self) -> Option<&'static str> {
+        Some("avro/binary")
+    }
 }
 
-/// Factory for [`AvroTransformer`].
+/// Factory for [`AvroCodec`].
 ///
 /// `options`:
 /// - `compression` (string, optional, default `"null"`): the object container
@@ -137,46 +178,42 @@ impl Transformer for AvroTransformer {
 ///   decode either way.
 ///
 /// Both sit on one node: `options compression="zstd" schema_id=42`.
-pub struct AvroTransformerFactory;
+pub struct AvroCodecFactory;
 
-impl TransformerFactory for AvroTransformerFactory {
+impl CodecFactory for AvroCodecFactory {
     fn format_name(&self) -> &'static str {
         "avro"
     }
 
-    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError> {
-        let compression = match options.get("compression") {
-            None => None,
-            Some(value) => {
-                let raw = value.as_str().ok_or_else(|| {
-                    SaciError::configuration("avro: option 'compression' must be a string")
-                })?;
-                match raw {
-                    "null" => None,
-                    "deflate" => Some(CompressionCodec::Deflate),
-                    "snappy" => Some(CompressionCodec::Snappy),
-                    "zstd" => Some(CompressionCodec::ZStandard),
-                    _ => {
-                        return Err(SaciError::configuration(
-                            "avro: option 'compression' must be one of null, deflate, \
-                             snappy, zstd",
-                        ));
-                    }
+    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
+        reject_unknown_options("avro", options, &["compression", "schema_id"])?;
+        let mut codec = AvroCodec::new();
+        if let Some(value) = options.get("compression") {
+            let raw = value.as_str().ok_or_else(|| {
+                SaciError::configuration("avro: option 'compression' must be a string")
+            })?;
+            match raw {
+                "null" => {}
+                "deflate" => codec = codec.compression(AvroCompression::Deflate),
+                "snappy" => codec = codec.compression(AvroCompression::Snappy),
+                "zstd" => codec = codec.compression(AvroCompression::Zstd),
+                _ => {
+                    return Err(SaciError::configuration(
+                        "avro: option 'compression' must be one of null, deflate, \
+                         snappy, zstd",
+                    ));
                 }
             }
-        };
-        let schema_id = match options.get("schema_id") {
-            None => None,
-            Some(value) => {
-                let raw = value.as_i64().ok_or_else(|| {
-                    SaciError::configuration("avro: option 'schema_id' must be an integer")
-                })?;
-                Some(u32::try_from(raw).map_err(|_| {
-                    SaciError::configuration("avro: option 'schema_id' must fit in a u32")
-                })?)
-            }
-        };
-        Ok(Arc::new(AvroTransformer::new(compression, schema_id)))
+        }
+        if let Some(value) = options.get("schema_id") {
+            let raw = value.as_i64().ok_or_else(|| {
+                SaciError::configuration("avro: option 'schema_id' must be an integer")
+            })?;
+            codec = codec.schema_id(u32::try_from(raw).map_err(|_| {
+                SaciError::configuration("avro: option 'schema_id' must fit in a u32")
+            })?);
+        }
+        Ok(Arc::new(codec))
     }
 }
 
@@ -186,7 +223,7 @@ impl TransformerFactory for AvroTransformerFactory {
 /// `schema` requires and the batch lacks is an error. Identical fields skip the
 /// rebuild. `safe: false`: a value that does not fit the declared type is an
 /// error, never a silent null.
-fn project(batch: RecordBatch, schema: &Schema) -> Result<RecordBatch, SaciError> {
+fn project(batch: RecordBatch, schema: &Arc<Schema>) -> Result<RecordBatch, SaciError> {
     if batch.schema_ref().fields() == schema.fields() {
         return Ok(batch);
     }
@@ -199,7 +236,7 @@ fn project(batch: RecordBatch, schema: &Schema) -> Result<RecordBatch, SaciError
 }
 
 struct AvroBatchReader {
-    reader: arrow_avro::reader::Reader<BufReader<std::fs::File>>,
+    reader: arrow_avro::reader::Reader<BufReader<ReadInput>>,
     /// What [`BatchReader::schema`] reports: `declared` when the config named
     /// one, the file's own otherwise.
     schema: Arc<Schema>,
@@ -462,21 +499,21 @@ mod tests {
     }
 
     fn options(source: &str) -> ConfigValue {
-        crate::transformer::from_kdl_str(source).expect("parse kdl")
+        crate::codec::from_kdl_str(source).expect("parse kdl")
     }
 
-    fn write_ocf(transformer: &dyn Transformer, batches: &[RecordBatch]) -> NamedTempFile {
-        write_ocf_with(transformer, schema(), batches)
+    fn write_ocf(codec: &dyn Codec, batches: &[RecordBatch]) -> NamedTempFile {
+        write_ocf_with(codec, schema(), batches)
     }
 
     /// The same, for a file whose own schema is not the two-column default.
     fn write_ocf_with(
-        transformer: &dyn Transformer,
+        codec: &dyn Codec,
         schema: Arc<Schema>,
         batches: &[RecordBatch],
     ) -> NamedTempFile {
         let file = NamedTempFile::new().expect("temp file");
-        let mut writer = transformer
+        let mut writer = codec
             .open_writer(Box::new(file.reopen().expect("reopen for write")), schema)
             .expect("writer opens");
         for batch in batches {
@@ -486,9 +523,9 @@ mod tests {
         file
     }
 
-    fn read_all(transformer: &dyn Transformer, file: &NamedTempFile) -> Vec<RecordBatch> {
-        let mut reader = transformer
-            .open_reader(file.reopen().expect("reopen"), None)
+    fn read_all(codec: &dyn Codec, file: &NamedTempFile) -> Vec<RecordBatch> {
+        let mut reader = codec
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         let mut batches = Vec::new();
         while let Some(batch) = reader.next_batch().expect("read") {
@@ -524,19 +561,19 @@ mod tests {
 
     #[test]
     fn a_write_then_read_round_trip_preserves_every_row() {
-        let transformer = AvroTransformer::default();
-        let file = write_ocf(&transformer, &[batch(2), batch(3)]);
-        let (ids, totals) = columns(&read_all(&transformer, &file));
+        let codec = AvroCodec::default();
+        let file = write_ocf(&codec, &[batch(2), batch(3)]);
+        let (ids, totals) = columns(&read_all(&codec, &file));
         assert_eq!(ids, vec![0, 1, 0, 1, 2]);
         assert_eq!(totals, vec![0.0, 1.5, 0.0, 1.5, 3.0]);
     }
 
     #[test]
     fn the_schema_comes_from_the_file() {
-        let transformer = AvroTransformer::default();
-        let file = write_ocf(&transformer, &[batch(4)]);
-        let reader = transformer
-            .open_reader(file.reopen().expect("reopen"), None)
+        let codec = AvroCodec::default();
+        let file = write_ocf(&codec, &[batch(4)]);
+        let reader = codec
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         let schema = reader.schema();
         assert_eq!(schema.field(0).name(), "id");
@@ -571,9 +608,9 @@ mod tests {
 
     #[test]
     fn a_declared_schema_projects_a_wider_file() {
-        let file = write_ocf_with(&AvroTransformer::default(), wide_schema(), &[wide_batch(3)]);
-        let mut reader = AvroTransformer::default()
-            .open_reader(file.reopen().expect("reopen"), Some(schema()))
+        let file = write_ocf_with(&AvroCodec::default(), wide_schema(), &[wide_batch(3)]);
+        let mut reader = AvroCodec::default()
+            .open_reader(file.reopen().expect("reopen").into(), Some(schema()))
             .expect("a declared schema is a projection target");
 
         assert_eq!(reader.schema(), schema(), "the declared schema governs");
@@ -596,10 +633,10 @@ mod tests {
             vec![Arc::new(Int8Array::from(vec![1i8, 2, 3]))],
         )
         .expect("batch");
-        let file = write_ocf_with(&AvroTransformer::default(), narrow_schema(), &[sent]);
+        let file = write_ocf_with(&AvroCodec::default(), narrow_schema(), &[sent]);
 
-        let mut reader = AvroTransformer::default()
-            .open_reader(file.reopen().expect("reopen"), Some(narrow_schema()))
+        let mut reader = AvroCodec::default()
+            .open_reader(file.reopen().expect("reopen").into(), Some(narrow_schema()))
             .expect("reader opens");
         let batch = reader.next_batch().expect("read").expect("one batch");
         assert_eq!(batch.schema(), narrow_schema());
@@ -620,10 +657,10 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("missing", DataType::Int64, false),
         ]));
-        let file = write_ocf(&AvroTransformer::default(), &[batch(1)]);
+        let file = write_ocf(&AvroCodec::default(), &[batch(1)]);
 
-        let mut reader = AvroTransformer::default()
-            .open_reader(file.reopen().expect("reopen"), Some(declared))
+        let mut reader = AvroCodec::default()
+            .open_reader(file.reopen().expect("reopen").into(), Some(declared))
             .expect("the container opens; the projection applies per batch");
         let Err(err) = reader.next_batch() else {
             panic!("the file carries no 'missing' column");
@@ -633,61 +670,90 @@ mod tests {
 
     #[test]
     fn a_run_that_writes_no_batch_still_leaves_a_readable_file() {
-        let transformer = AvroTransformer::default();
-        let file = write_ocf(&transformer, &[]);
-        let mut reader = transformer
-            .open_reader(file.reopen().expect("reopen"), None)
+        let codec = AvroCodec::default();
+        let file = write_ocf(&codec, &[]);
+        let mut reader = codec
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("the header alone is a readable file");
         assert!(reader.next_batch().expect("read").is_none());
     }
 
     #[test]
     fn a_deflate_file_round_trips() {
-        let transformer = AvroTransformer::new(Some(CompressionCodec::Deflate), None);
-        let file = write_ocf(&transformer, &[batch(64)]);
-        // The codec comes from the header, so the reader needs none of its own.
-        let (ids, _) = columns(&read_all(&AvroTransformer::default(), &file));
+        let codec = AvroCodec::new().compression(AvroCompression::Deflate);
+        let file = write_ocf(&codec, &[batch(64)]);
+        // The compression codec comes from the header, so the reader needs none of its own.
+        let (ids, _) = columns(&read_all(&AvroCodec::default(), &file));
         assert_eq!(ids, (0..64).collect::<Vec<_>>());
     }
 
     #[test]
     fn a_snappy_file_round_trips() {
-        let transformer = AvroTransformer::new(Some(CompressionCodec::Snappy), None);
-        let file = write_ocf(&transformer, &[batch(64)]);
-        let (ids, _) = columns(&read_all(&AvroTransformer::default(), &file));
+        let codec = AvroCodec::new().compression(AvroCompression::Snappy);
+        let file = write_ocf(&codec, &[batch(64)]);
+        let (ids, _) = columns(&read_all(&AvroCodec::default(), &file));
         assert_eq!(ids, (0..64).collect::<Vec<_>>());
     }
 
     #[test]
     fn a_zstd_file_round_trips() {
-        let transformer = AvroTransformer::new(Some(CompressionCodec::ZStandard), None);
-        let file = write_ocf(&transformer, &[batch(64)]);
-        let (ids, _) = columns(&read_all(&AvroTransformer::default(), &file));
+        let codec = AvroCodec::new().compression(AvroCompression::Zstd);
+        let file = write_ocf(&codec, &[batch(64)]);
+        let (ids, _) = columns(&read_all(&AvroCodec::default(), &file));
         assert_eq!(ids, (0..64).collect::<Vec<_>>());
     }
 
     #[test]
+    fn an_in_memory_document_reads_the_same_batches_as_a_file() {
+        let codec = AvroCodec::new().compression(AvroCompression::Deflate);
+        let file = write_ocf(&codec, &[batch(16), batch(8)]);
+        let bytes = std::fs::read(file.path()).expect("read back");
+
+        let from_file = read_all(&AvroCodec::new(), &file);
+        let mut reader = AvroCodec::new()
+            .open_reader(bytes.clone().into(), None)
+            .expect("reader opens");
+        let mut from_memory = Vec::new();
+        while let Some(batch) = reader.next_batch().expect("read") {
+            from_memory.push(batch);
+        }
+        assert_eq!(
+            from_file.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            24
+        );
+        assert_eq!(from_file, from_memory);
+
+        // A declared schema projects the memory variant the way it does a file.
+        let projected = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut reader = AvroCodec::new()
+            .open_reader(bytes.into(), Some(Arc::clone(&projected)))
+            .expect("reader opens");
+        let first = reader.next_batch().expect("read").expect("one batch");
+        assert_eq!(first.schema(), projected);
+    }
+
+    #[test]
     fn the_factory_reads_compression_and_schema_id_off_its_options_table() {
-        let transformer = AvroTransformerFactory
+        let codec = AvroCodecFactory
             .build(&options("compression \"zstd\"\nschema_id 42\n"))
             .expect("build");
-        assert_eq!(transformer.format(), "avro");
-        assert_eq!(AvroTransformerFactory.format_name(), "avro");
+        assert_eq!(codec.format(), "avro");
+        assert_eq!(AvroCodecFactory.format_name(), "avro");
 
-        // The codec reaches the container file header.
-        let file = write_ocf(transformer.as_ref(), &[batch(64)]);
-        let (ids, _) = columns(&read_all(&AvroTransformer::default(), &file));
+        // The compression codec reaches the container file header.
+        let file = write_ocf(codec.as_ref(), &[batch(64)]);
+        let (ids, _) = columns(&read_all(&AvroCodec::default(), &file));
         assert_eq!(ids, (0..64).collect::<Vec<_>>());
 
         // The registry id reaches every payload's prefix.
-        let payloads = transformer.encode_messages(&batch(1)).expect("encode");
+        let payloads = codec.encode_messages(&batch(1)).expect("encode");
         assert_eq!(payloads[0][0], 0x00);
         assert_eq!(&payloads[0][1..5], &42u32.to_be_bytes());
     }
 
     #[test]
     fn an_unsupported_compression_is_a_configuration_error() {
-        let Err(err) = AvroTransformerFactory.build(&options("compression \"bzip2\"")) else {
+        let Err(err) = AvroCodecFactory.build(&options("compression \"bzip2\"")) else {
             panic!("bzip2 is not a codec this build can write");
         };
         assert_eq!(err.category(), "configuration");
@@ -699,7 +765,7 @@ mod tests {
 
     #[test]
     fn a_non_string_compression_is_a_configuration_error() {
-        let Err(err) = AvroTransformerFactory.build(&options("compression 7")) else {
+        let Err(err) = AvroCodecFactory.build(&options("compression 7")) else {
             panic!("compression must be a string");
         };
         assert_eq!(err.category(), "configuration");
@@ -708,7 +774,7 @@ mod tests {
 
     #[test]
     fn a_non_integer_schema_id_is_a_configuration_error() {
-        let Err(err) = AvroTransformerFactory.build(&options("schema_id \"42\"")) else {
+        let Err(err) = AvroCodecFactory.build(&options("schema_id \"42\"")) else {
             panic!("schema_id must be an integer");
         };
         assert_eq!(err.category(), "configuration");
@@ -717,7 +783,7 @@ mod tests {
 
     #[test]
     fn a_schema_id_wider_than_u32_is_a_configuration_error() {
-        let Err(err) = AvroTransformerFactory.build(&options("schema_id 4294967296")) else {
+        let Err(err) = AvroCodecFactory.build(&options("schema_id 4294967296")) else {
             panic!("a Confluent registry id is a u32");
         };
         assert_eq!(err.category(), "configuration");
@@ -725,10 +791,24 @@ mod tests {
     }
 
     #[test]
+    fn an_option_the_format_does_not_read_is_a_configuration_error() {
+        let Err(err) = AvroCodecFactory.build(&options("schema_ids 42")) else {
+            panic!("a misspelled option must not be dropped");
+        };
+        assert_eq!(err.category(), "configuration");
+        assert_eq!(err.message(), "avro: unknown option 'schema_ids'");
+    }
+
+    #[test]
+    fn the_media_type_is_the_avro_specifications() {
+        assert_eq!(AvroCodec::new().media_type(), Some("avro/binary"));
+    }
+
+    #[test]
     fn encoding_emits_one_message_per_row() {
-        let transformer = AvroTransformer::default();
-        assert_eq!(transformer.message_shape(), Some(MessageShape::PerRow));
-        let payloads = transformer.encode_messages(&batch(3)).expect("encode");
+        let codec = AvroCodec::default();
+        assert_eq!(codec.message_shape(), Some(MessageShape::PerRow));
+        let payloads = codec.encode_messages(&batch(3)).expect("encode");
         assert_eq!(payloads.len(), 3);
         for payload in &payloads {
             assert_eq!(&payload[..2], &[0xC3, 0x01], "single-object magic");
@@ -737,11 +817,9 @@ mod tests {
 
     #[test]
     fn a_window_of_messages_decodes_into_one_batch() {
-        let transformer = AvroTransformer::default();
-        let payloads = transformer.encode_messages(&batch(3)).expect("encode");
-        let mut decoder = transformer
-            .open_message_decoder(schema())
-            .expect("decoder opens");
+        let codec = AvroCodec::default();
+        let payloads = codec.encode_messages(&batch(3)).expect("encode");
+        let mut decoder = codec.open_message_decoder(schema()).expect("decoder opens");
         for payload in &payloads {
             decoder.push(payload).expect("push");
         }
@@ -758,11 +836,9 @@ mod tests {
 
     #[test]
     fn a_window_wider_than_one_decoder_batch_decodes_into_one_batch() {
-        let transformer = AvroTransformer::default();
-        let payloads = transformer.encode_messages(&batch(2_500)).expect("encode");
-        let mut decoder = transformer
-            .open_message_decoder(schema())
-            .expect("decoder opens");
+        let codec = AvroCodec::default();
+        let payloads = codec.encode_messages(&batch(2_500)).expect("encode");
+        let mut decoder = codec.open_message_decoder(schema()).expect("decoder opens");
         for payload in &payloads {
             decoder.push(payload).expect("push");
         }
@@ -778,15 +854,13 @@ mod tests {
 
     #[test]
     fn a_confluent_framed_payload_carries_the_schema_id() {
-        let transformer = AvroTransformer::new(None, Some(42));
-        let payloads = transformer.encode_messages(&batch(2)).expect("encode");
+        let codec = AvroCodec::new().schema_id(42);
+        let payloads = codec.encode_messages(&batch(2)).expect("encode");
         for payload in &payloads {
             assert_eq!(payload[0], 0x00, "Confluent magic");
             assert_eq!(&payload[1..5], &42u32.to_be_bytes());
         }
-        let mut decoder = transformer
-            .open_message_decoder(schema())
-            .expect("decoder opens");
+        let mut decoder = codec.open_message_decoder(schema()).expect("decoder opens");
         for payload in &payloads {
             decoder.push(payload).expect("push");
         }
@@ -797,8 +871,8 @@ mod tests {
 
     #[test]
     fn a_mixed_framing_window_decodes_in_arrival_order() {
-        let single_object = AvroTransformer::default();
-        let confluent = AvroTransformer::new(None, Some(7));
+        let single_object = AvroCodec::default();
+        let confluent = AvroCodec::new().schema_id(7);
 
         let first = single_object
             .encode_messages(&one_row(1))
@@ -826,11 +900,12 @@ mod tests {
 
     #[test]
     fn a_confluent_payload_without_a_schema_id_names_the_option() {
-        let payload = AvroTransformer::new(None, Some(7))
+        let payload = AvroCodec::new()
+            .schema_id(7)
             .encode_messages(&one_row(1))
             .expect("encode")
             .remove(0);
-        let mut decoder = AvroTransformer::default()
+        let mut decoder = AvroCodec::default()
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(&payload) else {
@@ -842,11 +917,13 @@ mod tests {
 
     #[test]
     fn an_unknown_confluent_id_is_a_decode_error() {
-        let payload = AvroTransformer::new(None, Some(9))
+        let payload = AvroCodec::new()
+            .schema_id(9)
             .encode_messages(&one_row(1))
             .expect("encode")
             .remove(0);
-        let mut decoder = AvroTransformer::new(None, Some(7))
+        let mut decoder = AvroCodec::new()
+            .schema_id(7)
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(&payload) else {
@@ -857,7 +934,7 @@ mod tests {
 
     #[test]
     fn a_payload_that_is_not_framed_is_a_decode_error() {
-        let mut decoder = AvroTransformer::default()
+        let mut decoder = AvroCodec::default()
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(b"not avro") else {
@@ -868,7 +945,7 @@ mod tests {
 
     #[test]
     fn an_empty_payload_is_a_decode_error() {
-        let mut decoder = AvroTransformer::default()
+        let mut decoder = AvroCodec::default()
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(b"") else {
@@ -884,14 +961,14 @@ mod tests {
 
     #[test]
     fn a_declared_type_narrower_than_avro_is_cast_back() {
-        let transformer = AvroTransformer::default();
+        let codec = AvroCodec::default();
         let sent = RecordBatch::try_new(
             narrow_schema(),
             vec![Arc::new(Int8Array::from(vec![1i8, 2, 3]))],
         )
         .expect("batch");
-        let payloads = transformer.encode_messages(&sent).expect("encode");
-        let mut decoder = transformer
+        let payloads = codec.encode_messages(&sent).expect("encode");
+        let mut decoder = codec
             .open_message_decoder(narrow_schema())
             .expect("decoder opens");
         for payload in &payloads {
@@ -917,9 +994,9 @@ mod tests {
         let wide = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let sent =
             RecordBatch::try_new(wide, vec![Arc::new(Int32Array::from(vec![400]))]).expect("batch");
-        let transformer = AvroTransformer::default();
-        let payloads = transformer.encode_messages(&sent).expect("encode");
-        let mut decoder = transformer
+        let codec = AvroCodec::default();
+        let payloads = codec.encode_messages(&sent).expect("encode");
+        let mut decoder = codec
             .open_message_decoder(narrow_schema())
             .expect("decoder opens");
         for payload in &payloads {

@@ -73,7 +73,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
     Int8Array, Int16Array, Int32Array, Int64Array, RecordBatch, StringArray,

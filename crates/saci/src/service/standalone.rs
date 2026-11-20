@@ -137,8 +137,7 @@ use crate::dataset::Dataset;
 use crate::error::SaciError;
 use crate::inspector::Inspector;
 use crate::inspector_wire::{FlowDecision, FlowDecisionKind};
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
 use super::builder::{BuiltNodeKind, BuiltService};

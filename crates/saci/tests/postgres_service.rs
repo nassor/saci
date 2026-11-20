@@ -289,11 +289,11 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
         .expect("source node present");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema()).unwrap();
-    let first = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    let first = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("first cycle");
     dataset.clear();
-    let second = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    let second = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("second cycle");
     assert_eq!(first, 100);

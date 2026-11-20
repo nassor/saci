@@ -1,4 +1,4 @@
-//! [`NdjsonTransformer`]: the `ndjson` format, both surfaces.
+//! [`NdjsonCodec`]: the `ndjson` format, both surfaces.
 
 use std::io::{BufReader, BufWriter, Write};
 use std::sync::Arc;
@@ -8,43 +8,52 @@ use arrow_json::ReaderBuilder;
 use arrow_json::writer::LineDelimitedWriter;
 use arrow_schema::Schema;
 
-use crate::error::SaciError;
-use crate::transformer::{
-    BatchReader, BatchWriter, ConfigValue, MessageDecoder, MessageShape, Transformer,
-    TransformerFactory,
+use crate::codec::registry::reject_unknown_options;
+use crate::codec::{
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
+    ReadInput,
 };
+use crate::error::SaciError;
 
 /// Records inspected when inferring a schema, unless `infer_max` says
 /// otherwise.
 const DEFAULT_INFER_MAX: usize = 1024;
 
 /// The `ndjson` byte format: one JSON object per line.
-pub struct NdjsonTransformer {
+pub struct NdjsonCodec {
     infer_max: usize,
 }
 
-impl NdjsonTransformer {
-    /// Build the format, inspecting at most `infer_max` records when it has to
-    /// infer a schema.
-    pub fn new(infer_max: usize) -> Self {
-        Self { infer_max }
+impl NdjsonCodec {
+    /// Build the format, inspecting 1024 records when it has to infer a schema.
+    pub fn new() -> Self {
+        Self {
+            infer_max: DEFAULT_INFER_MAX,
+        }
+    }
+
+    /// Set how many records are inspected when a schema has to be inferred
+    /// (default 1024).
+    pub fn infer_max(mut self, infer_max: usize) -> Self {
+        self.infer_max = infer_max;
+        self
     }
 }
 
-impl Default for NdjsonTransformer {
+impl Default for NdjsonCodec {
     fn default() -> Self {
-        Self::new(DEFAULT_INFER_MAX)
+        Self::new()
     }
 }
 
-impl Transformer for NdjsonTransformer {
+impl Codec for NdjsonCodec {
     fn format(&self) -> &'static str {
         "ndjson"
     }
 
     fn open_reader(
         &self,
-        input: std::fs::File,
+        input: ReadInput,
         declared: Option<Arc<Schema>>,
     ) -> Result<Box<dyn BatchReader>, SaciError> {
         let mut buffered = BufReader::new(input);
@@ -108,41 +117,44 @@ impl Transformer for NdjsonTransformer {
     fn message_shape(&self) -> Option<MessageShape> {
         Some(MessageShape::PerRow)
     }
+
+    fn media_type(&self) -> Option<&'static str> {
+        Some("application/x-ndjson")
+    }
 }
 
-/// Factory for [`NdjsonTransformer`].
+/// Factory for [`NdjsonCodec`].
 ///
 /// `options`:
 /// - `infer_max` (integer, optional, default `1024`): records inspected when
 ///   no schema is declared, written `options infer_max=4096`.
-pub struct NdjsonTransformerFactory;
+pub struct NdjsonCodecFactory;
 
-impl TransformerFactory for NdjsonTransformerFactory {
+impl CodecFactory for NdjsonCodecFactory {
     fn format_name(&self) -> &'static str {
         "ndjson"
     }
 
-    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError> {
-        let infer_max = match options.get("infer_max") {
-            None => DEFAULT_INFER_MAX,
-            Some(value) => {
-                let raw = value.as_i64().ok_or_else(|| {
-                    SaciError::configuration("ndjson: option 'infer_max' must be an integer")
-                })?;
-                if raw < 1 {
-                    return Err(SaciError::configuration(
-                        "ndjson: option 'infer_max' must be at least 1",
-                    ));
-                }
-                raw as usize
+    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
+        reject_unknown_options("ndjson", options, &["infer_max"])?;
+        let mut codec = NdjsonCodec::new();
+        if let Some(value) = options.get("infer_max") {
+            let raw = value.as_i64().ok_or_else(|| {
+                SaciError::configuration("ndjson: option 'infer_max' must be an integer")
+            })?;
+            if raw < 1 {
+                return Err(SaciError::configuration(
+                    "ndjson: option 'infer_max' must be at least 1",
+                ));
             }
-        };
-        Ok(Arc::new(NdjsonTransformer::new(infer_max)))
+            codec = codec.infer_max(raw as usize);
+        }
+        Ok(Arc::new(codec))
     }
 }
 
 struct NdjsonBatchReader {
-    reader: arrow_json::Reader<BufReader<std::fs::File>>,
+    reader: arrow_json::Reader<BufReader<ReadInput>>,
     schema: Arc<Schema>,
 }
 
@@ -252,12 +264,12 @@ mod tests {
     }
 
     fn read_all(
-        transformer: &NdjsonTransformer,
-        file: std::fs::File,
+        codec: &NdjsonCodec,
+        input: impl Into<ReadInput>,
         declared: Option<Arc<Schema>>,
     ) -> (Arc<Schema>, Vec<RecordBatch>) {
-        let mut reader = transformer
-            .open_reader(file, declared)
+        let mut reader = codec
+            .open_reader(input.into(), declared)
             .expect("reader opens");
         let schema = reader.schema();
         let mut batches = Vec::new();
@@ -275,7 +287,7 @@ mod tests {
             r#"{"id":3,"val":3.5}"#,
         ]);
         let (read_schema, batches) = read_all(
-            &NdjsonTransformer::default(),
+            &NdjsonCodec::default(),
             f.reopen().expect("reopen"),
             Some(schema()),
         );
@@ -286,11 +298,8 @@ mod tests {
     #[test]
     fn an_absent_schema_is_inferred_from_the_first_records() {
         let f = write_ndjson(&[r#"{"x":10}"#, r#"{"x":20}"#]);
-        let (read_schema, batches) = read_all(
-            &NdjsonTransformer::default(),
-            f.reopen().expect("reopen"),
-            None,
-        );
+        let (read_schema, batches) =
+            read_all(&NdjsonCodec::default(), f.reopen().expect("reopen"), None);
         assert_eq!(read_schema.fields().len(), 1);
         assert_eq!(read_schema.field(0).name(), "x");
         // Inference rewinds, so no record is consumed by it.
@@ -306,9 +315,9 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = NdjsonTransformer::default();
+        let codec = NdjsonCodec::default();
         let file = NamedTempFile::new().expect("temp file");
-        let writer = transformer
+        let writer = codec
             .open_writer(
                 Box::new(file.reopen().expect("reopen for write")),
                 Arc::clone(&one_column),
@@ -319,7 +328,7 @@ mod tests {
         writer.finish().expect("finish");
 
         let (_, batches) = read_all(
-            &transformer,
+            &codec,
             file.reopen().expect("reopen for read"),
             Some(Arc::clone(&one_column)),
         );
@@ -338,8 +347,8 @@ mod tests {
     #[test]
     fn a_window_of_messages_decodes_into_one_batch() {
         let one_column = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
-        let transformer = NdjsonTransformer::default();
-        let mut decoder = transformer
+        let codec = NdjsonCodec::default();
+        let mut decoder = codec
             .open_message_decoder(Arc::clone(&one_column))
             .expect("decoder opens");
 
@@ -362,7 +371,7 @@ mod tests {
     #[test]
     fn a_malformed_payload_is_reported_by_push() {
         let one_column = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
-        let mut decoder = NdjsonTransformer::default()
+        let mut decoder = NdjsonCodec::default()
             .open_message_decoder(one_column)
             .expect("decoder opens");
         // A syntax error surfaces where it is fed. A merely truncated object
@@ -383,9 +392,9 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = NdjsonTransformer::default();
-        assert_eq!(transformer.message_shape(), Some(MessageShape::PerRow));
-        let payloads = transformer.encode_messages(&batch).expect("encode");
+        let codec = NdjsonCodec::default();
+        assert_eq!(codec.message_shape(), Some(MessageShape::PerRow));
+        let payloads = codec.encode_messages(&batch).expect("encode");
         assert_eq!(payloads.len(), 3);
         assert_eq!(payloads[0], br#"{"a":1}"#);
         assert!(
@@ -396,10 +405,10 @@ mod tests {
 
     #[test]
     fn the_factory_reads_infer_max_off_its_options_table() {
-        let options = crate::transformer::from_kdl_str("infer_max 4").expect("parse kdl");
-        let transformer = NdjsonTransformerFactory.build(&options).expect("build");
-        assert_eq!(transformer.format(), "ndjson");
-        assert_eq!(NdjsonTransformerFactory.format_name(), "ndjson");
+        let options = crate::codec::from_kdl_str("infer_max 4").expect("parse kdl");
+        let codec = NdjsonCodecFactory.build(&options).expect("build");
+        assert_eq!(codec.format(), "ndjson");
+        assert_eq!(NdjsonCodecFactory.format_name(), "ndjson");
 
         // Only the first four records are inspected, so a fifth-record column
         // is not in the inferred schema.
@@ -410,16 +419,16 @@ mod tests {
             r#"{"a":4}"#,
             r#"{"a":5,"late":true}"#,
         ]);
-        let reader = transformer
-            .open_reader(f.reopen().expect("reopen"), None)
+        let reader = codec
+            .open_reader(f.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         assert_eq!(reader.schema().fields().len(), 1);
     }
 
     #[test]
     fn a_non_integer_infer_max_is_a_configuration_error() {
-        let options = crate::transformer::from_kdl_str("infer_max \"lots\"").expect("parse kdl");
-        let Err(err) = NdjsonTransformerFactory.build(&options) else {
+        let options = crate::codec::from_kdl_str("infer_max \"lots\"").expect("parse kdl");
+        let Err(err) = NdjsonCodecFactory.build(&options) else {
             panic!("infer_max must be an integer");
         };
         assert_eq!(err.category(), "configuration");
@@ -428,10 +437,54 @@ mod tests {
 
     #[test]
     fn a_zero_infer_max_is_a_configuration_error() {
-        let options = crate::transformer::from_kdl_str("infer_max 0").expect("parse kdl");
-        let Err(err) = NdjsonTransformerFactory.build(&options) else {
+        let options = crate::codec::from_kdl_str("infer_max 0").expect("parse kdl");
+        let Err(err) = NdjsonCodecFactory.build(&options) else {
             panic!("infer_max must be at least 1");
         };
         assert!(err.message().contains("at least 1"), "got: {err}");
+    }
+
+    #[test]
+    fn an_option_the_format_does_not_read_is_a_configuration_error() {
+        let options = crate::codec::from_kdl_str("infer_maximum 4").expect("parse kdl");
+        let Err(err) = NdjsonCodecFactory.build(&options) else {
+            panic!("a misspelled option must not be dropped");
+        };
+        assert_eq!(err.category(), "configuration");
+        assert_eq!(err.message(), "ndjson: unknown option 'infer_maximum'");
+    }
+
+    #[test]
+    fn the_media_type_is_x_ndjson() {
+        assert_eq!(
+            NdjsonCodec::new().media_type(),
+            Some("application/x-ndjson")
+        );
+    }
+
+    #[test]
+    fn an_in_memory_document_reads_the_same_batches_as_a_file() {
+        let f = write_ndjson(&[
+            r#"{"id":1,"val":1.5}"#,
+            r#"{"id":2,"val":2.5}"#,
+            r#"{"id":3,"val":3.5}"#,
+        ]);
+        let bytes = std::fs::read(f.path()).expect("read back");
+        let codec = NdjsonCodec::new().infer_max(8);
+
+        // Inferred: the schema probe seeks, so the memory variant must rewind.
+        let from_file = read_all(&codec, f.reopen().expect("reopen"), None);
+        let from_memory = read_all(&codec, bytes.clone(), None);
+        assert_eq!(from_file.0, from_memory.0);
+        assert_eq!(from_file.1, from_memory.1);
+        assert_eq!(
+            from_file.1.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            3
+        );
+
+        // Declared.
+        let from_file = read_all(&codec, f.reopen().expect("reopen"), Some(schema()));
+        let from_memory = read_all(&codec, bytes, Some(schema()));
+        assert_eq!(from_file.1, from_memory.1);
     }
 }

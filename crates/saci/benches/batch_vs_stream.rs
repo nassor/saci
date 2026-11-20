@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use criterion::{Criterion, criterion_group, criterion_main};
 use saci::SaciError;
 use saci::dataset::Dataset;
-use saci::io::source::Source;
+use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::system::{
     ParallelSystem, STAGE_INLINE_THRESHOLD, System, SystemMeta, WriteSet, system_fn,

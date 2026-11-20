@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::saci::metrics::Instruments;
 use crate::connector::saci::wire::{self, Frame, PROTOCOL_VERSION};

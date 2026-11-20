@@ -51,8 +51,7 @@ use tokio::time::Instant;
 
 use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity};
 use crate::error::SaciError;
-use crate::io::retry::{RetryingSink, RetryingSource};
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{RetryingSink, RetryingSource, Sink, Source};
 use crate::retry::RetryMode;
 
 use super::factories::missing_factory_error;

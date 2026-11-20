@@ -29,7 +29,7 @@ use bytes::Bytes;
 use futures_util::future::join_all;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 use crate::connector::nats::config::{NatsSinkConfig, SinkMode};
 use crate::connector::nats::connect::{connect, jetstream_context};

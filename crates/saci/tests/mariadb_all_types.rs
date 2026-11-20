@@ -15,7 +15,7 @@ mod common;
 use arrow_array::{Array as _, ArrayRef, RecordBatch};
 use common::{Server, drain, sink, source};
 use mysql_async::prelude::Queryable;
-use saci::io::sink::Sink as _;
+use saci::io::Sink as _;
 
 /// One column: name, SQL type, declared field attributes, and how to render
 /// it for comparison.

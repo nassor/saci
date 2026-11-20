@@ -36,7 +36,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 /// Client-mode TCP sink: one encoded message out, one length-prefixed frame on
 /// the wire.

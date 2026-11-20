@@ -36,7 +36,7 @@ use chrono::{DateTime, Utc};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 use crate::connector::s3::config::{Flush, S3SinkConfig};
 
@@ -267,7 +267,7 @@ impl Pending {
 ///     flush: Flush::default(),
 ///     schema_fields: Vec::new(),
 /// };
-/// let sink = S3Sink::new(config, Arc::new(Schema::empty()), Arc::new(CsvCodec::new(true)))
+/// let sink = S3Sink::new(config, Arc::new(Schema::empty()), Arc::new(CsvCodec::new()))
 ///     .unwrap();
 /// ```
 pub struct S3Sink {
@@ -564,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn write_batch_after_finish_is_the_exact_error() {
         let mut sink =
-            S3Sink::new(config(), schema(), Arc::new(CsvCodec::new(true))).expect("builds");
+            S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
         sink.finish()
             .await
             .expect("finish on a fresh sink is a no-op");
@@ -579,7 +579,7 @@ mod tests {
     async fn finish_on_a_never_written_sink_issues_no_request() {
         // The endpoint is unreachable; any request would fail the test.
         let mut sink =
-            S3Sink::new(config(), schema(), Arc::new(CsvCodec::new(true))).expect("builds");
+            S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
         sink.finish().await.expect("finish issues no request");
         sink.finish().await.expect("finish is idempotent");
     }

@@ -1,7 +1,7 @@
 //! The Kafka connector: a Kafka [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! [`KafkaSource`] consumes a topic (or several) with `rdkafka`'s
 //! `StreamConsumer`; [`KafkaSink`] produces to one with a `FutureProducer`.

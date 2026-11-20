@@ -204,7 +204,7 @@ impl CursorReader {
     }
 
     /// The current effective fetch size, for tests that observe
-    /// [`Source::request_batch_rows`](crate::io::source::Source::request_batch_rows)
+    /// [`Source::request_batch_rows`](crate::io::Source::request_batch_rows)
     /// through [`PostgresSource`](crate::connector::postgresql::source::PostgresSource) rather than
     /// through this reader directly.
     #[cfg(test)]

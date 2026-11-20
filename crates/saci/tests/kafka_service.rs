@@ -224,7 +224,7 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await
@@ -280,7 +280,7 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
     .expect("readback source builds");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema).unwrap();
-    let rows = saci::io::source::drain_into_dataset(&mut read_source, &mut dataset, COMPONENT)
+    let rows = saci::io::read_all(&mut read_source, &mut dataset, COMPONENT)
         .await
         .expect("drain output topic");
     assert_eq!(rows, 3);
@@ -456,7 +456,7 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await

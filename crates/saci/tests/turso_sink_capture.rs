@@ -10,8 +10,8 @@ use std::sync::Arc;
 use arrow_array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use saci::connector::turso::{TursoSink, TursoSinkConfig, TursoSource, TursoSourceConfig};
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 
 fn sink(path: &str) -> TursoSink {
     let body = format!(

@@ -22,8 +22,8 @@ use saci::connector::nats::{
     SourceMode, StreamProvision,
 };
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::{Source, drain_into_dataset};
+use saci::io::Sink;
+use saci::io::{Source, read_all};
 use saci::transformer::Transformer;
 use saci::transformer::arrow_ipc::ArrowIpcTransformer;
 use saci::transformer::ndjson::NdjsonTransformer;
@@ -71,7 +71,7 @@ fn connection(url: &str) -> ConnectionConfig {
     }
 }
 
-/// A bounded core source, so `drain_into_dataset` terminates.
+/// A bounded core source, so `read_all` terminates.
 fn core_source_cfg(url: &str, subject: &str) -> NatsSourceConfig {
     NatsSourceConfig {
         connection: connection(url),
@@ -199,7 +199,7 @@ async fn core_ndjson_round_trips_through_a_subject() {
 
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema.clone()).unwrap();
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
@@ -475,7 +475,7 @@ async fn jetstream_round_trips_through_a_provisioned_stream() {
     .expect("source builds");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema.clone()).unwrap();
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
@@ -1184,7 +1184,7 @@ async fn a_zero_batch_rows_hint_still_advances_the_source() {
 
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema.clone()).unwrap();
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(
@@ -1203,7 +1203,7 @@ async fn rows_in_stream(nats: &common::NatsContainer, stream: &str, durable: &st
     .expect("source builds");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema()).unwrap();
-    drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     match dataset.batch_named(COMPONENT) {

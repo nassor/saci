@@ -39,7 +39,7 @@ use tokio::net::TcpStream;
 
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 use crate::connector::saci::wire::{self, Frame, PROTOCOL_VERSION};
 

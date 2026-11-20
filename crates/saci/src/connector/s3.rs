@@ -1,7 +1,7 @@
 //! The S3 connector: an S3 [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! This module moves object bytes over any S3-compatible endpoint (AWS, MinIO,
 //! R2, Ceph RGW, RustFS) and nothing else: the object client, the row/byte/age

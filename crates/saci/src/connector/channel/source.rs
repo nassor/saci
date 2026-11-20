@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 /// In-memory pull source backed by a tokio mpsc channel.
 ///
@@ -21,7 +21,7 @@ use crate::io::source::Source;
 /// use std::sync::Arc;
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::channel::ChannelSource;
-/// use saci::io::source::Source;
+/// use saci::io::Source;
 ///
 /// # #[tokio::main]
 /// # async fn main() {

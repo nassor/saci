@@ -46,7 +46,7 @@ use futures_util::stream::{SelectAll, select_all};
 use tokio::time::{Instant, timeout_at};
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::nats::config::{AckPolicyConfig, NatsSourceConfig, SourceMode};
 use crate::connector::nats::connect::{connect, jetstream_context};

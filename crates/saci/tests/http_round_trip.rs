@@ -34,8 +34,8 @@ use saci::connector::http::{
     ContentEncoding, HttpPushOptions, HttpPushSource, HttpSink, HttpSinkOptions, HttpSource,
     HttpSourceOptions, HttpVersion, Pagination, ReadMode, SchemaFrom, ServerTls, TlsFiles, Window,
 };
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 
 // ── the hand-rolled HTTP/1.1 test server ────────────────────────────────────
 
@@ -219,7 +219,7 @@ fn schema() -> Arc<Schema> {
 }
 
 fn csv() -> Arc<dyn Codec> {
-    Arc::new(CsvCodec::new(true))
+    Arc::new(CsvCodec::new())
 }
 
 fn ndjson() -> Arc<dyn Codec> {
@@ -255,12 +255,8 @@ fn column(batch: &RecordBatch, name: &str) -> Vec<i64> {
 /// Decode a captured request body back through the same format the sink wrote
 /// it with, which is what makes the round trip a round trip.
 fn decode_body(body: &[u8]) -> Vec<RecordBatch> {
-    let mut spool = tempfile::tempfile().expect("temp file");
-    spool.write_all(body).expect("write body");
-    std::io::Seek::rewind(&mut spool).expect("rewind");
-
     let mut reader = csv()
-        .open_reader(spool, Some(schema()))
+        .open_reader(body.to_vec().into(), Some(schema()))
         .expect("the body is a whole csv document");
     let mut batches = Vec::new();
     while let Some(batch) = reader.next_batch().expect("decode") {

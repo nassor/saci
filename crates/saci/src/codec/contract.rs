@@ -1,4 +1,4 @@
-//! The [`Transformer`] trait and the [`unsupported`] error every capability a
+//! The [`Codec`] trait and the [`unsupported`] error every capability a
 //! format lacks returns.
 
 use std::sync::Arc;
@@ -8,39 +8,40 @@ use arrow_schema::Schema;
 
 use crate::error::SaciError;
 
-use crate::transformer::batch::{BatchReader, BatchWriter};
-use crate::transformer::message::{MessageDecoder, MessageShape};
+use crate::codec::ReadInput;
+use crate::codec::batch::{BatchReader, BatchWriter};
+use crate::codec::message::{MessageDecoder, MessageShape};
 
-/// A byte format. Connectors move bytes; transformers give them meaning.
+/// A byte format. Connectors move bytes; codecs give them meaning.
 ///
-/// A transformer has two surfaces and need not implement both. The stream
+/// A codec has two surfaces and need not implement both. The stream
 /// surface ([`open_reader`](Self::open_reader),
 /// [`open_writer`](Self::open_writer)) is what the file connector uses. The
 /// message surface ([`open_message_decoder`](Self::open_message_decoder),
 /// [`encode_messages`](Self::encode_messages)) is what TCP and Kafka use. Every
 /// method that a format does not support returns [`unsupported`], so a mismatch
 /// is a configuration error naming the format and the capability.
-pub trait Transformer: Send + Sync + 'static {
-    /// The name a `format` key selects this transformer with.
+pub trait Codec: Send + Sync + 'static {
+    /// The name a `format` key selects this codec with.
     fn format(&self) -> &'static str;
 
     /// Open a reader over `input`.
     ///
-    /// `input` is a `File` rather than a `Read` because Parquet reads its
-    /// footer before any row group. `declared` is the schema the config named,
-    /// `None` when it named none: a schemaless format rejects `None` unless it
-    /// can infer, and a self-describing one treats `Some` as a projection
-    /// target. A projection returns exactly those columns, one batch per
-    /// source batch; a declared column the source does not carry is the
-    /// format's own error.
+    /// `input` is a [`ReadInput`] rather than a `Read` because Parquet reads
+    /// its footer before any row group: every variant is seekable. `declared`
+    /// is the schema the config named, `None` when it named none: a schemaless
+    /// format rejects `None` unless it can infer, and a self-describing one
+    /// treats `Some` as a projection target. A projection returns exactly
+    /// those columns, one batch per source batch; a declared column the source
+    /// does not carry is the format's own error.
     ///
     /// # Errors
     ///
     /// Returns [`unsupported`] when the format has no stream read surface, or
-    /// the format's own error when the handle cannot be read.
+    /// the format's own error when the input cannot be read.
     fn open_reader(
         &self,
-        input: std::fs::File,
+        input: ReadInput,
         declared: Option<Arc<Schema>>,
     ) -> Result<Box<dyn BatchReader>, SaciError> {
         let _ = (input, declared);
@@ -95,14 +96,14 @@ pub trait Transformer: Send + Sync + 'static {
         Err(unsupported(self.format(), "encoding discrete messages"))
     }
 
-    /// How this transformer splits a batch into messages, `None` when it has
+    /// How this codec splits a batch into messages, `None` when it has
     /// no message surface.
     ///
     /// This is a declaration about the other two message methods, and an
     /// implementor must keep it true: return `Some` only when both
     /// [`open_message_decoder`](Self::open_message_decoder) and
     /// [`encode_messages`](Self::encode_messages) are implemented, `None` only
-    /// when neither is. One answer serves both directions, so a transformer
+    /// when neither is. One answer serves both directions, so a codec
     /// that implements exactly one of the two has no honest declaration to
     /// make.
     ///
@@ -115,13 +116,23 @@ pub trait Transformer: Send + Sync + 'static {
     ///
     /// `message_shape_agrees_with_the_message_surface`
     /// (`crates/saci/tests/connector_matrix.rs`) probes both methods on
-    /// every registered transformer and fails on any disagreement.
+    /// every registered codec and fails on any disagreement.
     fn message_shape(&self) -> Option<MessageShape> {
+        None
+    }
+
+    /// The media type of one whole document this codec writes, `None` when it
+    /// has none registered.
+    ///
+    /// A connector that sends a document over a protocol with a content type
+    /// (the HTTP sink) advertises this value, and sends no content type at all
+    /// rather than a guess when it is `None`.
+    fn media_type(&self) -> Option<&'static str> {
         None
     }
 }
 
-/// The error a transformer returns for a capability it does not have.
+/// The error a codec returns for a capability it does not have.
 pub fn unsupported(format: &str, capability: &str) -> SaciError {
     SaciError::configuration(format!("format '{format}' does not support {capability}"))
 }
@@ -133,11 +144,11 @@ mod tests {
 
     use super::*;
 
-    /// A transformer with neither surface: every capability falls through to
+    /// A codec with neither surface: every capability falls through to
     /// the defaulted `unsupported` error.
-    struct BareTransformer;
+    struct BareCodec;
 
-    impl Transformer for BareTransformer {
+    impl Codec for BareCodec {
         fn format(&self) -> &'static str {
             "bare"
         }
@@ -163,8 +174,8 @@ mod tests {
     }
 
     #[test]
-    fn a_transformer_with_no_surfaces_reports_every_capability_unsupported() {
-        let t = BareTransformer;
+    fn a_codec_with_no_surfaces_reports_every_capability_unsupported() {
+        let t = BareCodec;
         assert_eq!(t.message_shape(), None);
 
         let Err(writer_err) = t.open_writer(Box::new(Vec::new()), schema()) else {
@@ -198,7 +209,7 @@ mod tests {
     #[test]
     fn the_defaulted_reader_reports_unsupported() {
         let file = tempfile::tempfile().expect("temp file");
-        let Err(err) = BareTransformer.open_reader(file, None) else {
+        let Err(err) = BareCodec.open_reader(file.into(), None) else {
             panic!("a format with no stream read surface must not open a reader");
         };
         assert_eq!(err.category(), "configuration");
@@ -206,5 +217,10 @@ mod tests {
             err.message().contains("reading a byte stream"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn a_codec_declares_no_media_type_unless_it_overrides() {
+        assert_eq!(BareCodec.media_type(), None);
     }
 }

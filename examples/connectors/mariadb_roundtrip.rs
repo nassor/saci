@@ -24,8 +24,8 @@ use saci::connector::mariadb::{
     MariadbSink, MariadbSinkConfig, MariadbSource, MariadbSourceConfig,
 };
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::{Source, drain_into_dataset};
+use saci::io::Sink;
+use saci::io::{Source, read_all};
 
 /// Rows inserted into the input table.
 const ROWS: i64 = 250;
@@ -110,7 +110,7 @@ schema_fields "amount" type="decimal128" precision=18 scale=4
     let schema = source.schema();
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema.clone())?;
-    let read = drain_into_dataset(&mut source, &mut dataset, COMPONENT).await?;
+    let read = read_all(&mut source, &mut dataset, COMPONENT).await?;
     println!("source drained {read} row(s) into the dataset");
 
     // --- write -----------------------------------------------------------

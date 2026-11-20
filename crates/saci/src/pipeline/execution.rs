@@ -15,7 +15,7 @@ use crate::system::{
 };
 
 #[cfg(feature = "engine")]
-use crate::io::{drain_dataset, drain_into_dataset};
+use crate::io::{read_all, write_all};
 
 #[cfg(feature = "tracing")]
 use tracing::{Instrument as _, info_span};
@@ -431,11 +431,11 @@ impl Pipeline {
             let start = Instant::now();
             let rows_before = data.live_rows() as isize;
             for (comp, src) in sources.iter_mut() {
-                drain_into_dataset(src.as_mut(), data, comp).await?;
+                read_all(src.as_mut(), data, comp).await?;
             }
             let stats = exec(name, systems, plan, data).await?;
             for (comp, sink) in sinks.iter_mut() {
-                drain_dataset(data, comp, sink.as_mut()).await?;
+                write_all(sink.as_mut(), data, comp).await?;
                 sink.finish().await?;
             }
             return Ok(RunStats {
@@ -517,7 +517,7 @@ impl Pipeline {
             total.retries += retries;
 
             for (sink_comp, sink) in sinks.iter_mut() {
-                drain_dataset(data, sink_comp, sink.as_mut()).await?;
+                write_all(sink.as_mut(), data, sink_comp).await?;
             }
             total.rows_produced += data.live_rows() as isize;
         }

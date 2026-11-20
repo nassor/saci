@@ -21,7 +21,7 @@ use crate::connector::{
     parse_schema_fields,
 };
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
 use crate::connector::http::sink::{ContentEncoding, HttpSinkOptions};
 use crate::connector::http::source::{

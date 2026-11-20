@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 /// Batches the reader thread may queue before it blocks. Four lets it stay
 /// slightly ahead of the pipeline without holding much memory.
@@ -66,7 +66,7 @@ impl FileSource {
     ) -> Result<Self, SaciError> {
         let file = std::fs::File::open(path)
             .map_err(|e| SaciError::generic(format!("FileSource: cannot open {path:?}: {e}")))?;
-        let mut reader = codec.open_reader(file, declared)?;
+        let mut reader = codec.open_reader(file.into(), declared)?;
         let schema = reader.schema();
         let estimated_rows = reader.estimated_rows();
 

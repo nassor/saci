@@ -258,7 +258,7 @@ fn the_shipped_example_configs_load_and_their_io_tables_are_accepted() {
         assert_eq!(config.workflows[0].sinks[0].type_name, "MariadbSink");
 
         // MariaDB declares its own schema, so it reads no `format` key and no
-        // bound transformer is needed.
+        // bound codec is needed.
         let ctx = ConnectorContext::new(None);
         let source = MariadbSourceFactory
             .build(&config.workflows[0].sources[0].config, &ctx)

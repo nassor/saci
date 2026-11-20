@@ -3,7 +3,7 @@
 //! Listens on a bind address and yields one [`RecordBatch`] per received frame.
 //! It never reaches EOF: `next_batch` blocks until the next frame arrives, so
 //! only the stream runner (`run_mode kind="stream"`) can drive it. The batch
-//! loop's [`drain_into_dataset`](crate::io::source::drain_into_dataset) would
+//! loop's [`read_all`](crate::io::read_all) would
 //! block forever, and the service config validator rejects that combination.
 //!
 //! ## Frame format
@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 /// Live TCP ingestion source: one frame in, one `RecordBatch` out.
 ///

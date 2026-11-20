@@ -1,10 +1,10 @@
 //! The file connector: a local-file [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! This module owns local-file IO and nothing else: the handle, the reader
-//! thread, and the channel [`FileSource::next_batch`](crate::io::source::Source::next_batch) awaits so the async
+//! thread, and the channel [`FileSource::next_batch`](crate::io::Source::next_batch) awaits so the async
 //! executor never blocks on the disk. The byte format comes from a
 //! [`Codec`](crate::codec::Codec), resolved by the host from
 //! the `transformer` key naming a declared `transformer` node, so csv, ndjson

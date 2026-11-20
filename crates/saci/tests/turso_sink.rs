@@ -10,7 +10,7 @@ use std::sync::Arc;
 use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use saci::connector::turso::{TursoSink, TursoSinkConfig};
-use saci::io::sink::Sink;
+use saci::io::Sink;
 
 fn sink(path: &str, mode: &str, conflict: Option<&str>) -> TursoSink {
     let conflict = match conflict {

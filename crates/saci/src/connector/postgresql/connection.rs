@@ -1,8 +1,8 @@
 //! One connection per connector instance, plus the SQL-identifier quoting every
 //! statement in this crate goes through.
 //!
-//! There is no pool. Both [`Source`](crate::io::source::Source) and
-//! [`Sink`](crate::io::sink::Sink) serialise all access through `&mut self`,
+//! There is no pool. Both [`Source`](crate::io::Source) and
+//! [`Sink`](crate::io::Sink) serialise all access through `&mut self`,
 //! so a second connection would sit idle.
 //!
 //! [`Connector`] is built synchronously, because `SourceFactory::build` is

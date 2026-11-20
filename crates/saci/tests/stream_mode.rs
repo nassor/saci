@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::connector::tcp::TcpIngestSource;
 use saci::error::SaciError;
-use saci::io::source::Source;
+use saci::io::Source;
 use saci::runtime::PipelineRuntime;
 use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
 use saci::service::config::{

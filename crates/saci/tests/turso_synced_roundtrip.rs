@@ -19,7 +19,7 @@ use std::time::Duration;
 use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use saci::connector::turso::{TursoSink, TursoSinkConfig, TursoSource, TursoSourceConfig};
-use saci::io::{sink::Sink, source::Source};
+use saci::io::{Sink, Source};
 
 const TABLE: &str = "saci_turso_synced_roundtrip";
 

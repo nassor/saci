@@ -2,14 +2,14 @@
 //!
 //! A message transport carries discrete payloads rather than one stream with an
 //! end: a TCP frame, a Kafka record. Decoding a window of them into one
-//! [`RecordBatch`] is the transformer's job; deciding
+//! [`RecordBatch`] is the codec's job; deciding
 //! what a window is remains the connector's.
 
 use arrow_array::RecordBatch;
 
 use crate::error::SaciError;
 
-/// How [`Transformer::encode_messages`](crate::transformer::Transformer::encode_messages)
+/// How [`Codec::encode_messages`](crate::codec::Codec::encode_messages)
 /// splits a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageShape {

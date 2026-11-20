@@ -10,7 +10,7 @@ mod common;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray};
 use saci::connector::from_kdl_str;
 use saci::connector::postgresql::{PostgresSource, PostgresSourceConfig};
-use saci::io::source::Source;
+use saci::io::Source;
 use serde::Deserialize as _;
 
 const FIELDS: &str = "

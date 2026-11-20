@@ -23,7 +23,7 @@ use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 use crate::connector::http::client::{self, HttpClient};
 use crate::connector::http::metrics::Instruments;
@@ -84,24 +84,6 @@ impl Default for HttpSinkOptions {
     }
 }
 
-/// The media type one whole document of `format` is.
-///
-/// `None` for a format with no registered media type, which sends no
-/// `content-type` at all rather than a guess.
-pub(crate) fn content_type_for(format: &str) -> Option<&'static str> {
-    match format {
-        "csv" => Some("text/csv"),
-        "ndjson" => Some("application/x-ndjson"),
-        "parquet" => Some("application/vnd.apache.parquet"),
-        // The Avro specification's own HTTP media type; no IANA registration
-        // exists for the container file.
-        "avro" => Some("avro/binary"),
-        // The codec writes the stream encapsulation, not the file one.
-        "arrow-ipc" => Some("application/vnd.apache.arrow.stream"),
-        _ => None,
-    }
-}
-
 /// A `std::io::Write` handle onto a shared byte buffer.
 ///
 /// [`Codec::open_writer`] takes ownership of the handle and
@@ -157,7 +139,7 @@ impl std::io::Write for SharedBuffer {
 /// let sink = HttpSink::new(
 ///     "https://example.invalid/ingest",
 ///     schema,
-///     Arc::new(CsvCodec::new(true)),
+///     Arc::new(CsvCodec::new()),
 ///     options,
 /// )
 /// .unwrap();
@@ -223,7 +205,7 @@ impl HttpSink {
                 "HttpSink: 'content-encoding' is set by content_encoding; remove it from headers",
             ));
         }
-        if !declares_type && let Some(media) = content_type_for(codec.format()) {
+        if !declares_type && let Some(media) = codec.media_type() {
             headers.push(("content-type".to_string(), media.to_string()));
         }
         if let Some(encoding) = content_encoding {
@@ -411,6 +393,23 @@ mod tests {
         }
     }
 
+    /// A codec that names a media type, which the sink sends as `content-type`.
+    struct Typed;
+
+    impl Codec for Typed {
+        fn format(&self) -> &'static str {
+            "typed"
+        }
+
+        fn media_type(&self) -> Option<&'static str> {
+            Some("application/x-typed")
+        }
+    }
+
+    fn sink_with(codec: Arc<dyn Codec>, options: HttpSinkOptions) -> Result<HttpSink, SaciError> {
+        HttpSink::new("http://127.0.0.1:1/ingest", schema(), codec, options)
+    }
+
     #[test]
     fn a_shared_buffer_hands_back_what_was_written_through_the_clone() {
         let buffer = SharedBuffer::default();
@@ -420,22 +419,28 @@ mod tests {
         assert!(buffer.take().is_empty(), "take drains the buffer");
     }
 
-    /// Every registered format has one, and a format with none sends no
-    /// `content-type` rather than a guess a peer would act on.
+    /// The codec's media type is the `content-type`; a codec with none sends no
+    /// `content-type` rather than a guess a peer would act on; a header the
+    /// config declares wins over the codec's.
     #[test]
-    fn every_registered_format_maps_to_its_media_type() {
-        assert_eq!(content_type_for("csv"), Some("text/csv"));
-        assert_eq!(content_type_for("ndjson"), Some("application/x-ndjson"));
+    fn the_codecs_media_type_is_the_content_type_unless_the_config_declares_one() {
+        let typed = sink_with(Arc::new(Typed), HttpSinkOptions::default()).expect("sink");
         assert_eq!(
-            content_type_for("parquet"),
-            Some("application/vnd.apache.parquet")
+            typed.headers.get("content-type").map(|v| v.as_bytes()),
+            Some(&b"application/x-typed"[..])
         );
-        assert_eq!(content_type_for("avro"), Some("avro/binary"));
+
+        let bare = sink(HttpSinkOptions::default()).expect("sink");
+        assert!(bare.headers.get("content-type").is_none());
+
+        let mut options = HttpSinkOptions::default();
+        options.client.headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        let declared = sink_with(Arc::new(Typed), options).expect("sink");
+        assert_eq!(declared.headers.get_all("content-type").iter().count(), 1);
         assert_eq!(
-            content_type_for("arrow-ipc"),
-            Some("application/vnd.apache.arrow.stream")
+            declared.headers.get("content-type").map(|v| v.as_bytes()),
+            Some(&b"text/plain"[..])
         );
-        assert_eq!(content_type_for("no-stream"), None);
     }
 
     #[test]

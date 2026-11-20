@@ -2,8 +2,8 @@
 //!
 //! [`ReadMode::Document`] is one GET of a finite resource. The body is spooled
 //! to an unnamed temp file as it arrives and handed to the codec's stream
-//! read surface: [`Codec::open_reader`] takes a `std::fs::File` because
-//! parquet reads its footer before any row group. One dedicated OS thread then
+//! read surface as a [`ReadInput::File`]: parquet reads its footer before any
+//! row group, so the body has to be seekable. One dedicated OS thread then
 //! drives the [`BatchReader`](crate::codec::BatchReader) and pushes batches
 //! down a bounded channel, so the executor never blocks on the decode. The
 //! source reports EOF when that stream ends and re-arms, so the next call
@@ -41,9 +41,10 @@ use reqwest::{Method, Url};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::codec::{Codec, ReadInput};
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::http::client::{self, Exchange, HttpClient, HttpVersion};
 use crate::connector::http::document::{self, CHANNEL_CAPACITY};
@@ -276,7 +277,7 @@ enum Engine {
 /// // csv carries no schema of its own, so the declared one is required.
 /// let src = HttpSource::new(
 ///     "https://example.invalid/orders.csv",
-///     Arc::new(CsvCodec::new(true)),
+///     Arc::new(CsvCodec::new()),
 ///     HttpSourceOptions {
 ///         declared: Some(schema),
 ///         schema_from: SchemaFrom::Config,
@@ -538,7 +539,15 @@ async fn fetch_page(
     // Opening the reader is blocking: a parquet footer read is a seek.
     let source = url.to_string();
     let reader = tokio::task::spawn_blocking(move || {
-        document::open(WHAT, &source, &codec, spool, declared, check, &expected)
+        document::open(
+            WHAT,
+            &source,
+            &codec,
+            ReadInput::File(spool),
+            declared,
+            check,
+            &expected,
+        )
     })
     .await
     .map_err(|e| SaciError::generic(format!("{WHAT}: spawn_blocking panic: {e}")))?

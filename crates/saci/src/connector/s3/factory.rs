@@ -12,7 +12,7 @@ use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
 use crate::connector::s3::config::{S3SinkConfig, S3SourceConfig};
 use crate::connector::s3::{S3Sink, S3Source};

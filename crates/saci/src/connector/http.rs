@@ -1,8 +1,8 @@
 //! The HTTP connector: HTTP and HTTPS [`Source`]s and a [`Sink`] for SACI,
 //! over HTTP/1.1, HTTP/2 or HTTP/3.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! Three node types, two of which dial out and one of which listens.
 //!

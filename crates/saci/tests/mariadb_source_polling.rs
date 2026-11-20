@@ -10,7 +10,7 @@ mod common;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use common::Server;
 use mysql_async::prelude::Queryable;
-use saci::io::source::Source;
+use saci::io::Source;
 
 common::on_every_server!(
     polling_batches_the_table_then_resumes_from_the_persisted_offset,

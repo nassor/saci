@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use saci::SaciError;
 use saci::connector::file::{FileSink, FileSource};
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::system::{ParallelSystem, SystemMeta, WriteSet};
 

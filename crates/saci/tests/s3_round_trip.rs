@@ -5,9 +5,9 @@
 
 #![cfg(all(
     feature = "connector-s3",
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-ndjson",
+    feature = "codec-parquet"
 ))]
 
 #[path = "common/s3.rs"]
@@ -21,11 +21,11 @@ use futures_util::StreamExt;
 use object_store::ObjectStore;
 use object_store::path::Path;
 
+use saci::codec::csv::CsvCodec;
+use saci::codec::parquet::ParquetCodec;
 use saci::connector::s3::{Flush, S3Sink, S3SinkConfig, S3Source, S3SourceConfig, SchemaFrom};
-use saci::io::sink::Sink;
-use saci::io::source::Source;
-use saci::transformer::csv::CsvTransformer;
-use saci::transformer::parquet::ParquetTransformer;
+use saci::io::Sink;
+use saci::io::Source;
 
 use common::S3Container;
 
@@ -124,7 +124,7 @@ async fn an_s3_sink_and_source_round_trip_csv() {
             },
         ),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("sink builds");
     for (id, name) in [(1, "one"), (2, "two"), (3, "three")] {
@@ -156,7 +156,7 @@ async fn an_s3_sink_and_source_round_trip_csv() {
     let mut src = S3Source::new(
         source_config(&s3, "orders", SchemaFrom::Config),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("source builds");
     assert_eq!(
@@ -187,7 +187,7 @@ async fn the_sink_writes_an_object_once_max_bytes_accumulates() {
             },
         ),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("sink builds");
     sink.write_batch(&batch(1, "one"))
@@ -218,7 +218,7 @@ async fn the_sink_writes_an_object_after_max_age_ms_without_a_batch() {
             },
         ),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("sink builds");
     sink.write_batch(&batch(7, "seven"))
@@ -237,7 +237,7 @@ async fn the_sink_writes_an_object_after_max_age_ms_without_a_batch() {
     let mut src = S3Source::new(
         source_config(&s3, "aged", SchemaFrom::Config),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("source builds");
     assert_eq!(rows_of(&mut src).await, vec![(7, "seven".to_string())]);
@@ -261,7 +261,7 @@ async fn all_thresholds_at_zero_writes_one_object_at_finish() {
             },
         ),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("sink builds");
     for (id, name) in [(1, "one"), (2, "two"), (3, "three")] {
@@ -280,7 +280,7 @@ async fn all_thresholds_at_zero_writes_one_object_at_finish() {
     let mut src = S3Source::new(
         source_config(&s3, "all", SchemaFrom::Config),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("source builds");
     assert_eq!(
@@ -311,7 +311,7 @@ async fn a_parquet_object_reads_back_under_both_schema_sources() {
             },
         ),
         schema(),
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
     )
     .expect("sink builds");
     sink.write_batch(&batch(4, "four"))
@@ -324,7 +324,7 @@ async fn a_parquet_object_reads_back_under_both_schema_sources() {
     let mut src = S3Source::new(
         source_config(&s3, "pq", SchemaFrom::Object),
         schema(),
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
     )
     .expect("source builds");
     assert_eq!(rows_of(&mut src).await, vec![(4, "four".to_string())]);
@@ -335,7 +335,7 @@ async fn a_parquet_object_reads_back_under_both_schema_sources() {
     let mut projected = S3Source::new(
         source_config(&s3, "pq", SchemaFrom::Config),
         schema(),
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
     )
     .expect("source builds");
     assert_eq!(rows_of(&mut projected).await, vec![(4, "four".to_string())]);
@@ -350,7 +350,7 @@ async fn a_source_over_an_empty_prefix_reports_eof() {
     let mut src = S3Source::new(
         source_config(&s3, "empty-prefix", SchemaFrom::Config),
         schema(),
-        Arc::new(CsvTransformer::new(false)),
+        Arc::new(CsvCodec::new().has_headers(false)),
     )
     .expect("source builds");
     assert!(src.next_batch().await.expect("listing succeeds").is_none());

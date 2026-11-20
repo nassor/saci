@@ -5,7 +5,7 @@
 //! records. The message surface is one Avro record per payload, which is what a
 //! Kafka topic or a TCP frame carries.
 //!
-//! A container file describes itself, so [`AvroTransformer`] takes the file's
+//! A container file describes itself, so [`AvroCodec`] takes the file's
 //! schema when reading one unless the config declared one, which projects the
 //! file down to those columns; writing takes the schema it is handed.
 //! Everything on the message surface uses the declared schema: a payload
@@ -49,7 +49,6 @@
 
 #![deny(missing_docs)]
 
-pub mod transformer;
+mod codec;
 
-pub use arrow_avro::compression::CompressionCodec;
-pub use transformer::{AvroTransformer, AvroTransformerFactory};
+pub use codec::{AvroCodec, AvroCodecFactory, AvroCompression};

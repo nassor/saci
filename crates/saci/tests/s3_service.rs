@@ -282,7 +282,7 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await
@@ -325,7 +325,7 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
     .expect("readback source builds");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema).unwrap();
-    let rows = saci::io::source::drain_into_dataset(&mut read_source, &mut dataset, COMPONENT)
+    let rows = saci::io::read_all(&mut read_source, &mut dataset, COMPONENT)
         .await
         .expect("drain output prefix");
     assert_eq!(rows, 3);

@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use saci::error::SaciError;
-use saci::io::source::Source;
+use saci::io::Source;
 use saci::runtime::PipelineRuntime;
 use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
 use saci::service::config::{

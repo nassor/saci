@@ -1,7 +1,7 @@
 //! The Turso connector: a Turso [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! Turso is an in-process, SQLite-compatible SQL database. The connector reaches
 //! it two ways: an embedded local database file
@@ -123,7 +123,7 @@
 //! # Delivery semantics
 //!
 //! The `polling` and `cdc` cursors are committed at the start of the *next*
-//! fetch, because [`Source`](crate::io::source::Source) has no
+//! fetch, because [`Source`](crate::io::Source) has no
 //! acknowledgement hook. A crash mid-cycle replays that cycle: delivery is
 //! **at-least-once**, matching what the distributed layer already promises.
 //! Configure the sink `write_mode="upsert"` or `"ignore_conflicts"` to make

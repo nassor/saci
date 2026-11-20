@@ -7,7 +7,7 @@ mod common;
 
 use arrow_array::{Array, Int64Array, StringArray};
 use saci::connector::turso::{TursoSource, TursoSourceConfig};
-use saci::io::source::Source;
+use saci::io::Source;
 
 fn source(path: &str, retention: &str) -> TursoSource {
     let body = format!(

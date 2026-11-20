@@ -1,4 +1,4 @@
-//! [`CsvTransformer`]: the `csv` format, both surfaces.
+//! [`CsvCodec`]: the `csv` format, both surfaces.
 
 use std::io::{BufWriter, Write};
 use std::sync::Arc;
@@ -8,11 +8,12 @@ use arrow_csv::{ReaderBuilder, WriterBuilder};
 use arrow_schema::Schema;
 use arrow_select::concat::concat_batches;
 
-use crate::error::SaciError;
-use crate::transformer::{
-    BatchReader, BatchWriter, ConfigValue, MessageDecoder, MessageShape, Transformer,
-    TransformerFactory,
+use crate::codec::registry::reject_unknown_options;
+use crate::codec::{
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
+    ReadInput,
 };
+use crate::error::SaciError;
 
 /// Whether a header row is read and written by default.
 const DEFAULT_HAS_HEADERS: bool = true;
@@ -26,36 +27,44 @@ const DEFAULT_HAS_HEADERS: bool = true;
 /// column names while reading and emits one while writing. The message surface
 /// has no header row at all, in either direction, whatever the option says. A
 /// payload is one record, which leaves no room for a line of column names, and
-/// [`open_message_decoder`](Transformer::open_message_decoder) is handed the
+/// [`open_message_decoder`](Codec::open_message_decoder) is handed the
 /// declared schema, so it needs none. A stream option that changed message
 /// framing would make one topic readable only by a consumer that guessed the
 /// producer's option.
-pub struct CsvTransformer {
+pub struct CsvCodec {
     has_headers: bool,
 }
 
-impl CsvTransformer {
-    /// Build the format with an explicit header setting, which applies to the
-    /// stream surface only.
-    pub fn new(has_headers: bool) -> Self {
-        Self { has_headers }
+impl CsvCodec {
+    /// Build the format with a header row, the default.
+    pub fn new() -> Self {
+        Self {
+            has_headers: DEFAULT_HAS_HEADERS,
+        }
+    }
+
+    /// Set whether the first row is column names (default `true`). It applies
+    /// to the stream surface only.
+    pub fn has_headers(mut self, has_headers: bool) -> Self {
+        self.has_headers = has_headers;
+        self
     }
 }
 
-impl Default for CsvTransformer {
+impl Default for CsvCodec {
     fn default() -> Self {
-        Self::new(DEFAULT_HAS_HEADERS)
+        Self::new()
     }
 }
 
-impl Transformer for CsvTransformer {
+impl Codec for CsvCodec {
     fn format(&self) -> &'static str {
         "csv"
     }
 
     fn open_reader(
         &self,
-        input: std::fs::File,
+        input: ReadInput,
         declared: Option<Arc<Schema>>,
     ) -> Result<Box<dyn BatchReader>, SaciError> {
         let schema = declared.ok_or_else(|| {
@@ -133,34 +142,39 @@ impl Transformer for CsvTransformer {
     fn message_shape(&self) -> Option<MessageShape> {
         Some(MessageShape::PerRow)
     }
+
+    fn media_type(&self) -> Option<&'static str> {
+        Some("text/csv")
+    }
 }
 
-/// Factory for [`CsvTransformer`].
+/// Factory for [`CsvCodec`].
 ///
 /// `options`:
 /// - `has_headers` (bool, optional, default `true`), written
 ///   `options has_headers=#false`. Applies to the stream surface only; the
 ///   message surface has no header row.
-pub struct CsvTransformerFactory;
+pub struct CsvCodecFactory;
 
-impl TransformerFactory for CsvTransformerFactory {
+impl CodecFactory for CsvCodecFactory {
     fn format_name(&self) -> &'static str {
         "csv"
     }
 
-    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError> {
-        let has_headers = match options.get("has_headers") {
-            None => DEFAULT_HAS_HEADERS,
-            Some(value) => value.as_bool().ok_or_else(|| {
+    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
+        reject_unknown_options("csv", options, &["has_headers"])?;
+        let mut codec = CsvCodec::new();
+        if let Some(value) = options.get("has_headers") {
+            codec = codec.has_headers(value.as_bool().ok_or_else(|| {
                 SaciError::configuration("csv: option 'has_headers' must be a boolean")
-            })?,
-        };
-        Ok(Arc::new(CsvTransformer::new(has_headers)))
+            })?);
+        }
+        Ok(Arc::new(codec))
     }
 }
 
 struct CsvBatchReader {
-    reader: arrow_csv::Reader<std::fs::File>,
+    reader: arrow_csv::Reader<ReadInput>,
     schema: Arc<Schema>,
 }
 
@@ -315,9 +329,9 @@ mod tests {
         f
     }
 
-    fn read_all(transformer: &CsvTransformer, file: std::fs::File) -> Vec<RecordBatch> {
-        let mut reader = transformer
-            .open_reader(file, Some(schema()))
+    fn read_all(codec: &CsvCodec, input: impl Into<ReadInput>) -> Vec<RecordBatch> {
+        let mut reader = codec
+            .open_reader(input.into(), Some(schema()))
             .expect("reader opens");
         let mut batches = Vec::new();
         while let Some(batch) = reader.next_batch().expect("read") {
@@ -329,10 +343,7 @@ mod tests {
     #[test]
     fn a_header_row_is_skipped_when_has_headers_is_set() {
         let f = write_csv(true, &["1,1.5", "2,2.5", "3,3.5"]);
-        let batches = read_all(
-            &CsvTransformer::new(true),
-            f.reopen().expect("reopen for read"),
-        );
+        let batches = read_all(&CsvCodec::new(), f.reopen().expect("reopen for read"));
         assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
     }
 
@@ -340,7 +351,7 @@ mod tests {
     fn every_row_is_data_when_has_headers_is_clear() {
         let f = write_csv(false, &["10,0.1", "20,0.2"]);
         let batches = read_all(
-            &CsvTransformer::new(false),
+            &CsvCodec::new().has_headers(false),
             f.reopen().expect("reopen for read"),
         );
         let batch = &batches[0];
@@ -356,7 +367,7 @@ mod tests {
     #[test]
     fn reading_without_a_declared_schema_is_a_configuration_error() {
         let f = write_csv(true, &["1,1.5"]);
-        let Err(err) = CsvTransformer::default().open_reader(f.reopen().expect("reopen"), None)
+        let Err(err) = CsvCodec::default().open_reader(f.reopen().expect("reopen").into(), None)
         else {
             panic!("csv cannot infer a schema");
         };
@@ -375,31 +386,31 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = CsvTransformer::new(true);
+        let codec = CsvCodec::new();
         let mut file = NamedTempFile::new().expect("temp file");
-        let mut writer = transformer
+        let mut writer = codec
             .open_writer(Box::new(file.reopen().expect("reopen for write")), schema())
             .expect("writer opens");
         writer.write_batch(&batch).expect("write");
         writer.finish().expect("finish flushes");
 
         file.rewind().expect("rewind");
-        let batches = read_all(&transformer, file.reopen().expect("reopen for read"));
+        let batches = read_all(&codec, file.reopen().expect("reopen for read"));
         assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
     }
 
     #[test]
     fn the_factory_reads_has_headers_off_its_options_table() {
-        let options = crate::transformer::from_kdl_str("has_headers #false").expect("parse kdl");
-        let transformer = CsvTransformerFactory.build(&options).expect("build");
-        assert_eq!(transformer.format(), "csv");
-        assert_eq!(CsvTransformerFactory.format_name(), "csv");
+        let options = crate::codec::from_kdl_str("has_headers #false").expect("parse kdl");
+        let codec = CsvCodecFactory.build(&options).expect("build");
+        assert_eq!(codec.format(), "csv");
+        assert_eq!(CsvCodecFactory.format_name(), "csv");
 
         // A no-header write emits no name row, so the round trip through a
         // has_headers=#true read would lose the first record.
         let f = write_csv(false, &["7,0.7"]);
-        let mut reader = transformer
-            .open_reader(f.reopen().expect("reopen"), Some(schema()))
+        let mut reader = codec
+            .open_reader(f.reopen().expect("reopen").into(), Some(schema()))
             .expect("reader opens");
         let batch = reader.next_batch().expect("read").expect("one batch");
         assert_eq!(batch.num_rows(), 1);
@@ -407,22 +418,51 @@ mod tests {
 
     #[test]
     fn a_non_boolean_has_headers_is_a_configuration_error() {
-        let options = crate::transformer::from_kdl_str("has_headers \"yes\"").expect("parse kdl");
-        let Err(err) = CsvTransformerFactory.build(&options) else {
+        let options = crate::codec::from_kdl_str("has_headers \"yes\"").expect("parse kdl");
+        let Err(err) = CsvCodecFactory.build(&options) else {
             panic!("has_headers must be a boolean");
         };
         assert_eq!(err.category(), "configuration");
         assert!(err.message().contains("has_headers"), "got: {err}");
     }
 
+    #[test]
+    fn an_option_the_format_does_not_read_is_a_configuration_error() {
+        let options = crate::codec::from_kdl_str("has_header #false").expect("parse kdl");
+        let Err(err) = CsvCodecFactory.build(&options) else {
+            panic!("a misspelled option must not be dropped");
+        };
+        assert_eq!(err.category(), "configuration");
+        assert_eq!(err.message(), "csv: unknown option 'has_header'");
+    }
+
+    #[test]
+    fn the_media_type_is_text_csv() {
+        assert_eq!(CsvCodec::new().media_type(), Some("text/csv"));
+    }
+
+    #[test]
+    fn an_in_memory_document_reads_the_same_batches_as_a_file() {
+        let f = write_csv(true, &["1,1.5", "2,2.5", "3,3.5"]);
+        let bytes = std::fs::read(f.path()).expect("read back");
+        let codec = CsvCodec::new();
+
+        let from_file = read_all(&codec, f.reopen().expect("reopen"));
+        let from_memory = read_all(&codec, bytes);
+
+        assert_eq!(
+            from_file.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            3
+        );
+        assert_eq!(from_file, from_memory);
+    }
+
     fn decode_window(
-        transformer: &CsvTransformer,
+        codec: &CsvCodec,
         declared: Arc<Schema>,
         payloads: &[Vec<u8>],
     ) -> Option<RecordBatch> {
-        let mut decoder = transformer
-            .open_message_decoder(declared)
-            .expect("decoder opens");
+        let mut decoder = codec.open_message_decoder(declared).expect("decoder opens");
         for payload in payloads {
             decoder.push(payload).expect("push");
         }
@@ -432,7 +472,7 @@ mod tests {
     #[test]
     fn the_message_shape_is_one_payload_per_row() {
         assert_eq!(
-            CsvTransformer::default().message_shape(),
+            CsvCodec::default().message_shape(),
             Some(MessageShape::PerRow)
         );
     }
@@ -448,16 +488,14 @@ mod tests {
         )
         .expect("batch");
         // `has_headers` is set, and the message surface still emits none.
-        let payloads = CsvTransformer::new(true)
-            .encode_messages(&batch)
-            .expect("encode");
+        let payloads = CsvCodec::new().encode_messages(&batch).expect("encode");
         assert_eq!(payloads, vec![b"1,1.5".to_vec(), b"2,2.5".to_vec()]);
     }
 
     #[test]
     fn a_payloads_first_row_is_data_even_when_has_headers_is_set() {
-        let decoded = decode_window(&CsvTransformer::new(true), schema(), &[b"9,0.5".to_vec()])
-            .expect("one batch");
+        let decoded =
+            decode_window(&CsvCodec::new(), schema(), &[b"9,0.5".to_vec()]).expect("one batch");
         assert_eq!(decoded.num_rows(), 1);
         assert_eq!(
             decoded
@@ -487,11 +525,10 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = CsvTransformer::default();
-        let payloads = transformer.encode_messages(&batch).expect("encode");
+        let codec = CsvCodec::default();
+        let payloads = codec.encode_messages(&batch).expect("encode");
         assert_eq!(payloads.len(), batch.num_rows());
-        let decoded =
-            decode_window(&transformer, Arc::clone(&declared), &payloads).expect("one batch");
+        let decoded = decode_window(&codec, Arc::clone(&declared), &payloads).expect("one batch");
         assert_eq!(decoded, batch);
     }
 
@@ -512,10 +549,9 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = CsvTransformer::default();
-        let payloads = transformer.encode_messages(&batch).expect("encode");
-        let decoded =
-            decode_window(&transformer, Arc::clone(&declared), &payloads).expect("one batch");
+        let codec = CsvCodec::default();
+        let payloads = codec.encode_messages(&batch).expect("encode");
+        let decoded = decode_window(&codec, Arc::clone(&declared), &payloads).expect("one batch");
         assert_eq!(decoded.schema_ref().field(0).data_type(), &DataType::UInt64);
         assert_eq!(decoded, batch);
     }
@@ -535,11 +571,10 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = CsvTransformer::default();
-        let payloads = transformer.encode_messages(&batch).expect("encode");
+        let codec = CsvCodec::default();
+        let payloads = codec.encode_messages(&batch).expect("encode");
         assert_eq!(payloads, vec![b"1,".to_vec()]);
-        let decoded =
-            decode_window(&transformer, Arc::clone(&declared), &payloads).expect("one batch");
+        let decoded = decode_window(&codec, Arc::clone(&declared), &payloads).expect("one batch");
         assert_eq!(
             decoded.column(1).logical_null_count(),
             1,
@@ -549,7 +584,7 @@ mod tests {
 
     #[test]
     fn a_payload_carrying_no_record_at_all_is_refused() {
-        let mut decoder = CsvTransformer::default()
+        let mut decoder = CsvCodec::default()
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(b"") else {
@@ -560,12 +595,8 @@ mod tests {
 
     #[test]
     fn a_payload_carrying_its_own_terminator_decodes_to_one_row() {
-        let decoded = decode_window(
-            &CsvTransformer::default(),
-            schema(),
-            &[b"4,0.25\r\n".to_vec()],
-        )
-        .expect("one batch");
+        let decoded = decode_window(&CsvCodec::default(), schema(), &[b"4,0.25\r\n".to_vec()])
+            .expect("one batch");
         assert_eq!(decoded.num_rows(), 1);
     }
 
@@ -584,10 +615,10 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = CsvTransformer::default();
-        let payloads = transformer.encode_messages(&batch).expect("encode");
+        let codec = CsvCodec::default();
+        let payloads = codec.encode_messages(&batch).expect("encode");
         assert_eq!(payloads.len(), 1);
-        let decoded = decode_window(&transformer, declared, &payloads).expect("one batch");
+        let decoded = decode_window(&codec, declared, &payloads).expect("one batch");
         assert_eq!(decoded, batch);
     }
 
@@ -597,8 +628,7 @@ mod tests {
         // The decoder's default batch size is 1024, so this window spans two of
         // its internal batches.
         let payloads: Vec<Vec<u8>> = (0i64..1030).map(|i| i.to_string().into_bytes()).collect();
-        let decoded =
-            decode_window(&CsvTransformer::default(), declared, &payloads).expect("one batch");
+        let decoded = decode_window(&CsvCodec::default(), declared, &payloads).expect("one batch");
         assert_eq!(decoded.num_rows(), 1030);
         let ids = decoded
             .column(0)

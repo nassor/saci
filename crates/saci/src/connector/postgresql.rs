@@ -1,7 +1,7 @@
 //! The PostgreSQL connector: a PostgreSQL [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! Both halves are declarative: the Arrow schema is written in the service
 //! configuration, not introspected, because [`SourceFactory::build`] is
@@ -118,7 +118,7 @@
 //!
 //! `polling` and `cdc_trigger` commit their offset at the start of the *next*
 //! drain cycle, and `cdc_logical` advances its slot there, because
-//! [`Source`](crate::io::source::Source) has no acknowledgement hook. A
+//! [`Source`](crate::io::Source) has no acknowledgement hook. A
 //! crash mid-cycle replays that cycle: delivery is **at-least-once**, matching
 //! what the distributed layer already promises. Configure the sink
 //! `write_mode="upsert"` or `"ignore_conflicts"` to make replays idempotent.

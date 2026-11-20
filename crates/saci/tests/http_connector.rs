@@ -125,12 +125,8 @@ fn exchange(stream: &mut std::net::TcpStream, body: &[u8]) -> Vec<u8> {
 /// Decode a captured request body through the same format the sink wrote it
 /// with, which is what makes the assertion a round trip.
 fn decode_body(body: &[u8]) -> Vec<RecordBatch> {
-    let mut spool = tempfile::tempfile().expect("temp file");
-    spool.write_all(body).expect("write body");
-    std::io::Seek::rewind(&mut spool).expect("rewind");
-
-    let mut reader = CsvCodec::new(true)
-        .open_reader(spool, Some(schema()))
+    let mut reader = CsvCodec::new()
+        .open_reader(body.to_vec().into(), Some(schema()))
         .expect("the body is a whole csv document");
     let mut batches = Vec::new();
     while let Some(batch) = reader.next_batch().expect("decode") {
@@ -252,7 +248,6 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
 /// the same shape back out.
 #[cfg(feature = "codec-ndjson")]
 mod push {
-    use std::io::Write;
     use std::time::Duration;
 
     use arrow_array::RecordBatch;
@@ -337,12 +332,8 @@ observability log_level="warn"
     /// Decode a captured request body through the same format the sink wrote
     /// it with, which is what makes the assertion a round trip.
     fn decode_body(body: &[u8]) -> Vec<RecordBatch> {
-        let mut spool = tempfile::tempfile().expect("temp file");
-        spool.write_all(body).expect("write body");
-        std::io::Seek::rewind(&mut spool).expect("rewind");
-
         let mut reader = NdjsonCodec::default()
-            .open_reader(spool, Some(schema()))
+            .open_reader(body.to_vec().into(), Some(schema()))
             .expect("the body is a whole ndjson document");
         let mut batches = Vec::new();
         while let Some(batch) = reader.next_batch().expect("decode") {

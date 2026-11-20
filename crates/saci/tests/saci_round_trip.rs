@@ -17,8 +17,8 @@ use prometheus::{Registry, TextEncoder};
 use saci::connector::NodeIdentity;
 use saci::connector::saci::wire::{self, Frame, PROTOCOL_VERSION};
 use saci::connector::saci::{SaciSink, SaciSource};
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 

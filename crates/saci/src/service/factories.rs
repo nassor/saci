@@ -1,8 +1,8 @@
 //! Built-in factory re-exports and registration.
 //!
 //! Two kinds of factory reach the registry here. A connector factory builds a
-//! [`Source`](crate::io::source::Source) or a
-//! [`Sink`](crate::io::sink::Sink) that moves bytes; a codec factory
+//! [`Source`](crate::io::Source) or a
+//! [`Sink`](crate::io::Sink) that moves bytes; a codec factory
 //! builds the byte format a connector's `format` key names. One feature per
 //! crate decides whether it is compiled in and registered:
 //!

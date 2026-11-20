@@ -21,8 +21,7 @@ use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 
 use crate::connector::udp::probe::{OnFailure, ProbeKind, ProbeSettings};
 use crate::connector::udp::sink::MAX_DATAGRAM_BYTES;

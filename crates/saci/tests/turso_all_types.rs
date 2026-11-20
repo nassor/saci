@@ -13,7 +13,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use saci::connector::turso::{TursoSink, TursoSinkConfig, TursoSource, TursoSourceConfig};
-use saci::io::{sink::Sink, source::Source};
+use saci::io::{Sink, Source};
 
 const FIELDS: &str = "\
 schema_fields \"id\" type=\"int64\" nullable=#false\n\

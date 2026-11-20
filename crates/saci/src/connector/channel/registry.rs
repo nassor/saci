@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::connector::ChannelBridge;
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
 use crate::connector::channel::{ChannelSink, ChannelSource};
 

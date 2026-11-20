@@ -378,7 +378,7 @@ pub fn sink(dsn: &str, body: &str) -> saci::connector::mariadb::MariadbSink {
 pub async fn drain(
     source: &mut saci::connector::mariadb::MariadbSource,
 ) -> Vec<arrow_array::RecordBatch> {
-    use saci::io::source::Source as _;
+    use saci::io::Source as _;
     let mut batches = Vec::new();
     while let Some(batch) = source.next_batch().await.expect("next_batch") {
         batches.push(batch);

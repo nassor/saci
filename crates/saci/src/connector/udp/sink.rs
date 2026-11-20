@@ -43,7 +43,7 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 use crate::connector::udp::DATAGRAM_BUFFER_BYTES;
 use crate::connector::udp::probe::{self, Liveness, OnFailure, ProbeSettings};
@@ -517,7 +517,7 @@ mod tests {
 
     /// One message per row, so a three-row batch is three datagrams.
     fn ndjson() -> Arc<dyn Codec> {
-        Arc::new(NdjsonCodec::new(64))
+        Arc::new(NdjsonCodec::new().infer_max(64))
     }
 
     fn batch(values: &[i64]) -> RecordBatch {

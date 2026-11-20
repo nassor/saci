@@ -17,7 +17,7 @@ use common::Server;
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
 use saci::connector::mariadb::MariadbSource;
-use saci::io::source::Source;
+use saci::io::Source;
 
 common::on_every_server!(
     outbox_mode_reads_the_operator_table_and_delete_acked_prunes_it,

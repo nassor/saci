@@ -24,8 +24,8 @@ use saci::connector::kafka::{
     KafkaSink, KafkaSinkConfig, KafkaSource, KafkaSourceConfig, TopicProvision,
 };
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::{Source, drain_into_dataset};
+use saci::io::Sink;
+use saci::io::{Source, read_all};
 use saci::transformer::Transformer;
 use saci::transformer::arrow_ipc::ArrowIpcTransformer;
 use saci::transformer::ndjson::NdjsonTransformer;
@@ -244,7 +244,7 @@ async fn json_roundtrip() {
     .expect("source builds");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema.clone()).unwrap();
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
@@ -278,7 +278,7 @@ async fn arrow_ipc_roundtrip() {
     .expect("source builds");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema.clone()).unwrap();
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
@@ -497,7 +497,7 @@ async fn offsets_commit_between_drains() {
     first_dataset
         .register_schema(COMPONENT, schema.clone())
         .unwrap();
-    let first = drain_into_dataset(&mut first_source, &mut first_dataset, COMPONENT)
+    let first = read_all(&mut first_source, &mut first_dataset, COMPONENT)
         .await
         .expect("first drain");
     assert_eq!(first, 4);
@@ -516,7 +516,7 @@ async fn offsets_commit_between_drains() {
     .expect("source builds");
     let mut second_dataset = Dataset::new();
     second_dataset.register_schema(COMPONENT, schema).unwrap();
-    let second = drain_into_dataset(&mut second_source, &mut second_dataset, COMPONENT)
+    let second = read_all(&mut second_source, &mut second_dataset, COMPONENT)
         .await
         .expect("second drain");
     assert_eq!(
@@ -694,7 +694,7 @@ async fn a_cancelled_poll_commits_nothing_it_did_not_hand_over() {
     .expect("source builds");
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema).unwrap();
-    let rows = drain_into_dataset(&mut second, &mut dataset, COMPONENT)
+    let rows = read_all(&mut second, &mut dataset, COMPONENT)
         .await
         .expect("second drain");
     assert_eq!(
@@ -1271,7 +1271,7 @@ async fn a_zero_batch_rows_hint_still_advances_the_source() {
 
     let mut dataset = Dataset::new();
     dataset.register_schema(COMPONENT, schema.clone()).unwrap();
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(

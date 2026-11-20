@@ -66,7 +66,7 @@ async fn dump_reads_the_whole_table_every_cycle() {
 
 #[tokio::test]
 async fn dump_respects_max_batches_per_cycle() {
-    use saci::io::source::Source;
+    use saci::io::Source;
 
     let db = common::temp_db();
     seed_five(&db).await;

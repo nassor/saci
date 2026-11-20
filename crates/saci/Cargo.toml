@@ -142,7 +142,7 @@ connector-s3 = [
 ]
 connector-tcp = ["connector-api", "tokio/net", "tokio/io-util", "codec-arrow-ipc"]
 connector-udp = ["connector-api", "tokio/net", "codec-ndjson", "dep:futures"]
-connector-redb = ["connector-api", "dep:tempfile", "dep:redb"]
+connector-redb = ["connector-api", "dep:redb"]
 connector-saci = ["connector-api", "tokio/net", "tokio/io-util"]
 
 # Host

@@ -19,7 +19,7 @@ use arrow_schema::{DataType, Field, Schema};
 use tokio_util::sync::CancellationToken;
 
 use saci::connector::file::FileSource;
-use saci::io::source::Source;
+use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;

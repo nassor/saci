@@ -1,7 +1,7 @@
 //! The MariaDB connector: a MariaDB and MySQL [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! One module reads from and writes to both MariaDB and MySQL servers. A
 //! `mysql://` and a `mariadb://` DSN are the same thing: the connector asks the
@@ -112,7 +112,7 @@
 //! # Delivery semantics
 //!
 //! Every source commits its offset at the start of the *next* drain cycle,
-//! because [`Source`](crate::io::source::Source) has no acknowledgement
+//! because [`Source`](crate::io::Source) has no acknowledgement
 //! hook. A crash mid-cycle replays that cycle: delivery is **at-least-once**,
 //! matching what the distributed layer already promises. Configure the sink
 //! `write_mode="upsert"`, `"ignore_conflicts"` or `"apply_changes"` to make

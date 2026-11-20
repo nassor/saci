@@ -88,7 +88,7 @@ pub struct RedbSourceConfig {
     #[serde(default)]
     pub cache_size_bytes: Option<usize>,
     /// Delete the entries this instance yielded at
-    /// [`Source::finish`](crate::io::source::Source::finish). Off by
+    /// [`Source::finish`](crate::io::Source::finish). Off by
     /// default: a source is a reader, and a second run over the same file
     /// reads the same entries.
     ///

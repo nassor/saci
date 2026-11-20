@@ -14,7 +14,7 @@ use arrow_array::types::{Int64Type, TimestampMicrosecondType, UInt64Type};
 use arrow_array::{Array as _, RecordBatch};
 use common::{Flavor, Server, drain, source};
 use mysql_async::prelude::Queryable;
-use saci::io::source::Source as _;
+use saci::io::Source as _;
 
 /// The metadata and data fields most cases declare.
 const ORDER_FIELDS: &str = r#"

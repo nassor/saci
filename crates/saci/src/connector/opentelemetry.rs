@@ -1,8 +1,8 @@
 //! The OpenTelemetry connector: an OpenTelemetry metrics [`Source`] and
 //! [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! `OpenTelemetryMetricsSource` reads OTLP/HTTP metrics into Arrow rows, either
 //! by listening for requests or by reading a url; `OpenTelemetryMetricsSink`

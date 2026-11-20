@@ -97,7 +97,6 @@
 //! and every recomputed value matching.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -644,31 +643,18 @@ impl SinkKind {
             // `HttpSink` writes through the stream surface, which emits the
             // header row `has_headers` asks for; the message surface would
             // not.
-            Self::Standard => (Box::new(CsvCodec::new(true)), Some(classified_schema())),
+            Self::Standard => (Box::new(CsvCodec::new()), Some(classified_schema())),
             Self::Window => (Box::new(ArrowIpcCodec::new()), None),
             Self::Audit => (Box::new(ParquetCodec::new()), None),
         }
     }
 }
 
-/// Spool the body to a temp file and pull every batch out of it.
-///
-/// `open_reader` takes a `std::fs::File` because Parquet reads its footer
-/// before any row group, so an in-memory body has to land on disk first. This
-/// is what `HttpSource` does with a response body.
+/// Pull every batch out of the body, which the codec reads from memory.
 fn decode(sink: SinkKind, body: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
     let (codec, declared) = sink.reader_setup();
-    let mut tmp =
-        tempfile::NamedTempFile::new().map_err(|e| format!("temp file for the body: {e}"))?;
-    tmp.write_all(body)
-        .and_then(|()| tmp.flush())
-        .map_err(|e| format!("writing the body to a temp file: {e}"))?;
-    let file = tmp
-        .reopen()
-        .map_err(|e| format!("reopening the spooled body: {e}"))?;
-
     let mut reader = codec
-        .open_reader(file, declared)
+        .open_reader(body.to_vec().into(), declared)
         .map_err(|e| format!("{}: open_reader: {e}", sink.label()))?;
     let schema = reader.schema();
     let mut batches = Vec::new();
@@ -841,13 +827,8 @@ fn check_ndjson_field_names(registry: &mut Registry, body: &[u8], expected: &Sch
 }
 
 fn decode_inferred_ndjson(body: &[u8]) -> Result<Arc<Schema>, String> {
-    let mut tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-    tmp.write_all(body)
-        .and_then(|()| tmp.flush())
-        .map_err(|e| e.to_string())?;
-    let file = tmp.reopen().map_err(|e| e.to_string())?;
     let reader = NdjsonCodec::default()
-        .open_reader(file, None)
+        .open_reader(body.to_vec().into(), None)
         .map_err(|e| e.to_string())?;
     Ok(reader.schema())
 }

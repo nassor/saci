@@ -1,8 +1,8 @@
 //! The UDP connector: a live UDP [`Source`] and a fire-and-forget UDP
 //! [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! UDP delivers nothing. A datagram that leaves the socket is neither
 //! acknowledged nor retransmitted, so a peer that is down, a receive buffer

@@ -20,8 +20,8 @@ use saci::connector::clickhouse::config::{
     CompressionConfig, DumpMode, FieldSpec, PollingMode, QueryMode, SourceMode, WriteMode,
 };
 use saci::connector::clickhouse::{ClickhouseSink, ClickhouseSource};
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 
 #[tokio::test]
 async fn clickhouse_roundtrip_sink_and_source() {

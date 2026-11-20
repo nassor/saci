@@ -1,7 +1,7 @@
 //! The NATS connector: a NATS [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! One `mode` child node picks which NATS the connector speaks.
 //! `kind="core"` is plain subject pub/sub with no persistence;

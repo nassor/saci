@@ -19,6 +19,6 @@
 
 #![deny(missing_docs)]
 
-pub mod transformer;
+mod codec;
 
-pub use transformer::{ArrowIpcTransformer, ArrowIpcTransformerFactory};
+pub use codec::{ArrowIpcCodec, ArrowIpcCodecFactory};

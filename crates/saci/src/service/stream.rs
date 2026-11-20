@@ -69,8 +69,7 @@ use tracing::Instrument as _;
 
 use crate::dataset::Dataset;
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
 use super::builder::{BuiltNodeKind, BuiltService};

@@ -23,8 +23,8 @@ use saci::codec::csv::CsvCodec;
 use saci::codec::ndjson::NdjsonCodec;
 use saci::codec::parquet::ParquetCodec;
 use saci::connector::file::{FileSink, FileSource};
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -118,7 +118,7 @@ fn ids(batches: &[RecordBatch]) -> Vec<i64> {
 
 #[tokio::test]
 async fn csv_round_trips_through_one_file_connector() {
-    let batches = round_trip("out.csv", Arc::new(CsvCodec::new(true)), true, 64).await;
+    let batches = round_trip("out.csv", Arc::new(CsvCodec::new()), true, 64).await;
     assert_eq!(total_rows(&batches), 64);
     assert!((first_value(&batches, 3) - 4.5).abs() < 1e-9);
 }
@@ -153,10 +153,10 @@ async fn only_parquet_reports_estimated_rows() {
 
     let csv_path = dir.path().join("rows.csv");
     let mut sink =
-        FileSink::create(&csv_path, Arc::new(CsvCodec::new(true)), schema()).expect("sink opens");
+        FileSink::create(&csv_path, Arc::new(CsvCodec::new()), schema()).expect("sink opens");
     sink.write_batch(&batch(42)).await.expect("write");
     sink.finish().await.expect("finish");
-    let csv = FileSource::open(&csv_path, Arc::new(CsvCodec::new(true)), Some(schema()))
+    let csv = FileSource::open(&csv_path, Arc::new(CsvCodec::new()), Some(schema()))
         .expect("source opens");
     assert_eq!(csv.estimated_rows(), None);
 }
@@ -185,7 +185,7 @@ async fn a_write_after_finish_is_an_error_naming_the_sink() {
 async fn opening_a_missing_file_names_the_path() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("absent.csv");
-    let Err(err) = FileSource::open(&path, Arc::new(CsvCodec::new(true)), Some(schema())) else {
+    let Err(err) = FileSource::open(&path, Arc::new(CsvCodec::new()), Some(schema())) else {
         panic!("a missing file must not open");
     };
     assert!(

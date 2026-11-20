@@ -1,8 +1,8 @@
 //! The TCP connector: a live TCP [`Source`] and a client-mode TCP [`Sink`]
 //! for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! [`TcpIngestSource`] listens on `bind` and yields one `RecordBatch` per
 //! received frame. [`TcpSink`] dials `connect` and writes one frame per encoded

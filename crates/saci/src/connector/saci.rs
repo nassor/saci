@@ -1,8 +1,8 @@
 //! The SACI connector: a service-to-service [`Source`] and [`Sink`] for
 //! SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! [`SaciSink`] in one standalone service pushes `RecordBatch`es to
 //! [`SaciSource`] in another, the way a `ChannelSink` feeds a `ChannelSource`

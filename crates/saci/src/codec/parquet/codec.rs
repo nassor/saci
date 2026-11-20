@@ -1,4 +1,4 @@
-//! [`ParquetTransformer`]: the `parquet` format, both surfaces.
+//! [`ParquetCodec`]: the `parquet` format, both surfaces.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -13,13 +13,15 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use parquet::file::reader::ChunkReader;
 
+use crate::codec::registry::reject_unknown_options;
+use crate::codec::{
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
+    ReadInput,
+};
 use crate::error::SaciError;
 use crate::io::cast_batch;
-use crate::transformer::{
-    BatchReader, BatchWriter, ConfigValue, MessageDecoder, MessageShape, Transformer,
-    TransformerFactory,
-};
 
 /// The `parquet` byte format: one self-contained Parquet file, whether that
 /// file is a whole object or one message payload.
@@ -35,9 +37,9 @@ use crate::transformer::{
 /// row type before a single row is written. That cost is paid once per batch,
 /// so a message transport carrying this format wants batches, not rows.
 #[derive(Default)]
-pub struct ParquetTransformer;
+pub struct ParquetCodec;
 
-impl ParquetTransformer {
+impl ParquetCodec {
     /// Build the format.
     pub fn new() -> Self {
         Self
@@ -51,64 +53,21 @@ fn writer_properties() -> WriterProperties {
         .build()
 }
 
-impl Transformer for ParquetTransformer {
+impl Codec for ParquetCodec {
     fn format(&self) -> &'static str {
         "parquet"
     }
 
     fn open_reader(
         &self,
-        input: std::fs::File,
+        input: ReadInput,
         declared: Option<Arc<Schema>>,
     ) -> Result<Box<dyn BatchReader>, SaciError> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(input)
-            .map_err(|e| SaciError::generic(format!("parquet: builder error: {e}")))?;
-        let file_schema = Arc::clone(builder.schema());
-
-        // Row-group metadata is already in memory: no data pages are read.
-        let rows: usize = builder
-            .metadata()
-            .row_groups()
-            .iter()
-            .map(|group| group.num_rows() as usize)
-            .sum();
-        let estimated_rows = (rows > 0).then_some(rows);
-
-        // A declared schema is pushed into the reader as a column projection,
-        // so the pages of a column it does not name are never read.
-        let (builder, schema) = match &declared {
-            None => (builder, file_schema),
-            Some(declared) => {
-                let indices = declared
-                    .fields()
-                    .iter()
-                    .map(|field| {
-                        file_schema.index_of(field.name()).map_err(|_| {
-                            SaciError::configuration(format!(
-                                "parquet: declared column '{}' is not in the file (file \
-                                 columns: {})",
-                                field.name(),
-                                render_names(&file_schema),
-                            ))
-                        })
-                    })
-                    .collect::<Result<Vec<usize>, SaciError>>()?;
-                // Root indices, not the `columns` name form: a field name
-                // carrying a `.` is one name here and one column path there.
-                let mask = ProjectionMask::roots(builder.parquet_schema(), indices);
-                (builder.with_projection(mask), Arc::clone(declared))
-            }
-        };
-
-        let reader = builder
-            .build()
-            .map_err(|e| SaciError::generic(format!("parquet: reader build error: {e}")))?;
-        Ok(Box::new(ParquetBatchReader {
-            reader,
-            schema,
-            declared,
-            estimated_rows,
-        }))
+        // `Bytes` takes the vector without copying it.
+        match input {
+            ReadInput::File(file) => open_parquet(file, declared),
+            ReadInput::Memory(cursor) => open_parquet(Bytes::from(cursor.into_inner()), declared),
+        }
     }
 
     fn open_writer(
@@ -158,18 +117,79 @@ impl Transformer for ParquetTransformer {
     fn message_shape(&self) -> Option<MessageShape> {
         Some(MessageShape::PerBatch)
     }
+
+    fn media_type(&self) -> Option<&'static str> {
+        Some("application/vnd.apache.parquet")
+    }
 }
 
-/// Factory for [`ParquetTransformer`]. Reads no options.
-pub struct ParquetTransformerFactory;
+/// Open a reader over the Parquet file `input` holds, projecting onto
+/// `declared` when it is set.
+fn open_parquet<T: ChunkReader + 'static>(
+    input: T,
+    declared: Option<Arc<Schema>>,
+) -> Result<Box<dyn BatchReader>, SaciError> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(input)
+        .map_err(|e| SaciError::generic(format!("parquet: builder error: {e}")))?;
+    let file_schema = Arc::clone(builder.schema());
 
-impl TransformerFactory for ParquetTransformerFactory {
+    // Row-group metadata is already in memory: no data pages are read.
+    let rows: usize = builder
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|group| group.num_rows() as usize)
+        .sum();
+    let estimated_rows = (rows > 0).then_some(rows);
+
+    // A declared schema is pushed into the reader as a column projection,
+    // so the pages of a column it does not name are never read.
+    let (builder, schema) = match &declared {
+        None => (builder, file_schema),
+        Some(declared) => {
+            let indices = declared
+                .fields()
+                .iter()
+                .map(|field| {
+                    file_schema.index_of(field.name()).map_err(|_| {
+                        SaciError::configuration(format!(
+                            "parquet: declared column '{}' is not in the file (file \
+                             columns: {})",
+                            field.name(),
+                            render_names(&file_schema),
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<usize>, SaciError>>()?;
+            // Root indices, not the `columns` name form: a field name
+            // carrying a `.` is one name here and one column path there.
+            let mask = ProjectionMask::roots(builder.parquet_schema(), indices);
+            (builder.with_projection(mask), Arc::clone(declared))
+        }
+    };
+
+    let reader = builder
+        .build()
+        .map_err(|e| SaciError::generic(format!("parquet: reader build error: {e}")))?;
+    Ok(Box::new(ParquetBatchReader {
+        reader,
+        schema,
+        declared,
+        estimated_rows,
+    }))
+}
+
+/// Factory for [`ParquetCodec`]. Reads no options, so any key is refused.
+pub struct ParquetCodecFactory;
+
+impl CodecFactory for ParquetCodecFactory {
     fn format_name(&self) -> &'static str {
         "parquet"
     }
 
-    fn build(&self, _options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError> {
-        Ok(Arc::new(ParquetTransformer::new()))
+    fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
+        reject_unknown_options("parquet", options, &[])?;
+        Ok(Arc::new(ParquetCodec::new()))
     }
 }
 
@@ -190,7 +210,7 @@ fn render_names(schema: &Schema) -> String {
 /// `schema` requires and the batch lacks is an error. Identical fields skip the
 /// rebuild. `safe: false`: a value that does not fit the declared type is an
 /// error, never a silent null.
-fn project(batch: RecordBatch, schema: &Schema) -> Result<RecordBatch, SaciError> {
+fn project(batch: RecordBatch, schema: &Arc<Schema>) -> Result<RecordBatch, SaciError> {
     if batch.schema_ref().fields() == schema.fields() {
         return Ok(batch);
     }
@@ -321,7 +341,7 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use tempfile::NamedTempFile;
 
-    use crate::transformer::ConfigMap;
+    use crate::codec::ConfigMap;
 
     use super::*;
 
@@ -345,7 +365,7 @@ mod tests {
         .expect("batch")
     }
 
-    /// Write `rows` rows through the transformer and hand back the file.
+    /// Write `rows` rows through the codec and hand back the file.
     fn written(rows: i64) -> NamedTempFile {
         written_with(schema(), &batch(rows))
     }
@@ -353,7 +373,7 @@ mod tests {
     /// The same, for a file whose own schema is not the two-column default.
     fn written_with(schema: Arc<Schema>, batch: &RecordBatch) -> NamedTempFile {
         let file = NamedTempFile::new().expect("temp file");
-        let mut writer = ParquetTransformer::new()
+        let mut writer = ParquetCodec::new()
             .open_writer(Box::new(file.reopen().expect("reopen for write")), schema)
             .expect("writer opens");
         writer.write_batch(batch).expect("write");
@@ -364,8 +384,8 @@ mod tests {
     #[test]
     fn the_schema_comes_from_the_file() {
         let file = written(10);
-        let reader = ParquetTransformer::new()
-            .open_reader(file.reopen().expect("reopen"), None)
+        let reader = ParquetCodec::new()
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         let schema = reader.schema();
         assert_eq!(schema.field(0).name(), "id");
@@ -399,8 +419,8 @@ mod tests {
     fn a_declared_schema_projects_a_wider_file() {
         let file = written_with(wide_schema(), &wide_batch(5));
 
-        let mut reader = ParquetTransformer::new()
-            .open_reader(file.reopen().expect("reopen"), Some(schema()))
+        let mut reader = ParquetCodec::new()
+            .open_reader(file.reopen().expect("reopen").into(), Some(schema()))
             .expect("a declared schema is a projection target");
         assert_eq!(reader.schema(), schema(), "the declared schema governs");
         assert_eq!(
@@ -428,7 +448,7 @@ mod tests {
         let file = written(1);
 
         let Err(err) =
-            ParquetTransformer::new().open_reader(file.reopen().expect("reopen"), Some(declared))
+            ParquetCodec::new().open_reader(file.reopen().expect("reopen").into(), Some(declared))
         else {
             panic!("the file carries no 'missing' column");
         };
@@ -443,8 +463,8 @@ mod tests {
     #[test]
     fn estimated_rows_comes_from_row_group_metadata() {
         let file = written(42);
-        let reader = ParquetTransformer::new()
-            .open_reader(file.reopen().expect("reopen"), None)
+        let reader = ParquetCodec::new()
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         assert_eq!(reader.estimated_rows(), Some(42));
     }
@@ -452,8 +472,8 @@ mod tests {
     #[test]
     fn a_write_then_read_round_trip_preserves_every_row() {
         let file = written(1_000);
-        let mut reader = ParquetTransformer::new()
-            .open_reader(file.reopen().expect("reopen"), None)
+        let mut reader = ParquetCodec::new()
+            .open_reader(file.reopen().expect("reopen").into(), None)
             .expect("reader opens");
         let mut rows = 0;
         while let Some(batch) = reader.next_batch().expect("read") {
@@ -464,24 +484,69 @@ mod tests {
 
     #[test]
     fn the_factory_builds_the_format_and_reads_no_options() {
-        let transformer = ParquetTransformerFactory
+        let codec = ParquetCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
             .expect("build");
-        assert_eq!(transformer.format(), "parquet");
-        assert_eq!(ParquetTransformerFactory.format_name(), "parquet");
+        assert_eq!(codec.format(), "parquet");
+        assert_eq!(ParquetCodecFactory.format_name(), "parquet");
+    }
+
+    #[test]
+    fn an_option_the_format_does_not_read_is_a_configuration_error() {
+        let options = crate::codec::from_kdl_str("compression \"zstd\"").expect("parse kdl");
+        let Err(err) = ParquetCodecFactory.build(&options) else {
+            panic!("parquet reads no options");
+        };
+        assert_eq!(err.category(), "configuration");
+        assert_eq!(err.message(), "parquet: unknown option 'compression'");
+    }
+
+    #[test]
+    fn the_media_type_is_the_apache_parquet_registration() {
+        assert_eq!(
+            ParquetCodec::new().media_type(),
+            Some("application/vnd.apache.parquet")
+        );
+    }
+
+    #[test]
+    fn an_in_memory_document_reads_the_same_batches_as_a_file() {
+        let file = written_with(wide_schema(), &wide_batch(1_000));
+        let bytes = std::fs::read(file.path()).expect("read back");
+        let codec = ParquetCodec::new();
+
+        for declared in [None, Some(schema())] {
+            let mut from_file = codec
+                .open_reader(file.reopen().expect("reopen").into(), declared.clone())
+                .expect("reader opens");
+            let mut from_memory = codec
+                .open_reader(bytes.clone().into(), declared)
+                .expect("reader opens");
+            assert_eq!(from_file.schema(), from_memory.schema());
+            assert_eq!(from_file.estimated_rows(), from_memory.estimated_rows());
+            assert_eq!(from_file.estimated_rows(), Some(1_000));
+            let mut rows = 0;
+            while let Some(expected) = from_file.next_batch().expect("read") {
+                let actual = from_memory.next_batch().expect("read").expect("a batch");
+                assert_eq!(actual, expected);
+                rows += actual.num_rows();
+            }
+            assert!(from_memory.next_batch().expect("read").is_none());
+            assert_eq!(rows, 1_000);
+        }
     }
 
     #[test]
     fn the_message_shape_is_one_payload_per_batch() {
         assert_eq!(
-            ParquetTransformer::new().message_shape(),
+            ParquetCodec::new().message_shape(),
             Some(MessageShape::PerBatch)
         );
     }
 
     #[test]
     fn encoding_emits_one_self_contained_file_for_the_whole_batch() {
-        let payloads = ParquetTransformer::new()
+        let payloads = ParquetCodec::new()
             .encode_messages(&batch(3))
             .expect("encode");
         assert_eq!(payloads.len(), 1);
@@ -500,12 +565,10 @@ mod tests {
 
     #[test]
     fn a_message_round_trip_preserves_every_row_and_column_type() {
-        let transformer = ParquetTransformer::new();
+        let codec = ParquetCodec::new();
         let original = batch(500);
-        let payloads = transformer.encode_messages(&original).expect("encode");
-        let mut decoder = transformer
-            .open_message_decoder(schema())
-            .expect("decoder opens");
+        let payloads = codec.encode_messages(&original).expect("encode");
+        let mut decoder = codec.open_message_decoder(schema()).expect("decoder opens");
         decoder.push(&payloads[0]).expect("push");
         let decoded = decoder.flush().expect("flush").expect("one batch");
         assert_eq!(decoded, original);
@@ -513,12 +576,10 @@ mod tests {
 
     #[test]
     fn every_payload_of_a_window_folds_into_one_batch() {
-        let transformer = ParquetTransformer::new();
-        let mut decoder = transformer
-            .open_message_decoder(schema())
-            .expect("decoder opens");
+        let codec = ParquetCodec::new();
+        let mut decoder = codec.open_message_decoder(schema()).expect("decoder opens");
         for _ in 0..3 {
-            let payloads = transformer.encode_messages(&batch(4)).expect("encode");
+            let payloads = codec.encode_messages(&batch(4)).expect("encode");
             decoder.push(&payloads[0]).expect("push");
         }
         let decoded = decoder.flush().expect("flush").expect("one batch");
@@ -540,11 +601,9 @@ mod tests {
         )
         .expect("batch");
 
-        let transformer = ParquetTransformer::new();
-        let payloads = transformer.encode_messages(&original).expect("encode");
-        let mut decoder = transformer
-            .open_message_decoder(declared)
-            .expect("decoder opens");
+        let codec = ParquetCodec::new();
+        let payloads = codec.encode_messages(&original).expect("encode");
+        let mut decoder = codec.open_message_decoder(declared).expect("decoder opens");
         decoder.push(&payloads[0]).expect("push");
         let decoded = decoder.flush().expect("flush").expect("one batch");
         assert_eq!(decoded.schema_ref().field(0).data_type(), &DataType::UInt64);
@@ -553,10 +612,10 @@ mod tests {
 
     #[test]
     fn a_payload_carrying_extra_columns_is_projected() {
-        let payloads = ParquetTransformer::new()
+        let payloads = ParquetCodec::new()
             .encode_messages(&wide_batch(4))
             .expect("encode");
-        let mut decoder = ParquetTransformer::new()
+        let mut decoder = ParquetCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         decoder
@@ -570,13 +629,13 @@ mod tests {
     #[test]
     fn a_payload_missing_a_declared_column_is_refused() {
         let other = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-        let payloads = ParquetTransformer::new()
+        let payloads = ParquetCodec::new()
             .encode_messages(
                 &RecordBatch::try_new(other, vec![Arc::new(Int64Array::from(vec![1i64]))])
                     .expect("batch"),
             )
             .expect("encode");
-        let mut decoder = ParquetTransformer::new()
+        let mut decoder = ParquetCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(&payloads[0]) else {
@@ -591,7 +650,7 @@ mod tests {
 
     #[test]
     fn a_payload_that_is_not_a_parquet_file_is_refused() {
-        let mut decoder = ParquetTransformer::new()
+        let mut decoder = ParquetCodec::new()
             .open_message_decoder(schema())
             .expect("decoder opens");
         let Err(err) = decoder.push(b"id,val\n1,1.5\n") else {

@@ -4,7 +4,7 @@
 //! datagram. It never reaches EOF: `next_batch` blocks until the next datagram
 //! arrives, so only the stream runner (`run_mode kind="stream"`) can drive it.
 //! The batch loop's
-//! [`drain_into_dataset`](crate::io::source::drain_into_dataset) would
+//! [`read_all`](crate::io::read_all) would
 //! block forever, and the service config validator rejects that combination.
 //!
 //! ## Wire rule
@@ -45,7 +45,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::udp::DATAGRAM_BUFFER_BYTES;
 
@@ -369,7 +369,7 @@ mod tests {
 
     /// One message per row, so a batch of three rows is three datagrams.
     fn ndjson() -> Arc<dyn Codec> {
-        Arc::new(NdjsonCodec::new(64))
+        Arc::new(NdjsonCodec::new().infer_max(64))
     }
 
     fn batch(values: &[i64]) -> RecordBatch {
@@ -736,7 +736,7 @@ mod tests {
         ) -> Result<Box<dyn MessageDecoder>, SaciError> {
             Ok(Box::new(BufferingDecoder {
                 buf: Vec::new(),
-                inner: NdjsonCodec::new(64).open_message_decoder(schema)?,
+                inner: NdjsonCodec::new().infer_max(64).open_message_decoder(schema)?,
             }))
         }
 

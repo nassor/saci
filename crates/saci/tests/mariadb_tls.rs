@@ -16,8 +16,8 @@ use mysql_async::prelude::Queryable;
 use saci::connector::mariadb::{
     MariadbSink, MariadbSinkConfig, MariadbSource, MariadbSourceConfig,
 };
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 use serde::Deserialize as _;
 
 /// A self-signed certificate for `localhost`: the PEMs the server loads, and the

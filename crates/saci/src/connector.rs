@@ -1,8 +1,8 @@
 //! Factory contract every SACI connector implements, and the connectors.
 //!
 //! [`SourceFactory`] and [`SinkFactory`] build a
-//! [`Source`](crate::io::source::Source) or a
-//! [`Sink`](crate::io::sink::Sink) from one opaque `config` table. They
+//! [`Source`](crate::io::Source) or a
+//! [`Sink`](crate::io::Sink) from one opaque `config` table. They
 //! live outside `service` so a connector implements them without the host
 //! that loads it.
 //!

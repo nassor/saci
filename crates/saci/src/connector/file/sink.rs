@@ -52,7 +52,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 /// Local-file [`Sink`]. The codec encodes; this type owns the file
 /// handle.
@@ -475,7 +475,7 @@ mod tests {
 
     use super::*;
     use crate::connector::file::FileSource;
-    use crate::io::source::Source;
+    use crate::io::Source;
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
@@ -595,11 +595,11 @@ mod tests {
     }
 
     fn ndjson() -> Arc<dyn Codec> {
-        Arc::new(NdjsonCodec::new(100))
+        Arc::new(NdjsonCodec::new().infer_max(100))
     }
 
     fn csv(has_headers: bool) -> Arc<dyn Codec> {
-        Arc::new(CsvCodec::new(has_headers))
+        Arc::new(CsvCodec::new().has_headers(has_headers))
     }
 
     /// Append to `path` the way another process would: its own handle.

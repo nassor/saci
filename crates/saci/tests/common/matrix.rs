@@ -310,8 +310,8 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
@@ -547,8 +547,8 @@ impl Format {
         match self {
             Self::None => None,
             Self::ArrowIpc => Some(Arc::new(saci::codec::arrow_ipc::ArrowIpcCodec::new())),
-            Self::Avro => Some(Arc::new(saci::codec::avro::AvroCodec::new(None, None))),
-            Self::Csv => Some(Arc::new(saci::codec::csv::CsvCodec::new(true))),
+            Self::Avro => Some(Arc::new(saci::codec::avro::AvroCodec::new())),
+            Self::Csv => Some(Arc::new(saci::codec::csv::CsvCodec::new())),
             Self::Ndjson => Some(Arc::new(saci::codec::ndjson::NdjsonCodec::default())),
             Self::Parquet => Some(Arc::new(saci::codec::parquet::ParquetCodec::new())),
         }
@@ -1943,12 +1943,9 @@ fn encode_document(format: Format, batch: &RecordBatch) -> Result<Vec<u8>, Strin
 /// Decode one self-contained `format` document into its batches.
 fn decode_document(format: Format, row: RowKind, bytes: &[u8]) -> Result<Vec<RecordBatch>, String> {
     let codec = format.codec().ok_or("Format::None decodes no document")?;
-    let mut spool = tempfile::tempfile().map_err(|e| e.to_string())?;
-    spool.write_all(bytes).map_err(|e| e.to_string())?;
-    spool.rewind().map_err(|e| e.to_string())?;
     let declared = (!format.carries_its_own_schema()).then(|| row.schema());
     let mut reader = codec
-        .open_reader(spool, declared)
+        .open_reader(bytes.to_vec().into(), declared)
         .map_err(|e| format!("open_reader: {e}"))?;
     let mut batches = Vec::new();
     while let Some(batch) = reader

@@ -1,23 +1,23 @@
 //! Turning one whole document body into batches, shared by the read halves.
 //!
-//! The codec's stream read surface takes a `std::fs::File` because
-//! parquet reads its footer before any row group, so a body has to land
-//! somewhere seekable before it can be decoded. It lands in an unnamed temp
-//! file the OS reclaims when the last handle closes, written chunk by chunk as
-//! the body arrives: a 2 GiB response never exists in memory, and
-//! `max_body_bytes` stops one before the disk fills.
+//! The codec's stream read surface takes a [`ReadInput`], which is seekable
+//! because parquet reads its footer before any row group. A body already whole
+//! in memory is handed over as it is. A body that arrives as a stream lands in
+//! an unnamed temp file the OS reclaims when the last handle closes, written
+//! chunk by chunk as the body arrives: a 2 GiB response never exists in memory,
+//! and `max_body_bytes` stops one before the disk fills.
 //!
 //! Opening the reader and draining it are blocking calls (a parquet footer read
 //! is a seek), so both happen inside a `spawn_blocking` the caller owns.
 
-use std::io::{Seek, Write};
+use std::io::Seek;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema};
 use tokio::sync::mpsc;
 
-use crate::codec::{BatchReader, Codec};
+use crate::codec::{BatchReader, Codec, ReadInput};
 use crate::error::SaciError;
 
 use crate::connector::http::client::Body;
@@ -113,23 +113,6 @@ pub(crate) async fn spool(
     Ok((file, written))
 }
 
-/// The same thing for a body already in memory, which is what the push source
-/// has once it has collected a request under its own cap.
-///
-/// # Errors
-///
-/// Returns [`SaciError::Generic`] when the temp file cannot be created,
-/// written or rewound.
-pub(crate) fn spool_bytes(what: &str, body: &[u8]) -> Result<std::fs::File, SaciError> {
-    let mut file =
-        tempfile::tempfile().map_err(|e| SaciError::generic(format!("{what}: spool file: {e}")))?;
-    file.write_all(body)
-        .map_err(|e| SaciError::generic(format!("{what}: spool write: {e}")))?;
-    file.rewind()
-        .map_err(|e| SaciError::generic(format!("{what}: spool rewind: {e}")))?;
-    Ok(file)
-}
-
 /// The one wording a body over `max_body_bytes` carries, whichever half read
 /// it and whether the length was announced or discovered.
 fn over_cap(what: &str, source: &str, cap: usize) -> SaciError {
@@ -138,7 +121,7 @@ fn over_cap(what: &str, source: &str, cap: usize) -> SaciError {
     ))
 }
 
-/// Open the format's reader over a spooled body and settle its schema.
+/// Open the format's reader over a body and settle its schema.
 ///
 /// `declared` is what the format is handed, already resolved from the
 /// `schema_from` rule: the declaration verbatim, or nothing so a
@@ -157,12 +140,12 @@ pub(crate) fn open(
     what: &str,
     source: &str,
     codec: &Arc<dyn Codec>,
-    spool: std::fs::File,
+    input: ReadInput,
     declared: Option<Arc<Schema>>,
     check: bool,
     expected: &Schema,
 ) -> Result<Box<dyn BatchReader>, SaciError> {
-    let reader = codec.open_reader(spool, declared)?;
+    let reader = codec.open_reader(input, declared)?;
     if check {
         let carried = reader.schema();
         if carried.fields() != expected.fields() {
@@ -228,13 +211,5 @@ mod tests {
             Field::new("label", DataType::Utf8, true),
         ]);
         assert_eq!(render_fields(schema.fields()), "id: Int64, label: Utf8");
-    }
-
-    #[test]
-    fn an_in_memory_body_spools_to_a_rewound_file() {
-        let mut file = spool_bytes("HttpPushSource", b"id\n1\n").expect("spool");
-        let mut read = String::new();
-        std::io::Read::read_to_string(&mut file, &mut read).expect("read back");
-        assert_eq!(read, "id\n1\n", "the handle is rewound, not at the end");
     }
 }

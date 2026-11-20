@@ -31,7 +31,7 @@ pub(crate) mod triggers;
 use std::sync::Arc;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;

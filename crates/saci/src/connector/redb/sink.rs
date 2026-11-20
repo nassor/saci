@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use redb::{Database, ReadableDatabase, TableDefinition, TableError};
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 use crate::connector::redb::config::RedbSinkConfig;
 use crate::connector::redb::key::{entry_key, parse_seq};
@@ -79,7 +79,7 @@ impl std::io::Write for SharedBuffer {
 ///     schema_fields: Vec::new(),
 /// };
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-/// let sink = RedbSink::open(config, schema, Arc::new(CsvCodec::new(true))).unwrap();
+/// let sink = RedbSink::open(config, schema, Arc::new(CsvCodec::new())).unwrap();
 /// ```
 pub struct RedbSink {
     /// `None` after [`Sink::finish`], which is what releases the file lock.

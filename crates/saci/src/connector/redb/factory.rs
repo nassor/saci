@@ -12,7 +12,7 @@ use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
 use crate::connector::redb::config::{RedbSinkConfig, RedbSourceConfig};
 use crate::connector::redb::{RedbSink, RedbSource};

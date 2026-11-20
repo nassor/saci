@@ -16,8 +16,7 @@ use serde::Deserialize;
 
 use crate::connector::{ConfigValue, ConnectorContext, SinkFactory, SourceFactory};
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 
 use crate::connector::turso::{TursoSink, TursoSinkConfig, TursoSource, TursoSourceConfig};
 

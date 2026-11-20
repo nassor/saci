@@ -32,8 +32,8 @@ use saci::connector::from_kdl_str;
 use saci::connector::postgresql::{
     PostgresSink, PostgresSinkConfig, PostgresSource, PostgresSourceConfig,
 };
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 use serde::Deserialize as _;
 use tokio_postgres::Client;
 

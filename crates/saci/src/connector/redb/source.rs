@@ -1,15 +1,14 @@
 //! [`RedbSource`]: the entries of one redb table, read through a codec.
 //!
 //! The source lists the table's matching keys once, then walks that list one
-//! entry at a time. Each value is spooled into an unnamed tempfile, one
+//! entry at a time. Each value is copied out of the read transaction, one
 //! dedicated OS thread drives the codec's
-//! [`BatchReader`](crate::codec::BatchReader) over that file, and
+//! [`BatchReader`](crate::codec::BatchReader) over that copy, and
 //! [`Source::next_batch`] awaits the bounded channel the thread feeds. EOF is
 //! the key list exhausted; there is no re-scan or tail mode, so this is a
 //! finite source every run mode can drive.
 
 use std::collections::VecDeque;
-use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,7 +19,7 @@ use redb::{Database, ReadOnlyDatabase, ReadableDatabase, TableDefinition, TableE
 use tokio::sync::mpsc;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 use crate::connector::redb::config::RedbSourceConfig;
 
@@ -29,7 +28,7 @@ use crate::connector::redb::config::RedbSourceConfig;
 const CHANNEL_CAPACITY: usize = 4;
 
 /// redb [`Source`]. The codec decodes; this type owns the database
-/// handle, the key list, the spool file, the reader thread and the channel.
+/// handle, the key list, the reader thread and the channel.
 ///
 /// # Example
 ///
@@ -55,7 +54,7 @@ const CHANNEL_CAPACITY: usize = 4;
 /// let src = RedbSource::new(
 ///     config,
 ///     Arc::new(Schema::empty()),
-///     Arc::new(CsvCodec::new(true)),
+///     Arc::new(CsvCodec::new()),
 /// )
 /// .unwrap();
 /// ```
@@ -168,7 +167,7 @@ impl RedbSource {
         Ok(())
     }
 
-    /// Read one entry's bytes and hand the codec a spool file over them.
+    /// Read one entry's bytes and hand the codec a reader over them.
     async fn open_entry(
         &self,
         key: String,
@@ -203,26 +202,14 @@ impl RedbSource {
                         path.display()
                     ))
                 })?;
-            let bytes = value.value();
-            let size = bytes.len();
-            // A spool file rather than a `Vec`: `Codec::open_reader`
-            // takes a concrete `std::fs::File`, and the OS reclaims an unnamed
-            // tempfile on close.
-            let mut spool = tempfile::tempfile()
-                .map_err(|e| SaciError::generic(format!("RedbSource: spool file: {e}")))?;
-            spool
-                .write_all(bytes)
-                .map_err(|e| SaciError::generic(format!("RedbSource: spool write: {e}")))?;
-            spool
-                .rewind()
-                .map_err(|e| SaciError::generic(format!("RedbSource: spool rewind: {e}")))?;
+            // The value borrows the read transaction, which ends with this
+            // closure, while the reader outlives it: the codec gets a copy.
+            let bytes = value.value().to_vec();
 
             #[cfg(feature = "tracing")]
-            tracing::info!(key = %key, bytes = size, "RedbSource: entry spooled");
-            #[cfg(not(feature = "tracing"))]
-            let _ = size;
+            tracing::info!(key = %key, bytes = bytes.len(), "RedbSource: entry read");
 
-            codec.open_reader(spool, Some(declared))
+            codec.open_reader(bytes.into(), Some(declared))
         })
         .await
         .map_err(|e| SaciError::generic(format!("RedbSource: spawn_blocking panic: {e}")))?
@@ -333,8 +320,8 @@ impl Source for RedbSource {
     /// # Errors
     ///
     /// A key leaves the list only when its entry's batch stream ends cleanly,
-    /// so every other outcome leaves it at the front: a scan error, a read or
-    /// spool error, a reader the entry's bytes refuse, and a decode error
+    /// so every other outcome leaves it at the front: a scan error, a read
+    /// error, a reader the entry's bytes refuse, and a decode error
     /// raised part way through the entry. A caller's retry therefore
     /// re-attempts that same entry rather than advancing past it, which
     /// replays the batches of that entry it had already handed over. That
@@ -440,9 +427,9 @@ impl Source for RedbSource {
             return Ok(());
         }
         // Both handles go before the exclusive write open. The decode thread
-        // holds only its spool file and the sender half, so dropping the
-        // receiver is what ends it; the database `Arc` never left the
-        // `spawn_blocking` that read the entry, so this is its last handle.
+        // holds only the sender half, so dropping the receiver is what ends
+        // it; the database `Arc` never left the `spawn_blocking` that read
+        // the entry, so this is its last handle.
         self.current = None;
         self.db = None;
         let path = self.path.clone();

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 /// In-memory push sink backed by a tokio mpsc channel.
 ///
@@ -20,7 +20,7 @@ use crate::io::sink::Sink;
 /// use std::sync::Arc;
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::channel::ChannelSink;
-/// use saci::io::sink::Sink;
+/// use saci::io::Sink;
 ///
 /// # #[tokio::main]
 /// # async fn main() {
