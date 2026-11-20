@@ -47,6 +47,7 @@ use std::time::Duration;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use crate::codec::Codec;
@@ -56,6 +57,7 @@ use crate::io::{RetryingSink, RetryingSource, Sink, Source};
 use crate::metrics::{SinkMetrics, SourceMetrics};
 use crate::retry::RetryMode;
 
+use super::config::flexible::{de_opt_bool_flexible, de_opt_f64_flexible, de_opt_u64_flexible};
 use super::factories::lookup_connector;
 use super::registry::Registry;
 use super::sampling::HEAL_TARGET;
@@ -66,7 +68,7 @@ const MAX_BACKOFF_EXPONENT: usize = 30;
 
 /// Resolved self-healing policy for one node.
 ///
-/// Built from [`HealConfig`](super::config::HealConfig) by layering a node's
+/// Built from [`HealConfig`] by layering a node's
 /// block over the top-level one and both over [`Default`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HealSettings {
@@ -706,6 +708,148 @@ fn schema_mismatch(pinned: &Schema, fresh: &Schema) -> Option<String> {
         fresh.fields(),
         pinned.fields()
     ))
+}
+
+/// Self-healing policy for a source or sink node: when the host stops
+/// re-driving a failing connector and replaces it with a fresh one built
+/// from the same factory and the same `config`.
+///
+/// On by default. Declared once at the top level, and overridden field by
+/// field per node:
+///
+/// ```kdl
+/// heal {
+///     enabled #true
+///     after_failures 3
+///     base_delay_ms 1000
+///     multiplier 2.0
+///     max_delay_ms 60000
+///     jitter 0.1
+///     max_attempts 0
+/// }
+///
+/// workflow "w" {
+///     sink "collector" connector="tcp" component="Order" {
+///         heal { after_failures 1 }
+///     }
+/// }
+/// ```
+///
+/// | Key | Unit | Default | Trade-off |
+/// |---|---|---|---|
+/// | `enabled` | flag | `#true` | `#false` keeps re-driving the same instance forever |
+/// | `after_failures` | failures | 3 | consecutive failures before the first rebuild; higher rides out a longer blip |
+/// | `base_delay_ms` | ms | 1000 | delay before the first rebuild |
+/// | `multiplier` | ratio | 2.0 | growth per further attempt; must be at least 1.0 |
+/// | `max_delay_ms` | ms | 60000 | ceiling on the computed delay |
+/// | `jitter` | ratio | 0.1 | fraction of the delay randomised, in `0.0..=1.0` |
+/// | `max_attempts` | attempts | 0 | rebuilds before the node gives up; `0` never gives up |
+///
+/// A connector answers [`Connector::rebuild`](crate::connector::Connector::rebuild)
+/// for its own config, and one that cannot be rebuilt is never healed. A
+/// node declaring its own `heal` block on such a connector is a load-time
+/// error rather than a block that quietly does nothing.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealConfig {
+    /// Whether a failing connector is replaced at all. Default `true`.
+    #[serde(deserialize_with = "de_opt_bool_flexible")]
+    pub enabled: Option<bool>,
+    /// Consecutive failed operations before the first rebuild.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub after_failures: Option<u64>,
+    /// Delay before the first rebuild.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub base_delay_ms: Option<u64>,
+    /// Growth factor applied per further attempt.
+    #[serde(deserialize_with = "de_opt_f64_flexible")]
+    pub multiplier: Option<f64>,
+    /// Ceiling on the computed delay.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub max_delay_ms: Option<u64>,
+    /// Fraction of the delay randomised, in `0.0..=1.0`.
+    #[serde(deserialize_with = "de_opt_f64_flexible")]
+    pub jitter: Option<f64>,
+    /// Rebuild attempts before the node gives up; `0` never gives up.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub max_attempts: Option<u64>,
+}
+
+impl HealConfig {
+    /// Layer this block over `global` and both over `defaults`.
+    pub fn resolve(&self, global: &Self, defaults: HealSettings) -> HealSettings {
+        HealSettings {
+            enabled: self.enabled.or(global.enabled).unwrap_or(defaults.enabled),
+            after_failures: saturating_u32(
+                self.after_failures.or(global.after_failures),
+                defaults.after_failures,
+            ),
+            base_delay_ms: self
+                .base_delay_ms
+                .or(global.base_delay_ms)
+                .unwrap_or(defaults.base_delay_ms),
+            multiplier: self
+                .multiplier
+                .or(global.multiplier)
+                .unwrap_or(defaults.multiplier),
+            max_delay_ms: self
+                .max_delay_ms
+                .or(global.max_delay_ms)
+                .unwrap_or(defaults.max_delay_ms),
+            jitter: self.jitter.or(global.jitter).unwrap_or(defaults.jitter),
+            max_attempts: saturating_u32(
+                self.max_attempts.or(global.max_attempts),
+                defaults.max_attempts,
+            ),
+        }
+    }
+
+    /// Reject an out-of-range key rather than clamping it, naming `what`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Configuration`] for a key outside its range, or
+    /// for a `max_delay_ms` below the resolved `base_delay_ms`.
+    pub fn validate(&self, global: &Self, what: &str) -> Result<(), SaciError> {
+        let resolved = self.resolve(global, HealSettings::default());
+        if resolved.after_failures < 1 {
+            return Err(SaciError::configuration(format!(
+                "{what}: after_failures must be at least 1; it counts the failures \
+                 that precede a rebuild"
+            )));
+        }
+        if resolved.base_delay_ms < 1 {
+            return Err(SaciError::configuration(format!(
+                "{what}: base_delay_ms must be at least 1; a zero delay rebuilds in a hot loop"
+            )));
+        }
+        if resolved.multiplier < 1.0 || resolved.multiplier.is_nan() {
+            return Err(SaciError::configuration(format!(
+                "{what}: multiplier must be at least 1.0, got {}",
+                resolved.multiplier
+            )));
+        }
+        if !(0.0..=1.0).contains(&resolved.jitter) {
+            return Err(SaciError::configuration(format!(
+                "{what}: jitter must be within 0.0..=1.0, got {}",
+                resolved.jitter
+            )));
+        }
+        if resolved.max_delay_ms < resolved.base_delay_ms {
+            return Err(SaciError::configuration(format!(
+                "{what}: max_delay_ms ({}) must be at least base_delay_ms ({})",
+                resolved.max_delay_ms, resolved.base_delay_ms
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A declared `u64` count narrowed to the `u32` the settings carry, or the
+/// default when the key was omitted. A value beyond `u32::MAX` saturates
+/// rather than wrapping into a small count.
+fn saturating_u32(declared: Option<u64>, default: u32) -> u32 {
+    declared.map_or(default, |v| u32::try_from(v).unwrap_or(u32::MAX))
 }
 
 #[cfg(all(test, feature = "service"))]
@@ -1356,5 +1500,161 @@ field "v" type="int64" nullable=#false
         rebuilder
             .build_source()
             .expect("a heal rebuild binds a fresh ephemeral port and keeps the identity");
+    }
+}
+
+#[cfg(all(test, feature = "service"))]
+mod config_tests {
+    use super::*;
+    use crate::service::config::ServiceConfig;
+    use crate::service::config::test_support::{minimal_standalone_kdl, parse};
+
+    // ── heal block ───────────────────────────────────────────────────────────
+
+    /// The trivial workflow with `global` at the top level and `local` inside
+    /// the sink node.
+    fn heal_kdl(global: &str, local: &str) -> String {
+        format!(
+            r#"
+mode "standalone"
+
+node id=1 data_dir="/tmp/saci-test"
+
+{global}
+
+workflow "w" {{
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X" {{
+        {local}
+    }}
+    link from="in" to="out"
+}}
+"#
+        )
+    }
+
+    /// The settings a config resolves for sink `out`.
+    fn resolved_heal(cfg: &ServiceConfig) -> HealSettings {
+        cfg.workflows[0].sinks[0]
+            .heal
+            .clone()
+            .unwrap_or_default()
+            .resolve(&cfg.heal, HealSettings::default())
+    }
+
+    #[test]
+    fn heal_is_on_by_default_when_no_block_is_declared() {
+        let cfg = parse(&minimal_standalone_kdl()).expect("parse should succeed");
+        cfg.validate().expect("the default policy is valid");
+        assert_eq!(cfg.heal, HealConfig::default());
+
+        let defaults = HealSettings::default();
+        assert!(defaults.enabled, "a connector heals with no config at all");
+        assert_eq!(defaults.after_failures, 3);
+        assert_eq!(defaults.base_delay_ms, 1_000);
+        assert_eq!(defaults.max_delay_ms, 60_000);
+        assert_eq!(defaults.max_attempts, 0, "0 never gives up");
+    }
+
+    #[test]
+    fn a_node_heal_block_layers_over_the_top_level_one() {
+        let cfg = parse(&heal_kdl(
+            "heal { after_failures 5; base_delay_ms 250; max_attempts 9 }",
+            "heal { after_failures 1 }",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+
+        let settings = resolved_heal(&cfg);
+        assert_eq!(settings.after_failures, 1, "the node's own key wins");
+        assert_eq!(settings.base_delay_ms, 250, "the top level fills the rest");
+        assert_eq!(settings.max_attempts, 9);
+        assert!(settings.enabled, "neither block turned it off");
+    }
+
+    #[test]
+    fn a_top_level_heal_block_parses_every_key() {
+        let cfg = parse(&heal_kdl(
+            r#"heal {
+    enabled #true
+    after_failures 2
+    base_delay_ms 500
+    multiplier 1.5
+    max_delay_ms 20000
+    jitter 0.25
+    max_attempts 7
+}"#,
+            "",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+
+        let settings = resolved_heal(&cfg);
+        assert!(settings.enabled);
+        assert_eq!(settings.after_failures, 2);
+        assert_eq!(settings.base_delay_ms, 500);
+        assert!((settings.multiplier - 1.5).abs() < f64::EPSILON);
+        assert_eq!(settings.max_delay_ms, 20_000);
+        assert!((settings.jitter - 0.25).abs() < f64::EPSILON);
+        assert_eq!(settings.max_attempts, 7);
+    }
+
+    #[test]
+    fn string_valued_heal_keys_parse_so_env_substitution_works() {
+        let cfg = parse(&heal_kdl(
+            r#"heal { enabled "false"; after_failures "6"; multiplier "1.25" }"#,
+            "",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+
+        let settings = resolved_heal(&cfg);
+        assert!(!settings.enabled);
+        assert_eq!(settings.after_failures, 6);
+        assert!((settings.multiplier - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn an_out_of_range_heal_key_is_rejected_rather_than_clamped() {
+        for (block, fragment) in [
+            (
+                "heal { after_failures 0 }",
+                "after_failures must be at least 1",
+            ),
+            (
+                "heal { base_delay_ms 0 }",
+                "base_delay_ms must be at least 1",
+            ),
+            ("heal { multiplier 0.5 }", "multiplier must be at least 1.0"),
+            ("heal { jitter 2.0 }", "jitter must be within 0.0..=1.0"),
+            (
+                "heal { base_delay_ms 100; max_delay_ms 10 }",
+                "max_delay_ms (10) must be at least base_delay_ms (100)",
+            ),
+        ] {
+            let cfg = parse(&heal_kdl(block, "")).expect("parse should succeed");
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains(fragment) && err.contains("heal:"),
+                "{block} must be refused naming its key, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_node_heal_error_names_the_workflow_and_the_node() {
+        let cfg = parse(&heal_kdl("", "heal { jitter 3.0 }")).expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("workflow 'w' sink 'out': heal"),
+            "the error must name where the key is, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_heal_key_is_rejected() {
+        let err = parse(&heal_kdl("heal { retries 3 }", ""))
+            .expect_err("an unknown key must be rejected");
+        assert!(err.contains("retries"), "got: {err}");
     }
 }

@@ -1,7 +1,7 @@
 //! The inspector's read-only JSON API, and the dashboard assets.
 //!
 //! Merged into the control-plane router by
-//! [`build_router`](super::http::build_router) **only** when
+//! [`build_router`](super::build_router) **only** when
 //! `observability.inspector.enabled` is true, so a disabled inspector answers
 //! 404 rather than 403: an operator who switched capture off has no endpoint
 //! here, not a forbidden one.
@@ -28,7 +28,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use super::http::ServiceState;
+use super::ServiceState;
 use crate::inspector::Inspector;
 
 /// Largest history window a client may ask for, in milliseconds.
@@ -108,10 +108,10 @@ pub fn ui_routes() -> Router<ServiceState> {
 /// wasm32-unknown-unknown only) without breaking a published tarball.
 /// Embedded rather than read from disk so `saci-service` is one
 /// self-contained binary and the dashboard cannot go missing at runtime.
-const UI_INDEX_HTML: &str = include_str!("../../assets/ui/index.html");
-const UI_APP_JS: &str = include_str!("../../assets/ui/app.js");
-const UI_APP_WASM: &[u8] = include_bytes!("../../assets/ui/app_bg.wasm");
-const UI_APP_CSS: &str = include_str!("../../assets/ui/app.css");
+const UI_INDEX_HTML: &str = include_str!("../../../assets/ui/index.html");
+const UI_APP_JS: &str = include_str!("../../../assets/ui/app.js");
+const UI_APP_WASM: &[u8] = include_bytes!("../../../assets/ui/app_bg.wasm");
+const UI_APP_CSS: &str = include_str!("../../../assets/ui/app.css");
 
 /// Every asset is served `no-cache`: the bundle changes with the binary, and a
 /// stale cached `app.js` against a new `app_bg.wasm` is a hard `wasm-bindgen`

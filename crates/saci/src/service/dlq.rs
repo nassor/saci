@@ -56,6 +56,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, BinaryArray, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::Schema;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -68,7 +69,7 @@ use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
 use crate::io::{Sink, Source};
 use crate::metrics::{SinkMetrics, WorkflowMetrics};
 
-use super::config::{DlqBlock, DlqReplayPoint, RetryConfig, ServiceConfig, WorkflowSpec};
+use super::config::{RetryConfig, ServiceConfig, WorkflowSpec, default_config};
 use super::heal::{HealSettings, Rebuilder};
 use super::registry::Registry;
 use super::sampling::DLQ_TARGET;
@@ -1531,6 +1532,113 @@ fn validate_store_block(
     Ok(())
 }
 
+/// Where in a pass the runner replays a workflow's dead letters.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DlqReplayPoint {
+    /// At the head of the pass, before the first declared source is drained.
+    /// A replayed letter therefore reaches its sink ahead of anything new.
+    #[default]
+    BeforeSources,
+    /// After the last node of the pass wrote, before pacing. New arrivals go
+    /// first and a replay uses what is left of the pass.
+    AfterSources,
+}
+
+impl DlqReplayPoint {
+    /// The KDL string this point is written as, which is also what
+    /// `GET /api/dlq` reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DlqReplayPoint::BeforeSources => "before_sources",
+            DlqReplayPoint::AfterSources => "after_sources",
+        }
+    }
+}
+
+/// The store a [`DlqConfig`] names when the block names none.
+fn default_dlq_store() -> String {
+    "redb".to_string()
+}
+
+/// One workflow's dead letter queue: which store holds a refused batch, when
+/// the runner replays what is waiting, and the config both halves of that
+/// store are built from.
+///
+/// Every key outside `replay`, `source` and `sink` belongs to the store's
+/// connector and is shared by both halves. A key only one half accepts goes
+/// in that half's own block, which wins over the shared value:
+///
+/// ```kdl
+/// workflow "orders" {
+///     dlq "redb" {
+///         replay "after_sources"
+///         directory "/var/lib/saci/dlq"
+///         source { check_integrity #true }
+///     }
+/// }
+/// ```
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DlqBlock {
+    /// Which store backs the queue: `redb`, `kafka` or `nats`. From the
+    /// block's leading argument.
+    #[serde(rename = "id", default = "default_dlq_store")]
+    pub store: String,
+    /// Where in a pass a replay runs.
+    #[serde(default)]
+    pub replay: DlqReplayPoint,
+    /// Keys only the store's source half takes.
+    #[serde(default = "default_config")]
+    pub source: ConfigValue,
+    /// Keys only the store's sink half takes.
+    #[serde(default = "default_config")]
+    pub sink: ConfigValue,
+    /// Every other key, handed to both halves.
+    #[serde(flatten)]
+    pub config: ConfigMap,
+}
+
+impl Default for DlqBlock {
+    fn default() -> Self {
+        Self {
+            store: default_dlq_store(),
+            replay: DlqReplayPoint::default(),
+            source: default_config(),
+            sink: default_config(),
+            config: ConfigMap::new(),
+        }
+    }
+}
+
+/// A workflow's `dlq` declaration, in any of the three shapes KDL writes it.
+///
+/// `dlq` alone is an empty table, `dlq "redb"` a scalar and
+/// `dlq "redb" { ... }` a table carrying `id`, so the scalar form is the one
+/// case a derived `Deserialize` would refuse.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct DlqConfig(pub DlqBlock);
+
+impl<'de> Deserialize<'de> for DlqConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Through the value tree rather than an untagged enum, so a bad key
+        // inside the table form still names itself instead of collapsing
+        // into "data did not match any variant".
+        let value = ConfigValue::deserialize(deserializer)?;
+        match value {
+            ConfigValue::String(store) => Ok(DlqConfig(DlqBlock {
+                store,
+                ..DlqBlock::default()
+            })),
+            table => DlqBlock::deserialize(table)
+                .map(DlqConfig)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 #[cfg(all(test, feature = "service"))]
 mod tests {
     use super::*;
@@ -2250,5 +2358,147 @@ mod tests {
         )
         .expect_err("the block is refused")
         .to_string()
+    }
+}
+
+#[cfg(all(test, feature = "service"))]
+mod config_tests {
+    use super::*;
+    use crate::service::config::test_support::parse;
+
+    /// The three shapes KDL writes a `dlq` block in.
+    fn dlq_kdl(block: &str) -> String {
+        format!(
+            r#"
+mode "standalone"
+
+node id=1 data_dir="/tmp/saci-test"
+
+workflow "orders" {{
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X"
+    link from="in" to="out"
+    {block}
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn every_dlq_shape_parses_to_the_same_defaults() {
+        for block in ["dlq", "dlq \"redb\""] {
+            let cfg = parse(&dlq_kdl(block)).unwrap_or_else(|e| panic!("{block}: {e}"));
+            let dlq = cfg.workflows[0].dlq.as_ref().expect("a declared block");
+            assert_eq!(dlq.0.store, "redb", "{block}");
+            assert_eq!(dlq.0.replay, DlqReplayPoint::BeforeSources, "{block}");
+            assert!(dlq.0.config.is_empty(), "{block}");
+            cfg.validate().unwrap_or_else(|e| panic!("{block}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_dlq_table_carries_the_store_the_replay_point_and_both_halves() {
+        let cfg = parse(&dlq_kdl(
+            r#"dlq "kafka" {
+        replay "after_sources"
+        brokers "broker:9092"
+        topic "saci-dlq-orders"
+        source { group_id "saci-dlq-orders" }
+        sink { acks "all" }
+    }"#,
+        ))
+        .expect("the table form parses");
+        cfg.validate().expect("a kafka store is valid");
+        let dlq = &cfg.workflows[0].dlq.as_ref().expect("a declared block").0;
+
+        assert_eq!(dlq.store, "kafka");
+        assert_eq!(dlq.replay, DlqReplayPoint::AfterSources);
+        assert_eq!(dlq.config["brokers"], ConfigValue::from("broker:9092"));
+        assert_eq!(dlq.config["topic"], ConfigValue::from("saci-dlq-orders"));
+        assert_eq!(dlq.source["group_id"], ConfigValue::from("saci-dlq-orders"));
+        assert_eq!(dlq.sink["acks"], ConfigValue::from("all"));
+        assert!(
+            !dlq.config.contains_key("source") && !dlq.config.contains_key("sink"),
+            "the half blocks are their own fields, not shared keys"
+        );
+    }
+
+    #[test]
+    fn an_unknown_dlq_store_is_refused_by_name() {
+        let cfg = parse(&dlq_kdl("dlq \"mongodb\"")).expect("any store name parses");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("dlq store 'mongodb' is not one of redb, kafka, nats"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_replay_point_is_refused_by_serde() {
+        let err = parse(&dlq_kdl("dlq \"redb\" { replay \"sometimes\" }"))
+            .expect_err("only the two declared points parse");
+        assert!(err.contains("sometimes"), "got: {err}");
+    }
+
+    #[test]
+    fn a_bad_typed_value_in_the_table_form_is_refused_with_a_specific_error() {
+        // `DlqConfig::deserialize` goes through the value tree rather than
+        // an untagged enum precisely so this stays a specific type-mismatch
+        // error naming the offending value, not the generic "data did not
+        // match any variant" an untagged enum's failed-branch collapse would
+        // give.
+        let err = parse(&dlq_kdl("dlq \"redb\" { replay 42 }"))
+            .expect_err("a number is not a legal replay point");
+        assert!(
+            err.contains("42") && err.contains("invalid type"),
+            "the bad value is still diagnosable: {err}"
+        );
+        assert!(
+            !err.contains("did not match any variant"),
+            "the value tree route must not collapse into the untagged-enum message: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_land_in_the_flattened_config_not_in_either_half() {
+        let cfg = parse(&dlq_kdl("dlq \"redb\" { directory \"/var/lib/saci/dlq\" }"))
+            .expect("an unrecognised top-level key is not a parse error");
+        let dlq = &cfg.workflows[0].dlq.as_ref().expect("a declared block").0;
+
+        assert_eq!(
+            dlq.config["directory"],
+            ConfigValue::from("/var/lib/saci/dlq"),
+            "an unknown top-level key lands in the flatten"
+        );
+        assert!(
+            !dlq.config.contains_key("source") && !dlq.config.contains_key("sink"),
+            "the half blocks never leak into the shared flatten"
+        );
+        assert_eq!(
+            dlq.source,
+            default_config(),
+            "no source block was declared, so the half stays at its empty default"
+        );
+        assert_eq!(
+            dlq.sink,
+            default_config(),
+            "no sink block was declared, so the half stays at its empty default"
+        );
+    }
+
+    #[test]
+    fn a_workflow_with_two_dlq_blocks_is_refused() {
+        // `dlq` carries plain `#[serde(default)]`, not `one_or_many`: a
+        // second declaration is not silently merged or last-wins, it turns
+        // the KDL value into a sequence `DlqConfig::deserialize` never
+        // matches (its `ConfigValue::String` arm aside, everything else,
+        // sequence included, falls through to `DlqBlock::deserialize`, which
+        // expects a map).
+        let raw = dlq_kdl("dlq \"redb\"\n    dlq \"kafka\"");
+        let err = parse(&raw).expect_err("a repeated dlq block is refused, not merged");
+        assert!(
+            err.contains("invalid type") && err.contains("sequence"),
+            "got: {err}"
+        );
     }
 }

@@ -63,8 +63,6 @@ pub(crate) mod digest;
 #[cfg(feature = "service")]
 mod dlq;
 #[cfg(feature = "service")]
-mod dlq_api;
-#[cfg(feature = "service")]
 mod factories;
 #[cfg(feature = "service")]
 mod flow;
@@ -73,11 +71,7 @@ mod heal;
 #[cfg(feature = "service")]
 mod http;
 #[cfg(feature = "service")]
-mod inspector_api;
-#[cfg(feature = "service")]
 mod lifecycle;
-#[cfg(feature = "service")]
-mod lifecycle_api;
 #[cfg(all(feature = "service", feature = "wasm-host"))]
 mod loader;
 #[cfg(feature = "service")]
@@ -88,6 +82,8 @@ mod plugin_loader;
 mod redb_state;
 #[cfg(feature = "service")]
 mod registry;
+#[cfg(feature = "service")]
+mod runner;
 #[cfg(feature = "service")]
 mod sampling;
 #[cfg(feature = "service")]

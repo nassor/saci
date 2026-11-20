@@ -11,9 +11,9 @@
 //! | `GET /status`  | Rich JSON status: node identity, uptime, build and standalone stats |
 //!
 //! Plus, when the inspector is enabled, the JSON API and dashboard from
-//! [`inspector_api`](super::inspector_api), and when standalone-mode lifecycle
+//! [`inspector`], and when standalone-mode lifecycle
 //! control is enabled, the workflow endpoints from
-//! [`lifecycle_api`](super::lifecycle_api).
+//! [`lifecycle`].
 //!
 //! ## Usage
 //!
@@ -89,6 +89,22 @@ use tower_http::trace::TraceLayer;
 use crate::error::{SaciError, SaciResult};
 use crate::service::config::HttpConfig;
 use crate::service::standalone::WorkflowStats;
+
+mod dlq;
+mod inspector;
+mod lifecycle;
+
+/// The body of every refusal from the lifecycle and dead letter queue
+/// routes.
+#[derive(Serialize)]
+pub(super) struct ControlError {
+    error: String,
+}
+
+/// A JSON `{ "error": .. }` refusal with the given status.
+pub(super) fn refuse(status: StatusCode, error: String) -> Response {
+    (status, Json(ControlError { error })).into_response()
+}
 
 /// Which mode the service is running in, as reported by `/status`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -170,23 +186,23 @@ pub fn build_router(state: ServiceState) -> Router {
         .route("/status", get(handle_status));
 
     if let Some(inspector) = &state.inspector {
-        router = router.merge(crate::service::inspector_api::routes());
+        router = router.merge(inspector::routes());
         if inspector.ui_enabled() {
-            router = router.merge(crate::service::inspector_api::ui_routes());
+            router = router.merge(inspector::ui_routes());
         }
     }
 
     if state.lifecycle.is_some() {
-        router = router.merge(crate::service::lifecycle_api::routes());
+        router = router.merge(lifecycle::routes());
     }
 
     // The read routes need only a declared queue; a replay runs inside a
     // workflow's runner, so the two `POST`s need the lifecycle plane that
     // knows whether one is live.
     if state.dlq.is_some() {
-        router = router.merge(crate::service::dlq_api::read_routes());
+        router = router.merge(dlq::read_routes());
         if state.lifecycle.is_some() {
-            router = router.merge(crate::service::dlq_api::control_routes());
+            router = router.merge(dlq::control_routes());
         }
     }
 

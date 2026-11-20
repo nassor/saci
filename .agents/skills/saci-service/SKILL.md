@@ -96,7 +96,7 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
 - `inspector`: the in-process telemetry in `src/inspector/`. Time-bounded ring buffers for spans,
   log events, metric samples and flow-control decisions: the first three fed by one `tracing`
   layer and one in-memory `PushMetricExporter`, the fourth written directly by the standalone and
-  stream runners; read back through the JSON API in `src/service/inspector_api.rs` and the `/ui`
+  stream runners; read back through the JSON API in `src/service/http/inspector.rs` and the `/ui`
   dashboard. Implies `tracing` and `metrics`, and pulls `dep:tracing-subscriber` and
   `dep:opentelemetry_sdk`. `service` implies it. Not under `service/`,
   so a library embedder can capture without the axum control plane.
@@ -192,7 +192,7 @@ replicates:
   interval instead of leaving the library default of 5000 below it, with a cluster node filling it
   in through `driver_config` (`src/service/cluster.rs`) from the `cluster` block. The handle exposes
   `propose`, `app_db`, `metrics`, `initialize`, `spawn_tcp_server` and `shutdown`
-- `transport/`: length-prefixed request/response TCP with a `serde_json` body,
+- `transport.rs` and `transport/`: length-prefixed request/response TCP with a `serde_json` body,
   `MAX_FRAME_BYTES` 16 MiB. `TcpNetworkFactory`/`TcpNetwork` implement `RaftNetworkV2` over a
   peer pool with a circuit breaker; `RaftTcpServer` answers `AppendEntries`, `Vote`, snapshot
   chunks and `ProposalForward`. The wire carries openraft's `AppendEntriesResponse`, which names no
@@ -219,7 +219,15 @@ Requires the `service` feature. KDL-driven config, factory registry, HTTP contro
 standalone/cluster runners.
 
 Key types:
-- `ServiceConfig` and `ServiceMode`: the config schema (`mode "standalone"` or `mode "cluster"`)
+- `ServiceConfig` and `ServiceMode`: the config schema (`mode "standalone"` or `mode "cluster"`).
+  `ServiceConfig`, `RawServiceConfig`, `load`, `from_kdl` and `validate` are in
+  `src/service/config.rs`; the section types are in `src/service/config/`: `node.rs`
+  (`NodeConfig`), `mode.rs` (`ServiceMode`, `StandaloneConfig`, `RunMode`, `ClusterConfig`,
+  `PeerSpec`), `store.rs` (`StoreConfig`), `workflow.rs` (`WorkflowSpec`, `SourceSpec`, `SinkSpec`,
+  `LinkSpec`, `CodecSpec`, `SchemaSpec`, `NodeKind`, `validate`, `topological_order`),
+  `processor.rs` (`WasmSpec`, `PluginSpec`), `window.rs` (`WindowConfig`), `retry.rs`
+  (`RetryConfig`), `http.rs` (`HttpConfig`), `observability.rs` (`ObservabilityConfig`,
+  `LogFormat`) and `flexible.rs`
 - `StoreConfig`: the top-level `store "redb"` block (`path`, `batch_resume`), the local
   unreplicated store the standalone and stream runners persist through. `mode "cluster"` rejects
   a `store` block, because a cluster node's state is the raft-replicated `cluster-app.redb` under
@@ -432,7 +440,7 @@ Key types:
   `saci-service` starts every workflow as configured. See
   `docs/content/service/operate/workflows.md`.
 - `FlowController`, `FlowSettings`, `FlowPlan`, `FlowControlConfig` and `FlowAdjustment`
-  (`src/service/flow.rs`, `src/service/config.rs`; all nine flow types re-exported from
+  (`src/service/flow.rs`; `FlowControlConfig` is there too; all nine flow types re-exported from
   `saci::service`, along with `FlowOutcome`, `FlowSample`, `FlowMove` and `FlowCause`):
   per-source adaptive admission control `BuiltWorkflow::run` applies before every
   pass. The workflow carries its `FlowPlan`: the factory computes it with `FlowPlan::from_config`,
@@ -510,7 +518,7 @@ Key types:
   a_flow_target_in_continuous_mode}` pin the two halves of the controller rule. See
   `docs/content/service/operate/flow-control.md`.
 - `HealingSource`, `HealingSink`, `HealSettings`, `Rebuilder` and `HealConfig`
-  (`src/service/heal.rs`, `src/service/config.rs`): per-node self-healing, on by default.
+  (`src/service/heal.rs`, which holds `HealConfig` too): per-node self-healing, on by default.
   `RetryingSource`/`RetryingSink` re-drive the *same* instance; this layer replaces it. After
   `after_failures` (3) consecutive failures the node schedules a rebuild for `base_delay_ms`
   (1000) out, growing by `multiplier` (2.0) to `max_delay_ms` (60000) with `jitter` (0.1), and
@@ -548,7 +556,7 @@ Key types:
   back rather than waiting out its own backoff. See
   `docs/content/service/operate/self-healing.md`.
 - `DeadLetterQueue`, `DlqShared`, `DlqRegistry`, `ReplayFilter`, `DlqError` and `DlqBlock`
-  (`src/service/dlq.rs`, `src/service/config.rs`): the per-workflow store for a batch a sink
+  (`src/service/dlq.rs`, which holds `DlqConfig`, `DlqBlock` and `DlqReplayPoint` too): the per-workflow store for a batch a sink
   refused. Opt-in through a `dlq` block, which parses in three KDL shapes (`dlq`, `dlq "redb"`,
   `dlq "redb" { ... }`) because `DlqConfig`'s hand-written `Deserialize` accepts the scalar form
   the derived one would refuse. `DLQ_STORES` is the table of three stores, each a connector pair
@@ -605,7 +613,7 @@ Key types:
 - HTTP control plane: `/health`, `/ready`, `/metrics`, `/status` (axum-backed), plus the inspector's
   `/api/*` and `/ui` when `observability.inspector.enabled` is set, plus `GET /api/workflows`,
   `GET /api/workflows/{id}`, `POST /api/workflows/{id}/{start,stop,pause,resume,restart}` and
-  `POST /api/service/{start,stop,pause,resume,restart}` (`src/service/lifecycle_api.rs`) when
+  `POST /api/service/{start,stop,pause,resume,restart}` (`src/service/http/lifecycle.rs`) when
   `ServiceState::lifecycle` is `Some`, which `serve` sets in standalone mode under
   `http { control #true }` (the default). Every one of those groups is
   **merged** rather than gated inside a handler, so a disabled inspector or a service with no
@@ -617,7 +625,7 @@ Key types:
   moves the rest, which is the whole point of one operator action over a per-workflow script.
   `/api/service/` is a separate path rather than a reserved id, because `pause` is a legal
   declared workflow id. `/status`'s standalone entries carry `state` when the registry is present.
-- Dead letter routes (`src/service/dlq_api.rs`): `GET /api/dlq` and
+- Dead letter routes (`src/service/http/dlq.rs`): `GET /api/dlq` and
   `GET /api/workflows/{id}/dlq` merged when `ServiceState::dlq` is `Some`, which `serve` sets
   from a non-empty `DlqRegistry`; `POST /api/workflows/{id}/dlq/{replay,purge}` merged only
   alongside the lifecycle registry, because a replay runs inside a live runner. `replay` takes an
@@ -654,7 +662,7 @@ Key types:
   `batch_span.in_scope(...)`. `never_sampled` bypasses both ratios for `FLOW_CONTROL_TARGET`
   (`"saci::flow_control"`), `WINDOWING_TARGET` (`"saci::windowing"`), `HEAL_TARGET`
   (`"saci::heal"`) and `DLQ_TARGET` (`"saci::dlq"`).
-- Flow-control log lines (`standalone.rs`'s `log_flow_start`, `record_flow_decision`,
+- Flow-control log lines (`src/service/runner.rs`'s `log_flow_start`, `record_flow_decision`,
   `log_flow_finish`, both runners): `flow control starting` per governed source at controller
   construction, `flow control decision` per episode, `flow control finished` per governed source at
   runner exit, all INFO on `FLOW_CONTROL_TARGET`, so neither `log_level` nor a ratio can silence
@@ -802,20 +810,21 @@ collector, a scraper or external storage. Nothing leaves the process.
   `Temporality::Cumulative`. `ResourceMetrics` derives only `Debug` and is a single buffer the reader
   overwrites every interval, so `export` must copy out owned `SeriesPoint`s synchronously before
   returning: it can neither store nor clone its argument.
-- `Inspector` (`mod.rs`): the handle. Unlike `metrics::Instruments` it is **not** process-global,
+- `Inspector` (`inspector.rs`; `InspectorConfig` in `inspector/config.rs`, the series summaries
+  and edge rates in `inspector/series.rs`): the handle. Unlike `metrics::Instruments` it is **not** process-global,
   because the router needs one and tests need isolated instances, so it is cloned (every field is an `Arc`)
   and threaded explicitly. Its module doc carries the full series-to-dashboard-element table. Four
   buffers: spans, log events, metric samples, and flow-control decisions.
 - `Snapshot::flow_decisions` is the one part of a snapshot the execution path writes rather than
   the capture layer. `FlowController::observe` returns a `FlowAdjustment` carrying a `FlowMove`
   (`from_rows`, `to_rows`, `FlowCause`) on every outcome but `Held`, and the runners map it to a
-  `saci::inspector_wire::FlowDecision` through `standalone::record_flow_decision`: the runner stamps
+  `saci::inspector_wire::FlowDecision` through `runner::record_flow_decision`: the runner stamps
   the time, names the workflow and source, and phrases the cause, because `flow.rs` reads no clock
   and knows no node ids.
   **The buffer carries episodes, not trips.** Safety is unpaced, so a guard under sustained
   pressure divides the target to the same size for the same cause on pass after pass, and at
   `min_rows` it divides nothing and sets no cooldown either, so it reports on every pass. Each
-  runner therefore holds one `standalone::FlowEpisode` per source, the last recorded
+  runner therefore holds one `runner::FlowEpisode` per source, the last recorded
   `(FlowDecisionKind, to_rows, mem::discriminant(FlowCause))`, and drops a decision matching
   it; a new record opens when the target lands elsewhere, the cause changes, or another kind
   intervenes. `Held` is not an adjustment and ends nothing: the backlog trend rule zeroes its
@@ -892,7 +901,7 @@ cargo clippy --manifest-path crates/saci-service-ui/Cargo.toml --target wasm32-u
 `crates/saci/assets/ui/{index.html,app.js,app_bg.wasm,app.css}` is the one committed home
 for the dashboard bundle: `cargo xtask ui` writes the three generated files straight there, next
 to the hand-written `index.html`, and `include_str!`/`include_bytes!` in
-`crates/saci/src/service/inspector_api.rs` embeds them from there. It lives under
+`crates/saci/src/service/http/inspector.rs` embeds them from there. It lives under
 the `saci` package rather than `saci-service-ui` (which carries no committed bundle of
 its own) because `cargo package`/`publish` never includes files outside the package being packaged;
 an `include_str!` reaching into `saci-service-ui` (itself excluded from the workspace) would drop out
@@ -1004,11 +1013,12 @@ store, so it needs no Docker and no running service. Lib unit tests that assert 
 ## Keep this skill current
 
 Update this file in the same change that: adds, removes or re-implies a `saci` host feature (`service`, `server`, `wasm-host`, `plugin-host`, `distributed*`, `inspector`, `metrics`);
-adds or renames a config block or key (`ServiceConfig`, `WorkflowSpec`, `StoreConfig`,
-`FlowControlConfig`, `HealConfig`, `DlqBlock`, `ObservabilityConfig`, the `cluster` block); changes the
+adds or renames a config block or key (`ServiceConfig`, or a type under `src/service/config/`:
+`WorkflowSpec`, `StoreConfig`, `ObservabilityConfig`, `RunMode`, `ClusterConfig`; `FlowControlConfig` in
+`flow.rs`, `HealConfig` in `heal.rs`, `DlqConfig`/`DlqBlock` in `dlq.rs`); changes the
 service's Rust API (`ServiceBuilder`'s chain, `BuiltWorkflow`, `BuiltWorkflowBuilder`, `RunOptions`,
 `WorkflowStats`, `serve`, `ServeOptions`, `ServeExit`, `ServiceConfig::from_kdl`, `PipelineRuntime::run_batch`);
-changes `serve.rs` or a runner, the
+changes `serve.rs`, `runner.rs` (the code `standalone.rs` and `stream.rs` share) or a runner, the
 lifecycle transition table, flow control's search or guards, the healing state machine, the dead
 letter queue's store table, envelope or replay triggers, or a
 control-plane route or status code; adds, removes or re-attributes a metric series; changes a span

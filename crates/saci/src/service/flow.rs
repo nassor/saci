@@ -148,7 +148,11 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
+use serde::{Deserialize, Serialize};
 
+use crate::error::{SaciError, SaciResult};
+
+use super::config::flexible::{de_opt_bool_flexible, de_opt_f64_flexible, de_opt_u64_flexible};
 use super::config::{RunMode, ServiceConfig, ServiceMode};
 
 /// Weight of the newest measurement in the throughput EWMA.
@@ -183,8 +187,7 @@ const STREAM_LATENCY_OBJECTIVE_MS: u64 = 250;
 
 /// Resolved, concrete flow-control settings for one source node.
 ///
-/// Produced by
-/// [`FlowControlConfig::resolve`](super::config::FlowControlConfig::resolve).
+/// Produced by [`FlowControlConfig::resolve`].
 /// The defaults are a working policy: the `flow_control` block exists to let
 /// an operator pace, pin or disable adaptation, not because it has to be
 /// filled in.
@@ -1179,6 +1182,334 @@ impl FlowPlan {
     /// not a declared source.
     pub fn for_source(&self, id: &str) -> FlowSettings {
         self.by_source.get(id).copied().unwrap_or(self.fallback)
+    }
+}
+
+/// Adaptive flow-control policy: how many rows a runner admits from a source
+/// per pass, how large the Arrow chunk it hands downstream is, and how the
+/// search for that size is paced.
+///
+/// Declared once at the top level, and overridden field by field per source:
+///
+/// ```kdl
+/// flow_control {
+///     enabled #true
+///     min_rows 1024
+///     max_rows 65536
+///     start_rows 4096
+///     max_chunk_bytes 8388608
+///     target_latency_ms 250
+///     adjust_interval_ms 60000
+///     growth_factor 2.0
+///     improve_threshold 0.05
+///     min_samples_per_arm 4
+///     settle_after_epochs 3
+///     backoff_factor 2.0
+///     backoff_cooldown 4
+/// }
+///
+/// workflow "w" {
+///     source "orders" connector="nats" component="Order" {
+///         flow_control { rows 4096 }
+///     }
+/// }
+/// ```
+///
+/// Every key is optional and every default is a working value; the block
+/// exists to pace, pin or disable adaptation, not because it has to be
+/// filled in. [`resolve`](Self::resolve) layers a source's block over the
+/// top-level one and both over the hard defaults.
+///
+/// | Key | Unit | Default | Trade-off |
+/// |---|---|---|---|
+/// | `enabled` | flag | `#true` | `#false` drains each source to EOF per iteration and paces unconditionally |
+/// | `min_rows` | rows | 1024 | floor; raising it protects throughput on a pipeline with heavy per-pass overhead |
+/// | `max_rows` | rows | 65536 | ceiling; raising it trades memory and per-pass latency for throughput |
+/// | `start_rows` | rows | 4096 | where a run begins before any epoch has decided |
+/// | `max_chunk_bytes` | bytes | 8 MiB | memory bound on one chunk; `0` unbounded |
+/// | `target_latency_ms` | ms | 250 in stream mode, 0 in batch modes | a candidate breaching it loses; `0` pursues throughput alone |
+/// | `adjust_interval_ms` | ms | 60000 | one experiment's length: longer measures more cleanly, shorter reacts sooner |
+/// | `growth_factor` | ratio | 2.0 | candidate step size; must exceed 1.0 |
+/// | `improve_threshold` | ratio | 0.05 | gain a candidate needs to win; lower chases noise, higher ignores real gains |
+/// | `min_samples_per_arm` | passes | 4 | evidence each arm needs; higher is stricter, and an epoch with less decides nothing |
+/// | `settle_after_epochs` | epochs | 3 | deciding epochs that leave the size alone before the search rests on it; `0` never rests |
+/// | `backoff_factor` | ratio | 2.0 | divisor on a guard trip; must exceed 1.0 |
+/// | `backoff_cooldown` | passes | 4 | passes held after a back-off; `0` resumes the search at once |
+/// | `rows` | rows | none | pins the size and disables adaptation |
+///
+/// `rows` pins one size. Within one block it is mutually exclusive with
+/// `min_rows`, `max_rows` and `start_rows`, which
+/// [`validate`](Self::validate) rejects instead of resolving by precedence.
+/// A top-level `rows` is inherited by every source that declares no `rows`
+/// of its own, so pin globally only to pin every source.
+///
+/// A source on a path to a windowed node is bounded but never sliced: the
+/// credit stops the runner pulling the next arrival, and the arrival in hand
+/// is one whole pass, so `max_chunk_bytes` does not bound it. Bound the
+/// arrival at the connector instead.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct FlowControlConfig {
+    /// Whether the runner applies an admission credit at all. Default `true`;
+    /// `false` drains every source to EOF per iteration and paces
+    /// unconditionally.
+    #[serde(deserialize_with = "de_opt_bool_flexible")]
+    pub enabled: Option<bool>,
+    /// Floor on the adaptive target, in rows. Default 1024.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub min_rows: Option<u64>,
+    /// Ceiling on the adaptive target, in rows. Default 65536.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub max_rows: Option<u64>,
+    /// Target the controller starts from, clamped into
+    /// `[min_rows, max_rows]`. Default 4096.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub start_rows: Option<u64>,
+    /// Ceiling on the projected Arrow memory of one chunk. Default 8 MiB;
+    /// `0` is unbounded. Does not apply to a source on a path to a windowed
+    /// node, whose arrivals are never sliced.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub max_chunk_bytes: Option<u64>,
+    /// Latency objective for one pass. Defaults to 250 in stream mode, where
+    /// per-item latency is the contract, and to 0 in `continuous`/`interval`,
+    /// where throughput is the only objective. An explicit value, including
+    /// `0`, wins in either mode.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub target_latency_ms: Option<u64>,
+    /// Length of one adjustment epoch, which is both the pacing of adjustment
+    /// decisions and the length of one experiment. Default 60000. Meaningless
+    /// for a pinned or disabled controller, which never adjusts.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub adjust_interval_ms: Option<u64>,
+    /// Multiplier for the candidate arm when stepping up, and its reciprocal
+    /// when stepping down. Default 2.0; must be greater than 1.0.
+    #[serde(deserialize_with = "de_opt_f64_flexible")]
+    pub growth_factor: Option<f64>,
+    /// Relative throughput gain a candidate must show to unseat the
+    /// incumbent. Default 0.05; must be within `0.0..1.0`.
+    #[serde(deserialize_with = "de_opt_f64_flexible")]
+    pub improve_threshold: Option<f64>,
+    /// Usable samples each arm needs before an epoch may decide. Default 4;
+    /// must be at least 1.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub min_samples_per_arm: Option<u64>,
+    /// Consecutive deciding epochs that leave the size alone before the
+    /// controller rests on it, admitting at the incumbent only. Default 3;
+    /// `0` never rests. A guard trip, an epoch that moves the size, or a size
+    /// missing `target_latency_ms` starts the count again.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub settle_after_epochs: Option<u64>,
+    /// Divisor applied to the target on a guard trip. Default 2.0; must be
+    /// greater than 1.0.
+    #[serde(deserialize_with = "de_opt_f64_flexible")]
+    pub backoff_factor: Option<f64>,
+    /// Passes held at the reduced size after a back-off before the search
+    /// resumes. Default 4; `0` resumes immediately.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub backoff_cooldown: Option<u64>,
+    /// Pin the size and disable adaptation.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub rows: Option<u64>,
+}
+
+/// Narrow a declared row count to `usize`, saturating rather than wrapping on
+/// a 32-bit host.
+fn declared_rows(declared: Option<u64>, default: usize) -> usize {
+    match declared {
+        Some(rows) => usize::try_from(rows).unwrap_or(usize::MAX),
+        None => default,
+    }
+}
+
+/// Narrow a declared count to `u32`, saturating rather than wrapping.
+fn declared_count(declared: Option<u64>, default: u32) -> u32 {
+    match declared {
+        Some(count) => u32::try_from(count).unwrap_or(u32::MAX),
+        None => default,
+    }
+}
+
+impl FlowControlConfig {
+    /// The concrete settings this block yields when layered over `global`,
+    /// ending at `defaults`.
+    ///
+    /// Field by field: this block wins, then `global`, then `defaults`, which
+    /// the caller picks by run mode ([`FlowSettings::default`] for the batch
+    /// modes, [`FlowSettings::stream_defaults`] for stream mode).
+    /// `start_rows` is clamped into the resolved `[min_rows, max_rows]` as a
+    /// defensive invariant: [`validate`](Self::validate) already rejects a
+    /// declared `start_rows` outside that range at load time, but a
+    /// hand-built config that skipped it still gets a usable range here, and
+    /// `min_rows`/`max_rows` are themselves ordered the same way.
+    pub fn resolve(&self, global: &Self, defaults: FlowSettings) -> FlowSettings {
+        let min_rows = declared_rows(self.min_rows.or(global.min_rows), defaults.min_rows).max(1);
+        let max_rows =
+            declared_rows(self.max_rows.or(global.max_rows), defaults.max_rows).max(min_rows);
+        let start_rows = declared_rows(self.start_rows.or(global.start_rows), defaults.start_rows);
+        FlowSettings {
+            min_rows,
+            max_rows,
+            start_rows: start_rows.clamp(min_rows, max_rows),
+            max_chunk_bytes: self
+                .max_chunk_bytes
+                .or(global.max_chunk_bytes)
+                .unwrap_or(defaults.max_chunk_bytes),
+            target_latency_ms: self
+                .target_latency_ms
+                .or(global.target_latency_ms)
+                .unwrap_or(defaults.target_latency_ms),
+            adjust_interval_ms: self
+                .adjust_interval_ms
+                .or(global.adjust_interval_ms)
+                .unwrap_or(defaults.adjust_interval_ms),
+            growth_factor: self
+                .growth_factor
+                .or(global.growth_factor)
+                .unwrap_or(defaults.growth_factor),
+            improve_threshold: self
+                .improve_threshold
+                .or(global.improve_threshold)
+                .unwrap_or(defaults.improve_threshold),
+            min_samples_per_arm: declared_count(
+                self.min_samples_per_arm.or(global.min_samples_per_arm),
+                defaults.min_samples_per_arm,
+            ),
+            settle_after_epochs: declared_count(
+                self.settle_after_epochs.or(global.settle_after_epochs),
+                defaults.settle_after_epochs,
+            ),
+            backoff_factor: self
+                .backoff_factor
+                .or(global.backoff_factor)
+                .unwrap_or(defaults.backoff_factor),
+            backoff_cooldown: declared_count(
+                self.backoff_cooldown.or(global.backoff_cooldown),
+                defaults.backoff_cooldown,
+            ),
+            fixed_rows: self
+                .rows
+                .or(global.rows)
+                .map(|rows| declared_rows(Some(rows), 1).max(1)),
+            enabled: self.enabled.or(global.enabled).unwrap_or(defaults.enabled),
+        }
+    }
+
+    /// Check this block on its own and against what it inherits from
+    /// `global`. The top-level block validates against
+    /// `FlowControlConfig::default()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Configuration`] naming `what` and the offending key
+    /// when `rows` is declared alongside `min_rows`, `max_rows` or
+    /// `start_rows` in the same block, when `min_rows`, `rows`,
+    /// `min_samples_per_arm` or an adaptive `adjust_interval_ms` is zero, when
+    /// the effective `max_rows` is below the effective `min_rows`, when a
+    /// declared `start_rows` falls outside the effective
+    /// `[min_rows, max_rows]`, when `growth_factor` or `backoff_factor` is not
+    /// a finite number greater than 1.0, or when `improve_threshold` is
+    /// outside `0.0..1.0`.
+    pub fn validate(&self, global: &Self, what: &str) -> SaciResult<()> {
+        if self.rows.is_some()
+            && (self.min_rows.is_some() || self.max_rows.is_some() || self.start_rows.is_some())
+        {
+            return Err(SaciError::configuration(format!(
+                "{what}: rows pins a fixed size and cannot be combined with \
+                 min_rows/max_rows/start_rows; declare one intent or the other"
+            )));
+        }
+        let min = self.min_rows.or(global.min_rows);
+        let max = self.max_rows.or(global.max_rows);
+        if let Some(min) = min
+            && min < 1
+        {
+            return Err(SaciError::configuration(format!(
+                "{what}: min_rows must be at least 1"
+            )));
+        }
+        let pinned = self.rows.or(global.rows);
+        if let Some(rows) = pinned
+            && rows < 1
+        {
+            return Err(SaciError::configuration(format!(
+                "{what}: rows must be at least 1"
+            )));
+        }
+        // Compared on the values that take effect, not only on a pair declared
+        // together: `max_rows 100` alone must be rejected rather than silently
+        // widened to the default floor by `resolve`.
+        let defaults = FlowSettings::default();
+        let effective_min = declared_rows(min, defaults.min_rows).max(1);
+        let effective_max = declared_rows(max, defaults.max_rows);
+        if (min.is_some() || max.is_some()) && effective_max < effective_min {
+            return Err(SaciError::configuration(format!(
+                "{what}: max_rows ({effective_max}) must be at least min_rows ({effective_min})"
+            )));
+        }
+        // The range is well-ordered from here on: either both bounds were
+        // declared and just passed the check above, or one or both are the
+        // hard defaults, which are ordered by construction.
+        let effective_max = effective_max.max(effective_min);
+
+        // A declared `start_rows` outside the effective range is rejected
+        // here, exactly like `max_rows`/`min_rows` above: an operator who
+        // wrote a value the range excludes meant something this engine
+        // cannot honour. `resolve`'s clamp is not this check wearing a
+        // different hat. It survives only as a defensive invariant for a
+        // hand-built `FlowControlConfig` that calls `resolve` directly,
+        // without ever passing through `validate` at all.
+        if let Some(start) = self.start_rows.or(global.start_rows) {
+            let effective_start = declared_rows(Some(start), defaults.start_rows);
+            if effective_start < effective_min || effective_start > effective_max {
+                return Err(SaciError::configuration(format!(
+                    "{what}: start_rows ({effective_start}) must be within \
+                     min_rows ({effective_min})..=max_rows ({effective_max})"
+                )));
+            }
+        }
+
+        // The experiment's shape. An out-of-range value is rejected rather
+        // than clamped: an operator who writes `growth_factor 0.5` meant
+        // something this engine cannot do.
+        let adaptive = pinned.is_none() && self.enabled.or(global.enabled).unwrap_or(true);
+        if let Some(interval) = self.adjust_interval_ms.or(global.adjust_interval_ms)
+            && interval < 1
+            && adaptive
+        {
+            return Err(SaciError::configuration(format!(
+                "{what}: adjust_interval_ms must be at least 1; it paces adjustment decisions"
+            )));
+        }
+        for (key, factor) in [
+            ("growth_factor", self.growth_factor.or(global.growth_factor)),
+            (
+                "backoff_factor",
+                self.backoff_factor.or(global.backoff_factor),
+            ),
+        ] {
+            if let Some(factor) = factor
+                && (!factor.is_finite() || factor <= 1.0)
+            {
+                return Err(SaciError::configuration(format!(
+                    "{what}: {key} must be a finite number greater than 1.0, got {factor}"
+                )));
+            }
+        }
+        if let Some(threshold) = self.improve_threshold.or(global.improve_threshold)
+            && !(0.0..1.0).contains(&threshold)
+        {
+            return Err(SaciError::configuration(format!(
+                "{what}: improve_threshold must be within 0.0..1.0, got {threshold}"
+            )));
+        }
+        if let Some(samples) = self.min_samples_per_arm.or(global.min_samples_per_arm)
+            && samples < 1
+        {
+            return Err(SaciError::configuration(format!(
+                "{what}: min_samples_per_arm must be at least 1"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -2698,5 +3029,411 @@ mod tests {
             4_096,
             "unchanged, but nowhere near the floor"
         );
+    }
+}
+
+#[cfg(all(test, feature = "service"))]
+mod config_tests {
+    use super::*;
+    use crate::service::config::test_support::{minimal_standalone_kdl, parse};
+
+    // ── flow_control block ───────────────────────────────────────────────────
+
+    /// The trivial workflow with `global` at the top level and `local` inside
+    /// the source node, in the run mode `run_mode` spells.
+    fn flow_kdl_mode(run_mode: &str, global: &str, local: &str) -> String {
+        format!(
+            r#"
+mode "standalone"
+
+node id=1 data_dir="/tmp/saci-test"
+
+{run_mode}
+{global}
+
+workflow "w" {{
+    source "in" connector="noop" component="X" {{
+        {local}
+    }}
+    sink "out" connector="noop" component="X"
+    link from="in" to="out"
+}}
+"#
+        )
+    }
+
+    /// The same workflow in the default (continuous) run mode.
+    fn flow_kdl(global: &str, local: &str) -> String {
+        flow_kdl_mode("", global, local)
+    }
+
+    /// The settings a config resolves for source `in`.
+    fn resolved(cfg: &ServiceConfig) -> FlowSettings {
+        crate::service::flow::FlowPlan::from_config(cfg).for_source("in")
+    }
+
+    #[test]
+    fn flow_control_defaults_to_the_enabled_policy_when_the_block_is_absent() {
+        let cfg = parse(&minimal_standalone_kdl()).expect("parse should succeed");
+        cfg.validate().expect("the default policy is valid");
+        assert_eq!(cfg.flow_control, FlowControlConfig::default());
+        assert_eq!(cfg.workflows[0].sources[0].flow_control, None);
+
+        let settings = resolved(&cfg);
+        assert_eq!(settings, FlowSettings::default());
+        assert!(settings.enabled, "flow control is on by default");
+        assert_eq!(settings.min_rows, 1_024);
+        assert_eq!(settings.max_rows, 65_536);
+        assert_eq!(settings.start_rows, 4_096);
+        assert_eq!(settings.max_chunk_bytes, 8 * 1024 * 1024);
+        assert_eq!(settings.adjust_interval_ms, 60_000);
+        assert_eq!(settings.growth_factor, 2.0);
+        assert_eq!(settings.improve_threshold, 0.05);
+        assert_eq!(settings.min_samples_per_arm, 4);
+        assert_eq!(settings.settle_after_epochs, 3);
+        assert_eq!(settings.backoff_factor, 2.0);
+        assert_eq!(settings.backoff_cooldown, 4);
+        assert_eq!(settings.fixed_rows, None);
+    }
+
+    #[test]
+    fn stream_mode_carries_a_latency_objective_and_batch_mode_does_not() {
+        let stream =
+            parse(&flow_kdl_mode(r#"run "stream""#, "", "")).expect("parse should succeed");
+        assert_eq!(
+            resolved(&stream).target_latency_ms,
+            250,
+            "a stream workflow's contract is per-item latency"
+        );
+
+        for mode in ["", r#"run "interval" every_ms=5000"#] {
+            let batch = parse(&flow_kdl_mode(mode, "", "")).expect("parse should succeed");
+            assert_eq!(
+                resolved(&batch).target_latency_ms,
+                0,
+                "a batch pass has no latency contract, so throughput is the objective ({mode:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_latency_objective_wins_in_either_mode() {
+        let batch = parse(&flow_kdl("flow_control { target_latency_ms 90 }", ""))
+            .expect("parse should succeed");
+        assert_eq!(resolved(&batch).target_latency_ms, 90);
+
+        let stream = parse(&flow_kdl_mode(
+            r#"run "stream""#,
+            "flow_control { target_latency_ms 0 }",
+            "",
+        ))
+        .expect("parse should succeed");
+        assert_eq!(
+            resolved(&stream).target_latency_ms,
+            0,
+            "zeroing the objective in stream mode must be honoured"
+        );
+    }
+
+    #[test]
+    fn a_top_level_flow_control_block_parses_every_key() {
+        let cfg = parse(&flow_kdl(
+            r#"flow_control {
+    enabled #true
+    min_rows 512
+    max_rows 4096
+    start_rows 2048
+    max_chunk_bytes 1048576
+    target_latency_ms 50
+    adjust_interval_ms 15000
+    growth_factor 1.5
+    improve_threshold 0.10
+    min_samples_per_arm 8
+    settle_after_epochs 6
+    backoff_factor 4.0
+    backoff_cooldown 2
+}"#,
+            "",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+        assert_eq!(
+            resolved(&cfg),
+            FlowSettings {
+                min_rows: 512,
+                max_rows: 4_096,
+                start_rows: 2_048,
+                max_chunk_bytes: 1_048_576,
+                target_latency_ms: 50,
+                adjust_interval_ms: 15_000,
+                growth_factor: 1.5,
+                improve_threshold: 0.10,
+                min_samples_per_arm: 8,
+                settle_after_epochs: 6,
+                backoff_factor: 4.0,
+                backoff_cooldown: 2,
+                fixed_rows: None,
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_source_block_overrides_the_global_one_field_by_field() {
+        let cfg = parse(&flow_kdl(
+            "flow_control { min_rows 512; max_rows 4096; adjust_interval_ms 30000 }",
+            "flow_control { max_rows 2048; growth_factor 1.25 }",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+        let settings = resolved(&cfg);
+        assert_eq!(settings.max_rows, 2_048, "the source's own value wins");
+        assert_eq!(settings.growth_factor, 1.25);
+        assert_eq!(settings.min_rows, 512, "an absent field inherits");
+        assert_eq!(settings.adjust_interval_ms, 30_000);
+        assert_eq!(
+            settings.improve_threshold, 0.05,
+            "a key neither block declares takes the hard default"
+        );
+    }
+
+    #[test]
+    fn a_source_can_pin_a_fixed_size() {
+        let cfg = parse(&flow_kdl("", "flow_control { rows 4096 }")).expect("parse should succeed");
+        cfg.validate().expect("valid");
+        assert_eq!(resolved(&cfg).fixed_rows, Some(4_096));
+    }
+
+    #[test]
+    fn flow_control_disabled_resolves_to_a_disabled_policy() {
+        let cfg =
+            parse(&flow_kdl("flow_control { enabled #false }", "")).expect("parse should succeed");
+        cfg.validate().expect("valid");
+        assert!(!resolved(&cfg).enabled);
+    }
+
+    #[test]
+    fn string_valued_flow_control_keys_parse_so_env_substitution_works() {
+        let cfg = parse(&flow_kdl(
+            r#"flow_control { enabled "true"; max_rows "8192"; growth_factor "1.5" }"#,
+            "",
+        ))
+        .expect("parse should succeed");
+        let settings = resolved(&cfg);
+        assert!(settings.enabled);
+        assert_eq!(settings.max_rows, 8_192);
+        assert_eq!(settings.growth_factor, 1.5);
+    }
+
+    #[test]
+    fn a_start_rows_below_the_effective_min_is_a_configuration_error() {
+        let cfg = parse(&flow_kdl(
+            "flow_control { min_rows 1000; max_rows 2000; start_rows 10 }",
+            "",
+        ))
+        .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("start_rows (10) must be within min_rows (1000)..=max_rows (2000)"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_start_rows_above_the_effective_max_is_a_configuration_error() {
+        let cfg = parse(&flow_kdl(
+            "flow_control { min_rows 1000; max_rows 2000; start_rows 5000 }",
+            "",
+        ))
+        .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("start_rows (5000) must be within min_rows (1000)..=max_rows (2000)"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_control_min_rows_zero_is_a_configuration_error() {
+        let cfg =
+            parse(&flow_kdl("flow_control { min_rows 0 }", "")).expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("flow_control: min_rows must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_control_max_rows_below_min_rows_is_a_configuration_error() {
+        let cfg = parse(&flow_kdl(
+            "flow_control { min_rows 4096; max_rows 1024 }",
+            "",
+        ))
+        .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("max_rows (1024) must be at least min_rows (4096)"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_ceiling_below_the_default_floor_is_a_configuration_error() {
+        // Declared alone, `max_rows` is still compared against the floor that
+        // takes effect, so an unusable range is refused instead of silently
+        // widened.
+        let cfg =
+            parse(&flow_kdl("flow_control { max_rows 100 }", "")).expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("max_rows (100) must be at least min_rows (1024)"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_control_rows_zero_is_a_configuration_error() {
+        let cfg = parse(&flow_kdl("flow_control { rows 0 }", "")).expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("flow_control: rows must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_fixed_size_alongside_a_range_is_a_configuration_error() {
+        let cfg = parse(&flow_kdl("flow_control { rows 4096; max_rows 8192 }", ""))
+            .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("rows pins a fixed size and cannot be combined with"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_zero_adjust_interval_is_a_configuration_error_while_adaptive() {
+        let cfg = parse(&flow_kdl("flow_control { adjust_interval_ms 0 }", ""))
+            .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("adjust_interval_ms must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_zero_adjust_interval_is_accepted_when_nothing_adapts() {
+        let cfg = parse(&flow_kdl(
+            "flow_control { enabled #false; adjust_interval_ms 0 }",
+            "",
+        ))
+        .expect("parse should succeed");
+        cfg.validate()
+            .expect("the epoch is meaningless with adaptation off");
+    }
+
+    #[test]
+    fn a_growth_factor_of_one_or_less_is_a_configuration_error() {
+        for value in ["1.0", "0.5"] {
+            let cfg = parse(&flow_kdl(
+                &format!("flow_control {{ growth_factor {value} }}"),
+                "",
+            ))
+            .expect("parse should succeed");
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("growth_factor must be a finite number greater than 1.0"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backoff_factor_of_one_or_less_is_a_configuration_error() {
+        let cfg = parse(&flow_kdl("flow_control { backoff_factor 1.0 }", ""))
+            .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("backoff_factor must be a finite number greater than 1.0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_growth_or_backoff_factor_is_a_configuration_error() {
+        for key in ["growth_factor", "backoff_factor"] {
+            for value in [r#""inf""#, r#""nan""#] {
+                let cfg = parse(&flow_kdl(&format!("flow_control {{ {key} {value} }}"), ""))
+                    .unwrap_or_else(|e| panic!("parse should succeed for {key} {value}: {e}"));
+                let err = cfg.validate().unwrap_err().to_string();
+                assert!(
+                    err.contains(&format!("{key} must be a finite number greater than 1.0")),
+                    "got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_improve_threshold_outside_the_unit_range_is_a_configuration_error() {
+        for value in ["1.0", "-0.1", r#""inf""#, r#""nan""#] {
+            let cfg = parse(&flow_kdl(
+                &format!("flow_control {{ improve_threshold {value} }}"),
+                "",
+            ))
+            .expect("parse should succeed");
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("improve_threshold must be within 0.0..1.0"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_samples_per_arm_is_a_configuration_error() {
+        let cfg = parse(&flow_kdl("flow_control { min_samples_per_arm 0 }", ""))
+            .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("min_samples_per_arm must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_source_flow_control_error_names_the_workflow_and_source() {
+        let cfg = parse(&flow_kdl("", "flow_control { growth_factor 0.5 }"))
+            .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "workflow 'w' source 'in': flow_control: growth_factor must be a finite \
+                 number greater than 1.0"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_flow_control_key_is_rejected() {
+        let err = parse(&flow_kdl("flow_control { batch_size 10 }", ""))
+            .expect_err("an unknown key must be rejected");
+        assert!(err.contains("batch_size"), "got: {err}");
+    }
+
+    /// A non-numeric value for a numeric flow-control key, or a non-boolean
+    /// value for `enabled`, is a load-time configuration error rather than a
+    /// silent fallback to `None`.
+    #[test]
+    fn a_non_numeric_flow_control_string_is_a_configuration_error() {
+        parse(&flow_kdl(r#"flow_control { min_rows "abc" }"#, ""))
+            .expect_err("a non-numeric string must not silently become the default");
+
+        parse(&flow_kdl(r#"flow_control { enabled "maybe" }"#, ""))
+            .expect_err("a non-boolean string must not silently become the default");
     }
 }

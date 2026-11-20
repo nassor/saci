@@ -67,34 +67,22 @@ use tokio::sync::RwLock;
 #[cfg(feature = "tracing")]
 use tracing::Instrument as _;
 
-use crate::dataset::Dataset;
 use crate::error::SaciError;
-use crate::io::{Sink, Source};
-use crate::metrics::{ProcessorMetrics, SinkMetrics, SourceMetrics};
-use crate::runtime::PipelineRuntime;
 
 use super::builder::{BuiltNodeKind, BuiltWorkflow, RunOptions};
 use super::dlq::ReplayCtx;
 use super::flow::{Carry, FlowAdjustment, FlowController, FlowOutcome, FlowSample};
 use super::lifecycle::RunControl;
 use super::redb_state::SourceCursorMeta;
-use super::sampling::FLOW_CONTROL_TARGET;
-use super::standalone::{
-    FlowEpisode, NodeStats, WorkflowStats, finish_all_sources, log_flow_finish, log_flow_start,
-    record_flow_decision,
-};
 #[cfg(feature = "windows")]
-use super::windowing::WindowTracker;
-
-/// Which of the three roles a node plays while it runs. Mirrors
-/// `standalone::NodeRunKind`; kept as a separate (private) type because the
-/// two runners never share more than the enum shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NodeRunKind {
-    Source,
-    Processor,
-    Sink,
-}
+use super::runner::advance_watermark;
+use super::runner::{
+    self, FlowEpisode, NodeRunKind, Nodes, PassLog, deliver_outbound, fan_out_source,
+    finish_all_sinks, finish_all_sources, log_flow_finish, log_flow_start, record_flow_decision,
+    report_sink_backlog, write_staged,
+};
+use super::sampling::FLOW_CONTROL_TARGET;
+use super::standalone::WorkflowStats;
 
 /// Minimum spacing between `live_stats` publishes.
 ///
@@ -188,82 +176,38 @@ pub(crate) async fn run(
     let inspector = inspector.as_ref();
     let n = nodes.len();
 
-    let mut ids: Vec<String> = Vec::with_capacity(n);
-    let mut components: Vec<Option<&'static str>> = Vec::with_capacity(n);
-    let mut downstream: Vec<Vec<crate::service::builder::BuiltEdge>> = Vec::with_capacity(n);
-    let mut kinds: Vec<NodeRunKind> = Vec::with_capacity(n);
-    let mut sources: Vec<Option<Box<dyn Source>>> = Vec::with_capacity(n);
-    let mut runtimes: Vec<Option<Box<dyn PipelineRuntime>>> = Vec::with_capacity(n);
-    let mut datasets: Vec<Option<Dataset>> = Vec::with_capacity(n);
-    let mut sinks: Vec<Option<Box<dyn Sink>>> = Vec::with_capacity(n);
-    let mut node_stats: Vec<NodeStats> = Vec::with_capacity(n);
-    // One bound metrics handle per node, of the node's own kind (`None`
-    // elsewhere), and one for the workflow, so a write builds no attribute.
+    // One bound metrics handle for the workflow, so a write builds no
+    // attribute; each node binds its own in `Nodes::from_built`.
     let workflow_metrics = crate::metrics::instruments().workflow(&workflow_id);
-    let mut source_metrics: Vec<Option<SourceMetrics>> = Vec::with_capacity(n);
-    let mut processor_metrics: Vec<Option<ProcessorMetrics>> = Vec::with_capacity(n);
-    let mut sink_metrics: Vec<Option<SinkMetrics>> = Vec::with_capacity(n);
-    // One flag per healed sink node, `None` elsewhere. See the standalone
-    // runner's own binding.
-    let mut recovered: Vec<Option<Arc<std::sync::atomic::AtomicBool>>> = Vec::with_capacity(n);
+
+    let nodes = Nodes::from_built(nodes);
+    // A source on a path to a windowed node keeps every arrival whole: one
+    // arrival is one item, because a windowed node observes event time at
+    // every pass boundary and a credit-derived boundary would put a
+    // throughput measurement in its output. See `runner::whole_arrivals` and
+    // [`windowing`](super::windowing) for the rule and its memory cost.
+    let whole_arrivals: Vec<bool> = runner::whole_arrivals(&nodes);
+    let Nodes {
+        ids,
+        components,
+        downstream,
+        kinds,
+        mut sources,
+        runtimes,
+        mut datasets,
+        mut sinks,
+        mut node_stats,
+        source_metrics,
+        processor_metrics,
+        sink_metrics,
+        recovered,
+        #[cfg(feature = "windows")]
+        mut trackers,
+        mut staged,
+    } = nodes;
     // One WIT checkpoint blob per processor node, fed back as `prior` on the
     // next item for that same node: every processor keeps its own.
-    let mut prior: Vec<Option<Vec<u8>>> = Vec::with_capacity(n);
-    // One watermark tracker per windowed processor node, monotonic across
-    // items, mirroring the standalone runner.
-    #[cfg(feature = "windows")]
-    let mut trackers: Vec<Option<WindowTracker>> = Vec::with_capacity(n);
-
-    for node in nodes {
-        ids.push(node.id);
-        components.push(node.component);
-        downstream.push(node.downstream);
-        recovered.push(node.heal_recovered);
-        prior.push(None);
-        #[cfg(feature = "windows")]
-        trackers.push(node.window.map(WindowTracker::new));
-
-        let (kind, source, runtime, dataset, sink) = match node.kind {
-            BuiltNodeKind::Source(source) => (NodeRunKind::Source, Some(source), None, None, None),
-            BuiltNodeKind::Processor { runtime, .. } => {
-                let dataset = runtime.template_dataset();
-                (
-                    NodeRunKind::Processor,
-                    None,
-                    Some(runtime),
-                    Some(dataset),
-                    None,
-                )
-            }
-            BuiltNodeKind::Sink(sink) => (NodeRunKind::Sink, None, None, None, Some(sink)),
-        };
-        kinds.push(kind);
-        {
-            let id = ids.last().expect("just pushed");
-            let instruments = crate::metrics::instruments();
-            source_metrics.push((kind == NodeRunKind::Source).then(|| instruments.source(id)));
-            processor_metrics
-                .push((kind == NodeRunKind::Processor).then(|| instruments.processor(id)));
-            sink_metrics.push((kind == NodeRunKind::Sink).then(|| instruments.sink(id)));
-        }
-        sources.push(source);
-        runtimes.push(runtime);
-        datasets.push(dataset);
-        sinks.push(sink);
-        node_stats.push(NodeStats {
-            id: Arc::from(ids.last().expect("just pushed").as_str()),
-            kind: match kind {
-                NodeRunKind::Source => "source",
-                NodeRunKind::Processor => "processor",
-                NodeRunKind::Sink => "sink",
-            },
-            rows: 0,
-            batches: 0,
-            errors: 0,
-        });
-    }
-
-    let mut staged: Vec<Vec<RecordBatch>> = vec![Vec::new(); n];
+    let mut prior: Vec<Option<Vec<u8>>> = vec![None; n];
 
     let mut stats = WorkflowStats::default();
     let start = Instant::now();
@@ -281,15 +225,6 @@ pub(crate) async fn run(
     // Items delivered per source, tracked so a persisted cursor can name the
     // exact count at the last save point.
     let mut items_per_source: Vec<u64> = vec![0; n];
-    // A source on a path to a windowed node keeps every arrival whole: one
-    // arrival is one item, because a windowed node observes event time at
-    // every pass boundary and a credit-derived boundary would put a
-    // throughput measurement in its output. See
-    // [`windowing`](super::windowing) for the rule and its memory cost.
-    #[cfg(feature = "windows")]
-    let whole_arrivals: Vec<bool> = super::windowing::reaches_windowed_node(&trackers, &downstream);
-    #[cfg(not(feature = "windows"))]
-    let whole_arrivals: Vec<bool> = vec![false; n];
 
     // One controller per source node, plus the tail of the batch each source
     // is mid-way through. A pending tail is admitted before that source is
@@ -613,6 +548,13 @@ pub(crate) async fn run(
             rows = rows
         );
 
+        let log = PassLog {
+            workflow_id: &workflow_id,
+            iteration: stats.iterations,
+            #[cfg(feature = "tracing")]
+            span: &batch_span,
+        };
+
         let current_source = source_metrics[source_index]
             .as_ref()
             .expect("a source node binds its metrics");
@@ -655,32 +597,18 @@ pub(crate) async fn run(
 
         // Fan out the source item exactly like a batch-mode source drain.
         let component = components[source_index].expect("the stream source declares a component");
-        for edge in &downstream[source_index] {
-            let d = edge.node;
-            match kinds[d] {
-                NodeRunKind::Processor => {
-                    if let Err(_e) = datasets[d]
-                        .as_mut()
-                        .expect("processor node keeps its dataset")
-                        .append_record_batch(component, batch.clone())
-                    {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            parent: &batch_span,
-                            workflow = %workflow_id,
-                            iteration = stats.iterations,
-                            from = %ids[source_index],
-                            to = %ids[d],
-                            error = %_e,
-                            "fan-out append error (continuing)"
-                        );
-                        stats.iteration_errors += 1;
-                    }
-                }
-                NodeRunKind::Sink => staged[d].push(batch.clone()),
-                NodeRunKind::Source => unreachable!("a source is never a link target"),
-            }
-        }
+        fan_out_source(
+            source_index,
+            &downstream,
+            component,
+            &batch,
+            &kinds,
+            &mut datasets,
+            &mut staged,
+            &ids,
+            &mut stats,
+            log,
+        );
 
         let mut cancelled_mid_item = false;
 
@@ -699,46 +627,15 @@ pub(crate) async fn run(
                     // by the time this processor runs, every upstream node has
                     // delivered into its dataset for this item.
                     #[cfg(feature = "windows")]
-                    if let Some(tracker) = trackers[i].as_mut() {
-                        match tracker.advance_from(
-                            datasets[i]
-                                .as_ref()
-                                .expect("processor node keeps its dataset"),
-                        ) {
-                            Ok(advance) => {
-                                let dataset = datasets[i]
-                                    .as_mut()
-                                    .expect("processor node keeps its dataset");
-                                dataset.insert_resource(crate::windows::WindowWatermark(
-                                    tracker.watermark_ms(),
-                                ));
-                                if tracker.has_watermark() {
-                                    metrics.window_watermark(tracker.watermark_seconds());
-                                }
-                                super::windowing::report_watermark_advance(
-                                    &workflow_id,
-                                    &ids[i],
-                                    metrics,
-                                    tracker,
-                                    advance,
-                                );
-                            }
-                            Err(_e) => {
-                                #[cfg(feature = "tracing")]
-                                tracing::warn!(
-                                    parent: &batch_span,
-                                    workflow = %workflow_id,
-                                    iteration = stats.iterations,
-                                    processor = %ids[i],
-                                    error = %_e,
-                                    "window watermark advance error (continuing without it)"
-                                );
-                                #[cfg(not(feature = "tracing"))]
-                                let _ = _e;
-                                stats.iteration_errors += 1;
-                            }
-                        }
-                    }
+                    advance_watermark(
+                        i,
+                        &mut trackers,
+                        &mut datasets,
+                        &ids,
+                        metrics,
+                        &mut stats,
+                        log,
+                    );
 
                     let rows_in = datasets[i]
                         .as_ref()
@@ -811,73 +708,20 @@ pub(crate) async fn run(
                             node_stats[i].rows += rows_out;
                             node_stats[i].batches += 1;
 
-                            let routes = &out.routes;
-                            for name in routes.iter().flatten() {
-                                if !downstream[i]
-                                    .iter()
-                                    .any(|e| e.branch.as_deref() == Some(name.as_str()))
-                                {
-                                    #[cfg(feature = "tracing")]
-                                    tracing::warn!(
-                                        parent: &batch_span,
-                                        workflow = %workflow_id,
-                                        iteration = stats.iterations,
-                                        processor = %ids[i],
-                                        branch = %name,
-                                        "routing decision names a branch no link carries (continuing)"
-                                    );
-                                    #[cfg(not(feature = "tracing"))]
-                                    let _ = name;
-                                }
-                            }
-
-                            for edge in &downstream[i] {
-                                let d = edge.node;
-                                if !crate::service::builder::edge_selected(routes, &edge.branch) {
-                                    continue;
-                                }
-                                if let Some(branch) = &edge.branch {
-                                    metrics.branch_rows(branch, rows_out);
-                                }
-                                match kinds[d] {
-                                    NodeRunKind::Processor => {
-                                        let (left, right) = datasets.split_at_mut(i + 1);
-                                        let src = left[i].as_ref().expect("processor dataset");
-                                        let dst = right[d - i - 1]
-                                            .as_mut()
-                                            .expect("downstream processor dataset");
-                                        if let Err(_e) = src.forward_into(dst) {
-                                            #[cfg(feature = "tracing")]
-                                            tracing::warn!(
-                                                parent: &batch_span,
-                                                workflow = %workflow_id,
-                                                iteration = stats.iterations,
-                                                from = %ids[i],
-                                                to = %ids[d],
-                                                error = %_e,
-                                                "fan-out forward error (continuing)"
-                                            );
-                                            stats.iteration_errors += 1;
-                                        }
-                                    }
-                                    NodeRunKind::Sink => {
-                                        let component = components[d]
-                                            .expect("a sink node always declares a component");
-                                        if let Ok(fwd) = datasets[i]
-                                            .as_ref()
-                                            .expect("processor dataset")
-                                            .batch_named(component)
-                                            .cloned()
-                                            && fwd.num_rows() > 0
-                                        {
-                                            staged[d].push(fwd);
-                                        }
-                                    }
-                                    NodeRunKind::Source => {
-                                        unreachable!("a source is never a link target")
-                                    }
-                                }
-                            }
+                            deliver_outbound(
+                                i,
+                                &out.routes,
+                                rows_out,
+                                metrics,
+                                &downstream,
+                                &kinds,
+                                &components,
+                                &mut datasets,
+                                &mut staged,
+                                &ids,
+                                &mut stats,
+                                log,
+                            );
                         }
                         Err(_e) => {
                             #[cfg(feature = "tracing")]
@@ -916,34 +760,26 @@ pub(crate) async fn run(
                         )
                     });
                     let rows_before: u64 = staged[i].iter().map(|b| b.num_rows() as u64).sum();
-                    for b in staged[i].drain(..) {
-                        let sink = sinks[i].as_mut().expect("sink node keeps its sink");
-                        match sink.write_batch(&b).await {
-                            Ok(()) => {
-                                let rows = b.num_rows() as u64;
-                                node_stats[i].rows += rows;
-                                node_stats[i].batches += 1;
-                                stats.sink_batches_written += 1;
-                                metrics.write(rows);
-                            }
-                            Err(e) => {
-                                #[cfg(feature = "tracing")]
-                                tracing::error!(
-                                    parent: &write_span,
-                                    workflow = %workflow_id,
-                                    iteration = stats.iterations,
-                                    sink = %ids[i],
-                                    error = %e,
-                                    "stream sink write error (continuing)"
-                                );
-                                stats.iteration_errors += 1;
-                                node_stats[i].errors += 1;
-                                if let Some(dlq) = dlq.as_mut() {
-                                    dlq.record(&b, &ids[i], component, &e, &mut stats).await;
-                                }
-                            }
-                        }
-                    }
+                    let sink = sinks[i].as_mut().expect("sink node keeps its sink");
+                    // A refused batch is worded and parented as this item's own.
+                    let write_log = PassLog {
+                        #[cfg(feature = "tracing")]
+                        span: &write_span,
+                        ..log
+                    };
+                    write_staged(
+                        sink.as_mut(),
+                        &mut staged[i],
+                        &ids[i],
+                        metrics,
+                        component,
+                        &workflow_id,
+                        &mut node_stats[i],
+                        &mut stats,
+                        dlq.as_mut(),
+                        Some(write_log),
+                    )
+                    .await;
                     #[cfg(feature = "tracing")]
                     write_span.record("rows", rows_before);
                     #[cfg(not(feature = "tracing"))]
@@ -953,7 +789,15 @@ pub(crate) async fn run(
         }
 
         if cancelled_mid_item {
-            finish_all_sinks(&mut sinks, &ids, &workflow_id, &mut node_stats, &mut stats).await;
+            finish_all_sinks(
+                &mut sinks,
+                &ids,
+                &workflow_id,
+                &mut node_stats,
+                &mut stats,
+                true,
+            )
+            .await;
             finish_all_sources(
                 &mut sources,
                 &ids,
@@ -996,18 +840,7 @@ pub(crate) async fn run(
         // is what governs admission, because the whole consumer chain is one
         // shared resource, but a backlog is measured against one sink's flush
         // policy and only the per-sink value means anything to a reader.
-        let mut sink_pending: Option<u64> = None;
-        for i in 0..n {
-            let (Some(sink), Some(metrics)) = (sinks[i].as_ref(), sink_metrics[i].as_ref()) else {
-                continue;
-            };
-            let Some(pending) = sink.pending_rows() else {
-                continue;
-            };
-            let pending = pending as u64;
-            metrics.pending_rows(pending);
-            sink_pending = Some(sink_pending.map_or(pending, |seen| seen.max(pending)));
-        }
+        let sink_pending = report_sink_backlog(&sinks, &sink_metrics);
         // Feed the chunk back to this source's controller. `item_start` opens
         // once the batch is in hand, so the sample excludes the `next_batch`
         // await and the prime phase. It covers what the item then did: the
@@ -1072,7 +905,15 @@ pub(crate) async fn run(
         }
     }
 
-    finish_all_sinks(&mut sinks, &ids, &workflow_id, &mut node_stats, &mut stats).await;
+    finish_all_sinks(
+        &mut sinks,
+        &ids,
+        &workflow_id,
+        &mut node_stats,
+        &mut stats,
+        true,
+    )
+    .await;
     finish_all_sources(
         &mut sources,
         &ids,
@@ -1105,33 +946,6 @@ pub(crate) async fn run(
     Ok(stats)
 }
 
-/// Finalise every sink. Each item already wrote its own batches, so only
-/// `finish` remains.
-async fn finish_all_sinks(
-    sinks: &mut [Option<Box<dyn Sink>>],
-    ids: &[String],
-    workflow_id: &str,
-    node_stats: &mut [NodeStats],
-    stats: &mut WorkflowStats,
-) {
-    for i in 0..sinks.len() {
-        let Some(sink) = sinks[i].as_mut() else {
-            continue;
-        };
-        if let Err(_e) = sink.finish().await {
-            #[cfg(feature = "tracing")]
-            tracing::error!(
-                workflow = %workflow_id,
-                sink = %ids[i],
-                error = %_e,
-                "stream sink finish error"
-            );
-            stats.iteration_errors += 1;
-            node_stats[i].errors += 1;
-        }
-    }
-}
-
 async fn publish(shared: &Option<Arc<RwLock<WorkflowStats>>>, stats: &WorkflowStats) {
     if let Some(shared) = shared {
         *shared.write().await = stats.clone();
@@ -1147,6 +961,9 @@ async fn publish(shared: &Option<Arc<RwLock<WorkflowStats>>>, stats: &WorkflowSt
 mod tests {
     use super::*;
     use crate::connector::channel::ChannelSource;
+    use crate::dataset::Dataset;
+    use crate::io::{Sink, Source};
+    use crate::runtime::PipelineRuntime;
     use crate::service::config::RunMode;
     use crate::service::flow::{FlowPlan, FlowSettings};
     use arrow_array::Int64Array;

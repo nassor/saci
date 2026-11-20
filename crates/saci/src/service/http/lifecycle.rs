@@ -2,7 +2,7 @@
 //! verb to one workflow or to all of them at once.
 //!
 //! Merged into the control-plane router by
-//! [`build_router`](super::http::build_router) **only** when the service is
+//! [`build_router`](super::build_router) **only** when the service is
 //! running standalone and `http { control #true }` (the default), so a cluster
 //! node or an operator who switched control off has no endpoint here rather
 //! than a forbidden one, the same convention the inspector's routes follow.
@@ -20,7 +20,7 @@
 //!
 //! A per-workflow `POST` answers the resulting `WorkflowStatus`: `200` once the
 //! transition settled, `202` when it was still in progress after
-//! [`LIFECYCLE_ACK_BUDGET`](super::lifecycle::LIFECYCLE_ACK_BUDGET). A verb
+//! [`LIFECYCLE_ACK_BUDGET`](crate::service::lifecycle::LIFECYCLE_ACK_BUDGET). A verb
 //! that was already satisfied is `200` with the status unchanged. Refusals are
 //! `404` (unknown workflow), `409` (illegal from this state, or the workflow
 //! cannot be rebuilt) and `503` (the supervisor is gone).
@@ -42,10 +42,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
 
-use super::http::ServiceState;
-use super::lifecycle::{LifecycleError, WorkflowCommand};
+use super::{ServiceState, refuse};
+use crate::service::lifecycle::{LifecycleError, WorkflowCommand};
 
 /// The lifecycle routes, sharing the control plane's [`ServiceState`].
 pub fn routes() -> Router<ServiceState> {
@@ -62,16 +61,6 @@ pub fn routes() -> Router<ServiceState> {
         .route("/api/service/pause", post(handle_pause_all))
         .route("/api/service/resume", post(handle_resume_all))
         .route("/api/service/restart", post(handle_restart_all))
-}
-
-/// The body of every refusal.
-#[derive(Serialize)]
-struct ControlError {
-    error: String,
-}
-
-fn refuse(status: StatusCode, error: String) -> Response {
-    (status, Json(ControlError { error })).into_response()
 }
 
 /// `GET /api/workflows`

@@ -33,8 +33,9 @@ together is redundant, not ambiguous. The shared module and its files are in ski
 
 ## Host
 
-The host is `crates/saci/src/plugin_host/` (`mod.rs`, `loader.rs`, `manifest.rs`, `runtime.rs`,
-`host_impl.rs`) plus `crates/saci/src/service/plugin_loader.rs`, the builder-side loader
+The host is `crates/saci/src/plugin_host.rs` with `crates/saci/src/plugin_host/` (`loader.rs`,
+`manifest.rs`, `runtime.rs`, `host_impl.rs`) plus `crates/saci/src/service/plugin_loader.rs`, the
+builder-side loader
 `ServiceBuilder` calls for a `plugin` node. The `saci` crate's feature gate:
 
 - `plugin-host`: native plugin host, `saci::plugin_host`. `NativePluginRuntime` dlopens a shared

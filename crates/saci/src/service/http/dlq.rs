@@ -1,7 +1,7 @@
 //! The dead letter queue API: read what is waiting, replay it, purge it.
 //!
 //! Merged into the control-plane router by
-//! [`build_router`](super::http::build_router) only when at least one workflow
+//! [`build_router`](super::build_router) only when at least one workflow
 //! declares a `dlq` block, so a service with none has no endpoint here rather
 //! than one answering an empty list, the same convention the inspector's and
 //! the lifecycle plane's routes follow. The two `POST` routes need the
@@ -33,17 +33,16 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
 
 use crate::inspector_wire::{DlqReplayRequest, DlqTrigger, WorkflowRunState};
+use crate::service::dlq::{DlqError, ReplayFilter};
 
-use super::dlq::{DlqError, ReplayFilter};
-use super::http::ServiceState;
+use super::{ServiceState, refuse};
 
 /// How long a `POST` waits for the runner to reach its replay point before
 /// answering `202`.
 ///
-/// Matches [`LIFECYCLE_ACK_BUDGET`](super::lifecycle::LIFECYCLE_ACK_BUDGET):
+/// Matches [`LIFECYCLE_ACK_BUDGET`](crate::service::lifecycle::LIFECYCLE_ACK_BUDGET):
 /// an operator action either lands within a few seconds or is better reported
 /// as accepted than held open.
 pub const DLQ_ACK_BUDGET: Duration = Duration::from_secs(5);
@@ -60,16 +59,6 @@ pub fn control_routes() -> Router<ServiceState> {
     Router::new()
         .route("/api/workflows/{id}/dlq/replay", post(handle_replay))
         .route("/api/workflows/{id}/dlq/purge", post(handle_purge))
-}
-
-/// The body of every refusal.
-#[derive(Serialize)]
-struct ControlError {
-    error: String,
-}
-
-fn refuse(status: StatusCode, error: String) -> Response {
-    (status, Json(ControlError { error })).into_response()
 }
 
 fn no_queue(id: &str) -> Response {
