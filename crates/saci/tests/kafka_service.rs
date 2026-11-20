@@ -1,10 +1,10 @@
-//! The whole standalone service path over Kafka: config file, factories,
+//! The whole standalone service path over Kafka: config file, connector,
 //! source drain, pipeline run, sink drain.
 //!
 //! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this
 //! is the end to end proof that a `connector-kafka` build moves rows from one
 //! topic through a pipeline and into another via the registered
-//! `KafkaSourceFactory`/`KafkaSinkFactory`, not just via the connector's
+//! `KafkaConnector`, not just via the connector's
 //! own direct API (already covered by the Kafka connector's own tests, `crates/saci/tests/kafka_roundtrip.rs`).
 //!
 //! Soft-skips without Docker.
@@ -142,12 +142,12 @@ mode "standalone"
 
 node id=1 name="saci-kafka-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "kafka-service-test" {{
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="KafkaSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="kafka" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             brokers "{brokers}"
             topic "{input_topic}"
@@ -155,22 +155,22 @@ workflow "kafka-service-test" {{
             stop_at_end #true
             poll_timeout_ms 20000
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="KafkaSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="kafka" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             brokers "{brokers}"
             topic "{output_topic}"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
@@ -178,7 +178,7 @@ workflow "kafka-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -260,7 +260,7 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
             brokers,
             topic: output_topic,
             group_id: "kafka-service-readback".to_string(),
-            batch_size: 1000,
+            batch_rows: 1000,
             poll_timeout_ms: 5_000,
             auto_offset_reset: "earliest".to_string(),
             commit_on_drain: true,
@@ -359,7 +359,7 @@ mode "standalone"
 
 node id=1 name="saci-kafka-dlq" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "kafka-dlq-test" {{
     dlq "kafka" {{
@@ -371,9 +371,9 @@ workflow "kafka-dlq-test" {{
         }}
     }}
 
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="KafkaSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="kafka" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             brokers "{brokers}"
             topic "{input_topic}"
@@ -381,29 +381,29 @@ workflow "kafka-dlq-test" {{
             stop_at_end #true
             poll_timeout_ms 20000
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="ndjson_fmt" {{
         retry {{ max_attempts 1 }}
         heal {{ enabled #false }}
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     link from="orders_in" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

@@ -2,7 +2,7 @@
 //!
 //! Listens on a bind address and yields one [`RecordBatch`] per received frame.
 //! It never reaches EOF: `next_batch` blocks until the next frame arrives, so
-//! only the stream runner (`run_mode kind="stream"`) can drive it. The batch
+//! only the stream runner (`run "stream"`) can drive it. The batch
 //! loop's [`read_all`](crate::io::read_all) would
 //! block forever, and the service config validator rejects that combination.
 //!
@@ -13,7 +13,7 @@
 //! (`distributed::consensus::transport::wire`). Framing is transport, so this
 //! crate owns it; what the payload bytes mean is the
 //! [`Codec`] the host resolved from the
-//! source's `transformer` key.
+//! source's `codec` key.
 //!
 //! A frame carrying several batches yields their concatenation, because the
 //! decoder is asked for one batch per frame and folds whatever that frame held.

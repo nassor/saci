@@ -60,9 +60,9 @@ impl ClickhouseSource {
         config.validate()?;
 
         let fields = config
-            .schema_fields
+            .fields
             .iter()
-            .map(|f| f.to_arrow_field())
+            .map(|f| f.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
 
@@ -112,7 +112,7 @@ impl ClickhouseSource {
 
                 let cols = self
                     .config
-                    .schema_fields
+                    .fields
                     .iter()
                     .map(|f| quote_identifier(&f.name))
                     .collect::<Vec<_>>()
@@ -123,7 +123,7 @@ impl ClickhouseSource {
                 if let Some(cursor) = current_cursor.as_deref() {
                     let cursor_ty = self
                         .config
-                        .schema_fields
+                        .fields
                         .iter()
                         .find(|f| f.name == poll.cursor_column)
                         .map(|f| f.ty)
@@ -144,7 +144,7 @@ impl ClickhouseSource {
                         (Some(tie), Some(tie_val)) => {
                             let tie_ty = self
                                 .config
-                                .schema_fields
+                                .fields
                                 .iter()
                                 .find(|f| f.name == *tie)
                                 .map(|f| f.ty)
@@ -232,7 +232,7 @@ impl ClickhouseSource {
 
                 let cols = self
                     .config
-                    .schema_fields
+                    .fields
                     .iter()
                     .map(|f| quote_identifier(&f.name))
                     .collect::<Vec<_>>()
@@ -718,9 +718,8 @@ mod tests {
 
     #[test]
     fn source_request_batch_rows_updates_batch_rows() {
-        use crate::connector::clickhouse::config::{
-            ClickhouseFieldType, ConnectionConfig, DumpMode, FieldSpec,
-        };
+        use crate::connector::clickhouse::config::{ConnectionConfig, DumpMode};
+        use crate::connector::schema::{FieldSpec, FieldType};
         use std::collections::HashMap;
 
         let config = ClickhouseSourceConfig {
@@ -737,12 +736,14 @@ mod tests {
             mode: SourceMode::Dump(DumpMode {
                 table: "events".to_string(),
             }),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             batch_rows: 100,
             max_batches_per_cycle: 0,

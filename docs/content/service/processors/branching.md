@@ -113,7 +113,7 @@ through different sinks if they land in different passes: see
             <rect class="hd hd-data" x="0" y="100" width="124" height="20" rx="8"/>
             <rect class="hd hd-data" x="0" y="112" width="124" height="8"/>
             <text class="t-lbl" x="12" y="115">in</text>
-            <text class="t-sm" x="12" y="138">NatsSource</text>
+            <text class="t-sm" x="12" y="138">nats source</text>
         </g>
         <g class="anim anim-2">
             <path class="arw arw-data" d="M124 128 C167 128 167 54 210 54" marker-end="url(#br-d)"/>

@@ -14,13 +14,13 @@ use saci::io::Source;
 use serde::Deserialize as _;
 
 const FIELDS: &str = "
-schema_fields \"__op\" type=\"utf8\" nullable=#false
-schema_fields \"__lsn\" type=\"int64\" nullable=#false
-schema_fields \"__xid\" type=\"int64\"
-schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\"
-schema_fields \"__table\" type=\"utf8\" nullable=#false
-schema_fields \"id\" type=\"int64\"
-schema_fields \"label\" type=\"utf8\"
+field \"__op\" type=\"utf8\" nullable=#false
+field \"__lsn\" type=\"int64\" nullable=#false
+field \"__xid\" type=\"int64\"
+field \"__commit_ts\" type=\"timestamp_micros_utc\"
+field \"__table\" type=\"utf8\" nullable=#false
+field \"id\" type=\"int64\"
+field \"label\" type=\"utf8\"
 ";
 
 fn source(dsn: &str, body: &str) -> PostgresSource {
@@ -457,9 +457,9 @@ async fn the_cursor_and_logical_paths_render_a_text_wire_column_identically() {
         .expect("fixture");
 
     let fields = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"ip\" type=\"utf8\" pg_type=\"inet\" nullable=#true
-schema_fields \"flag\" type=\"utf8\" pg_type=\"bool\" nullable=#true
+field \"id\" type=\"int64\" nullable=#false
+field \"ip\" type=\"utf8\" native_type=\"inet\" nullable=#true
+field \"flag\" type=\"utf8\" native_type=\"bool\" nullable=#true
 ";
     let mut logical = source(
         &pg.dsn(),

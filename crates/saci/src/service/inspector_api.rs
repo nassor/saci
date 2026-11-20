@@ -9,7 +9,7 @@
 //! | Route | Body |
 //! |---|---|
 //! | `GET /api/topology` | [`Topology`](crate::inspector_wire::Topology) |
-//! | `GET /api/snapshot?window_secs=60` | [`Snapshot`](crate::inspector_wire::Snapshot), the one document the dashboard polls |
+//! | `GET /api/snapshot?window_ms=60000` | [`Snapshot`](crate::inspector_wire::Snapshot), the one document the dashboard polls |
 //! | `GET /api/traces?limit=100` | newest-first [`TraceSummary`](crate::inspector_wire::TraceSummary) list |
 //! | `GET /api/traces/{trace_id}` | [`TraceDetail`](crate::inspector_wire::TraceDetail) for the waterfall, 404 once the trace ages out |
 //! | `GET /api/logs?limit=200&level=warn` | newest-first [`LogRecord`](crate::inspector_wire::LogRecord) list, filtered at or above `level` |
@@ -31,18 +31,18 @@ use serde::Deserialize;
 use super::http::ServiceState;
 use crate::inspector::Inspector;
 
-/// Largest history window a client may ask for, in seconds.
+/// Largest history window a client may ask for, in milliseconds.
 ///
 /// Bounded because the caller controls it and a huge value would make the
 /// handler walk the whole buffer for points it cannot use; the retention
 /// window is the real ceiling anyway.
-const MAX_WINDOW_SECS: u64 = 24 * 3600;
+const MAX_WINDOW_MS: u64 = 24 * 3600 * 1000;
 
 /// Largest number of records a list endpoint returns.
 const MAX_LIMIT: usize = 1000;
 
-fn default_window_secs() -> u64 {
-    60
+fn default_window_ms() -> u64 {
+    60_000
 }
 
 fn default_trace_limit() -> usize {
@@ -53,11 +53,11 @@ fn default_log_limit() -> usize {
     200
 }
 
-/// `?window_secs=` for `/api/snapshot`.
+/// `?window_ms=` for `/api/snapshot`.
 #[derive(Debug, Deserialize)]
 pub struct SnapshotQuery {
-    #[serde(default = "default_window_secs")]
-    window_secs: u64,
+    #[serde(default = "default_window_ms")]
+    window_ms: u64,
 }
 
 /// `?limit=` for `/api/traces`.
@@ -143,7 +143,7 @@ async fn handle_snapshot(
         Ok(inspector) => inspector,
         Err(status) => return status.into_response(),
     };
-    let window = Duration::from_secs(query.window_secs.clamp(1, MAX_WINDOW_SECS));
+    let window = Duration::from_millis(query.window_ms.clamp(1_000, MAX_WINDOW_MS));
     let ready = state.ready.load(Ordering::Relaxed);
     Json(inspector.snapshot(window, ready)).into_response()
 }

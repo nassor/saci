@@ -31,7 +31,7 @@ and no file in between.
             <text class="t-lbl" x="12" y="35">workflow "route"</text>
             <rect class="blk blk-data" x="16" y="56" width="208" height="40" rx="8"/>
             <text class="t-lbl" x="28" y="72">sink standard_bridge</text>
-            <text class="t-sm" x="28" y="88">type="ChannelSink"</text>
+            <text class="t-sm" x="28" y="88">connector="channel"</text>
         </g>
         <g class="anim anim-2">
             <path class="arw arw-data" d="M240 76 H262" marker-end="url(#ch-a)"/>
@@ -49,7 +49,7 @@ and no file in between.
             <text class="t-lbl" x="432" y="35">workflow "settle"</text>
             <rect class="blk blk-data" x="436" y="56" width="208" height="40" rx="8"/>
             <text class="t-lbl" x="448" y="72">source standard_in</text>
-            <text class="t-sm" x="448" y="88">type="ChannelSource"</text>
+            <text class="t-sm" x="448" y="88">connector="channel"</text>
         </g>
         <defs>
             <marker id="ch-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -80,9 +80,9 @@ and no file in between.
 
 ```kdl
 workflow "settle" {
-    source "standard_in" type="ChannelSource" component="Sale" {
+    source "standard_in" connector="channel" component="Sale" {
         config name="standard" buffer=8 {
-            schema_fields "id" type="Int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }
     }
 }
@@ -91,8 +91,8 @@ workflow "settle" {
 </div>
 
 `name` is the channel this half joins. `buffer` is how many batches the channel holds before the
-producing sink waits, and both halves have to declare the same value. `schema_fields` is required,
-and both halves have to agree on it. A batch whose schema differs is refused.
+producing sink waits, and both halves have to declare the same value. `field` lines are required,
+and both halves have to agree on them. A batch whose schema differs is refused.
 
 ## 2. Write to a channel: the sink node
 
@@ -101,9 +101,9 @@ and both halves have to agree on it. A batch whose schema differs is refused.
 
 ```kdl
 workflow "route" {
-    sink "standard_bridge" type="ChannelSink" component="Sale" {
+    sink "standard_bridge" connector="channel" component="Sale" {
         config name="standard" buffer=8 {
-            schema_fields "id" type="Int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }
     }
 }
@@ -119,7 +119,7 @@ a channel is the only way rows move between workflows.
 `examples/multi_workflow/multi_workflow.kdl` is a worked pair: the `route` workflow splits a stream
 and bridges half of it to the `settle` workflow on the channel `standard`.
 
-Two `NatsSource`s and two `PostgresSink`s sit alongside the channel, and neither
+Two `nats` sources and two `postgresql` sinks sit alongside the channel, and neither
 connector is in the server build, so the two commands below need a binary built
 with `--features server,connector-nats,connector-postgresql`.
 
@@ -191,9 +191,9 @@ Source and sink take the same three keys:
 |---|---|---|---|
 | `name` | string | required | the channel both halves join |
 | `buffer` | integer | `8` | batches the channel holds before the writer waits; at least 1, and both halves must agree |
-| `schema_fields` | list of fields | required | the schema batches carry; both halves must agree |
+| `field` | lines | required | the schema batches carry; both halves must agree |
 
-An unrecognised key inside `config` is a configuration error naming the key. `schema_fields` is read beside these keys.
+An unrecognised key inside `config` is a configuration error naming the key. `field` lines sit beside these keys.
 
 ## When it refuses to start
 
@@ -203,8 +203,8 @@ An unrecognised key inside `config` is a configuration error naming the key. `sc
 | `channel '<name>': more than one ChannelSink declared` | keep exactly one sink for that `name` |
 | ``ChannelSource config: missing field `name` `` | add `name="..."` to the `config` |
 | `channel: 'buffer' must be at least 1` | give `buffer` a positive value |
-| `ChannelSource config requires a 'schema_fields' list` | declare `schema_fields` in the `config` |
-| `channel '<name>': the paired ChannelSource and ChannelSink declare different schemas` | make both `schema_fields` lists identical |
+| `ChannelSource config requires at least one 'field' entry` | declare `field` lines in the `config` |
+| `channel '<name>': the paired ChannelSource and ChannelSink declare different schemas` | make both halves' `field` lines identical |
 | `channel '<name>': buffer <n> differs from the paired half's buffer <m>` | give both halves the same `buffer` |
 
 ## Next

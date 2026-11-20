@@ -8,12 +8,12 @@
 //! server which one answered and adapts the few statements that differ.
 //!
 //! Both halves are declarative: the Arrow schema is written in the service
-//! configuration, not introspected, because [`SourceFactory::build`] is
+//! configuration, not introspected, because [`Connector::source`] is
 //! synchronous and cannot open a connection. The declared schema is checked
 //! against the live catalog on the first query and a column the server cannot
 //! fill is a loud error rather than a silent coercion.
 //!
-//! [`SourceFactory::build`]: crate::connector::factory::SourceFactory::build
+//! [`Connector::source`]: crate::connector::Connector::source
 //!
 //! # Source modes
 //!
@@ -121,33 +121,33 @@
 //! # Configuration
 //!
 //! ```kdl
-//! source "orders_cdc" type="MariadbSource" component="OrderChange" {
+//! source "orders_cdc" connector="mariadb" component="OrderChange" {
 //!     config name="orders_cdc" batch_rows=8192 {
 //!         connection dsn="${SACI_MARIADB_DSN}" ssl_mode="verify_identity" \
 //!             connect_timeout_ms=5000 statement_timeout_ms=30000
 //!         mode kind="cdc_binlog" table="shop.orders" position="file" \
 //!             snapshot="initial" server_id=4100
-//!         schema_fields "__op" type="utf8" nullable=#false
-//!         schema_fields "id" type="int64" nullable=#false
-//!         schema_fields "total" type="decimal128" precision=12 scale=2
-//!         schema_fields "note" type="utf8" mariadb_type="varchar"
+//!         field "__op" type="utf8" nullable=#false
+//!         field "id" type="int64" nullable=#false
+//!         field "total" type="decimal128" precision=12 scale=2
+//!         field "note" type="utf8" native_type="varchar"
 //!     }
 //! }
 //!
-//! sink "orders_mirror" type="MariadbSink" component="OrderChange" {
+//! sink "orders_mirror" connector="mariadb" component="OrderChange" {
 //!     config name="orders_mirror" table="shop.orders_copy" \
 //!         write_mode="apply_changes" conflict_columns="id" {
 //!         connection dsn="${SACI_MARIADB_SINK_DSN}" ssl_mode="verify_identity"
-//!         schema_fields "__op" type="utf8" nullable=#false
-//!         schema_fields "id" type="int64" nullable=#false
-//!         schema_fields "total" type="decimal128" precision=12 scale=2
-//!         schema_fields "note" type="utf8"
+//!         field "__op" type="utf8" nullable=#false
+//!         field "id" type="int64" nullable=#false
+//!         field "total" type="decimal128" precision=12 scale=2
+//!         field "note" type="utf8"
 //!     }
 //! }
 //! ```
 //!
 //! The `source` node's declared id is what the service logs; the `name` inside
-//! its `config` is what the connector sees, because the factory is handed only
+//! its `config` is what the connector sees, because the connector is handed only
 //! the `config` sub-table. Keep them equal for readable output.
 //!
 //! `${VAR}` and `${VAR:-default}` are substituted by the service before the
@@ -178,12 +178,11 @@ mod offsets;
 mod types;
 mod values;
 
-pub use factory::{MariadbSinkFactory, MariadbSourceFactory};
+pub use factory::MariadbConnector;
 pub use sink::MariadbSink;
 pub use source::MariadbSource;
 
 pub use config::{
-    BinlogMode, ConnectionConfig, CursorMode, FieldSpec, MariadbFieldType, MariadbSinkConfig,
-    MariadbSourceConfig, PositionMode, ReconnectConfig, Retention, SnapshotMode, SourceMode,
-    SslModeConfig, TriggerMode, WriteMode,
+    BinlogMode, ConnectionConfig, CursorMode, MariadbSinkConfig, MariadbSourceConfig, PositionMode,
+    ReconnectConfig, Retention, SnapshotMode, SourceMode, SslModeConfig, TriggerMode, WriteMode,
 };

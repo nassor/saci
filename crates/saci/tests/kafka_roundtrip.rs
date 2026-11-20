@@ -112,7 +112,7 @@ fn source_cfg(brokers: &str, topic: &str, group_id: &str) -> KafkaSourceConfig {
         brokers: brokers.to_string(),
         topic: topic.to_string(),
         group_id: group_id.to_string(),
-        batch_size: 1000,
+        batch_rows: 1000,
         poll_timeout_ms: 5_000,
         auto_offset_reset: "earliest".to_string(),
         commit_on_drain: true,
@@ -577,12 +577,12 @@ async fn a_cancelled_window_keeps_the_messages_already_fetched() {
     let topic = kafka.topic("cancel-safe-window");
     let schema = schema();
 
-    // Live rather than `stop_at_end`, and `batch_size` 2: a window this
+    // Live rather than `stop_at_end`, and `batch_rows` 2: a window this
     // source cannot close until a second message arrives is a window that can
     // be cancelled while it holds the first.
     let mut source = KafkaSource::new(
         KafkaSourceConfig {
-            batch_size: 2,
+            batch_rows: 2,
             poll_timeout_ms: LIVE_POLL_MS,
             stop_at_end: false,
             ..source_cfg(kafka.brokers(), &topic, "cancel-safe-window-group")
@@ -604,12 +604,12 @@ async fn a_cancelled_window_keeps_the_messages_already_fetched() {
     .await;
     let first = tokio::time::timeout(DRAINED_BOUND, source.next_batch())
         .await
-        .expect("a window filled to batch_size must not wait on poll_timeout_ms")
+        .expect("a window filled to batch_rows must not wait on poll_timeout_ms")
         .expect("the first poll must not error")
         .expect("a live source blocks until it has rows");
     assert_eq!(ids_of(&first), vec![1, 2]);
 
-    // Half of what `batch_size` asks for, so the window stays open holding
+    // Half of what `batch_rows` asks for, so the window stays open holding
     // row 3 while it waits for a second row.
     produce_wave(
         kafka.brokers(),
@@ -660,7 +660,7 @@ async fn a_cancelled_poll_commits_nothing_it_did_not_hand_over() {
     // over, and still runs the commit every call makes on entry.
     let mut source = KafkaSource::new(
         KafkaSourceConfig {
-            batch_size: 4,
+            batch_rows: 4,
             poll_timeout_ms: LIVE_POLL_MS,
             stop_at_end: false,
             ..source_cfg(kafka.brokers(), &topic, group_id)
@@ -674,7 +674,7 @@ async fn a_cancelled_poll_commits_nothing_it_did_not_hand_over() {
             tokio::time::timeout(Duration::from_secs(5), source.next_batch())
                 .await
                 .is_err(),
-            "a window short of batch_size must still be open after 5 s, \
+            "a window short of batch_rows must still be open after 5 s, \
              or this test cancels nothing"
         );
     }
@@ -956,7 +956,7 @@ async fn compacted_snapshot_deduplicates_and_applies_tombstones() {
         KafkaSourceConfig {
             key_field: Some("id".to_string()),
             compacted: true,
-            batch_size: 2,
+            batch_rows: 2,
             ..source_cfg(kafka.brokers(), &topic, "compacted-snapshot-group")
         },
         schema.clone(),
@@ -978,7 +978,7 @@ async fn compacted_snapshot_deduplicates_and_applies_tombstones() {
     assert_eq!(
         sizes,
         vec![2, 1],
-        "batch_size 2 chunks three survivors into 2 then 1"
+        "batch_rows 2 chunks three survivors into 2 then 1"
     );
     assert!(
         source.next_batch().await.expect("after eof").is_none(),
@@ -1058,7 +1058,7 @@ async fn compacted_snapshot_orders_survivors_by_partition_then_offset() {
         KafkaSourceConfig {
             key_field: Some("id".to_string()),
             compacted: true,
-            batch_size: 2,
+            batch_rows: 2,
             ..source_cfg(kafka.brokers(), &topic, "compacted-multi-partition-group")
         },
         schema(),
@@ -1070,7 +1070,7 @@ async fn compacted_snapshot_orders_survivors_by_partition_then_offset() {
     assert_eq!(
         sizes,
         vec![2, 2],
-        "batch_size 2 chunks four survivors into 2 then 2"
+        "batch_rows 2 chunks four survivors into 2 then 2"
     );
     // Not sorted before comparing: this is the order `next_batch` actually
     // returned. Partition 0's key, then partition 1's, then partition 2's

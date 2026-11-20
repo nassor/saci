@@ -20,7 +20,7 @@
 //
 // Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
 // then run the service and the publisher:
-//   cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
+//   cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- serve \
 //     --config examples/windowing/sliding/sliding.kdl
 //   cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 
@@ -31,7 +31,7 @@ node id=1 name="saci-windowing-sliding" data_dir="${SACI_DATA_DIR:-/tmp/saci-win
 // A core NATS subscription never reaches EOF, so the interval runner would
 // spin on a source that is never done. The stream runner drives live sources
 // item by item instead, pulling the two sources round-robin.
-run_mode kind="stream"
+run "stream"
 
 // No `flow_control` block: both sources here feed a windowed processor, and
 // a stream-mode source on a path to a windowed node builds no controller at
@@ -39,17 +39,17 @@ run_mode kind="stream"
 // docs/content/service/operate/flow-control.md and the window block below.
 
 workflow "windowing_sliding" {
-    // One JSON object per message, decoded against schema_fields below.
-    transformer "ndjson_fmt" format="ndjson"
+    // One JSON object per message, decoded against the `field` lines below.
+    codec "ndjson_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- sources
     //
     // Two independent streams of the same Sale shape, both feeding the
     // processor: the fan-in merge is what one watermark spans.
 
-    source "sales_a" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+    source "sales_a" connector="nats" component="Sale" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -59,15 +59,15 @@ workflow "windowing_sliding" {
 
             mode kind="core" subject="windowing.sales.a"
 
-            schema_fields "timestamp_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
+            field "timestamp_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
         }
     }
 
-    source "sales_b" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+    source "sales_b" connector="nats" component="Sale" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -77,9 +77,9 @@ workflow "windowing_sliding" {
 
             mode kind="core" subject="windowing.sales.b"
 
-            schema_fields "timestamp_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
+            field "timestamp_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
         }
     }
 
@@ -91,22 +91,22 @@ workflow "windowing_sliding" {
     // processor reads back through get-config. One source of truth.
     //
     // size_ms is an exact multiple of slide_ms, so every row lands in exactly
-    // four distinct windows: `assign_sliding` returns duplicate ids when it is
+    // four distinct windows: `sliding_ids` returns duplicate ids when it is
     // not.
 
-    wasm "window_sliding" module="target/wasm32-wasip3/release/windowing_sliding_wasm.wasm" {
+    wasm "window_sliding" path="target/wasm32-wasip3/release/windowing_sliding_wasm.wasm" {
         window kind="sliding" size_ms=60000 slide_ms=15000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-            key_field "symbol"
+            key_fields "symbol"
         }
     }
 
     // ----------------------------------------------------------------- sinks
     //
     // The table comes from schema.sql, which compose runs on first
-    // initialisation; PostgresSink never issues CREATE TABLE. upsert on
+    // initialisation; the `postgresql` sink never issues CREATE TABLE. upsert on
     // (window_start_ms, symbol) keeps a re-run or a late re-fire idempotent.
 
-    sink "sliding_totals" type="PostgresSink" component="SlidingTotal" {
+    sink "sliding_totals" connector="postgresql" component="SlidingTotal" {
         config {
             name "sliding-totals"
             table "public.sliding_window_totals"
@@ -119,11 +119,11 @@ workflow "windowing_sliding" {
                 sslmode "disable"
             }
 
-            schema_fields "window_start_ms" type="int64" nullable=#false
-            schema_fields "window_end_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "count" type="int64" nullable=#false
-            schema_fields "sum" type="float64" nullable=#false
+            field "window_start_ms" type="int64" nullable=#false
+            field "window_end_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "count" type="int64" nullable=#false
+            field "sum" type="float64" nullable=#false
         }
     }
 

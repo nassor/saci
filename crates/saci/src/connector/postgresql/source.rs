@@ -1,6 +1,6 @@
 //! [`PostgresSource`]: the one public source type, over three read modes.
 //!
-//! The Arrow schema is built from the declared `schema_fields` once, in
+//! The Arrow schema is built from the declared `field` entries once, in
 //! [`PostgresSource::new`], and handed out by reference from
 //! [`Source::schema`]: the trait requires a schema that does not change between
 //! calls, so it is never rebuilt.
@@ -9,7 +9,7 @@
 //! builds the schema and the `Connector`, and
 //! returns; the first [`next_batch`](Source::next_batch) connects. That is what
 //! keeps `saci-service validate` free of a database, and it is forced anyway,
-//! because `SourceFactory::build` is synchronous.
+//! because `Connector::source` is synchronous.
 
 pub(crate) mod cursor;
 pub(crate) mod logical;
@@ -61,9 +61,9 @@ impl PostgresSource {
         cfg.validate()?;
 
         let fields = cfg
-            .schema_fields
+            .fields
             .iter()
-            .map(|spec| spec.to_arrow_field())
+            .map(|spec| spec.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
 
@@ -71,7 +71,7 @@ impl PostgresSource {
         tracing::info!(
             source = %cfg.name,
             mode = cfg.mode.label(),
-            columns = cfg.schema_fields.len(),
+            columns = cfg.fields.len(),
             "postgres source configured"
         );
 
@@ -117,10 +117,10 @@ impl Source for PostgresSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::from_kdl_str;
+    use crate::config::from_kdl_str;
     use serde::Deserialize as _;
 
-    const FIELDS: &str = "\nschema_fields \"id\" type=\"int64\" nullable=#false\n";
+    const FIELDS: &str = "\nfield \"id\" type=\"int64\" nullable=#false\n";
 
     const POLLING: &str = "name \"src\"\nbatch_rows 100\n\n\
         connection dsn=\"postgres://h:5432/d\" sslmode=\"disable\"\n\n\

@@ -20,8 +20,8 @@ fn sink(path: &str) -> TursoSink {
          write_mode \"append\"\n\
          connection path=\"{}\"\n\
          capture mode=\"full\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSinkConfig = common::config_from_kdl(&body);
@@ -34,9 +34,9 @@ fn source(path: &str) -> TursoSource {
          batch_rows 1024\n\
          connection path=\"{}\"\n\
          mode kind=\"cdc\" table=\"enriched\"\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"id\" type=\"int64\" nullable=#true\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"id\" type=\"int64\" nullable=#true\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSourceConfig = common::config_from_kdl(&body);

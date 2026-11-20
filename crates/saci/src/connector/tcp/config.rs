@@ -75,8 +75,7 @@ mod tests {
 
     #[test]
     fn a_source_table_reads_its_defaults() {
-        let table =
-            from_kdl_str("bind \"127.0.0.1:0\"\nschema_fields \"v\" type=\"Int64\"\n").unwrap();
+        let table = from_kdl_str("bind \"127.0.0.1:0\"\nfield \"v\" type=\"int64\"\n").unwrap();
         let cfg: TcpSourceConfig = deserialize_config(&table, "TcpSource").unwrap();
         assert_eq!(cfg, TcpSourceConfig::new("127.0.0.1:0"));
     }
@@ -84,8 +83,7 @@ mod tests {
     #[test]
     fn a_sink_table_needs_connect_and_nothing_else() {
         let table =
-            from_kdl_str("connect \"collector:9500\"\nschema_fields \"v\" type=\"Int64\"\n")
-                .unwrap();
+            from_kdl_str("connect \"collector:9500\"\nfield \"v\" type=\"int64\"\n").unwrap();
         let cfg: TcpSinkConfig = deserialize_config(&table, "TcpSink").unwrap();
         assert_eq!(cfg, TcpSinkConfig::new("collector:9500"));
 

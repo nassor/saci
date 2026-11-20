@@ -11,33 +11,33 @@
 //! names all three, and it puts them in its own series labels and span
 //! fields.
 //!
-//! Arrow IPC is the wire format and there is no `transformer` key: both ends
+//! Arrow IPC is the wire format and there is no `codec` key: both ends
 //! are SACI services that already agree on `RecordBatch`es. [`wire`] owns the
 //! framing, and it is public so a foreign producer, or a harness standing in
 //! for one half, can speak it.
 //!
-//! The source is stream-only: it never reaches EOF, so `run_mode
-//! kind="stream"` is the one mode that can drive it. The sink runs under every
+//! The source is stream-only: it never reaches EOF, so `run "stream"` is the
+//! one mode that can drive it. The sink runs under every
 //! mode, and its `connect` key takes several addresses tried in order, so a
 //! set of downstream services acts as failover peers.
 //!
 //! ```kdl
 //! // Service A, pushing out.
-//! sink "forward" type="saci" component="Tick" {
+//! sink "forward" connector="peer" component="Tick" {
 //!     config {
 //!         connect "b.internal:9700" "b-standby.internal:9700"
 //!         handshake_timeout_ms 5000
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //!
 //! // Service B, receiving.
-//! source "ingest" type="saci" component="Tick" {
+//! source "ingest" connector="peer" component="Tick" {
 //!     config {
 //!         bind "0.0.0.0:9700"
 //!         buffer 64
 //!         max_frame_bytes 8388608
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //! ```
@@ -62,6 +62,6 @@ pub mod source;
 pub mod wire;
 
 pub use config::{PeerSinkConfig, PeerSourceConfig};
-pub use factory::{SaciSinkFactory, SaciSourceFactory};
+pub use factory::PeerConnector;
 pub use sink::PeerSink;
 pub use source::PeerSource;

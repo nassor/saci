@@ -7,17 +7,17 @@
 //! `kind="core"` is plain subject pub/sub with no persistence;
 //! `kind="jetstream"` is a durable stream, read through a pull consumer and
 //! written with publish acks. What a message payload means is the
-//! [`Codec`](crate::codec::Codec) the node's `transformer` key
+//! [`Codec`](crate::codec::Codec) the node's `codec` key
 //! names, and its [`MessageShape`](crate::codec::MessageShape) decides
 //! whether a batch becomes one message per row or one message in total.
 //!
 //! Both sides are declarative: the Arrow schema is written in the service
 //! configuration, not introspected, because
-//! [`SourceFactory::build`]/[`SinkFactory::build`] are synchronous and open no
+//! [`Connector::source`] and [`Connector::sink`] are synchronous and open no
 //! connection.
 //!
-//! [`SourceFactory::build`]: crate::connector::factory::SourceFactory::build
-//! [`SinkFactory::build`]: crate::connector::factory::SinkFactory::build
+//! [`Connector::source`]: crate::connector::Connector::source
+//! [`Connector::sink`]: crate::connector::Connector::sink
 //!
 //! # Delivery semantics
 //!
@@ -57,6 +57,6 @@ pub use config::{
     NatsSourceConfig, ReplayPolicyConfig, RetentionConfig, SinkMode, SourceMode, StorageConfig,
     StreamProvision, TlsConfig,
 };
-pub use factory::{NatsSinkFactory, NatsSourceFactory};
+pub use factory::NatsConnector;
 pub use sink::NatsSink;
 pub use source::NatsSource;

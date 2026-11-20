@@ -9,7 +9,7 @@
 //! message. A frame is a `u32` big-endian length prefix followed by that many
 //! payload bytes, so the two halves are wire compatible; the
 //! [`Codec`](crate::codec::Codec) the host resolved from the
-//! node's `transformer` key decodes or encodes them.
+//! node's `codec` key decodes or encodes them.
 //!
 //! Framing is transport and belongs here; decoding is format and does not. That
 //! split is why the same listener carries Arrow IPC or newline-delimited JSON
@@ -17,21 +17,21 @@
 //!
 //! The source never reaches EOF, so only the stream runner can drive it. Its
 //! `config` table takes `bind`, an optional `buffer` and `max_frame_bytes`, and
-//! a `schema_fields` array declaring the Arrow schema. The sink's takes
-//! `connect` and `schema_fields`, and it runs under any run mode.
+//! a `field` entry per column declaring the Arrow schema. The sink's takes
+//! `connect` and `field` entries, and it runs under any run mode.
 //!
 //! ```kdl
-//! transformer "frames-ipc" name="Frames Arrow IPC" format="arrow-ipc"
+//! codec "frames-ipc" name="Frames Arrow IPC" format="arrow-ipc"
 //!
-//! source "ingest" type="tcp" transformer="frames-ipc" component="Reading" {
+//! source "ingest" connector="tcp" codec="frames-ipc" component="Reading" {
 //!     config bind="0.0.0.0:9500" max_frame_bytes=8388608 {
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //!
-//! sink "forward" type="tcp" transformer="frames-ipc" component="Reading" {
+//! sink "forward" connector="tcp" codec="frames-ipc" component="Reading" {
 //!     config connect="collector.internal:9600" {
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //! ```
@@ -43,6 +43,6 @@ pub mod sink;
 pub mod source;
 
 pub use config::{TcpSinkConfig, TcpSourceConfig};
-pub use factory::{TcpSinkFactory, TcpSourceFactory};
+pub use factory::TcpConnector;
 pub use sink::TcpSink;
 pub use source::TcpSource;

@@ -22,12 +22,12 @@
 //!
 //! # Two services, not one
 //!
-//! `run_mode` is global to a config. `examples/integrity/integrity.kdl` runs
-//! `kind="stream"` and holds the `ingest` and `settle` workflows; its control
+//! `run` is global to a config. `examples/integrity/integrity.kdl` declares
+//! `run "stream"` and holds the `ingest` and `settle` workflows; its control
 //! plane is `--stream-url`. A stream-mode source that reports EOF leaves the
 //! rotation permanently, which is right for the catalog `FileSource` and fatal
 //! for a `PostgresSource`, so the CDC half lives in
-//! `examples/integrity/integrity_audit.kdl` under `kind="interval"`, with the
+//! `examples/integrity/integrity_audit.kdl` under `run "interval"`, with the
 //! `audit` workflow and the `--audit-url` control plane.
 //!
 //! # Flags
@@ -127,7 +127,7 @@ const WINDOW_SIZE_MS: i64 = 10_000;
 /// Lateness budget the `settle` workflow declares.
 const ALLOWED_LATENESS_MS: i64 = 2_000;
 /// Orders packed into one Kafka message. The source is configured
-/// `batch_size 1` with flow control off, so one message is exactly one batch
+/// `batch_rows 1` with flow control off, so one message is exactly one batch
 /// and every row in it routes the same way.
 const ORDERS_PER_MESSAGE: usize = 5;
 /// The consumer group `integrity.kdl` gives `orders_kafka`. Deleted with the

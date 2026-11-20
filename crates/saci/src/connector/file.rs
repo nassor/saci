@@ -7,17 +7,17 @@
 //! thread, and the channel [`FileSource::next_batch`](crate::io::Source::next_batch) awaits so the async
 //! executor never blocks on the disk. The byte format comes from a
 //! [`Codec`](crate::codec::Codec), resolved by the host from
-//! the `transformer` key naming a declared `transformer` node, so csv, ndjson
+//! the `codec` key naming a declared `codec` node, so csv, ndjson
 //! and parquet are one connector rather than three.
 //!
 //! ```kdl
-//! transformer "orders-csv" name="Orders CSV" format="csv" {
-//!     options has_headers=#true
+//! codec "orders-csv" name="Orders CSV" format="csv" {
+//!     config has_headers=#true
 //! }
 //!
-//! source "orders_in" type="FileSource" transformer="orders-csv" component="Order" {
+//! source "orders_in" connector="file" codec="orders-csv" component="Order" {
 //!     config path="/data/orders.csv" {
-//!         schema_fields "id" type="Int64" nullable=#false
+//!         field "id" type="int64" nullable=#false
 //!     }
 //! }
 //! ```
@@ -31,6 +31,6 @@ pub mod sink;
 pub mod source;
 
 pub use config::{FileSinkConfig, FileSourceConfig};
-pub use factory::{FileSinkFactory, FileSourceFactory};
+pub use factory::FileConnector;
 pub use sink::FileSink;
 pub use source::FileSource;

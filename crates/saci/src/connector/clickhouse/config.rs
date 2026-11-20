@@ -8,13 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::connector::schema::{FieldSpec, FieldType};
 use crate::error::SaciError;
-use arrow_schema::{DataType, Field, TimeUnit};
 use serde::Deserialize;
-
-fn default_true() -> bool {
-    true
-}
 
 fn default_batch_rows() -> usize {
     8_192
@@ -92,189 +88,90 @@ impl ConnectionConfig {
     }
 }
 
-/// Supported scalar and Arrow data types for ClickHouse fields.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ClickhouseFieldType {
-    /// Boolean flag.
-    #[serde(alias = "bool")]
-    Boolean,
-    /// Signed 8-bit integer.
-    Int8,
-    /// Signed 16-bit integer.
-    Int16,
-    /// Signed 32-bit integer.
-    Int32,
-    /// Signed 64-bit integer.
-    Int64,
-    /// Unsigned 8-bit integer.
-    #[serde(rename = "uint8", alias = "u_int8")]
-    UInt8,
-    /// Unsigned 16-bit integer.
-    #[serde(rename = "uint16", alias = "u_int16")]
-    UInt16,
-    /// Unsigned 32-bit integer.
-    #[serde(rename = "uint32", alias = "u_int32")]
-    UInt32,
-    /// Unsigned 64-bit integer.
-    #[serde(rename = "uint64", alias = "u_int64")]
-    UInt64,
-    /// Single-precision 32-bit floating point.
-    Float32,
-    /// Double-precision 64-bit floating point.
-    Float64,
-    /// UTF-8 encoded string.
-    #[serde(alias = "string")]
-    Utf8,
-    /// Raw binary bytes.
-    Binary,
-    /// Days elapsed since UNIX epoch.
-    Date32,
-    /// Milliseconds elapsed since UNIX epoch.
-    Date64,
-    /// Timestamp with microsecond precision.
-    TimestampMicros,
-    /// Timestamp with millisecond precision.
-    TimestampMillis,
-    /// Fixed-point 128-bit decimal with given precision and scale.
-    Decimal128,
+/// Whether the connector maps a declared type.
+fn supported(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::Boolean
+            | FieldType::Int8
+            | FieldType::Int16
+            | FieldType::Int32
+            | FieldType::Int64
+            | FieldType::UInt8
+            | FieldType::UInt16
+            | FieldType::UInt32
+            | FieldType::UInt64
+            | FieldType::Float32
+            | FieldType::Float64
+            | FieldType::Utf8
+            | FieldType::Binary
+            | FieldType::Date32
+            | FieldType::Date64
+            | FieldType::TimestampMicros
+            | FieldType::TimestampMillis
+            | FieldType::Decimal128
+    )
 }
 
-impl ClickhouseFieldType {
-    /// Returns the canonical type label.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Boolean => "boolean",
-            Self::Int8 => "int8",
-            Self::Int16 => "int16",
-            Self::Int32 => "int32",
-            Self::Int64 => "int64",
-            Self::UInt8 => "uint8",
-            Self::UInt16 => "uint16",
-            Self::UInt32 => "uint32",
-            Self::UInt64 => "uint64",
-            Self::Float32 => "float32",
-            Self::Float64 => "float64",
-            Self::Utf8 => "utf8",
-            Self::Binary => "binary",
-            Self::Date32 => "date32",
-            Self::Date64 => "date64",
-            Self::TimestampMicros => "timestamp_micros",
-            Self::TimestampMillis => "timestamp_millis",
-            Self::Decimal128 => "decimal128",
-        }
+/// Whether a column of this type is eligible as a polling cursor column.
+pub(crate) fn is_cursor_capable(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::Int8
+            | FieldType::Int16
+            | FieldType::Int32
+            | FieldType::Int64
+            | FieldType::UInt8
+            | FieldType::UInt16
+            | FieldType::UInt32
+            | FieldType::UInt64
+            | FieldType::Float32
+            | FieldType::Float64
+            | FieldType::Utf8
+            | FieldType::Date32
+            | FieldType::Date64
+            | FieldType::TimestampMicros
+            | FieldType::TimestampMillis
+    )
+}
+
+/// Validates a declared field list: non-empty, every `id` non-empty and unique,
+/// every type one this connector maps, and every Arrow mapping legal.
+fn validate_fields(what: &str, fields: &[FieldSpec]) -> Result<(), SaciError> {
+    if fields.is_empty() {
+        return Err(SaciError::configuration(format!(
+            "{what}: at least one 'field' entry is required"
+        )));
     }
 
-    /// Whether this type is eligible as a polling cursor column.
-    pub fn is_cursor_capable(self) -> bool {
-        matches!(
-            self,
-            Self::Int8
-                | Self::Int16
-                | Self::Int32
-                | Self::Int64
-                | Self::UInt8
-                | Self::UInt16
-                | Self::UInt32
-                | Self::UInt64
-                | Self::Float32
-                | Self::Float64
-                | Self::Utf8
-                | Self::Date32
-                | Self::Date64
-                | Self::TimestampMicros
-                | Self::TimestampMillis
-        )
-    }
-}
-
-/// One declared column in the schema.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FieldSpec {
-    /// Column identifier.
-    #[serde(rename = "id")]
-    pub name: String,
-    /// Target Arrow data type.
-    #[serde(rename = "type")]
-    pub ty: ClickhouseFieldType,
-    /// Whether the field admits NULL values.
-    #[serde(default = "default_true")]
-    pub nullable: bool,
-    /// Total digits for `decimal128`.
-    #[serde(default)]
-    pub precision: Option<u8>,
-    /// Fractional digits for `decimal128`.
-    #[serde(default)]
-    pub scale: Option<i8>,
-}
-
-impl FieldSpec {
-    /// Converts this specification into an [`arrow_schema::Field`].
-    pub fn to_arrow_field(&self) -> Result<Field, SaciError> {
-        let dt = match self.ty {
-            ClickhouseFieldType::Boolean => DataType::Boolean,
-            ClickhouseFieldType::Int8 => DataType::Int8,
-            ClickhouseFieldType::Int16 => DataType::Int16,
-            ClickhouseFieldType::Int32 => DataType::Int32,
-            ClickhouseFieldType::Int64 => DataType::Int64,
-            ClickhouseFieldType::UInt8 => DataType::UInt8,
-            ClickhouseFieldType::UInt16 => DataType::UInt16,
-            ClickhouseFieldType::UInt32 => DataType::UInt32,
-            ClickhouseFieldType::UInt64 => DataType::UInt64,
-            ClickhouseFieldType::Float32 => DataType::Float32,
-            ClickhouseFieldType::Float64 => DataType::Float64,
-            ClickhouseFieldType::Utf8 => DataType::Utf8,
-            ClickhouseFieldType::Binary => DataType::Binary,
-            ClickhouseFieldType::Date32 => DataType::Date32,
-            ClickhouseFieldType::Date64 => DataType::Date64,
-            ClickhouseFieldType::TimestampMicros => {
-                DataType::Timestamp(TimeUnit::Microsecond, None)
-            }
-            ClickhouseFieldType::TimestampMillis => {
-                DataType::Timestamp(TimeUnit::Millisecond, None)
-            }
-            ClickhouseFieldType::Decimal128 => {
-                let precision = self.precision.ok_or_else(|| {
-                    SaciError::configuration(format!(
-                        "field '{}': decimal128 requires precision",
-                        self.name
-                    ))
-                })?;
-                let scale = self.scale.ok_or_else(|| {
-                    SaciError::configuration(format!(
-                        "field '{}': decimal128 requires scale",
-                        self.name
-                    ))
-                })?;
-                if !(1..=38).contains(&precision) {
-                    return Err(SaciError::configuration(format!(
-                        "field '{}': precision must be within 1..=38, got {precision}",
-                        self.name
-                    )));
-                }
-                if scale < 0 || scale > precision as i8 {
-                    return Err(SaciError::configuration(format!(
-                        "field '{}': scale must be within 0..={precision}, got {scale}",
-                        self.name
-                    )));
-                }
-                DataType::Decimal128(precision, scale)
-            }
-        };
-
-        if self.ty != ClickhouseFieldType::Decimal128
-            && (self.precision.is_some() || self.scale.is_some())
-        {
+    let mut seen = HashSet::new();
+    for (i, field) in fields.iter().enumerate() {
+        if field.name.trim().is_empty() {
             return Err(SaciError::configuration(format!(
-                "field '{}': precision/scale apply to type 'decimal128' only, not '{}'",
-                self.name,
-                self.ty.as_str()
+                "{what}: field[{i}] has an empty 'id'"
             )));
         }
-
-        Ok(Field::new(&self.name, dt, self.nullable))
+        if !seen.insert(&field.name) {
+            return Err(SaciError::configuration(format!(
+                "{what}: field '{}' is declared more than once",
+                field.name
+            )));
+        }
+        if !supported(field.ty) {
+            return Err(SaciError::configuration(format!(
+                "clickhouse: field '{}' has type '{}', which this connector does not map",
+                field.name, field.ty
+            )));
+        }
+        if field.native_type.is_some() {
+            return Err(SaciError::configuration(format!(
+                "clickhouse: field '{}' sets 'native_type', which this connector does not use",
+                field.name
+            )));
+        }
+        field.to_arrow()?;
     }
+    Ok(())
 }
 
 /// Incremental polling configuration.
@@ -345,8 +242,8 @@ pub struct ClickhouseSourceConfig {
     /// Read mode.
     pub mode: SourceMode,
     /// Declared Arrow schema fields.
-    #[serde(deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(rename = "field", deserialize_with = "crate::config::one_or_many")]
+    pub fields: Vec<FieldSpec>,
     /// Rows per emitted batch.
     #[serde(default = "default_batch_rows")]
     pub batch_rows: usize,
@@ -364,27 +261,7 @@ impl ClickhouseSourceConfig {
         }
         self.connection.validate(&what)?;
 
-        if self.schema_fields.is_empty() {
-            return Err(SaciError::configuration(format!(
-                "{what}: schema_fields must declare at least one field"
-            )));
-        }
-
-        let mut seen = HashSet::new();
-        for field in &self.schema_fields {
-            if field.name.trim().is_empty() {
-                return Err(SaciError::configuration(format!(
-                    "{what}: schema_fields id must not be empty"
-                )));
-            }
-            if !seen.insert(&field.name) {
-                return Err(SaciError::configuration(format!(
-                    "{what}: duplicate schema_fields id '{}'",
-                    field.name
-                )));
-            }
-            field.to_arrow_field()?;
-        }
+        validate_fields(&what, &self.fields)?;
 
         match &self.mode {
             SourceMode::Polling(poll) => {
@@ -394,16 +271,16 @@ impl ClickhouseSourceConfig {
                     )));
                 }
                 let cursor_field = self
-                    .schema_fields
+                    .fields
                     .iter()
                     .find(|f| f.name == poll.cursor_column)
                     .ok_or_else(|| {
                         SaciError::configuration(format!(
-                            "{what}: mode.cursor_column '{}' is not declared in schema_fields",
+                            "{what}: mode.cursor_column '{}' does not name a declared 'field' entry",
                             poll.cursor_column
                         ))
                     })?;
-                if !cursor_field.ty.is_cursor_capable() {
+                if !is_cursor_capable(cursor_field.ty) {
                     return Err(SaciError::configuration(format!(
                         "{what}: mode.cursor_column '{}' of type '{}' is not cursor capable",
                         poll.cursor_column,
@@ -411,10 +288,10 @@ impl ClickhouseSourceConfig {
                     )));
                 }
                 if let Some(tie) = &poll.tiebreak_column
-                    && !self.schema_fields.iter().any(|f| f.name == *tie)
+                    && !self.fields.iter().any(|f| f.name == *tie)
                 {
                     return Err(SaciError::configuration(format!(
-                        "{what}: mode.tiebreak_column '{tie}' is not declared in schema_fields"
+                        "{what}: mode.tiebreak_column '{tie}' does not name a declared 'field' entry"
                     )));
                 }
             }
@@ -470,8 +347,8 @@ pub struct ClickhouseSinkConfig {
     /// Destination table name.
     pub table: String,
     /// Declared Arrow schema fields.
-    #[serde(deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(rename = "field", deserialize_with = "crate::config::one_or_many")]
+    pub fields: Vec<FieldSpec>,
     /// Write mode (defaults to `append`).
     #[serde(default)]
     pub write_mode: WriteMode,
@@ -502,27 +379,7 @@ impl ClickhouseSinkConfig {
             )));
         }
 
-        if self.schema_fields.is_empty() {
-            return Err(SaciError::configuration(format!(
-                "{what}: schema_fields must declare at least one field"
-            )));
-        }
-
-        let mut seen = HashSet::new();
-        for field in &self.schema_fields {
-            if field.name.trim().is_empty() {
-                return Err(SaciError::configuration(format!(
-                    "{what}: schema_fields id must not be empty"
-                )));
-            }
-            if !seen.insert(&field.name) {
-                return Err(SaciError::configuration(format!(
-                    "{what}: duplicate schema_fields id '{}'",
-                    field.name
-                )));
-            }
-            field.to_arrow_field()?;
-        }
+        validate_fields(&what, &self.fields)?;
 
         Ok(())
     }
@@ -531,44 +388,63 @@ impl ClickhouseSinkConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_schema::{DataType, TimeUnit};
+
+    fn spec(name: &str, ty: FieldType, nullable: bool) -> FieldSpec {
+        FieldSpec {
+            name: name.to_string(),
+            ty,
+            nullable,
+            precision: None,
+            scale: None,
+            item: None,
+            native_type: None,
+        }
+    }
+
+    fn connection(compression: CompressionConfig) -> ConnectionConfig {
+        ConnectionConfig {
+            url: "http://localhost:8123".to_string(),
+            user: None,
+            password: None,
+            database: "default".to_string(),
+            query_timeout_ms: 30000,
+            compression,
+            settings: HashMap::new(),
+        }
+    }
 
     #[test]
     fn all_field_types_convert_to_arrow_fields() {
         let types = [
-            (ClickhouseFieldType::Boolean, DataType::Boolean),
-            (ClickhouseFieldType::Int8, DataType::Int8),
-            (ClickhouseFieldType::Int16, DataType::Int16),
-            (ClickhouseFieldType::Int32, DataType::Int32),
-            (ClickhouseFieldType::Int64, DataType::Int64),
-            (ClickhouseFieldType::UInt8, DataType::UInt8),
-            (ClickhouseFieldType::UInt16, DataType::UInt16),
-            (ClickhouseFieldType::UInt32, DataType::UInt32),
-            (ClickhouseFieldType::UInt64, DataType::UInt64),
-            (ClickhouseFieldType::Float32, DataType::Float32),
-            (ClickhouseFieldType::Float64, DataType::Float64),
-            (ClickhouseFieldType::Utf8, DataType::Utf8),
-            (ClickhouseFieldType::Binary, DataType::Binary),
-            (ClickhouseFieldType::Date32, DataType::Date32),
-            (ClickhouseFieldType::Date64, DataType::Date64),
+            (FieldType::Boolean, DataType::Boolean),
+            (FieldType::Int8, DataType::Int8),
+            (FieldType::Int16, DataType::Int16),
+            (FieldType::Int32, DataType::Int32),
+            (FieldType::Int64, DataType::Int64),
+            (FieldType::UInt8, DataType::UInt8),
+            (FieldType::UInt16, DataType::UInt16),
+            (FieldType::UInt32, DataType::UInt32),
+            (FieldType::UInt64, DataType::UInt64),
+            (FieldType::Float32, DataType::Float32),
+            (FieldType::Float64, DataType::Float64),
+            (FieldType::Utf8, DataType::Utf8),
+            (FieldType::Binary, DataType::Binary),
+            (FieldType::Date32, DataType::Date32),
+            (FieldType::Date64, DataType::Date64),
             (
-                ClickhouseFieldType::TimestampMicros,
+                FieldType::TimestampMicros,
                 DataType::Timestamp(TimeUnit::Microsecond, None),
             ),
             (
-                ClickhouseFieldType::TimestampMillis,
+                FieldType::TimestampMillis,
                 DataType::Timestamp(TimeUnit::Millisecond, None),
             ),
         ];
 
         for (ty, expected_dt) in types {
-            let spec = FieldSpec {
-                name: "f".to_string(),
-                ty,
-                nullable: false,
-                precision: None,
-                scale: None,
-            };
-            let field = spec.to_arrow_field().expect("converts to arrow");
+            assert!(supported(ty));
+            let field = spec("f", ty, false).to_arrow().expect("converts to arrow");
             assert_eq!(field.data_type(), &expected_dt);
             assert!(!field.is_nullable());
         }
@@ -577,59 +453,49 @@ mod tests {
     #[test]
     fn decimal128_validates_precision_and_scale() {
         let valid = FieldSpec {
-            name: "amount".to_string(),
-            ty: ClickhouseFieldType::Decimal128,
-            nullable: true,
             precision: Some(18),
             scale: Some(4),
+            ..spec("amount", FieldType::Decimal128, true)
         };
-        let field = valid.to_arrow_field().expect("valid decimal");
+        let field = valid.to_arrow().expect("valid decimal");
         assert_eq!(field.data_type(), &DataType::Decimal128(18, 4));
 
         let missing_prec = FieldSpec {
             precision: None,
             ..valid.clone()
         };
-        assert!(missing_prec.to_arrow_field().is_err());
+        assert!(missing_prec.to_arrow().is_err());
 
         let missing_scale = FieldSpec {
             scale: None,
             ..valid.clone()
         };
-        assert!(missing_scale.to_arrow_field().is_err());
+        assert!(missing_scale.to_arrow().is_err());
 
         let out_of_range_prec = FieldSpec {
             precision: Some(39),
             ..valid.clone()
         };
-        assert!(out_of_range_prec.to_arrow_field().is_err());
+        assert!(out_of_range_prec.to_arrow().is_err());
 
         let scale_larger_than_prec = FieldSpec {
             scale: Some(19),
             ..valid.clone()
         };
-        assert!(scale_larger_than_prec.to_arrow_field().is_err());
+        assert!(scale_larger_than_prec.to_arrow().is_err());
 
         let non_decimal_with_prec = FieldSpec {
-            name: "n".to_string(),
-            ty: ClickhouseFieldType::Int64,
-            nullable: false,
             precision: Some(10),
-            scale: None,
+            ..spec("n", FieldType::Int64, false)
         };
-        assert!(non_decimal_with_prec.to_arrow_field().is_err());
+        assert!(non_decimal_with_prec.to_arrow().is_err());
     }
 
     #[test]
     fn connection_config_requires_valid_url() {
         let valid = ConnectionConfig {
             url: "http://127.0.0.1:8123".to_string(),
-            user: None,
-            password: None,
-            database: "default".to_string(),
-            query_timeout_ms: 30000,
-            compression: CompressionConfig::Lz4,
-            settings: HashMap::new(),
+            ..connection(CompressionConfig::Lz4)
         };
         assert!(valid.validate("test").is_ok());
 
@@ -656,36 +522,16 @@ mod tests {
     fn source_config_validates_polling_cursor_column() {
         let valid = ClickhouseSourceConfig {
             name: "src".to_string(),
-            connection: ConnectionConfig {
-                url: "http://localhost:8123".to_string(),
-                user: None,
-                password: None,
-                database: "default".to_string(),
-                query_timeout_ms: 30000,
-                compression: CompressionConfig::None,
-                settings: HashMap::new(),
-            },
+            connection: connection(CompressionConfig::None),
             mode: SourceMode::Polling(PollingMode {
                 table: "events".to_string(),
                 cursor_column: "ts".to_string(),
                 initial_cursor: None,
                 tiebreak_column: None,
             }),
-            schema_fields: vec![
-                FieldSpec {
-                    name: "ts".to_string(),
-                    ty: ClickhouseFieldType::TimestampMicros,
-                    nullable: false,
-                    precision: None,
-                    scale: None,
-                },
-                FieldSpec {
-                    name: "data".to_string(),
-                    ty: ClickhouseFieldType::Binary,
-                    nullable: true,
-                    precision: None,
-                    scale: None,
-                },
+            fields: vec![
+                spec("ts", FieldType::TimestampMicros, false),
+                spec("data", FieldType::Binary, true),
             ],
             batch_rows: 100,
             max_batches_per_cycle: 0,
@@ -710,32 +556,25 @@ mod tests {
             initial_cursor: None,
             tiebreak_column: None,
         });
-        assert!(unknown_col.validate().is_err());
+        let message = unknown_col
+            .validate()
+            .expect_err("unknown cursor")
+            .message();
+        assert!(
+            message.contains("does not name a declared 'field' entry"),
+            "{message}"
+        );
     }
 
     #[test]
     fn source_config_validation_failures() {
         let base = ClickhouseSourceConfig {
             name: "src".to_string(),
-            connection: ConnectionConfig {
-                url: "http://localhost:8123".to_string(),
-                user: None,
-                password: None,
-                database: "default".to_string(),
-                query_timeout_ms: 30000,
-                compression: CompressionConfig::None,
-                settings: HashMap::new(),
-            },
+            connection: connection(CompressionConfig::None),
             mode: SourceMode::Dump(DumpMode {
                 table: "events".to_string(),
             }),
-            schema_fields: vec![FieldSpec {
-                name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
-                nullable: false,
-                precision: None,
-                scale: None,
-            }],
+            fields: vec![spec("id", FieldType::Int64, false)],
             batch_rows: 100,
             max_batches_per_cycle: 0,
         };
@@ -745,41 +584,42 @@ mod tests {
         c.name = "   ".to_string();
         assert!(c.validate().is_err());
 
-        // Empty schema_fields
+        // Empty field list
         let mut c = base.clone();
-        c.schema_fields = vec![];
-        assert!(c.validate().is_err());
+        c.fields = vec![];
+        let message = c.validate().expect_err("no fields").message();
+        assert!(
+            message.contains("at least one 'field' entry is required"),
+            "{message}"
+        );
 
         // Empty field name
         let mut c = base.clone();
-        c.schema_fields = vec![FieldSpec {
-            name: "  ".to_string(),
-            ty: ClickhouseFieldType::Int64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        }];
-        assert!(c.validate().is_err());
+        c.fields = vec![spec("  ", FieldType::Int64, false)];
+        let message = c.validate().expect_err("empty id").message();
+        assert!(message.contains("field[0] has an empty 'id'"), "{message}");
 
         // Duplicate field name
         let mut c = base.clone();
-        c.schema_fields = vec![
-            FieldSpec {
-                name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
-                nullable: false,
-                precision: None,
-                scale: None,
-            },
-            FieldSpec {
-                name: "id".to_string(),
-                ty: ClickhouseFieldType::Utf8,
-                nullable: true,
-                precision: None,
-                scale: None,
-            },
+        c.fields = vec![
+            spec("id", FieldType::Int64, false),
+            spec("id", FieldType::Utf8, true),
         ];
-        assert!(c.validate().is_err());
+        let message = c.validate().expect_err("duplicate id").message();
+        assert!(
+            message.contains("field 'id' is declared more than once"),
+            "{message}"
+        );
+
+        // A type the connector does not map
+        let mut c = base.clone();
+        c.fields = vec![spec("tags", FieldType::List, true)];
+        let message = c.validate().expect_err("unmapped type").message();
+        assert!(message.contains("tags"), "{message}");
+        assert!(
+            message.contains("which this connector does not map"),
+            "{message}"
+        );
 
         // batch_rows = 0
         let mut c = base.clone();
@@ -817,7 +657,7 @@ mod tests {
         });
         assert!(c.validate().is_err());
 
-        // Polling with tiebreak_column not in schema_fields
+        // Polling with tiebreak_column not declared as a field
         let mut c = base.clone();
         c.mode = SourceMode::Polling(PollingMode {
             table: "events".to_string(),
@@ -825,17 +665,15 @@ mod tests {
             initial_cursor: None,
             tiebreak_column: Some("missing_tie".to_string()),
         });
-        assert!(c.validate().is_err());
+        let message = c.validate().expect_err("unknown tiebreak").message();
+        assert!(
+            message.contains("does not name a declared 'field' entry"),
+            "{message}"
+        );
 
-        // Polling with tiebreak_column present in schema_fields
+        // Polling with tiebreak_column declared as a field
         let mut c = base.clone();
-        c.schema_fields.push(FieldSpec {
-            name: "seq".to_string(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        });
+        c.fields.push(spec("seq", FieldType::UInt64, false));
         c.mode = SourceMode::Polling(PollingMode {
             table: "events".to_string(),
             cursor_column: "id".to_string(),
@@ -849,23 +687,9 @@ mod tests {
     fn sink_config_validation() {
         let valid = ClickhouseSinkConfig {
             name: "sink".to_string(),
-            connection: ConnectionConfig {
-                url: "http://localhost:8123".to_string(),
-                user: None,
-                password: None,
-                database: "default".to_string(),
-                query_timeout_ms: 30000,
-                compression: CompressionConfig::Lz4,
-                settings: HashMap::new(),
-            },
+            connection: connection(CompressionConfig::Lz4),
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
-                name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
-                nullable: false,
-                precision: None,
-                scale: None,
-            }],
+            fields: vec![spec("id", FieldType::Int64, false)],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
             flush_rows: 10,
@@ -882,37 +706,39 @@ mod tests {
         assert!(c.validate().is_err());
 
         let mut c = valid.clone();
-        c.schema_fields = vec![];
+        c.fields = vec![];
         assert!(c.validate().is_err());
 
         let mut c = valid.clone();
-        c.schema_fields = vec![FieldSpec {
-            name: "".to_string(),
-            ty: ClickhouseFieldType::Int64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        }];
+        c.fields = vec![spec("", FieldType::Int64, false)];
         assert!(c.validate().is_err());
 
         let mut c = valid.clone();
-        c.schema_fields = vec![
-            FieldSpec {
-                name: "col".to_string(),
-                ty: ClickhouseFieldType::Int64,
-                nullable: false,
-                precision: None,
-                scale: None,
-            },
-            FieldSpec {
-                name: "col".to_string(),
-                ty: ClickhouseFieldType::Utf8,
-                nullable: false,
-                precision: None,
-                scale: None,
-            },
+        c.fields = vec![
+            spec("col", FieldType::Int64, false),
+            spec("col", FieldType::Utf8, false),
         ];
         assert!(c.validate().is_err());
+
+        let mut c = valid.clone();
+        c.fields = vec![spec("tags", FieldType::List, true)];
+        let message = c.validate().expect_err("unmapped type").message();
+        assert!(message.contains("tags"), "{message}");
+        assert!(
+            message.contains("which this connector does not map"),
+            "{message}"
+        );
+
+        let mut c = valid.clone();
+        c.fields = vec![FieldSpec {
+            native_type: Some("Int64".to_string()),
+            ..spec("id", FieldType::Int64, false)
+        }];
+        let message = c.validate().expect_err("native_type").message();
+        assert!(
+            message.contains("sets 'native_type', which this connector does not use"),
+            "{message}"
+        );
 
         let mut c = valid;
         c.connection.url = "bad://url".to_string();
@@ -947,37 +773,29 @@ mod tests {
         );
 
         let types = [
-            (ClickhouseFieldType::Boolean, "boolean", false),
-            (ClickhouseFieldType::Int8, "int8", true),
-            (ClickhouseFieldType::Int16, "int16", true),
-            (ClickhouseFieldType::Int32, "int32", true),
-            (ClickhouseFieldType::Int64, "int64", true),
-            (ClickhouseFieldType::UInt8, "uint8", true),
-            (ClickhouseFieldType::UInt16, "uint16", true),
-            (ClickhouseFieldType::UInt32, "uint32", true),
-            (ClickhouseFieldType::UInt64, "uint64", true),
-            (ClickhouseFieldType::Float32, "float32", true),
-            (ClickhouseFieldType::Float64, "float64", true),
-            (ClickhouseFieldType::Utf8, "utf8", true),
-            (ClickhouseFieldType::Binary, "binary", false),
-            (ClickhouseFieldType::Date32, "date32", true),
-            (ClickhouseFieldType::Date64, "date64", true),
-            (
-                ClickhouseFieldType::TimestampMicros,
-                "timestamp_micros",
-                true,
-            ),
-            (
-                ClickhouseFieldType::TimestampMillis,
-                "timestamp_millis",
-                true,
-            ),
-            (ClickhouseFieldType::Decimal128, "decimal128", false),
+            (FieldType::Boolean, "boolean", false),
+            (FieldType::Int8, "int8", true),
+            (FieldType::Int16, "int16", true),
+            (FieldType::Int32, "int32", true),
+            (FieldType::Int64, "int64", true),
+            (FieldType::UInt8, "uint8", true),
+            (FieldType::UInt16, "uint16", true),
+            (FieldType::UInt32, "uint32", true),
+            (FieldType::UInt64, "uint64", true),
+            (FieldType::Float32, "float32", true),
+            (FieldType::Float64, "float64", true),
+            (FieldType::Utf8, "utf8", true),
+            (FieldType::Binary, "binary", false),
+            (FieldType::Date32, "date32", true),
+            (FieldType::Date64, "date64", true),
+            (FieldType::TimestampMicros, "timestamp_micros", true),
+            (FieldType::TimestampMillis, "timestamp_millis", true),
+            (FieldType::Decimal128, "decimal128", false),
         ];
 
         for (ty, label, cursor_capable) in types {
             assert_eq!(ty.as_str(), label);
-            assert_eq!(ty.is_cursor_capable(), cursor_capable);
+            assert_eq!(is_cursor_capable(ty), cursor_capable);
         }
     }
 

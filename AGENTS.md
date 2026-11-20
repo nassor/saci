@@ -22,8 +22,8 @@ user-level skills under `~/.agents/skills/`, shared by every project.
 
 | Skill | Read before |
 |---|---|
-| `saci-connectors` | touching `crates/saci/src/connector.rs` or anything under `crates/saci/src/connector/`, a `SourceFactory`/`SinkFactory` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
-| `saci-transformers` | touching `crates/saci/src/codec.rs` or anything under `crates/saci/src/codec/`, a `format` registration, or a codec option |
+| `saci-connectors` | touching `crates/saci/src/connector.rs` or anything under `crates/saci/src/connector/`, a `Connector` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
+| `saci-codecs` | touching `crates/saci/src/codec.rs` or anything under `crates/saci/src/codec/`, a `format` registration, or a codec option |
 | `saci-processors` | touching `crates/saci/src/sdk.rs` or `sdk/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/arrow-ipc-conformance/`, or `examples/{wasm,quickstart,conformance}/` |
 | `saci-plugins` | touching `crates/saci/src/sdk/plugin_rt.rs`, `crates/saci-macros/src/plugin.rs`, `crates/saci/src/plugin_abi.rs`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
 | `saci-service` | touching `crates/saci/src/{service,distributed,inspector,bin}/`, `src/metrics.rs`, `src/inspector_wire.rs`, `crates/saci-service-ui`, or `examples/{native,branching,windowing,multi_workflow,integrity,distributed_fulfillment}/` |
@@ -223,12 +223,12 @@ crates/
 │                             #                 one_or_many, substitute_env_vars, substitute_vars.
 │                             #                 A parse failure after substitution names the
 │                             #                 variables inserted, never a value.
-│                             #   connector     SourceFactory, SinkFactory, ConnectorContext,
+│                             #   connector     Connector, ConnectorContext,
 │                             #                 NodeIdentity, bridge::ChannelBridge, and one child
 │                             #                 module per connector. skill saci-connectors
 │                             #   codec         Codec, CodecFactory, CodecRegistry, BatchReader,
 │                             #                 BatchWriter, MessageDecoder, ReadInput, and one
-│                             #                 child module per byte format. skill saci-transformers
+│                             #                 child module per byte format. skill saci-codecs
 │                             #   processor     Processor SDK; `wit/` holds the canonical WIT
 │                             #                 package. skill saci-processors
 │                             #   plugin, plugin_abi
@@ -313,7 +313,7 @@ Host: `service` (KDL config, Registry, runners, HTTP control plane, the `saci-se
 `wasm-host` and `plugin-host` (the two processor hosts, `saci::wasm_host` and
 `saci::plugin_host`), `distributed`, `distributed-raft`, `service-cluster`, `inspector`,
 `parquet-checkpoint`, `trace-context`, `mimalloc`. A `connector-*` feature registers its
-factories only when `service` is on too. The full table and what each implies is in skill
+connector only when `service` is on too. The full table and what each implies is in skill
 `saci-service`.
 
 Bundles: `server` is what `cargo install saci --features server` builds: `service`, `wasm-host`,
@@ -323,7 +323,7 @@ host and a Raft cluster node, but excludes `conformance`, the corpus generator's
 `crates/saci/tests/feature_bundles.rs` holds both bundles to those rules.
 
 A custom server is a binary depending on `saci` with the features it wants and a `main` that
-calls `saci::service::cli::main()`, or `main_with` to register its own factories. A binary that
+calls `saci::service::cli::main()`, or `main_with` to register its own connector with `ServiceBuilder::connector`. A binary that
 owns its startup calls `saci::service::serve(config, builder, ServeOptions { .. })`.
 
 ### Columnar engine (the `saci` crate root)
@@ -483,9 +483,9 @@ persists it through `CheckpointStore`.
 
 ### Host (`service` and the modules beside it)
 
-The host is documented in four skills. `saci-connectors` and `saci-transformers` carry the IO
+The host is documented in four skills. `saci-connectors` and `saci-codecs` carry the IO
 layer: a connector moves bytes, a codec turns bytes into `RecordBatch`es and back, and
-`ServiceBuilder` resolves a node's `transformer` id against the `CodecRegistry` so no
+`ServiceBuilder` resolves a node's `codec` id against the `CodecRegistry` so no
 connector resolves a format itself. `saci-processors` carries the wasm host (`src/wasm_host/`)
 and the processor SDK; `saci-plugins` carries the native plugin host and SDK. `saci-service`
 carries the rest: the distributed runner and Raft consensus (`src/distributed/`); config,

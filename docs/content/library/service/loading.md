@@ -17,11 +17,11 @@ refusal below as an `Err` from that one call.
 
 - The workflow declares at least one source, processor or sink node.
 - Every id (workflow and node) matches the id charset and length bound.
-- No id is declared twice, across `transformer` nodes, sources, processors and sinks.
-- Every `transformer=` key on a source or sink names a declared
-  `transformer` id.
+- No id is declared twice, across `codec` nodes, sources, processors and sinks.
+- Every `codec=` key on a source or sink names a declared
+  `codec` id.
 - Every `link.from` and `link.to` names a declared source, processor or sink id,
-  and no link names a node twice (`from == to`). A `transformer` id is not a
+  and no link names a node twice (`from == to`). A `codec` id is not a
   graph node.
 - No `(from, to)` pair is declared twice.
 - Nothing links into a source; nothing links out of a sink.
@@ -29,10 +29,10 @@ refusal below as an `Err` from that one call.
 - Every source has an outbound link; every sink has an inbound one.
 - Cluster mode declares exactly one processor and no source, sink or link, and
   no `window` block.
-- `run_mode kind="stream"` declares at least one source.
+- `run "stream"` declares at least one source.
 - Outside stream mode, no source is live: a `tcp` source always is, and a
-  `NatsSource` or `KafkaSource` is live unless its config sets `stop_at_end
-  #true` (`KafkaSource` also accepts `compacted #true`, which always reaches
+  `nats` or `kafka` source is live unless its config sets `stop_at_end
+  #true` (a `kafka` source also accepts `compacted #true`, which always reaches
   EOF).
 - Every `retry` block is valid.
 - Every link `branch` matches the id charset and is at most 64 bytes.
@@ -40,15 +40,19 @@ refusal below as an `Err` from that one call.
 - A node labels every outbound link or none.
 - Every `window` block is geometrically sane, names a non-empty `time_field`,
   and has a non-negative `allowed_lateness_ms`.
+- Schema ids are unique within the workflow and each `schema` block declares at least one
+  valid `field`. A source or sink whose `component` equals a schema id and declares no
+  `field` lines of its own takes that schema's fields; a node with its own `field` lines
+  keeps them.
 
 Across workflows, `ServiceConfig::validate` adds:
 
 - Cluster mode declares exactly one workflow.
 - Workflow ids are unique.
-- Every declared id, `transformer` ids included, is unique across all workflows.
+- Every declared id, `codec` ids included, is unique across all workflows.
   The metric attribution keys are bare node ids, so an overlap would double
   count.
-- Every `ChannelSource` name is paired with exactly one `ChannelSink` of the same
+- Every `channel` source name is paired with exactly one `channel` sink of the same
   name, and vice versa.
 
 ## What is not a key
@@ -57,14 +61,12 @@ Across workflows, `ServiceConfig::validate` adds:
 `watch` property: nothing in the service builds a `System` from a type name, so
 those keys are parse errors.
 
-`WorkflowSpec`, `CodecSpec`, `SourceSpec`, `SinkSpec`, `WasmSpec`,
-`PluginSpec`, `RetryConfig`, `HealConfig` and `FlowControlConfig` carry
-`#[serde(deny_unknown_fields)]`, and the `window` block rejects unknown keys
-through its own hand-written reader, so a typo inside `workflow` fails the
-parse. `ServiceConfig`, `NodeConfig`, `ObservabilityConfig`, `HttpConfig`,
-`StandaloneConfig`, `ClusterConfig` and `LinkSpec` do not: an unrecognised key
-at the top level, under `observability`, or on a `link` node is accepted and
-ignored.
+`WorkflowSpec`, `SchemaSpec`, `CodecSpec`, `SourceSpec`, `SinkSpec`, `WasmSpec`,
+`PluginSpec`, `RetryConfig`, `HealConfig`, `FlowControlConfig`, `NodeConfig`,
+`ObservabilityConfig`, `HttpConfig`, `ClusterConfig`, `PeerSpec`, `LinkSpec` and the
+config root carry `#[serde(deny_unknown_fields)]`, and the `window` block rejects
+unknown keys through its own hand-written reader, so a misspelled key anywhere in
+the document fails the parse.
 
 ## What it refuses to start on
 

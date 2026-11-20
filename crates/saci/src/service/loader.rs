@@ -95,7 +95,7 @@ impl ModuleResolver for LocalModuleResolver {
 ///
 /// // WasmSpec comes from a declared workflow's `wasm` list (deserialized from config).
 /// # let spec = WasmSpec { id: "my-pipeline".into(), name: None,
-/// #     module: Some("transform.wasm".into()), sha3_256: None,
+/// #     path: Some("transform.wasm".into()), sha3_256: None,
 /// #     config: Default::default(),
 /// #     window: None };
 /// let runtime = loader.load("my-pipeline", &spec).unwrap();
@@ -138,9 +138,9 @@ impl<R: ModuleResolver> PipelineRuntimeLoader<R> {
     /// Returns [`SaciError::SystemExecution`] if the processor's `describe()` call
     /// fails on the first instantiation.
     pub fn load(&self, pipeline_name: &str, spec: &WasmSpec) -> SaciResult<WasmPipelineRuntime> {
-        let module = spec.module.as_deref().ok_or_else(|| {
+        let module = spec.path.as_deref().ok_or_else(|| {
             SaciError::configuration(format!(
-                "wasm node '{pipeline_name}' declares no 'module'; supply a runtime through \
+                "wasm node '{pipeline_name}' declares no 'path'; supply a runtime through \
                  ServiceBuilder::runtime instead"
             ))
         })?;
@@ -203,7 +203,7 @@ mod tests {
         let spec = WasmSpec {
             id: "test".to_string(),
             name: None,
-            module: Some("missing.wasm".to_string()),
+            path: Some("missing.wasm".to_string()),
             sha3_256: None,
             config: HashMap::new(),
             window: None,
@@ -222,7 +222,7 @@ mod tests {
         let spec = WasmSpec {
             id: "p".to_string(),
             name: None,
-            module: None,
+            path: None,
             sha3_256: None,
             config: HashMap::new(),
             window: None,
@@ -244,7 +244,7 @@ mod tests {
         let spec = WasmSpec {
             id: "test".to_string(),
             name: None,
-            module: Some("bad.wasm".to_string()),
+            path: Some("bad.wasm".to_string()),
             sha3_256: None,
             config: HashMap::new(),
             window: None,

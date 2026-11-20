@@ -22,7 +22,7 @@
 //! a replay is already pending) and `503` (the runner went away mid-request).
 //!
 //! The `202` is the normal answer for an idle workflow: both replay points sit
-//! inside a pass, and in `run_mode kind="stream"` the head of the loop is
+//! inside a pass, and in `run "stream"` the head of the loop is
 //! reached only when an item arrives. The request stays queued and the runner
 //! serves it when it next gets there.
 
@@ -207,15 +207,15 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci-dlq-api"
 
 workflow "orders" {
-    source "in" type="NoopSource" component="X"
-    sink "out" type="NoopSink" component="X"
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X"
     link from="in" to="out"
     dlq "redb"
 }
 
 workflow "plain" {
-    source "in2" type="NoopSource" component="X"
-    sink "out2" type="NoopSink" component="X"
+    source "in2" connector="noop" component="X"
+    sink "out2" connector="noop" component="X"
     link from="in2" to="out2"
 }
 "#;

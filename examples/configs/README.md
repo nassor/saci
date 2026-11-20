@@ -19,41 +19,41 @@ The file still parses; the refusal names the missing flag. `standalone_plugin.kd
 `redb.kdl`, `redb_connector.kdl`, `dlq.kdl` and `opentelemetry_metrics.kdl` declare no processor
 node.
 
-Each `type="..."` also needs the feature that registers its factory. `server` carries `service`,
+Each `connector="..."` also needs the feature that registers it. `server` carries `service`,
 `wasm-host` and the seven self-contained connectors (`connector-channel`, `connector-file`,
 `connector-http`, `connector-tcp`, `connector-udp`, `connector-peer`, `connector-redb`) with the
-five transformers. The table lists what to enable beside it:
+five codecs. The table lists what to enable beside it:
 
 | Config | Features |
 |--------|----------|
-| `standalone.kdl`, `standalone_wasm.kdl`, `standalone_settle.kdl` | `connector-file,transformer-csv,wasm-host` |
-| `extension_example.kdl` | a custom binary: no feature registers `MongoSource` or `ClickHouseSink`, and `wasm-host` is all `validate` needs to show the warning |
-| `standalone_plugin.kdl` | `connector-file,transformer-csv,plugin-host` |
+| `standalone.kdl`, `standalone_wasm.kdl`, `standalone_settle.kdl` | `connector-file,codec-csv,wasm-host` |
+| `extension_example.kdl` | a custom binary: no feature registers the `mongo` or `clickhouse-enriched` connector, and `wasm-host` is all `validate` needs to show the warning |
+| `standalone_plugin.kdl` | `connector-file,codec-csv,plugin-host` |
 | `postgresql.kdl` | `connector-postgresql,wasm-host` |
 | `mariadb.kdl` | `connector-mariadb,wasm-host` |
 | `mariadb_trigger.kdl` | `connector-mariadb,wasm-host` |
 | `turso.kdl` | `connector-turso,wasm-host` |
 | `clickhouse.kdl` | `connector-clickhouse,wasm-host` |
-| `s3.kdl` | `connector-s3,transformer-csv,wasm-host` |
-| `cluster.kdl` | `service-cluster,wasm-host`; it declares no source, sink or transformer |
+| `s3.kdl` | `connector-s3,codec-csv,wasm-host` |
+| `cluster.kdl` | `service-cluster,wasm-host`; it declares no source, sink or codec |
 | `kafka.kdl` | `connector-kafka,wasm-host` |
 | `nats.kdl` | `connector-nats,wasm-host` |
 | `tcp.kdl` | `connector-tcp,wasm-host` |
 | `udp.kdl` | `connector-udp,wasm-host` |
 | `saci.kdl` | `connector-peer,wasm-host` |
 | `opentelemetry_metrics.kdl` | `connector-otlp`; it declares no processor node |
-| `http.kdl` | `connector-http,transformer-csv,wasm-host` |
-| `http_push.kdl` | `connector-http,transformer-ndjson,wasm-host` |
-| `redb.kdl` | `connector-file,transformer-csv` |
-| `redb_connector.kdl` | `connector-file,connector-redb,transformer-csv` |
-| `dlq.kdl` | `server`, which carries `connector-file,connector-http,connector-redb,transformer-csv,transformer-ndjson` |
+| `http.kdl` | `connector-http,codec-csv,wasm-host` |
+| `http_push.kdl` | `connector-http,codec-ndjson,wasm-host` |
+| `redb.kdl` | `connector-file,codec-csv` |
+| `redb_connector.kdl` | `connector-file,connector-redb,codec-csv` |
+| `dlq.kdl` | `server`, which carries `connector-file,connector-http,connector-redb,codec-csv,codec-ndjson` |
 
 ## Build the binary
 
 Build with `server` plus the features of the config you plan to run:
 
 ```text
-cargo build -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service
+cargo build -p saci --features server,connector-file,codec-csv,wasm-host --bin saci-service
 ```
 
 Runs the same on Linux, macOS and Windows (PowerShell).
@@ -66,7 +66,7 @@ Kafka's vendored librdkafka.
 
 `standalone_wasm.kdl` reads `fixtures/order_processing_input.csv`, runs the Rust processor from
 `examples/wasm/order_processing/`, and writes `/tmp/saci-order-processing-out.csv`. Its
-`run_mode` is `one_shot`, so the process exits after one iteration. The sink opens its file when
+`run` node is `"once"`, so the process exits after one iteration. The sink opens its file when
 the pipeline is built, so the output directory must exist first.
 
 1. Build the processor component. Runs the same on Linux, macOS and Windows (PowerShell):
@@ -88,13 +88,13 @@ the pipeline is built, so the output directory must exist first.
    macOS and Windows (PowerShell):
 
    ```text
-   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- validate --config examples/configs/standalone_wasm.kdl --strict
+   cargo run -p saci --features server,connector-file,codec-csv,wasm-host --bin saci-service -- validate --config examples/configs/standalone_wasm.kdl --strict
    ```
 
 4. Run the pipeline. Runs the same on Linux, macOS and Windows (PowerShell):
 
    ```text
-   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- serve --config examples/configs/standalone_wasm.kdl
+   cargo run -p saci --features server,connector-file,codec-csv,wasm-host --bin saci-service -- serve --config examples/configs/standalone_wasm.kdl
    ```
 
 5. Read the output. The processor has filled in `valid` and `usd_amount` on every row.
@@ -116,10 +116,10 @@ the pipeline is built, so the output directory must exist first.
 
 `standalone.kdl` is the same shape with a component named `pipelines/orders.wasm`, a path you
 supply. Without that file, `validate --connectors-only` still checks its source, sink and
-transformer:
+codec:
 
 ```text
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host --bin saci-service -- validate --config examples/configs/standalone.kdl --connectors-only
+cargo run -p saci --features server,connector-file,codec-csv,wasm-host --bin saci-service -- validate --config examples/configs/standalone.kdl --connectors-only
 ```
 
 Runs the same on Linux, macOS and Windows (PowerShell).
@@ -161,59 +161,59 @@ create `C:\tmp` first as in the standalone steps. Runs the same on Linux, macOS 
 (PowerShell):
 
 ```text
-cargo run -p saci --features server,connector-file,transformer-csv --bin saci-service -- validate --config examples/configs/redb.kdl
-cargo run -p saci --features server,connector-file,transformer-csv --bin saci-service -- serve --config examples/configs/redb.kdl
+cargo run -p saci --features server,connector-file,codec-csv --bin saci-service -- validate --config examples/configs/redb.kdl
+cargo run -p saci --features server,connector-file,codec-csv --bin saci-service -- serve --config examples/configs/redb.kdl
 ```
 
-## Built-in factories
+## Built-in connectors
 
-Each factory lives in a module of the `saci` crate and registers only when its feature and
+Each connector lives in a module of the `saci` crate and registers only when its feature and
 `service` are both on. `service` alone registers nothing.
 
-A connector moves bytes and a transformer decides what they mean. A config that names a file
-therefore needs both: a `source` or `sink` with `type="FileSource"` or `type="FileSink"` from
-`connector-file`, and a `transformer "..." format="csv"` node from `transformer-csv` that the
-source or sink references by id through its own `transformer="..."` property. A byte-carrying
-source or sink always names its `transformer`: there is no implicit default format.
+A connector moves bytes and a codec decides what they mean. A config that names a file
+therefore needs both: a `source` or `sink` with `connector="file"` from
+`connector-file`, and a `codec "..." format="csv"` node from `codec-csv` that the
+source or sink references by id through its own `codec="..."` property. A byte-carrying
+source or sink always names its `codec`: there is no implicit default format.
 
 ### Sources
 
-| config `type` | Description | Required config keys | Feature |
-|---------------|-------------|----------------------|---------|
-| `FileSource` | Reads a local file in whatever format its `transformer` names | `path` | `connector-file` |
-| `RedbSource` | Reads the entries of one redb table in key order, in whatever format its `transformer` names | `directory`, `schema_fields` | `connector-redb` |
-| `HttpSource` | One GET, or a body that never ends, decoded in whatever format its `transformer` names | `url`, plus `schema_fields` where the format needs it | `connector-http` |
-| `HttpPushSource` | Documents a client pushes in, one whole document per request, stream mode only | `bind`, `schema_fields` | `connector-http` |
-| `PostgresSource` | Polling, outbox or `pgoutput` reads | `name`, `connection`, `mode`, `schema_fields` (optionally `pg_type` per field) | `connector-postgresql` |
-| `MariadbSource` | Polling, a trigger changelog (an operator outbox or installed triggers) or row-binlog reads on MariaDB and MySQL, with an optional initial snapshot | `name`, `connection`, `mode`, `schema_fields` | `connector-mariadb` |
-| `TursoSource` | Embedded or synced reads: cursor polling, full dump, or the change table | `name`, `connection`, `mode`, `schema_fields` | `connector-turso` |
-| `ClickhouseSource` | Polling, dump or custom SELECT query | `name`, `connection`, `mode`, `schema_fields` | `connector-clickhouse` |
-| `KafkaSource` | Consumes a Kafka topic | `brokers`, `topic`, `schema_fields` | `connector-kafka` |
-| `S3Source` | Lists a prefix once and drains every object in key order | `connection`, `schema_fields` | `connector-s3` |
-| `tcp` | Live framed messages off a listener, stream mode only | `bind`, `schema_fields` | `connector-tcp` |
-| `udp` | Live datagrams off a bound socket, one message each, stream mode only | `bind`, `schema_fields` | `connector-udp` |
-| `saci` | Batches pushed by a `saci` sink in another service, stream mode only | `bind`, `schema_fields` | `connector-peer` |
-| `OpenTelemetryMetricsSource` | Listens for OTLP/HTTP metrics, or reads a url, in Protobuf or JSON; listening is stream mode only | `bind`, `schema_fields` for a projection other than the canonical ten columns | `connector-otlp` |
-| `ChannelSource` | In-process channel (testing/internal) | `schema_fields` | `connector-channel` |
+| `connector` | Description | Required config keys | Feature |
+|-------------|-------------|----------------------|---------|
+| `file` | Reads a local file in whatever format its `codec` names | `path` | `connector-file` |
+| `redb` | Reads the entries of one redb table in key order, in whatever format its `codec` names | `directory`, `field` lines | `connector-redb` |
+| `http` | One GET, or a body that never ends, decoded in whatever format its `codec` names | `url`, plus `field` lines where the format needs them | `connector-http` |
+| `http-listen` | Documents a client pushes in, one whole document per request, stream mode only | `bind`, `field` lines | `connector-http` |
+| `postgresql` | Polling, outbox or `pgoutput` reads | `name`, `connection`, `mode`, `field` lines (optionally `native_type` per field) | `connector-postgresql` |
+| `mariadb` | Polling, a trigger changelog (an operator outbox or installed triggers) or row-binlog reads on MariaDB and MySQL, with an optional initial snapshot | `name`, `connection`, `mode`, `field` lines | `connector-mariadb` |
+| `turso` | Embedded or synced reads: cursor polling, full dump, or the change table | `name`, `connection`, `mode`, `field` lines | `connector-turso` |
+| `clickhouse` | Polling, dump or custom SELECT query | `name`, `connection`, `mode`, `field` lines | `connector-clickhouse` |
+| `kafka` | Consumes a Kafka topic | `brokers`, `topic`, `field` lines | `connector-kafka` |
+| `s3` | Lists a prefix once and drains every object in key order | `connection`, `field` lines | `connector-s3` |
+| `tcp` | Live framed messages off a listener, stream mode only | `bind`, `field` lines | `connector-tcp` |
+| `udp` | Live datagrams off a bound socket, one message each, stream mode only | `bind`, `field` lines | `connector-udp` |
+| `peer` | Batches pushed by a `peer` sink in another service, stream mode only | `bind`, `field` lines | `connector-peer` |
+| `otlp-metrics` | Listens for OTLP/HTTP metrics, or reads a url, in Protobuf or JSON; listening is stream mode only | `bind`, `field` lines for a projection other than the canonical ten columns | `connector-otlp` |
+| `channel` | In-process channel (testing/internal) | `field` lines | `connector-channel` |
 
 ### Sinks
 
-| config `type` | Description | Required config keys | Feature |
-|---------------|-------------|----------------------|---------|
-| `FileSink` | Writes a local file in whatever format its `transformer` names | `path`, `schema_fields`, optional `truncate` | `connector-file` |
-| `RedbSink` | Stores one redb entry per batch, in whatever format its `transformer` names | `directory`, `schema_fields` | `connector-redb` |
-| `HttpSink` | One request per batch, body written by its `transformer` | `url`, `schema_fields`, optional `method` | `connector-http` |
-| `PostgresSink` | `COPY FORMAT binary`, optional upsert | `name`, `connection`, `table`, `schema_fields` (optionally `pg_type` per field) | `connector-postgresql` |
-| `MariadbSink` | Batched `INSERT` with `append`, `upsert`, `ignore_conflicts` or `apply_changes` | `name`, `connection`, `table`, `schema_fields` | `connector-mariadb` |
-| `TursoSink` | Prepared `INSERT` with optional `ON CONFLICT` upsert, `deferred`/`immediate`/`concurrent` transactions, change capture and encryption | `name`, `connection`, `table`, `write_mode`, `schema_fields` | `connector-turso` |
-| `ClickhouseSink` | Bulk load via Arrow IPC streaming over HTTP, optional truncate | `name`, `connection`, `table`, `schema_fields` | `connector-clickhouse` |
-| `KafkaSink` | Produces to a Kafka topic | `brokers`, `topic`, `schema_fields` | `connector-kafka` |
-| `S3Sink` | Accumulates rows and uploads one object per flush | `connection`, `schema_fields` | `connector-s3` |
-| `tcp` | Dials a peer and writes one length-prefixed frame per message | `connect`, `schema_fields` | `connector-tcp` |
-| `udp` | Sends one datagram per message to every `connect` peer, fire and forget | `connect`, `schema_fields` | `connector-udp` |
-| `saci` | Dials a `saci` source in another service, first reachable of `connect` wins | `connect`, `schema_fields` | `connector-peer` |
-| `OpenTelemetryMetricsSink` | One OTLP/HTTP export per batch, in Protobuf or JSON | `url`, `schema_fields` for a projection other than the canonical ten columns | `connector-otlp` |
-| `ChannelSink` | In-process channel (testing/internal) | `schema_fields` | `connector-channel` |
+| `connector` | Description | Required config keys | Feature |
+|-------------|-------------|----------------------|---------|
+| `file` | Writes a local file in whatever format its `codec` names | `path`, `field` lines, optional `truncate` | `connector-file` |
+| `redb` | Stores one redb entry per batch, in whatever format its `codec` names | `directory`, `field` lines | `connector-redb` |
+| `http` | One request per batch, body written by its `codec` | `url`, `field` lines, optional `method` | `connector-http` |
+| `postgresql` | `COPY FORMAT binary`, optional upsert | `name`, `connection`, `table`, `field` lines (optionally `native_type` per field) | `connector-postgresql` |
+| `mariadb` | Batched `INSERT` with `append`, `upsert`, `ignore_conflicts` or `apply_changes` | `name`, `connection`, `table`, `field` lines | `connector-mariadb` |
+| `turso` | Prepared `INSERT` with optional `ON CONFLICT` upsert, `deferred`/`immediate`/`concurrent` transactions, change capture and encryption | `name`, `connection`, `table`, `write_mode`, `field` lines | `connector-turso` |
+| `clickhouse` | Bulk load via Arrow IPC streaming over HTTP, optional truncate | `name`, `connection`, `table`, `field` lines | `connector-clickhouse` |
+| `kafka` | Produces to a Kafka topic | `brokers`, `topic`, `field` lines | `connector-kafka` |
+| `s3` | Accumulates rows and uploads one object per flush | `connection`, `field` lines | `connector-s3` |
+| `tcp` | Dials a peer and writes one length-prefixed frame per message | `connect`, `field` lines | `connector-tcp` |
+| `udp` | Sends one datagram per message to every `connect` peer, fire and forget | `connect`, `field` lines | `connector-udp` |
+| `peer` | Dials a `peer` source in another service, first reachable of `connect` wins | `connect`, `field` lines | `connector-peer` |
+| `otlp-metrics` | One OTLP/HTTP export per batch, in Protobuf or JSON | `url`, `field` lines for a projection other than the canonical ten columns | `connector-otlp` |
+| `channel` | In-process channel (testing/internal) | `field` lines | `connector-channel` |
 
 ### Retry
 
@@ -238,7 +238,7 @@ override changes its settings. The set of configs shows the keys:
   adjustment epoch from 60 s to 10 s because the workflow redrains every 2 s, and the per-source
   `flow_control { rows 8192 }` pins one source to a fixed admission size.
 - `../multi_workflow/multi_workflow.kdl` carries only a per-source override.
-- `http.kdl`, `s3.kdl` and the `standalone*` configs run `one_shot`, which builds no controller
+- `http.kdl`, `s3.kdl` and the `standalone*` configs run `once`, which builds no controller
   for any source, so they declare no block.
 - A stream-mode source builds no controller either, so the stream-mode configs here declare none.
 - `cluster.kdl` declares no source, and `ServiceConfig::validate` rejects a `flow_control` block
@@ -257,21 +257,21 @@ workflow's expected span volume. `error_sample_ratio` is `1.0` everywhere, so a 
 `log_level` are in
 [`docs/content/service/operate/observability.md`](../../docs/content/service/operate/observability.md).
 
-### Transformers
+### Codecs
 
-A workflow declares each byte format as its own `transformer "id" format="..."` node, and every
-source or sink that moves bytes in that format names it through `transformer="id"`. `options` is
+A workflow declares each byte format as its own `codec "id" format="..."` node, and every
+source or sink that moves bytes in that format names it through `codec="id"`. `config` is
 an optional table handed to the format's factory.
 
 | `format` | Stream read | Stream write | Message codec | Schema rule | Feature |
 |----------|-------------|--------------|---------------|-------------|---------|
-| `csv` | yes | yes | one per row | `schema_fields` required | `transformer-csv` |
-| `ndjson` | yes | yes | one per row | inferred when absent on a stream read, required on the message surface | `transformer-ndjson` |
-| `parquet` | yes | yes | one per batch | read from the file; `schema_fields` rejected on a source, required on a sink and on the message surface | `transformer-parquet` |
-| `avro` | yes | yes | one per row | read from the file; `schema_fields` rejected on a source, required on a sink and on the message surface | `transformer-avro` |
-| `arrow-ipc` | yes | yes | one per batch | read from the stream; `schema_fields` rejected on a source, required on a sink and on the message surface | `transformer-arrow-ipc` |
+| `csv` | yes | yes | one per row | `field` lines required | `codec-csv` |
+| `ndjson` | yes | yes | one per row | inferred when absent on a stream read, required on the message surface | `codec-ndjson` |
+| `parquet` | yes | yes | one per batch | read from the file; `field` lines rejected on a source, required on a sink and on the message surface | `codec-parquet` |
+| `avro` | yes | yes | one per row | read from the file; `field` lines rejected on a source, required on a sink and on the message surface | `codec-avro` |
+| `arrow-ipc` | yes | yes | one per batch | read from the stream; `field` lines rejected on a source, required on a sink and on the message surface | `codec-arrow-ipc` |
 
-Options:
+Config keys:
 
 - `csv` takes `has_headers` (bool, default `#true`, stream surface only; a message is one record
   with no header row).
@@ -280,7 +280,7 @@ Options:
   `schema_id` (integer, the Confluent registry id).
 - `parquet` and `arrow-ipc` take none.
 
-`FileSink` opens its output file as soon as the factory is built, `saci-service validate`
+The `file` sink opens its output file as soon as the factory is built, `saci-service validate`
 included, so the parent directory must exist before `validate` or `serve`. A missing file is
 created and existing bytes are kept: rows land after them. `truncate #true` in the sink's
 `config` replaces the file on every build, which the example configs use.
@@ -292,26 +292,25 @@ of two ways:
 
 - a `wasm` or `plugin` node names a WASM or native plugin component, which reports its components
   through the `describe()` export;
-- a custom binary hands `ServiceBuilder::with_runtime` a `Box<dyn PipelineRuntime>` keyed by the
-  node's declared id, and the node omits `module` and `library`.
+- a custom binary hands `ServiceBuilder::runtime` a `PipelineRuntime` keyed by the
+  node's declared id, and the node omits `path`.
 
 A `systems` or `components` node under `workflow` is a parse error.
 
-### Arrow types for `schema_fields`
+### Field types
 
-`Boolean`, `Int8`, `Int16`, `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `Float32`,
-`Float64`, `Utf8`, `LargeUtf8`, `Binary`, `Date32`, `Date64`. Names are case-insensitive. Every
-connector accepts this set except three, which read their own vocabulary:
+A `field` line takes `type=` from one lowercase list: `boolean`, `int8`, `int16`, `int32`,
+`int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float32`, `float64`, `utf8`, `largeutf8`,
+`json`, `binary`, `date32`, `date64`, `time64_micros`, `timestamp_micros`,
+`timestamp_micros_utc`, `timestamp_millis`, `uuid`, `decimal128` with `precision` and `scale`,
+`interval_month_day_nano` and `list` with `item`. Mixed-case names and aliases such as `string`
+or `bool` are errors. An optional `native_type` pins the server column type on the database
+connectors.
 
-- `PostgresSource` and `PostgresSink`: `timestamp_micros`, `timestamp_micros_utc`, `uuid`, `json`,
-  `decimal128` with `precision` and `scale`, `interval_month_day_nano`, `list` with `item`, and an
-  optional `pg_type` that pins the server column type. See `crates/saci/src/connector/postgresql.rs`.
-- `MariadbSource` and `MariadbSink`: `boolean`, `int8` to `int64`, `uint8` to `uint64`,
-  `float32`, `float64`, `decimal128` with `precision` and `scale`, `utf8`, `binary`, `date32`,
-  `time64_micros`, `timestamp_micros`, `timestamp_micros_utc`, `json`, and an optional
-  `mariadb_type` that asserts the server column type. See `crates/saci/src/connector/mariadb.rs`.
-- `TursoSource` and `TursoSink`: `utf8`, `int64`, `float64`, `bool`, `binary`, `decimal128` with
-  `precision` and `scale`. See `crates/saci/src/connector/turso.rs`.
+`postgresql`, `mariadb`, `turso` and `clickhouse` refuse a type they do not map and name the field
+in the error; each connector page under `docs/content/service/connectors/` lists the types it
+maps. For example, `turso` maps `utf8`, `int64`, `float64`, `boolean`, `binary` and `decimal128`
+with `precision` and `scale`.
 
 ## Standalone and cluster mode
 
@@ -335,41 +334,41 @@ Raft replicates cluster state, not a `store` block. Master batches, row-range cl
 checkpoints live in `cluster-app.redb` under the node's `data_dir`, beside `raft-log.redb`,
 `bootstrap.lock` and `node-id`.
 
-## Extend saci-service with your own factories
+## Extend saci-service with your own connectors
 
 The stock binary is `saci::service::cli::main()`. A binary crate of your own depends on `saci`
 with the features it needs:
 
 ```toml
 [dependencies]
-saci = { version = "0.1", default-features = false, features = ["service", "wasm-host", "connector-file", "transformer-csv"] }
+saci = { version = "0.1", default-features = false, features = ["service", "wasm-host", "connector-file", "codec-csv"] }
 ```
 
 Its `main` calls `saci::service::cli::main_with`. The closure receives the `ServiceBuilder` that
-the `serve` and `validate` subcommands use, after the built-in factories are registered:
+the `serve` and `validate` subcommands use, after the built-in connectors and codecs are registered:
 
 ```rust
 fn main() -> std::process::ExitCode {
     saci::service::cli::main_with(|builder| {
         builder
-            .register_source(MyMongoSourceFactory)
-            .register_sink(MyClickHouseSinkFactory)
+            .connector(MyMongoConnector)
+            .connector(MyClickHouseConnector)
     })
 }
 ```
 
-Sources, sinks and transformers are the whole factory surface; `register_transformer` adds a byte
+Connectors and codecs are the whole extension surface; `ServiceBuilder::codec` adds a byte
 format the same way.
 
-`extension_example.kdl` is a commented config for the types such a binary registers. Validate it
-with the stock binary to see the unknown-factory warning. Runs the same on Linux, macOS and
+`extension_example.kdl` is a commented config for the connectors such a binary registers. Validate it
+with the stock binary to see the unknown-connector warning. Runs the same on Linux, macOS and
 Windows (PowerShell):
 
 ```text
 cargo run -p saci --features server,wasm-host --bin saci-service -- validate --config examples/configs/extension_example.kdl
 ```
 
-It exits 0 and warns about the unknown types `MongoSource` and `ClickHouseSink`. With `--strict`
+It exits 0 and warns about the unknown connectors `mongo` and `clickhouse-enriched`. With `--strict`
 it exits 1.
 
 ## Files in this directory

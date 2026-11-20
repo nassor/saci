@@ -15,17 +15,17 @@
 //! [`ReadMode::Lines`] and [`ReadMode::Events`] read a body that never ends:
 //! newline-delimited records, and `text/event-stream`. Each frame goes through
 //! the codec's *message* surface rather than its stream surface, a window
-//! closes on `batch_size` frames or `poll_timeout`, and a body that does end is
+//! closes on `batch_rows` frames or `poll_timeout`, and a body that does end is
 //! reconnected to after `reconnect`. Both are live sources: only the stream
 //! runner can drive them, and the service's config validator refuses any
 //! other run mode.
 //!
 //! [`SchemaFrom`] decides what a document mode read hands the format:
-//! `schema_fields` verbatim, which `csv` needs and which `parquet`, `avro` and
-//! `arrow-ipc` project the body onto, or nothing at all, which leaves a
+//! `field` entries verbatim, which `csv` needs and which `parquet`, `avro` and
+//! `arrow-ipc` project the payload onto, or nothing at all, which leaves a
 //! self-describing format reading its own. The declared schema is what
 //! [`Source::schema`] reports either way, because the graph is validated before
-//! a request is made; with [`SchemaFrom::Body`] it is checked field for field
+//! a request is made; with [`SchemaFrom::Payload`] it is checked field for field
 //! against the schema the body turned out to carry, rather than used to project
 //! it. A streaming mode has no such choice: the message surface takes a
 //! required schema, opened before the first byte arrives.
@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::codec::{Codec, ReadInput};
-use crate::connector::NodeIdentity;
+use crate::connector::{NodeIdentity, SchemaFrom};
 use crate::error::SaciError;
 use crate::io::Source;
 
@@ -54,21 +54,6 @@ use crate::connector::http::tls::TlsFiles;
 
 /// The connector name every error and metric label of this half carries.
 const WHAT: &str = "HttpSource";
-
-/// Where the Arrow schema a source hands the format comes from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SchemaFrom {
-    /// `schema_fields` is handed to the format, including nothing when the
-    /// config declared none: what `csv` needs, and what `parquet`, `avro` and
-    /// `arrow-ipc` project the body onto.
-    #[default]
-    Config,
-    /// The format reads its own schema out of the response body, and that
-    /// schema must then equal `schema_fields` field for field. What a source
-    /// wants when the body's own schema is what it reads, `parquet` and `avro`
-    /// included.
-    Body,
-}
 
 /// Whether a document mode read follows `Link` headers past the first page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -83,15 +68,15 @@ pub enum Pagination {
 
 /// How a streaming read closes one batch.
 ///
-/// A window ends on whichever comes first: `batch_size` frames, or
+/// A window ends on whichever comes first: `batch_rows` frames, or
 /// `poll_timeout` since the window's first frame. `reconnect` is how long the
 /// reader waits before re-requesting a body that ended.
 #[derive(Debug, Clone, Copy)]
 pub struct BatchWindow {
     /// Frames per batch. A decoder that cannot flush after refusing a frame,
     /// ndjson's among them, loses the open window's other frames with it, so a
-    /// smaller `batch_size` bounds that loss.
-    pub batch_size: usize,
+    /// smaller `batch_rows` bounds that loss.
+    pub batch_rows: usize,
     /// How long a partially filled window waits for its next frame.
     pub poll_timeout: Duration,
     /// How long to wait before re-requesting a body that ended or failed.
@@ -101,7 +86,7 @@ pub struct BatchWindow {
 impl Default for BatchWindow {
     fn default() -> Self {
         Self {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_secs(1),
             reconnect: Duration::from_secs(1),
         }
@@ -275,7 +260,7 @@ enum Engine {
 /// the config declared none, and never changes: nothing can be known about a
 /// body that has not arrived. Under [`SchemaFrom::Config`] a body carrying
 /// columns the declaration does not name is projected onto it;
-/// [`SchemaFrom::Body`] instead withholds the declaration, so the body's own
+/// [`SchemaFrom::Payload`] instead withholds the declaration, so the body's own
 /// schema governs and is compared against it once the body arrives.
 ///
 /// # Example
@@ -284,7 +269,8 @@ enum Engine {
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::{DataType, Field, Schema};
-/// use saci::connector::http::{HttpSource, HttpSourceConfig, SchemaFrom};
+/// use saci::connector::SchemaFrom;
+/// use saci::connector::http::{HttpSource, HttpSourceConfig};
 /// use saci::codec::csv::CsvCodec;
 ///
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -327,10 +313,10 @@ impl HttpSource {
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] when [`SchemaFrom::Body`] is asked
+    /// Returns [`SaciError::Configuration`] when [`SchemaFrom::Payload`] is asked
     /// for without a declared schema to check the body against, when a
     /// streaming mode is asked for without one at all, when a streaming mode
-    /// is combined with `schema_from "body"`, when `http_version "3"` is
+    /// is combined with `schema_from "payload"`, when `http_version "3"` is
     /// pointed at a non-https url, when a header name or value is malformed,
     /// when a `tls` file is missing or malformed, or when the HTTP client
     /// cannot be built. No request is made.
@@ -350,16 +336,16 @@ impl HttpSource {
         // Without a declared schema there is nothing for `Source::schema` to
         // report, so `validate_workflow_graph` would reject the link before a
         // request is ever made. Refusing here names the missing key instead.
-        if schema_from == SchemaFrom::Body && schema.is_none() {
+        if schema_from == SchemaFrom::Payload && schema.is_none() {
             return Err(SaciError::configuration(
-                "HttpSource: schema_from \"body\" needs a 'schema_fields' list to check the \
+                "HttpSource: schema_from \"payload\" needs a 'field' entry to check the \
                  body's own schema against",
             ));
         }
         let streaming = !matches!(mode, ReadMode::Document { .. });
-        if streaming && schema_from == SchemaFrom::Body {
+        if streaming && schema_from == SchemaFrom::Payload {
             return Err(SaciError::configuration(
-                "HttpSource: schema_from \"body\" applies to mode kind=\"document\" only",
+                "HttpSource: schema_from \"payload\" applies to mode kind=\"document\" only",
             ));
         }
         let declared_for_stream = match (streaming, &schema) {
@@ -371,7 +357,7 @@ impl HttpSource {
                     _ => "events",
                 };
                 return Err(SaciError::configuration(format!(
-                    "HttpSource: mode kind=\"{kind}\" needs a 'schema_fields' list: a message \
+                    "HttpSource: mode kind=\"{kind}\" needs a 'field' entry: a message \
                      decoder is built before the first byte arrives"
                 )));
             }
@@ -734,7 +720,7 @@ enum BodyEnd {
     Reconnect,
 }
 
-/// Read one live body to its end, closing a window per `batch_size` frames or
+/// Read one live body to its end, closing a window per `batch_rows` frames or
 /// per `poll_timeout`.
 #[allow(clippy::too_many_arguments)]
 async fn read_body(
@@ -941,7 +927,7 @@ impl<'a> Frames<'a> {
     }
 
     /// Decode every frame one chunk yielded, closing a window each time it
-    /// reaches `batch_size`.
+    /// reaches `batch_rows`.
     ///
     /// # Errors
     ///
@@ -958,7 +944,7 @@ impl<'a> Frames<'a> {
             if self.deadline.is_none() {
                 self.deadline = Some(Instant::now() + self.window.poll_timeout);
             }
-            if self.pushed >= self.window.batch_size {
+            if self.pushed >= self.window.batch_rows {
                 self.close().await?;
             }
         }
@@ -1111,9 +1097,9 @@ impl Source for HttpSource {
                             codec: Arc::clone(codec),
                             declared: match schema_from {
                                 SchemaFrom::Config => declared.clone(),
-                                SchemaFrom::Body => None,
+                                SchemaFrom::Payload => None,
                             },
-                            check: *schema_from == SchemaFrom::Body,
+                            check: *schema_from == SchemaFrom::Payload,
                             expected: Arc::clone(schema),
                             cap: *max_body_bytes,
                         },
@@ -1242,7 +1228,7 @@ mod tests {
 
     /// Every row of the window is a row the consumer takes: a frame the
     /// decoder refuses hands over what came before it and reports itself,
-    /// rather than dropping a window of up to `batch_size` rows.
+    /// rather than dropping a window of up to `batch_rows` rows.
     #[tokio::test]
     async fn a_refused_frame_hands_over_the_rows_before_it() {
         let metrics = Instruments::new("source", None);
@@ -1250,7 +1236,7 @@ mod tests {
         let schema = stub_schema();
         let (tx, mut rx) = mpsc::channel(8);
         let window = BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             ..BatchWindow::default()
         };
 

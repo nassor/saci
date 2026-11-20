@@ -1,6 +1,6 @@
 //! [`MariadbSource`]: the one public source type, over three read modes.
 //!
-//! The Arrow schema is built from the declared `schema_fields` once, in
+//! The Arrow schema is built from the declared `field` entries once, in
 //! [`MariadbSource::new`], and handed out by reference from [`Source::schema`]:
 //! the trait requires a schema that does not change between calls, so it is
 //! never rebuilt.
@@ -9,7 +9,7 @@
 //! builds the schema and the mode's reader, and returns; the first
 //! [`next_batch`](Source::next_batch) connects. That is what keeps
 //! `saci-service validate` free of a database, and it is forced anyway, because
-//! `SourceFactory::build` is synchronous.
+//! `Connector::source` is synchronous.
 //!
 //! # Readers
 //!
@@ -74,9 +74,9 @@ impl MariadbSource {
         cfg.validate()?;
 
         let fields = cfg
-            .schema_fields
+            .fields
             .iter()
-            .map(|spec| spec.to_arrow_field())
+            .map(|spec| spec.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
 
@@ -84,7 +84,7 @@ impl MariadbSource {
         tracing::info!(
             source = %cfg.name,
             mode = cfg.mode.label(),
-            columns = cfg.schema_fields.len(),
+            columns = cfg.fields.len(),
             "mariadb source configured"
         );
 
@@ -138,9 +138,9 @@ mod tests {
     use arrow_schema::{DataType, TimeUnit};
     use serde::Deserialize as _;
 
-    const FIELDS: &str = "\nschema_fields \"id\" type=\"int64\" nullable=#false\n\
-        schema_fields \"label\" type=\"utf8\"\n\
-        schema_fields \"at\" type=\"timestamp_micros_utc\"\n";
+    const FIELDS: &str = "\nfield \"id\" type=\"int64\" nullable=#false\n\
+        field \"label\" type=\"utf8\"\n\
+        field \"at\" type=\"timestamp_micros_utc\"\n";
 
     const POLLING: &str = "name \"src\"\nbatch_rows 100\n\n\
         connection dsn=\"mysql://h:3306/shop\" ssl_mode=\"disabled\"\n\n\

@@ -168,7 +168,7 @@ impl Codec for AvroCodec {
 
 /// Factory for [`AvroCodec`].
 ///
-/// `options`:
+/// `config`:
 /// - `compression` (string, optional, default `"null"`): the object container
 ///   file block codec, one of `null`, `deflate`, `snappy`, `zstd`.
 /// - `schema_id` (integer, optional, default absent): the Confluent registry
@@ -177,7 +177,7 @@ impl Codec for AvroCodec {
 ///   encoding and a Confluent payload is rejected. Single-object payloads
 ///   decode either way.
 ///
-/// Both sit on one node: `options compression="zstd" schema_id=42`.
+/// Both sit on one node: `config compression="zstd" schema_id=42`.
 pub struct AvroCodecFactory;
 
 impl CodecFactory for AvroCodecFactory {
@@ -254,7 +254,7 @@ impl BatchReader for AvroBatchReader {
             None => Ok(None),
             // Avro widens: int8/uint8/uint16 all arrive as Int32, so a decoded
             // batch carries the types Avro has rather than the ones
-            // `schema_fields` declared, and may carry columns the projection
+            // the `field` entries declared, and may carry columns the projection
             // drops.
             Some(Ok(batch)) => match &self.declared {
                 Some(declared) => project(batch, declared).map(Some),

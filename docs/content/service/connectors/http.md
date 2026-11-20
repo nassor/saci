@@ -1,6 +1,6 @@
 +++
 title = "HTTP"
-description = "A document read in, one request per batch out, and a third node type that listens for documents pushed in. HTTP/1.1, HTTP/2 or HTTP/3 on every half."
+description = "A document read in, one request per batch out, and an http-listen source that accepts documents pushed in. HTTP/1.1, HTTP/2 or HTTP/3 on every half."
 template = "subpage.html"
 weight = 2
 aliases = ["/connectors/http/"]
@@ -9,17 +9,17 @@ label = "Direction"
 value = "Source, sink and listening source"
 [[extra.facts]]
 label = "Format"
-value = "Required on all three node types"
+value = "Required on the source, the sink and the listening source"
 [[extra.facts]]
 label = "Run modes"
-value = "Any for a document read; stream for a streaming read and for HttpPushSource"
+value = "Any for a document read; stream for a streaming read and for <code>http-listen</code>"
 [[extra.facts]]
 label = "In the server build"
 value = "yes"
 +++
 A workflow pulls one document over HTTP, processes the rows, and posts each processed batch to a
-second endpoint. A third node type listens, so another service can push documents in instead of
-serving them.
+second endpoint. The `http-listen` source listens, so another service can push documents in instead
+of serving them.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 124" role="img" aria-labelledby="ht-t ht-d">
@@ -81,7 +81,7 @@ serving them.
   `http://127.0.0.1:8082/ingest`, overridable with `SACI_HTTP_SINK_URL`.
 - Nothing extra for `https`. The peer is verified against the machine's trust store, and the
   verification has no off switch. A `tls` block adds a private CA or a client certificate.
-- `run_mode kind="stream"` whenever an `HttpPushSource`, a `mode kind="lines"` or a
+- `run "stream"` whenever an `http-listen` source, a `mode kind="lines"` or a
   `mode kind="events"` source is declared. All three are live and validation rejects any other run
   mode. A document read and the sink carry no such rule.
 - The processor component the config names, at `pipelines/orders.wasm`, for the `serve` step.
@@ -90,14 +90,14 @@ serving them.
 
 ## 1. Declare the format
 
-The body is a whole document in one format, so both halves name a declared `transformer`.
+The body is a whole document in one format, so both halves name a declared `codec`.
 
 <div class="code">
 <div class="code-cap"><span>KDL</span><em>one declared codec serves the response body and every request body</em></div>
 
 ```kdl
-transformer "orders_csv" format="csv" {
-    options has_headers=#true
+codec "orders_csv" format="csv" {
+    config has_headers=#true
 }
 ```
 
@@ -106,7 +106,7 @@ transformer "orders_csv" format="csv" {
 Any of [csv](@/service/formats/csv.md), [ndjson](@/service/formats/ndjson.md),
 [parquet](@/service/formats/parquet.md), [avro](@/service/formats/avro.md) and
 [arrow-ipc](@/service/formats/arrow-ipc.md) works. A format that reads its own schema needs
-`schema_from "body"`, covered in step 2.
+`schema_from "payload"`, covered in step 2.
 
 ## 2. Read from an endpoint: the source node
 
@@ -114,7 +114,7 @@ Any of [csv](@/service/formats/csv.md), [ndjson](@/service/formats/ndjson.md),
 <div class="code-cap"><span>KDL</span><em>headers is a nested table, one entry per line</em></div>
 
 ```kdl
-source "orders_in" type="HttpSource" component="Order" transformer="orders_csv" {
+source "orders_in" connector="http" component="Order" codec="orders_csv" {
     config {
         url "https://data.internal/orders.csv"
         timeout_ms 30000
@@ -122,7 +122,7 @@ source "orders_in" type="HttpSource" component="Order" transformer="orders_csv" 
             accept "text/csv"
         }
 
-        schema_fields "id" type="Int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
@@ -133,11 +133,11 @@ source "orders_in" type="HttpSource" component="Order" transformer="orders_csv" 
 whole request, connect through body. `headers` is a table of header name to value, sent on the
 request.
 
-`schema_from` decides what the format is handed. `"config"`, the default, hands over
-`schema_fields`, which csv requires and ndjson infers without. `"body"` hands over nothing, which is
+`schema_from` decides what the format is handed. `"config"`, the default, hands over the
+`field` lines, which csv requires and ndjson infers without. `"payload"` hands over nothing, which is
 the only thing parquet, avro and arrow-ipc accept, and the schema the body turns out to carry then
-has to equal `schema_fields` field for field. Either way `schema_fields` stays declared, because the
-link check between this node and the next one reads it.
+has to equal the `field` lines field for field. Either way the `field` lines stay declared, because the
+link check between this node and the next one reads them.
 
 ## 3. Write to an endpoint: the sink node
 
@@ -145,7 +145,7 @@ link check between this node and the next one reads it.
 <div class="code-cap"><span>KDL</span><em>one batch is one request and one whole document</em></div>
 
 ```kdl
-sink "orders_out" type="HttpSink" component="Order" transformer="orders_csv" {
+sink "orders_out" connector="http" component="Order" codec="orders_csv" {
     config {
         url "https://ingest.internal/v1/orders"
         method "POST"
@@ -153,14 +153,14 @@ sink "orders_out" type="HttpSink" component="Order" transformer="orders_csv" {
             "content-type" "text/csv"
         }
 
-        schema_fields "id" type="Int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
 
 </div>
 
-`method` defaults to `POST` and takes any valid HTTP method. `schema_fields` is required here,
+`method` defaults to `POST` and takes any valid HTTP method. `field` lines are required here,
 because that is the schema each body is written with.
 
 ## 4. Validate and run
@@ -186,7 +186,7 @@ OK: every source, sink and codec built
 OK: all declared types resolved in built-in registry
 ```
 
-Then run it. The config sets `run_mode kind="one_shot"`, so the resource is read once:
+Then run it. The config sets `run "once"`, so the resource is read once:
 
 Runs the same on Linux, macOS and Windows (PowerShell):
 
@@ -250,7 +250,7 @@ exist, or a key file holding no key, fails before the service starts.
 <div class="code-cap"><span>KDL</span><em>a live event stream, filtered to one event name</em></div>
 
 ```kdl
-mode kind="events" event="order" batch_size=500 poll_timeout_ms=250 reconnect_ms=1000
+mode kind="events" event="order" batch_rows=500 poll_timeout_ms=250 reconnect_ms=1000
 ```
 
 </div>
@@ -262,13 +262,13 @@ every tick.
 
 `kind="lines"` reads a body that never ends as newline-delimited records, and `kind="events"` reads
 one as `text/event-stream`. Each record goes through the format's message codec. A batch closes at
-`batch_size` records or `poll_timeout_ms` after the batch's first record, and a body that does end
+`batch_rows` records or `poll_timeout_ms` after the batch's first record, and a body that does end
 is requested again `reconnect_ms` later. `event` narrows an event stream to one event name; without
 it every event's data is decoded.
 
-Both streaming kinds are live sources. They never reach EOF, so they need `run_mode kind="stream"`
-and validation rejects every other run mode. Both also need `schema_fields`, because the message
-decoder is built before the first byte arrives, and both refuse `schema_from "body"`.
+Both streaming kinds are live sources. They never reach EOF, so they need `run "stream"`
+and validation rejects every other run mode. Both also need `field` lines, because the message
+decoder is built before the first byte arrives, and both refuse `schema_from "payload"`.
 
 `max_body_bytes` caps what a source reads. A document read refuses a `content-length` above the cap
 before the body is read and fails a body that grows past it; a streaming read caps one record.
@@ -299,17 +299,17 @@ Response bodies are decompressed transparently, because every request carries an
 listing the encodings this connector reads. A `headers` entry for `accept-encoding` replaces that
 one, which is how a node asks for an uncompressed response.
 
-## Accept pushed documents: the HttpPushSource node
+## Accept pushed documents: the http-listen source
 
-`HttpPushSource` listens instead of dialling. One request carries one whole document in the format
-its `transformer` names, exactly what `HttpSink` writes, so a sink in one service feeds this source
+`http-listen` listens instead of dialling. One request carries one whole document in the format
+its `codec` names, exactly what the `http` sink writes, so a sink in one service feeds this source
 in another.
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>a listening source needs run_mode kind="stream"</em></div>
+<div class="code-cap"><span>KDL</span><em>a listening source needs run "stream"</em></div>
 
 ```kdl
-source "orders_in" type="HttpPushSource" component="Order" transformer="orders_json" {
+source "orders_in" connector="http-listen" component="Order" codec="orders_json" {
     config {
         bind "127.0.0.1:9700"
         path "/orders"
@@ -320,7 +320,7 @@ source "orders_in" type="HttpPushSource" component="Order" transformer="orders_j
             bearer "dev-token"
         }
 
-        schema_fields "id" type="Int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
@@ -332,7 +332,7 @@ included, so a busy port fails before the service starts. `path` is the one path
 documents and defaults to `/`. `methods` takes one method name or a list of them and defaults to
 `POST`. `max_body_bytes` caps one body at 64 MiB. `buffer` is how many decoded batches queue before
 a request in flight waits for its response, which is where backpressure reaches the client.
-`schema_fields` is required, and `schema_from` works as it does on the source.
+`field` lines are required, and `schema_from` works as it does on the source.
 
 One TCP listener serves HTTP/1.1 and HTTP/2. The HTTP/2 connection preface is sniffed, so a client
 with prior knowledge and an HTTP/1.1 client share the port. A `tls` block here takes `cert_file`
@@ -357,7 +357,7 @@ constant time.
 A document is queued whole or not at all, so a client that retries a request answered `400` or
 `413` duplicates no rows.
 
-`examples/configs/http_push.kdl` declares this node feeding an `HttpSink`.
+`examples/configs/http_push.kdl` declares this node feeding an `http` sink.
 
 Runs the same on Linux, macOS and Windows (PowerShell):
 
@@ -382,7 +382,7 @@ OK: all declared types resolved in built-in registry
 No client half touches the network while the config is built, so `validate` passes against a url
 that is down, a host that does not resolve, and a certificate the trust store rejects. All three
 surface during `serve`, on the first batch, as `HttpSource: cannot GET {url}` or
-`HttpSink: cannot POST {url}`. A push source binds its sockets while the config is built instead,
+`HttpSink: cannot POST {url}`. An `http-listen` source binds its sockets while the config is built instead,
 so a busy port fails at load.
 
 The connector holds no connection open across a failure and reconnects on its own only in a
@@ -413,8 +413,8 @@ Source:
 | `mode` | table | `kind="document"` | the read shape |
 | `pagination` | `"none"` or `"link"` | `"none"` | follow `Link` `rel="next"` across pages, `kind="document"` only |
 | `conditional` | boolean | `#false` | send the last response's validators, `kind="document"` only |
-| `schema_from` | `"config"` or `"body"` | `"config"` | whether the format is handed `schema_fields` to project onto, or reads the body's own schema and is checked against it |
-| `schema_fields` | list of fields | the format decides, required by `schema_from "body"` and by both streaming kinds | the declared column list |
+| `schema_from` | `"config"` or `"payload"` | `"config"` | whether the format is handed the `field` lines to project onto, or reads the body's own schema and is checked against it |
+| `field` | lines | the format decides, required by `schema_from "payload"` and by both streaming kinds | the declared column list |
 
 Sink:
 
@@ -427,9 +427,9 @@ Sink:
 | `http_version` | `"auto"`, `"1.1"`, `"2"` or `"3"` | `"auto"` | which HTTP version to speak |
 | `tls` | table | none | extra roots and a client certificate for this node |
 | `content_encoding` | `"gzip"`, `"br"` or `"zstd"` | none | compress each body whole and declare it |
-| `schema_fields` | list of fields | required | the schema each body is written with |
+| `field` | lines | required | the schema each body is written with |
 
-Push source:
+`http-listen` source:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
@@ -441,8 +441,8 @@ Push source:
 | `tls` | table | none | `cert_file` plus `key_file` terminate TLS on this listener |
 | `quic_bind` | string | none | a UDP `host:port` serving HTTP/3, advertised as `alt-svc`; needs `tls` |
 | `auth` | table | none | `bearer` demands that token from every request |
-| `schema_from` | `"config"` or `"body"` | `"config"` | as on the source |
-| `schema_fields` | list of fields | required | the schema every document is read against |
+| `schema_from` | `"config"` or `"payload"` | `"config"` | as on the source |
+| `field` | lines | required | the schema every document is read against |
 
 ### headers
 
@@ -464,7 +464,7 @@ Push source:
 |---|---|---|---|
 | `kind` | `"document"`, `"lines"` or `"events"` | `"document"` | the read shape |
 | `event` | string | none | the one event name to decode, `kind="events"` only |
-| `batch_size` | integer | `1000` | records per batch, the streaming kinds only |
+| `batch_rows` | integer | `1000` | records per batch, the streaming kinds only |
 | `poll_timeout_ms` | integer | `1000` | how long a partly filled batch waits for its next record |
 | `reconnect_ms` | integer | `1000` | how long to wait before requesting a body again |
 
@@ -474,7 +474,7 @@ Push source:
 |---|---|---|---|
 | `bearer` | string | none | the token every request must present as `authorization: Bearer <token>` |
 
-An unrecognised key inside `config` is a configuration error naming the key, on each of the three nodes: `HttpSource`, `HttpSink` and `HttpPushSource`.
+A key outside the allowlist of a node's connector is a configuration error, `http: unknown key '{key}'`, on the `http` source, the `http` sink and the `http-listen` source.
 
 ## When it refuses to start
 
@@ -484,22 +484,22 @@ An unrecognised key inside `config` is a configuration error naming the key, on 
 | `HttpSink config requires a 'url' string field` | add `url "..."` to the sink's `config` |
 | `HttpSource config.headers must be a table of string values` | write `headers` as a child node of name and value pairs |
 | `HttpSink config.headers['{name}'] must be a string` | quote the header value |
-| `HttpSource moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
+| `HttpSource moves bytes and needs a 'codec' key naming a declared codec` | add `codec="<id>"` to the node |
 | `HttpSink: '{method}' is not a valid HTTP method: {e}` | use a real method name, such as `POST` or `PUT` |
 | `HttpSource: '{name}' is not a valid header name: {e}` | fix the header name |
 | `HttpSink: header '{name}' has an invalid value: {e}` | fix the header value |
-| `HttpSource config.schema_from must be "config" or "body"` | set `schema_from` to `"config"` or `"body"` |
-| `HttpSource: schema_from "body" needs a 'schema_fields' list to check the body's own schema against` | keep `schema_fields` declared even in `"body"` mode |
+| `HttpSource config.schema_from must be "config" or "payload"` | set `schema_from` to `"config"` or `"payload"` |
+| `HttpSource: schema_from "payload" needs a 'field' entry to check the body's own schema against` | keep `field` lines declared even in `"payload"` mode |
 | `HttpSource config.http_version must be "auto", "1.1", "2" or "3"` | use one of the four spellings |
 | `HttpSink: http_version "3" needs an https url: HTTP/3 runs over TLS` | point `url` at `https`, or pick another version |
 | `HttpSource config.tls must be a table` | write `tls` as a child node of string paths |
 | `HttpSource config.tls['{key}'] is not a tls key: expected 'ca_file', 'cert_file' or 'key_file'` | drop the unknown key |
 | `HttpSource config.max_body_bytes must be an integer of at least 1` | give the cap a positive byte count |
 | `HttpSource config.mode.kind must be "document", "lines" or "events"` | name one of the three kinds |
-| `HttpSource config.mode['{key}'] must be an integer of at least 1` | give `batch_size`, `poll_timeout_ms` or `reconnect_ms` a positive value |
+| `HttpSource config.mode['{key}'] must be an integer of at least 1` | give `batch_rows`, `poll_timeout_ms` or `reconnect_ms` a positive value |
 | `HttpSource: mode.event applies to mode kind="events" only` | drop `event`, or set `kind="events"` |
-| `HttpSource: mode kind="{kind}" needs a 'schema_fields' list: a message decoder is built before the first byte arrives` | declare `schema_fields` on a streaming read |
-| `HttpSource: schema_from "body" applies to mode kind="document" only` | keep `schema_from "config"` on a streaming read |
+| `HttpSource: mode kind="{kind}" needs a 'field' entry: a message decoder is built before the first byte arrives` | declare `field` lines on a streaming read |
+| `HttpSource: schema_from "payload" applies to mode kind="document" only` | keep `schema_from "config"` on a streaming read |
 | `HttpSource: pagination applies to mode kind="document" only` | drop `pagination`, or read a document |
 | `HttpSource: conditional applies to mode kind="document" only` | drop `conditional`, or read a document |
 | `HttpSink config.content_encoding must be "gzip", "br" or "zstd"` | name one of the three encodings |
@@ -513,11 +513,11 @@ An unrecognised key inside `config` is a configuration error naming the key, on 
 | `HttpListenSource config.tls['ca_file'] is not a listener key: a listening source authenticates callers with auth { bearer }, not with a client certificate` | drop `ca_file` and use `auth { bearer }` |
 | `HttpListenSource: quic_bind needs a 'tls' block: HTTP/3 runs over TLS` | add `tls`, or drop `quic_bind` |
 | `HttpListenSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
-| `source type 'HttpPushSource' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"` |
+| `source connector 'http-listen' never reaches EOF; it requires standalone mode with run "stream"` | set `run "stream"` |
 
 Two more wait for the first batch rather than the config check:
 `HttpSource: body from {url} carries schema [...] but the config declared [...]` means a
-`schema_from "body"` source found other columns than the declared ones, and
+`schema_from "payload"` source found other columns than the declared ones, and
 `parquet: declared column 'X' is not in the file (file columns: ...)` means the default
 `schema_from "config"` projected onto a column the body does not carry.
 

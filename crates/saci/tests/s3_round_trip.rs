@@ -23,7 +23,8 @@ use object_store::path::Path;
 
 use saci::codec::csv::CsvCodec;
 use saci::codec::parquet::ParquetCodec;
-use saci::connector::s3::{Flush, S3Sink, S3SinkConfig, S3Source, S3SourceConfig, SchemaFrom};
+use saci::connector::SchemaFrom;
+use saci::connector::s3::{Flush, S3Sink, S3SinkConfig, S3Source, S3SourceConfig};
 use saci::io::Sink;
 use saci::io::Source;
 
@@ -320,7 +321,7 @@ async fn a_parquet_object_reads_back_under_both_schema_sources() {
     // Parquet carries its own schema, so the object is the schema source and
     // the rows round-trip field for field.
     let mut src = S3Source::new(
-        source_config(&s3, "pq", SchemaFrom::Object),
+        source_config(&s3, "pq", SchemaFrom::Payload),
         schema(),
         Arc::new(ParquetCodec::new()),
     )

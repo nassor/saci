@@ -7,7 +7,7 @@
 //! inter-item sleep: latency is bounded by the workflow itself, not by a
 //! pacing timer.
 //!
-//! Selected by `run_mode` `kind = "stream"` in standalone mode;
+//! Selected by `run "stream"` in standalone mode;
 //! [`BuiltWorkflow::run`] dispatches here.
 //!
 //! ## Semantics
@@ -287,7 +287,7 @@ pub(crate) async fn run(
     // epoch experiment and publish `saci_flow_target_rows` and
     // `saci_flow_throughput_rows_per_second` for a source it does not govern,
     // which is the one question those series exist to answer. Its arrivals
-    // are the connector's declared `batch_size`/`batch_rows` instead.
+    // are the connector's declared `batch_rows` instead.
     let mut controllers: Vec<Option<FlowController>> = (0..n)
         .map(|i| {
             (matches!(kinds[i], NodeRunKind::Source) && !whole_arrivals[i]).then(|| {
@@ -1622,56 +1622,50 @@ mod tests {
         }
     }
 
-    /// Hands the workflow a source the test built, so the test keeps the
-    /// sending end of its channel.
-    struct HandedSourceFactory(std::sync::Mutex<Option<Box<dyn Source>>>);
+    /// Hands the workflow the source and the sink the test built, so the test
+    /// keeps the sending end of the source's channel and the receiving end of
+    /// the sink's.
+    struct HandedConnector {
+        source: std::sync::Mutex<Option<Box<dyn Source>>>,
+        sink: std::sync::Mutex<Option<Box<dyn Sink>>>,
+    }
 
-    impl crate::connector::SourceFactory for HandedSourceFactory {
-        fn type_name(&self) -> &'static str {
-            "HandedSource"
+    impl crate::connector::Connector for HandedConnector {
+        fn name(&self) -> &'static str {
+            "handed"
         }
 
-        fn build(
+        fn source(
             &self,
             _config: &crate::config::ConfigValue,
             _ctx: &crate::connector::ConnectorContext,
         ) -> Result<Box<dyn Source>, SaciError> {
             Ok(self
-                .0
+                .source
                 .lock()
                 .unwrap()
                 .take()
-                .expect("the workflow declares one HandedSource"))
-        }
-    }
-
-    /// Hands the workflow a sink the test built, so the test keeps the
-    /// receiving end of its channel.
-    struct HandedSinkFactory(std::sync::Mutex<Option<Box<dyn Sink>>>);
-
-    impl crate::connector::SinkFactory for HandedSinkFactory {
-        fn type_name(&self) -> &'static str {
-            "HandedSink"
+                .expect("the workflow declares one handed source"))
         }
 
-        fn build(
+        fn sink(
             &self,
             _config: &crate::config::ConfigValue,
             _ctx: &crate::connector::ConnectorContext,
         ) -> Result<Box<dyn Sink>, SaciError> {
             Ok(self
-                .0
+                .sink
                 .lock()
                 .unwrap()
                 .take()
-                .expect("the workflow declares one HandedSink"))
+                .expect("the workflow declares one handed sink"))
         }
     }
 
     /// A native [`Pipeline`](crate::pipeline::Pipeline) that declares
     /// `.state::<Tally>()` and reaches the runner through
     /// [`ServiceBuilder::runtime`](crate::service::builder::ServiceBuilder::runtime)
-    /// keeps its counter across the items of a `run_mode kind="stream"`
+    /// keeps its counter across the items of a `run "stream"`
     /// workflow: the runner hands the blob `run_batch` returned back in as
     /// `prior` on the next item.
     #[cfg(feature = "wasm-host")]
@@ -1710,20 +1704,20 @@ mode "standalone"
 
 node id=1 name="stream-state" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "w" {{
-    source "in" type="HandedSource" component="V"
+    source "in" connector="handed" component="V"
 
     wasm "tally" name="Tally"
 
-    sink "out" type="HandedSink" component="V"
+    sink "out" connector="handed" component="V"
 
     link from="in" to="tally"
     link from="tally" to="out"
 }}
 
-http disabled=#true
+http enabled=#false
 "#
             ),
         )
@@ -1735,8 +1729,10 @@ http disabled=#true
         let source: Box<dyn Source> = Box::new(source);
         let sink: Box<dyn Sink> = Box::new(sink);
         let built = ServiceBuilder::new()
-            .register_source(HandedSourceFactory(std::sync::Mutex::new(Some(source))))
-            .register_sink(HandedSinkFactory(std::sync::Mutex::new(Some(sink))))
+            .connector(HandedConnector {
+                source: std::sync::Mutex::new(Some(source)),
+                sink: std::sync::Mutex::new(Some(sink)),
+            })
             .runtime("tally", pipeline)
             .build(&config)
             .expect("the workflow builds")

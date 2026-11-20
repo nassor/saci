@@ -3,7 +3,7 @@
 //! Listens on a bind address and yields one [`RecordBatch`] per batch a
 //! [`PeerSink`](crate::connector::peer::PeerSink) in another service pushed to it. It never
 //! reaches EOF: `next_batch` blocks until the next batch arrives, so only the
-//! stream runner (`run_mode kind="stream"`) can drive it, and the service
+//! stream runner (`run "stream"`) can drive it, and the service
 //! config validator rejects every other mode.
 //!
 //! A session opens with the sink's hello, which names the service, workflow
@@ -22,7 +22,7 @@
 //! soon as the receiver is gone and the peer sees the close on its next
 //! write.
 //!
-//! The wire format is Arrow IPC, so a `saci` node takes no `transformer` key:
+//! The wire format is Arrow IPC, so a `peer` node takes no `codec` key:
 //! the peer is another SACI service and both ends already agree on
 //! `RecordBatch`es.
 

@@ -22,12 +22,11 @@ use tokio::net::TcpListener;
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
-use saci::connector::{ConfigValue, ConnectorContext};
+use saci::connector::{ConfigValue, Connector, ConnectorContext, Role};
 use saci::error::SaciError;
 use saci::io::Source;
 use saci::service::ServiceBuilder;
 use saci::service::ServiceConfig;
-use saci::service::SourceFactory;
 
 const COMPONENT: &str = "Tick";
 
@@ -66,14 +65,19 @@ impl Source for TickSource {
     }
 }
 
-struct TickSourceFactory(Arc<AtomicUsize>);
+/// A source-only connector named `tick`, counting the instances it builds.
+struct TickConnector(Arc<AtomicUsize>);
 
-impl SourceFactory for TickSourceFactory {
-    fn type_name(&self) -> &'static str {
+impl Connector for TickConnector {
+    fn name(&self) -> &'static str {
         "tick"
     }
 
-    fn build(
+    fn roles(&self) -> &'static [Role] {
+        &[Role::Source]
+    }
+
+    fn source(
         &self,
         _config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -96,7 +100,7 @@ mode "standalone"
 
 node id=1 name="connector-heal" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 // Only the schedule: no `enabled` key anywhere, so the sink heals under the
 // default policy.
@@ -107,28 +111,28 @@ heal {{
 }}
 
 workflow "heal-test" {{
-    transformer "ipc" format="arrow-ipc"
+    codec "ipc" format="arrow-ipc"
 
-    source "ticks" type="tick" component="{COMPONENT}" {{
+    source "ticks" connector="tick" component="{COMPONENT}" {{
         config {{
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
-    sink "collector" type="tcp" component="{COMPONENT}" transformer="ipc" {{
+    sink "collector" connector="tcp" component="{COMPONENT}" codec="ipc" {{
         // One attempt: re-driving a dead socket cannot help, so the failure
         // must reach the heal layer rather than be retried seven times.
         retry max_attempts=1
         config {{
             connect "{connect}"
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
     link from="ticks" to="collector"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -185,7 +189,7 @@ async fn a_tcp_sink_whose_peer_disappears_is_rebuilt_and_resumes_writing() {
     .expect("config loads");
     let source_builds = Arc::new(AtomicUsize::new(0));
     let built = ServiceBuilder::new()
-        .register_source(TickSourceFactory(Arc::clone(&source_builds)))
+        .connector(TickConnector(Arc::clone(&source_builds)))
         .build(&config)
         .expect("the workflow builds")
         .remove(0);

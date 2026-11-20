@@ -61,7 +61,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::codec::Codec;
 use crate::codec::arrow_ipc::ArrowIpcCodec;
-use crate::connector::{ConfigMap, ConfigValue, parse_schema_fields};
+use crate::connector::{ConfigMap, ConfigValue, parse_fields, schema_of};
 use crate::error::{SaciError, SaciResult};
 use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
 use crate::io::{Sink, Source};
@@ -74,12 +74,10 @@ use super::standalone::{NodeStats, WorkflowStats};
 
 /// One store the `dlq` block may name.
 pub(crate) struct DlqStoreKind {
-    /// The name the block names it by.
+    /// The name the block names it by, which is also the name of the
+    /// connector that serves both halves: the recording sink and the
+    /// replaying source.
     pub(crate) id: &'static str,
-    /// Connector `type` of the recording half.
-    pub(crate) sink_type: &'static str,
-    /// Connector `type` of the replaying half.
-    pub(crate) source_type: &'static str,
     /// Whether the sink half holds the store against its own source half, so
     /// the two can never be open at once.
     pub(crate) exclusive: bool,
@@ -99,22 +97,16 @@ pub(crate) struct DlqStoreKind {
 pub(crate) const DLQ_STORES: &[DlqStoreKind] = &[
     DlqStoreKind {
         id: "redb",
-        sink_type: "RedbSink",
-        source_type: "RedbSource",
         exclusive: true,
         confirms_end: true,
     },
     DlqStoreKind {
         id: "kafka",
-        sink_type: "KafkaSink",
-        source_type: "KafkaSource",
         exclusive: false,
         confirms_end: false,
     },
     DlqStoreKind {
         id: "nats",
-        sink_type: "NatsSink",
-        source_type: "NatsSource",
         exclusive: false,
         confirms_end: true,
     },
@@ -137,7 +129,7 @@ pub(crate) fn store_names() -> String {
 /// The envelope's columns, in order, as `(name, Arrow type string)`.
 ///
 /// One table for both forms the schema takes: the Arrow [`Schema`] the
-/// payload decoder projects onto, and the `schema_fields` array both store
+/// payload decoder projects onto, and the `field` entries both store
 /// halves are configured with. Deriving them from one list is what keeps a
 /// connector's declared schema and the batch the layer writes identical.
 const ENVELOPE_FIELDS: &[(&str, &str)] = &[
@@ -151,8 +143,8 @@ const ENVELOPE_FIELDS: &[(&str, &str)] = &[
     ("payload", "binary"),
 ];
 
-/// The envelope's `schema_fields` as a store half's config carries it.
-pub(crate) fn envelope_schema_fields() -> ConfigValue {
+/// The envelope's `field` entries as a store half's config carries them.
+pub(crate) fn envelope_field_config() -> ConfigValue {
     ConfigValue::Array(
         ENVELOPE_FIELDS
             .iter()
@@ -171,8 +163,9 @@ pub(crate) fn envelope_schema_fields() -> ConfigValue {
 pub fn envelope_schema() -> Arc<Schema> {
     static SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
         let mut config = ConfigMap::new();
-        config.insert("schema_fields".to_string(), envelope_schema_fields());
-        parse_schema_fields(&ConfigValue::Object(config), "dead letter envelope")
+        config.insert("field".to_string(), envelope_field_config());
+        parse_fields(&ConfigValue::Object(config), "dead letter envelope")
+            .and_then(|fields| schema_of(&fields))
             .expect("ENVELOPE_FIELDS names only supported Arrow types")
     });
     Arc::clone(&SCHEMA)
@@ -680,7 +673,7 @@ impl DeadLetterQueue {
 
         let sink_rebuilder = Rebuilder::new(
             registry.clone(),
-            store.sink_type,
+            store.id,
             &node_id,
             sink_config,
             Some(Arc::clone(&ipc)),
@@ -692,7 +685,7 @@ impl DeadLetterQueue {
         // answering.
         let source_rebuilder = Rebuilder::new(
             registry.clone(),
-            store.source_type,
+            store.id,
             &node_id,
             source_config,
             Some(ipc),
@@ -1472,7 +1465,7 @@ pub(crate) fn half_config(
             config.insert((*key).to_string(), value.clone());
         }
     }
-    config.insert("schema_fields".to_string(), envelope_schema_fields());
+    config.insert("field".to_string(), envelope_field_config());
     ConfigValue::Object(config)
 }
 
@@ -1613,20 +1606,20 @@ mod tests {
         assert_eq!(config["directory"], ConfigValue::from("/shared"));
         assert_eq!(config["check_integrity"], ConfigValue::Bool(true));
         assert_eq!(config["consume"], ConfigValue::Bool(true));
-        assert_eq!(config["schema_fields"], envelope_schema_fields());
+        assert_eq!(config["field"], envelope_field_config());
     }
 
     #[test]
-    fn a_declared_schema_fields_is_replaced_by_the_envelope() {
+    fn a_declared_field_is_replaced_by_the_envelope() {
         let block = DlqBlock {
-            config: match serde_json::json!({ "schema_fields": "nonsense" }) {
+            config: match serde_json::json!({ "field": "nonsense" }) {
                 ConfigValue::Object(map) => map,
                 _ => unreachable!("a literal object"),
             },
             ..DlqBlock::default()
         };
         let config = half_config(&block, &block.sink, &[]);
-        assert_eq!(config["schema_fields"], envelope_schema_fields());
+        assert_eq!(config["field"], envelope_field_config());
     }
 
     #[test]
@@ -1670,8 +1663,7 @@ mod tests {
         use crate::service::registry::Registry as R;
 
         let mut registry = R::new();
-        registry.register_sink(crate::connector::redb::RedbSinkFactory);
-        registry.register_source(crate::connector::redb::RedbSourceFactory);
+        registry.register(crate::connector::redb::RedbConnector);
         let registry = Arc::new(registry);
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -1706,7 +1698,7 @@ mod tests {
 
     /// A workflow declaring a store whose connector this binary does not
     /// carry must hear which `--features` flag supplies it, the same answer a
-    /// `sink` node naming `RedbSink` gets. This is what
+    /// `sink` node naming `redb` gets. This is what
     /// `--no-default-features --features service` reaches, where no connector
     /// is registered at all.
     #[test]
@@ -1720,7 +1712,7 @@ mod tests {
         )
         .expect_err("an empty registry supplies neither half");
         let message = err.to_string();
-        assert!(message.contains("RedbSource"), "got: {message}");
+        assert!(message.contains("'redb'"), "got: {message}");
         assert!(
             message.contains("--features connector-redb"),
             "the refusal must name the flag that supplies it: {message}"
@@ -1876,8 +1868,7 @@ mod tests {
         block: DlqBlock,
     ) -> (DeadLetterQueue, WorkflowStats) {
         let mut registry = Registry::new();
-        registry.register_sink(crate::connector::redb::RedbSinkFactory);
-        registry.register_source(crate::connector::redb::RedbSourceFactory);
+        registry.register(crate::connector::redb::RedbConnector);
         let spec = spec_with(block);
         let queue = DeadLetterQueue::build(&spec, dir, &Arc::new(registry), Arc::clone(shared))
             .expect("the redb store opens");
@@ -2208,6 +2199,7 @@ mod tests {
             id: "orders".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),

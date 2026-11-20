@@ -91,12 +91,12 @@ fn sink(body: &str, connection: &str) -> MariadbSink {
 
 const SOURCE: &str = "name \"t\"\nbatch_rows 10\n\n\
     mode kind=\"polling\" table=\"t\" cursor_column=\"id\"\n\
-    schema_fields \"id\" type=\"int64\" nullable=#false\n\
-    schema_fields \"label\" type=\"utf8\"\n";
+    field \"id\" type=\"int64\" nullable=#false\n\
+    field \"label\" type=\"utf8\"\n";
 
 const SINK: &str = "name \"t\"\ntable \"t\"\n\n\
-    schema_fields \"id\" type=\"int64\" nullable=#false\n\
-    schema_fields \"label\" type=\"utf8\"\n";
+    field \"id\" type=\"int64\" nullable=#false\n\
+    field \"label\" type=\"utf8\"\n";
 
 macro_rules! on_every_tls_server {
     ($($case:ident => $make:ident),* $(,)?) => {

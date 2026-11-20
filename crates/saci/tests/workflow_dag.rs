@@ -51,27 +51,27 @@ mode "standalone"
 
 node id=1 name="saci-workflow-dag" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "smoketest-chain" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "pings_in" type="FileSource" component="Ping" transformer="csv_fmt" {{
+    source "pings_in" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "seq" type="uint64" nullable=#false
+            field "seq" type="uint64" nullable=#false
         }}
     }}
 
-    wasm "first" module="{wasm_path}"
-    wasm "second" module="{wasm_path}"
+    wasm "first" path="{wasm_path}"
+    wasm "second" path="{wasm_path}"
 
-    sink "pings_out" type="FileSink" component="Ping" transformer="csv_fmt" {{
+    sink "pings_out" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{output}"
-            schema_fields "seq" type="uint64" nullable=#false
+            field "seq" type="uint64" nullable=#false
         }}
     }}
 
@@ -80,7 +80,7 @@ workflow "smoketest-chain" {{
     link from="second" to="pings_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

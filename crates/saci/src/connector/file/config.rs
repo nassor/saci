@@ -50,12 +50,11 @@ mod tests {
 
     #[test]
     fn a_source_table_needs_a_path() {
-        let table =
-            from_kdl_str("path \"/data/in.csv\"\nschema_fields \"v\" type=\"Int64\"\n").unwrap();
+        let table = from_kdl_str("path \"/data/in.csv\"\nfield \"v\" type=\"int64\"\n").unwrap();
         let cfg: FileSourceConfig = deserialize_config(&table, "FileSource").unwrap();
         assert_eq!(cfg, FileSourceConfig::new("/data/in.csv"));
 
-        let empty = from_kdl_str("schema_fields \"v\" type=\"Int64\"\n").unwrap();
+        let empty = from_kdl_str("field \"v\" type=\"int64\"\n").unwrap();
         let err = deserialize_config::<FileSourceConfig>(&empty, "FileSource").unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("path"), "got: {err}");

@@ -29,7 +29,7 @@ use crate::components::{DlqView, LogsView, PipelinesView, TracesView};
 use crate::ui::{Badge, BadgeTone, Separator, TabBar, TabButton, Tooltip};
 
 /// How much series history the graph's sparklines cover.
-const WINDOW_SECS: u64 = 300;
+const WINDOW_MS: u64 = 300_000;
 
 /// Which tab is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +95,7 @@ pub fn App() -> impl IntoView {
 
     let poll = move || {
         spawn_local(async move {
-            match api::snapshot(WINDOW_SECS).await {
+            match api::snapshot(WINDOW_MS).await {
                 Ok(value) => {
                     set_snapshot.set(Some(value));
                     set_error.set(None);

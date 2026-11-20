@@ -27,13 +27,18 @@
 //! [`SourceSpec::config`](crate::service::config::SourceSpec::config) and
 //! [`SinkSpec::config`](crate::service::config::SinkSpec::config) are opaque
 //! config tables holding `connection.dsn`, `connection.password` and
-//! credential file paths. [`TopoNode::detail`] therefore copies values through a
-//! per-`type` allowlist; a key outside it is dropped, never masked, so nothing
-//! in the response hints at a secret's shape or length.
+//! credential file paths. [`TopoNode::detail`] therefore copies values through
+//! the dotted keys each connector lists in
+//! [`Connector::detail_keys`](crate::connector::Connector::detail_keys), per
+//! role. A key outside the list is dropped, never masked, so nothing in the
+//! response hints at a secret's shape or length, and a connector the
+//! registry does not hold shows no detail at all: an unknown connector is
+//! precisely the case where guessing which keys are safe is wrong.
 
 use std::collections::HashMap;
 
 use crate::config::ConfigValue;
+use crate::connector::Role;
 #[cfg(feature = "windows")]
 use crate::inspector_wire::WindowInfo;
 use crate::inspector_wire::{
@@ -47,90 +52,7 @@ use super::builder::BuiltEdge;
 use super::builder::{BuiltNode, BuiltNodeKind};
 use super::config::ServiceConfig;
 use super::config::ServiceMode;
-
-/// Which config keys may be shown, per connector `type`.
-///
-/// The keys are the strings `SourceFactory::type_name` / `SinkFactory::type_name`
-/// return, which is what a config's `type =` names, not the Rust type names.
-/// Both TCP halves register as `"tcp"` and both UDP halves as `"udp"`, so one
-/// entry each covers the source's `bind` and the sink's `connect`.
-///
-/// Dotted keys walk nested tables (`mode.subject` reads `[sources.config.mode]`
-/// then `subject`). A `type` absent from this table gets no detail at all: an
-/// unknown connector is precisely the case where guessing which keys are safe
-/// is wrong.
-const DETAIL_ALLOWLIST: &[(&str, &[&str])] = &[
-    ("NatsSource", &["mode.kind", "mode.stream", "mode.subject"]),
-    ("NatsSink", &["mode.kind", "mode.stream", "mode.subject"]),
-    ("PostgresSource", &["mode.kind", "mode.table"]),
-    ("PostgresSink", &["table", "write_mode"]),
-    (
-        "MariadbSource",
-        &[
-            "mode.kind",
-            "mode.table",
-            "mode.position",
-            "mode.snapshot",
-            "mode.install_triggers",
-        ],
-    ),
-    ("MariadbSink", &["table", "write_mode"]),
-    (
-        "ClickhouseSource",
-        &["mode.kind", "mode.table", "mode.query"],
-    ),
-    ("ClickhouseSink", &["table", "write_mode"]),
-    ("TursoSource", &["mode.kind", "mode.table"]),
-    ("TursoSink", &["table", "write_mode"]),
-    ("S3Source", &["connection.bucket", "prefix"]),
-    ("S3Sink", &["connection.bucket", "prefix"]),
-    ("FileSource", &["path"]),
-    ("FileSink", &["path"]),
-    (
-        "RedbSource",
-        &["directory", "file", "table", "key_prefix", "key_suffix"],
-    ),
-    (
-        "RedbSink",
-        &[
-            "directory",
-            "file",
-            "table",
-            "key_prefix",
-            "key_suffix",
-            "durability",
-            "compact",
-        ],
-    ),
-    ("KafkaSource", &["topic"]),
-    ("KafkaSink", &["topic"]),
-    ("tcp", &["bind", "connect"]),
-    (
-        "udp",
-        &[
-            "bind",
-            "connect",
-            "multicast_group",
-            "broadcast",
-            "probe.kind",
-            "probe.interval_ms",
-            "probe.timeout_ms",
-            "probe.on_failure",
-        ],
-    ),
-    ("saci", &["bind", "connect"]),
-    ("HttpPushSource", &["bind", "path", "quic_bind"]),
-    (
-        "OpenTelemetryMetricsSource",
-        &["bind", "path", "mode.kind", "mode.url"],
-    ),
-    (
-        "OpenTelemetryMetricsSink",
-        &["url", "encoding", "service_name"],
-    ),
-    ("ChannelSource", &["name"]),
-    ("ChannelSink", &["name"]),
-];
+use super::registry::Registry;
 
 /// Read a dotted key out of a config table, rendering only scalars.
 ///
@@ -150,18 +72,27 @@ fn scalar_at(config: &ConfigValue, dotted: &str) -> Option<String> {
     }
 }
 
-/// Every allowlisted `(key, value)` pair for one connector instance.
-fn detail_for(type_name: &str, config: &ConfigValue) -> Vec<(String, String)> {
-    let Some((_, keys)) = DETAIL_ALLOWLIST.iter().find(|(name, _)| *name == type_name) else {
+/// Every allowlisted `(key, value)` pair for one connector instance: the keys
+/// the registered connector `connector` lists for `role`. A connector the
+/// registry does not hold gets no detail at all.
+fn detail_for(
+    registry: &Registry,
+    connector: &str,
+    role: Role,
+    config: &ConfigValue,
+) -> Vec<(String, String)> {
+    let Some(connector) = registry.connector(connector) else {
         return Vec::new();
     };
-    keys.iter()
+    connector
+        .detail_keys(role)
+        .iter()
         .filter_map(|key| scalar_at(config, key).map(|value| ((*key).to_string(), value)))
         .collect()
 }
 
 /// One [`TopoNode`] plus its `runtime` self-description, if any.
-fn node_view(config: &ServiceConfig, node: &BuiltNode) -> TopoNode {
+fn node_view(config: &ServiceConfig, registry: &Registry, node: &BuiltNode) -> TopoNode {
     #[cfg_attr(not(feature = "windows"), allow(unused_variables))]
     let (kind, detail, runtime, window) = match &node.kind {
         BuiltNodeKind::Source(_) => {
@@ -170,7 +101,9 @@ fn node_view(config: &ServiceConfig, node: &BuiltNode) -> TopoNode {
                 .iter()
                 .flat_map(|w| w.sources.iter())
                 .find(|s| s.id == node.id)
-                .map_or_else(Vec::new, |spec| detail_for(&node.type_name, &spec.config));
+                .map_or_else(Vec::new, |spec| {
+                    detail_for(registry, &node.connector, Role::Source, &spec.config)
+                });
             ("source", detail, None, None)
         }
         BuiltNodeKind::Sink(_) => {
@@ -179,7 +112,9 @@ fn node_view(config: &ServiceConfig, node: &BuiltNode) -> TopoNode {
                 .iter()
                 .flat_map(|w| w.sinks.iter())
                 .find(|s| s.id == node.id)
-                .map_or_else(Vec::new, |spec| detail_for(&node.type_name, &spec.config));
+                .map_or_else(Vec::new, |spec| {
+                    detail_for(registry, &node.connector, Role::Sink, &spec.config)
+                });
             ("sink", detail, None, None)
         }
         BuiltNodeKind::Processor { runtime, kind } => {
@@ -250,7 +185,7 @@ fn node_view(config: &ServiceConfig, node: &BuiltNode) -> TopoNode {
         id: node.id.clone(),
         kind: kind.to_string(),
         name: node.name.clone(),
-        type_name: node.type_name.clone(),
+        type_name: node.connector.clone(),
         component: node.component.map(str::to_string),
         runtime,
         #[cfg(feature = "windows")]
@@ -312,9 +247,13 @@ fn window_info(config: &crate::service::config::WindowConfig) -> WindowInfo {
 /// so a `BuiltEdge::node` index resolves within this same slice.
 fn workflow_topo_parts(
     config: &ServiceConfig,
+    registry: &Registry,
     nodes: &[BuiltNode],
 ) -> (Vec<TopoNode>, Vec<TopoEdge>) {
-    let topo_nodes: Vec<TopoNode> = nodes.iter().map(|node| node_view(config, node)).collect();
+    let topo_nodes: Vec<TopoNode> = nodes
+        .iter()
+        .map(|node| node_view(config, registry, node))
+        .collect();
 
     let mut edges = Vec::new();
     for node in nodes {
@@ -330,8 +269,8 @@ fn workflow_topo_parts(
     (topo_nodes, edges)
 }
 
-/// One [`BridgeEdge`] per channel name with both a `ChannelSink` and a
-/// `ChannelSource` declared, so the bridge `ServiceBuilder::build` wires
+/// One [`BridgeEdge`] per channel name with both a `channel` sink and a
+/// `channel` source declared, so the bridge `ServiceBuilder::build` wires
 /// through the channel registry is visible to the dashboard without belonging
 /// to either workflow's edge list.
 ///
@@ -343,14 +282,14 @@ fn channel_bridge_edges(config: &ServiceConfig) -> Vec<BridgeEdge> {
     let mut sources: HashMap<&str, &str> = HashMap::new();
     for wf in &config.workflows {
         for s in &wf.sinks {
-            if s.type_name == "ChannelSink"
+            if s.connector == "channel"
                 && let Some(name) = s.config.get("name").and_then(ConfigValue::as_str)
             {
                 sinks.insert(name, s.id.as_str());
             }
         }
         for s in &wf.sources {
-            if s.type_name == "ChannelSource"
+            if s.connector == "channel"
                 && let Some(name) = s.config.get("name").and_then(ConfigValue::as_str)
             {
                 sources.insert(name, s.id.as_str());
@@ -373,16 +312,19 @@ fn channel_bridge_edges(config: &ServiceConfig) -> Vec<BridgeEdge> {
 
 /// Build the topology for every workflow this process runs.
 ///
-/// `workflow_nodes` holds one entry per declared workflow, each the
-/// [`BuiltNode`]s `ServiceBuilder::build` produced for it, in topological
-/// order, the order the dashboard's depth layout expects within each
-/// workflow. The result carries one [`WorkflowTopology`] per declared
-/// workflow, zipped from `config.workflows` in declaration order, so each
-/// keeps its own `id`/`name` and its own edge list. Cross-workflow channel
-/// bridges are reported separately in `Topology::bridges`, because their
-/// endpoints span workflows.
+/// `registry` is the one the workflows were built from: each node's
+/// connector names the config keys its detail may show
+/// ([`Connector::detail_keys`](crate::connector::Connector::detail_keys)). `workflow_nodes` holds one entry per declared
+/// workflow, each the [`BuiltNode`]s `ServiceBuilder::build` produced for it,
+/// in topological order, the order the dashboard's depth layout expects
+/// within each workflow. The result carries one [`WorkflowTopology`] per
+/// declared workflow, zipped from `config.workflows` in declaration order, so
+/// each keeps its own `id`/`name` and its own edge list. Cross-workflow
+/// channel bridges are reported separately in `Topology::bridges`, because
+/// their endpoints span workflows.
 pub fn build_topology(
     config: &ServiceConfig,
+    registry: &Registry,
     workflow_nodes: &[&[BuiltNode]],
     version: u64,
 ) -> Topology {
@@ -391,7 +333,7 @@ pub fn build_topology(
         .iter()
         .zip(workflow_nodes)
         .map(|(spec, nodes)| {
-            let (nodes, edges) = workflow_topo_parts(config, nodes);
+            let (nodes, edges) = workflow_topo_parts(config, registry, nodes);
             WorkflowTopology {
                 id: spec.id.clone(),
                 name: spec.name.clone(),
@@ -416,6 +358,7 @@ pub fn build_topology(
 #[cfg(all(test, feature = "service", feature = "connector-channel"))]
 mod tests {
     use super::*;
+    use crate::connector::Connector;
     use crate::pipeline::Pipeline;
     use crate::service::builder::{BuiltWorkflow, BuiltWorkflowBuilder};
     use crate::service::config::{
@@ -431,78 +374,111 @@ mod tests {
         crate::config::from_kdl_str(raw).expect("parse test config")
     }
 
+    /// A connector that declares only its detail keys, so these tests need no
+    /// real connector compiled in. The keys mirror what the real connectors
+    /// of the same name declare.
+    struct DetailConnector {
+        name: &'static str,
+        source: &'static [&'static str],
+        sink: &'static [&'static str],
+    }
+
+    impl Connector for DetailConnector {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn detail_keys(&self, role: Role) -> &'static [&'static str] {
+            match role {
+                Role::Source => self.source,
+                Role::Sink => self.sink,
+            }
+        }
+    }
+
+    /// The registry the detail tests ask: `nats`, `postgresql`, `udp`, `file`
+    /// and `channel`, each with the keys the real connector shows.
+    fn detail_registry() -> Registry {
+        const NATS: &[&str] = &["mode.kind", "mode.stream", "mode.subject"];
+        const UDP: &[&str] = &[
+            "bind",
+            "connect",
+            "multicast_group",
+            "broadcast",
+            "probe.kind",
+            "probe.interval_ms",
+            "probe.timeout_ms",
+            "probe.on_failure",
+        ];
+        let mut registry = Registry::new();
+        registry
+            .register(DetailConnector {
+                name: "nats",
+                source: NATS,
+                sink: NATS,
+            })
+            .register(DetailConnector {
+                name: "postgresql",
+                source: &["mode.kind", "mode.table"],
+                sink: &["table", "write_mode"],
+            })
+            .register(DetailConnector {
+                name: "udp",
+                source: UDP,
+                sink: UDP,
+            })
+            .register(DetailConnector {
+                name: "file",
+                source: &["path"],
+                sink: &["path"],
+            })
+            .register(DetailConnector {
+                name: "channel",
+                source: &["name"],
+                sink: &["name"],
+            });
+        registry
+    }
+
     #[test]
     fn detail_for_keeps_only_allowlisted_keys() {
         let config = cfg(r#"
 mode kind="core" subject="authorizations.raw"
 connection url="nats://localhost:4222" password="hunter2"
 "#);
-        let detail = detail_for("NatsSource", &config);
+        let detail = detail_for(&detail_registry(), "nats", Role::Source, &config);
         assert!(detail.contains(&("mode.kind".to_string(), "core".to_string())));
         assert!(detail.contains(&("mode.subject".to_string(), "authorizations.raw".to_string())));
         assert!(
             !detail.iter().any(|(k, _)| k.starts_with("connection")),
-            "connection.password is not allowlisted for NatsSource: {detail:?}"
+            "connection.password is not allowlisted for nats: {detail:?}"
         );
     }
 
     #[test]
-    fn detail_for_an_unknown_type_is_empty() {
+    fn detail_for_an_unknown_connector_is_empty() {
         let config = cfg("secret_token \"abc\"\n");
-        assert!(detail_for("SomeUserDefinedSource", &config).is_empty());
+        assert!(
+            detail_for(
+                &detail_registry(),
+                "some-user-source",
+                Role::Source,
+                &config
+            )
+            .is_empty()
+        );
     }
 
-    /// Every allowlist entry must name a connector type this crate ships.
-    ///
-    /// A key that matches no connector is dead: the connector it was meant for
-    /// silently renders no detail, which reads as "this connector has nothing
-    /// to show" rather than as the typo it is. `TcpSource` registers as
-    /// `"tcp"`, which is exactly the mistake this pins down.
-    ///
-    /// Pinned against
-    /// [`BUILTIN_CONNECTOR_FEATURES`](crate::service::factories::BUILTIN_CONNECTOR_FEATURES)
-    /// rather than against the live registry. The registry holds only the
-    /// connectors *this* build compiled in, so a registry check states the
-    /// invariant as "every allowlist key is registered here", which is false
-    /// in every build short of `all`, including the default bundle, where the
-    /// five opt-in connectors are absent. Such a check would have to be
-    /// switched off exactly where a dead allowlist key is hardest to notice.
-    /// The table is declared unconditionally, and
-    /// `factories::tests::builtin_connector_table_matches_the_registry` pins
-    /// it against the registry in both directions, so the two checks chained
-    /// still say "no allowlist key is a name no connector ever registers",
-    /// and this half says it in every build.
-    ///
-    /// The relation is subset, not equality: the converse is deliberately not
-    /// asserted, because `HttpSource` and `HttpSink` are tabled connectors
-    /// with no allowlisted key at all, a URL carrying credentials. A duplicate
-    /// key is checked too: `detail_for` resolves a `type` with `find`, so a
-    /// second entry for the same connector never renders and its keys are
-    /// dead.
+    /// A connector's keys are per role: the `postgresql` source shows a mode
+    /// table, never the sink's `write_mode`.
     #[test]
-    fn every_allowlist_key_is_a_connector_type_this_crate_ships() {
-        use crate::service::factories::BUILTIN_CONNECTOR_FEATURES;
-
-        for (type_name, _) in DETAIL_ALLOWLIST {
-            assert!(
-                BUILTIN_CONNECTOR_FEATURES
-                    .iter()
-                    .any(|(tabled, _)| tabled == type_name),
-                "allowlist key '{type_name}' is not a connector type this crate \
-                 ships: the key must be what SourceFactory/SinkFactory::type_name \
-                 returns, as listed in BUILTIN_CONNECTOR_FEATURES"
-            );
-        }
-
-        let mut seen: Vec<&str> = DETAIL_ALLOWLIST.iter().map(|(name, _)| *name).collect();
-        let before = seen.len();
-        seen.sort_unstable();
-        seen.dedup();
+    fn detail_keys_follow_the_node_role() {
+        let config = cfg("table \"t\"\nwrite_mode \"upsert\"\n");
+        let registry = detail_registry();
+        assert!(detail_for(&registry, "postgresql", Role::Source, &config).is_empty());
         assert_eq!(
-            seen.len(),
-            before,
-            "DETAIL_ALLOWLIST has a duplicate type: detail_for finds the first \
-             entry only, so the second one's keys never render; merge them"
+            detail_for(&registry, "postgresql", Role::Sink, &config).len(),
+            2
         );
     }
 
@@ -521,12 +497,13 @@ connection url="nats://localhost:4222" password="hunter2"
             id: "orders".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: vec![SourceSpec {
                 heal: None,
                 flow_control: None,
                 id: "orders-in".to_string(),
                 name: None,
-                type_name: "NatsSource".to_string(),
+                connector: "nats".to_string(),
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
@@ -538,7 +515,7 @@ connection url="nats://localhost:4222" password="hunter2"
                 heal: None,
                 id: "settlements".to_string(),
                 name: None,
-                type_name: "PostgresSink".to_string(),
+                connector: "postgresql".to_string(),
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
@@ -597,29 +574,29 @@ connection url="nats://localhost:4222" password="hunter2"
     }
 
     /// A `BuiltNode` backed by a cheap `ChannelSource`/`ChannelSink`/native
-    /// `Pipeline`, but carrying whatever `id`/`type_name` the caller declares:
-    /// `node_view` selects `detail_for`'s allowlist purely off `type_name`, so
-    /// the concrete Rust type underneath never needs to be the real connector.
-    fn built_source(id: &str, type_name: &str) -> BuiltNode {
+    /// `Pipeline`, but carrying whatever `id`/`connector` the caller declares:
+    /// `node_view` selects the detail keys purely off `connector`, so the
+    /// concrete Rust type underneath never needs to be the real connector.
+    fn built_source(id: &str, connector: &str) -> BuiltNode {
         use crate::connector::channel::ChannelSource;
         let (src, _tx) = ChannelSource::new(order_schema(), 1);
         let mut node = lone_node(BuiltWorkflow::builder("w").source(id, "Order", src));
-        node.type_name = type_name.to_string();
+        node.connector = connector.to_string();
         node
     }
 
-    fn built_sink(id: &str, type_name: &str) -> BuiltNode {
+    fn built_sink(id: &str, connector: &str) -> BuiltNode {
         use crate::connector::channel::ChannelSink;
         let (sink, _rx) = ChannelSink::new(order_schema(), 1);
         let mut node = lone_node(BuiltWorkflow::builder("w").sink(id, "Order", sink));
-        node.type_name = type_name.to_string();
+        node.connector = connector.to_string();
         node
     }
 
     fn built_processor(id: &str, artifact: Option<&str>) -> BuiltNode {
         let mut node = lone_node(BuiltWorkflow::builder("w").processor(id, Pipeline::new(id)));
         node.name = Some("Validator".to_string());
-        node.type_name = "wasm".to_string();
+        node.connector = "wasm".to_string();
         if let BuiltNodeKind::Processor { kind, .. } = &mut node.kind {
             *kind = "wasm";
         }
@@ -641,14 +618,14 @@ connection url="nats://localhost:4222" password="hunter2"
     fn nodes_and_edges_match_the_declared_io() {
         let workflow = workflow_with_io(default_config_value(), default_config_value());
         let config = service_config(workflow);
-        let mut source = built_source("orders-in", "NatsSource");
+        let mut source = built_source("orders-in", "nats");
         source.downstream.push(BuiltEdge {
             node: 1,
             branch: None,
         });
-        let sink = built_sink("settlements", "PostgresSink");
+        let sink = built_sink("settlements", "postgresql");
         let nodes = [source, sink];
-        let topology = build_topology(&config, &[nodes.as_slice()], 1);
+        let topology = build_topology(&config, &detail_registry(), &[nodes.as_slice()], 1);
 
         assert_eq!(topology.node_id, "7");
         assert_eq!(topology.mode, "standalone");
@@ -685,10 +662,10 @@ connection url="nats://localhost:4222" password="hunter2"
         ];
         let nodes = [
             processor,
-            built_sink("out_high", "PostgresSink"),
-            built_sink("out_low", "PostgresSink"),
+            built_sink("out_high", "postgresql"),
+            built_sink("out_low", "postgresql"),
         ];
-        let topology = build_topology(&config, &[nodes.as_slice()], 1);
+        let topology = build_topology(&config, &detail_registry(), &[nodes.as_slice()], 1);
 
         let branches: Vec<Option<&str>> = topology.workflows[0]
             .edges
@@ -715,14 +692,14 @@ connection dsn="postgres://postgres:s3cret@127.0.0.1:5432/saci"
 "#);
         let workflow = workflow_with_io(source_config, sink_config);
         let config = service_config(workflow);
-        let mut source = built_source("orders-in", "NatsSource");
+        let mut source = built_source("orders-in", "nats");
         source.downstream.push(BuiltEdge {
             node: 1,
             branch: None,
         });
-        let sink = built_sink("settlements", "PostgresSink");
+        let sink = built_sink("settlements", "postgresql");
         let nodes = [source, sink];
-        let topology = build_topology(&config, &[nodes.as_slice()], 1);
+        let topology = build_topology(&config, &detail_registry(), &[nodes.as_slice()], 1);
         let rendered = serde_json::to_string(&topology).expect("serialize");
 
         assert!(!rendered.contains("hunter2"), "source password leaked");
@@ -743,26 +720,26 @@ connection dsn="postgres://postgres:s3cret@127.0.0.1:5432/saci"
     }
 
     /// The `udp` sink's own allowlist: `connect`, `broadcast` and every
-    /// `probe.*` key render; `schema_fields`, present in the raw config but
+    /// `probe.*` key render; `field`, present in the raw config but
     /// never in the allowlist, does not.
     #[test]
-    fn a_udp_sink_shows_its_own_detail_keys_and_not_schema_fields() {
+    fn a_udp_sink_shows_its_own_detail_keys_and_not_field() {
         let sink_config = cfg(r#"
 connect "127.0.0.1:9701"
 broadcast #true
 probe kind="echo" interval_ms=100 on_failure="warn"
-schema_fields "v" type="Int64" nullable=#false
+field "v" type="int64" nullable=#false
 "#);
         let workflow = workflow_with_io(default_config_value(), sink_config);
         let config = service_config(workflow);
-        let mut source = built_source("orders-in", "NatsSource");
+        let mut source = built_source("orders-in", "nats");
         source.downstream.push(BuiltEdge {
             node: 1,
             branch: None,
         });
         let sink = built_sink("settlements", "udp");
         let nodes = [source, sink];
-        let topology = build_topology(&config, &[nodes.as_slice()], 1);
+        let topology = build_topology(&config, &detail_registry(), &[nodes.as_slice()], 1);
 
         let sink_node = &topology.workflows[0].nodes[1];
         assert!(
@@ -791,7 +768,7 @@ schema_fields "v" type="Int64" nullable=#false
                 .contains(&("probe.on_failure".to_string(), "warn".to_string()))
         );
         assert!(
-            sink_node.detail.iter().all(|(k, _)| k != "schema_fields"),
+            sink_node.detail.iter().all(|(k, _)| k != "field"),
             "got: {:?}",
             sink_node.detail
         );
@@ -801,7 +778,7 @@ schema_fields "v" type="Int64" nullable=#false
     fn processor_node_carries_a_populated_runtime_and_source_sink_do_not() {
         let workflow = workflow_with_io(default_config_value(), default_config_value());
         let config = service_config(workflow);
-        let mut source = built_source("orders-in", "NatsSource");
+        let mut source = built_source("orders-in", "nats");
         source.downstream.push(BuiltEdge {
             node: 1,
             branch: None,
@@ -811,9 +788,9 @@ schema_fields "v" type="Int64" nullable=#false
             node: 2,
             branch: None,
         });
-        let sink = built_sink("settlements", "PostgresSink");
+        let sink = built_sink("settlements", "postgresql");
         let nodes = [source, processor, sink];
-        let topology = build_topology(&config, &[nodes.as_slice()], 1);
+        let topology = build_topology(&config, &detail_registry(), &[nodes.as_slice()], 1);
 
         assert!(topology.workflows[0].nodes[0].runtime.is_none());
         assert!(topology.workflows[0].nodes[2].runtime.is_none());
@@ -851,7 +828,7 @@ schema_fields "v" type="Int64" nullable=#false
             allowed_lateness_ms: 5_000,
         });
         let nodes = [processor];
-        let topology = build_topology(&config, &[nodes.as_slice()], 1);
+        let topology = build_topology(&config, &detail_registry(), &[nodes.as_slice()], 1);
 
         let node = &topology.workflows[0].nodes[0];
         let info = node.window.as_ref().expect("window info");
@@ -882,12 +859,13 @@ schema_fields "v" type="Int64" nullable=#false
             id: "producer".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: vec![SourceSpec {
                 heal: None,
                 flow_control: None,
                 id: "orders_in".to_string(),
                 name: None,
-                type_name: "FileSource".to_string(),
+                connector: "file".to_string(),
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
@@ -899,7 +877,7 @@ schema_fields "v" type="Int64" nullable=#false
                 heal: None,
                 id: "bridge_out".to_string(),
                 name: None,
-                type_name: "ChannelSink".to_string(),
+                connector: "channel".to_string(),
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
@@ -916,12 +894,13 @@ schema_fields "v" type="Int64" nullable=#false
             id: "consumer".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: vec![SourceSpec {
                 heal: None,
                 flow_control: None,
                 id: "bridge_in".to_string(),
                 name: None,
-                type_name: "ChannelSource".to_string(),
+                connector: "channel".to_string(),
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
@@ -933,7 +912,7 @@ schema_fields "v" type="Int64" nullable=#false
                 heal: None,
                 id: "orders_out".to_string(),
                 name: None,
-                type_name: "FileSink".to_string(),
+                connector: "file".to_string(),
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
@@ -948,24 +927,25 @@ schema_fields "v" type="Int64" nullable=#false
         };
         let config = service_config_many(vec![producer, consumer]);
 
-        let mut source = built_source("orders_in", "FileSource");
+        let mut source = built_source("orders_in", "file");
         source.downstream.push(BuiltEdge {
             node: 1,
             branch: None,
         });
-        let bridge_out = built_sink("bridge_out", "ChannelSink");
+        let bridge_out = built_sink("bridge_out", "channel");
         let producer_nodes = [source, bridge_out];
 
-        let mut bridge_in = built_source("bridge_in", "ChannelSource");
+        let mut bridge_in = built_source("bridge_in", "channel");
         bridge_in.downstream.push(BuiltEdge {
             node: 1,
             branch: None,
         });
-        let orders_out = built_sink("orders_out", "FileSink");
+        let orders_out = built_sink("orders_out", "file");
         let consumer_nodes = [bridge_in, orders_out];
 
         let topology = build_topology(
             &config,
+            &detail_registry(),
             &[producer_nodes.as_slice(), consumer_nodes.as_slice()],
             1,
         );

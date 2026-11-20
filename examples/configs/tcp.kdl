@@ -22,10 +22,10 @@ mode "standalone"
 node id=1 name="saci-tcp" data_dir="${SACI_DATA_DIR:-/tmp/saci-tcp}"
 
 // The source never reaches EOF: it blocks until the next frame arrives. Only
-// the stream runner can drive that, so config validation rejects `type="tcp"`
+// the stream runner can drive that, so config validation rejects `connector="tcp"`
 // on a source node in any other run mode. One workflow pass runs per arriving
 // frame. The sink half carries no such rule and runs in every mode.
-run_mode kind="stream"
+run "stream"
 
 // Adaptive flow control: every other source (this one included) hands over
 // whatever it produced and the runner slices it at the target, so the
@@ -42,18 +42,18 @@ flow_control {
 // One workflow declares the whole DAG: the byte format each end speaks, the
 // source, the processor, the sink, and the explicit links between them.
 workflow "ticks" {
-    // The transformer that decodes and encodes each frame's payload.
+    // The codec that decodes and encodes each frame's payload.
     // "arrow-ipc" is one whole RecordBatch per frame; "ndjson" is one JSON
-    // object per frame, decoded against schema_fields below. Both need their
-    // transformer-* feature compiled in, and connector-tcp pulls in
-    // transformer-arrow-ipc.
-    transformer "ipc_fmt" format="arrow-ipc"
+    // object per frame, decoded against the `field` lines below. Both need their
+    // codec-* feature compiled in, and connector-tcp pulls in
+    // codec-arrow-ipc.
+    codec "ipc_fmt" format="arrow-ipc"
 
     // ---------------------------------------------------------------- source
 
     // The processor's `describe()` supplies the component list, so `component`
     // on this source and the sink below must name components it declares.
-    source "ticks_in" type="tcp" component="Tick" transformer="ipc_fmt" {
+    source "ticks_in" connector="tcp" component="Tick" codec="ipc_fmt" {
         config {
             // Listen address. Producers connect here and write frames; several
             // at once is fine, and ordering holds within one connection.
@@ -67,30 +67,30 @@ workflow "ticks" {
             // connection closed and the listener stays up.
             max_frame_bytes 8388608
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "price" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "price" type="float64" nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "process_ticks" module="pipelines/ticks.wasm"
+    wasm "process_ticks" path="pipelines/ticks.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // A different component than the source's: the processor declares both,
-    // reads Tick and writes EnrichedTick. A sink's schema_fields must match
+    // reads Tick and writes EnrichedTick. A sink's `field` lines must match
     // the component's RecordBatch field for field, in order.
 
-    sink "ticks_out" type="tcp" component="EnrichedTick" transformer="ipc_fmt" {
+    sink "ticks_out" connector="tcp" component="EnrichedTick" codec="ipc_fmt" {
         config {
             // Peer to dial. Resolved when the factory is built and connected
             // on the first batch, and that one connection serves the whole
             // run.
             connect "${SACI_TCP_CONNECT:-127.0.0.1:9600}"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "price" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "price" type="float64" nullable=#true
         }
     }
 
@@ -99,7 +99,7 @@ workflow "ticks" {
 }
 
 // HTTP control plane. /metrics carries the service's own counters.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a 15% grade:
 // one workflow.batch span opens per arriving frame, so a live producer at

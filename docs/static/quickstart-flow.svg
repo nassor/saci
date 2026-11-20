@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 374" role="img" aria-labelledby="qs-flow-title qs-flow-desc">
   <title id="qs-flow-title">Quick Start: NATS in, two WebAssembly stages, PostgreSQL out</title>
   <desc id="qs-flow-desc">
-    The quickstart_publish example sends NDJSON authorisations to the authorizations.raw subject on NATS. A saci-service process running quickstart.kdl reads that subject with a NatsSource, passes the rows to the Rust validate stage validate.wasm, which writes valid, then to the Rust settle stage settle.wasm, which writes fee and review_tier, and a PostgresSink upserts them by id into the public.settlements table in PostgreSQL. NATS and PostgreSQL run in docker compose.
+    The quickstart_publish example sends NDJSON authorisations to the authorizations.raw subject on NATS. A saci-service process running quickstart.kdl reads that subject with a nats source, passes the rows to the Rust validate stage validate.wasm, which writes valid, then to the Rust settle stage settle.wasm, which writes fee and review_tier, and a postgresql sink upserts them by id into the public.settlements table in PostgreSQL. NATS and PostgreSQL run in docker compose.
   </desc>
 
   <style>
@@ -109,7 +109,7 @@
     <rect class="blk blk-c" x="39" y="154" width="132" height="80" rx="8"/>
     <rect class="hd-c" x="39" y="154" width="132" height="22" rx="8"/>
     <rect class="hd-c" x="39" y="168" width="132" height="8"/>
-    <text class="t-ttl" x="51" y="170">NatsSource</text>
+    <text class="t-ttl" x="51" y="170">nats source</text>
     <text class="t-sub" x="51" y="194">core subject</text>
     <text class="t-sub" x="51" y="210">decodes NDJSON</text>
   </g>
@@ -134,7 +134,7 @@
     <rect class="blk blk-c" x="489" y="154" width="132" height="80" rx="8"/>
     <rect class="hd-c" x="489" y="154" width="132" height="22" rx="8"/>
     <rect class="hd-c" x="489" y="168" width="132" height="8"/>
-    <text class="t-ttl" x="501" y="170">PostgresSink</text>
+    <text class="t-ttl" x="501" y="170">postgresql sink</text>
     <text class="t-sub" x="501" y="194">upsert on id</text>
   </g>
   <path class="arw s-d" d="M171 194 H187" marker-end="url(#m-d)"/>

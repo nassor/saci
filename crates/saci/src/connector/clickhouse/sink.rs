@@ -133,9 +133,9 @@ impl ClickhouseSink {
         config.validate()?;
 
         let fields = config
-            .schema_fields
+            .fields
             .iter()
-            .map(|f| f.to_arrow_field())
+            .map(|f| f.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
         let client = build_client(&config.connection)?;
@@ -461,9 +461,8 @@ impl Sink for ClickhouseSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::clickhouse::config::{
-        ClickhouseFieldType, ConnectionConfig, FieldSpec, WriteMode,
-    };
+    use crate::connector::clickhouse::config::{ConnectionConfig, WriteMode};
+    use crate::connector::schema::{FieldSpec, FieldType};
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -480,12 +479,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -522,12 +523,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -572,12 +575,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -616,12 +621,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -734,12 +741,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,

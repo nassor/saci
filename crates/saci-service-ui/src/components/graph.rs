@@ -1168,7 +1168,7 @@ fn bridges_view(bridges: Vec<BridgeEdge>, snapshot: Signal<Option<Snapshot>>) ->
             <header class="border-b border-border px-4 py-3">
                 <h2 class="text-sm font-semibold tracking-tight">"channel bridges"</h2>
                 <p class="mt-0.5 text-xs text-muted-foreground">
-                    "A ChannelSink and a ChannelSource meeting on one name. No config declares \
+                    "A channel sink and a channel source meeting on one name. No config declares \
                      the pair, so it is listed rather than drawn."
                 </p>
             </header>

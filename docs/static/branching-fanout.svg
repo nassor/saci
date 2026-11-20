@@ -93,7 +93,7 @@
     <rect class="hd-c" x="16" y="138" width="128" height="22" rx="8"/>
     <rect class="hd-c" x="16" y="152" width="128" height="8"/>
     <text class="t-ttl" x="28" y="154">in</text>
-    <text class="t-sub" x="28" y="178">NatsSource</text>
+    <text class="t-sub" x="28" y="178">nats source</text>
     <text class="t-sub" x="28" y="194">branching.orders</text>
   </g>
   <g>

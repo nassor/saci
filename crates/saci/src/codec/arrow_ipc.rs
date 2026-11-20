@@ -12,8 +12,12 @@
 //! wrote decodes through the message decoder unchanged.
 //!
 //! ```kdl
-//! source "wire" type="tcp" {
-//!     config bind="0.0.0.0:9500" format="arrow-ipc"
+//! codec "ipc" format="arrow-ipc"
+//!
+//! source "wire" connector="tcp" codec="ipc" component="Reading" {
+//!     config bind="0.0.0.0:9500" {
+//!         field "v" type="int64" nullable=#false
+//!     }
 //! }
 //! ```
 

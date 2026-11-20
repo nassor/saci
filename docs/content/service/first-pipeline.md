@@ -119,37 +119,37 @@ mode "standalone"
 
 node id=1 name="first-pipeline" data_dir="${SACI_DATA_DIR:-/tmp/saci-first}"
 
-run_mode kind="interval" interval_ms=5000
+run "interval" every_ms=5000
 
 workflow "orders" {
-    transformer "csv_fmt" format="csv" {
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {
+        config has_headers=#true
     }
 
-    source "csv_orders" type="FileSource" component="Transaction" transformer="csv_fmt" {
+    source "csv_orders" connector="file" component="Transaction" codec="csv_fmt" {
         config {
             path "examples/configs/fixtures/order_processing_input.csv"
-            schema_fields "id" type="UInt64" nullable=#false
-            schema_fields "amount" type="Float64" nullable=#false
-            schema_fields "currency" type="Utf8" nullable=#false
-            schema_fields "valid" type="Boolean" nullable=#false
-            schema_fields "usd_amount" type="Float64" nullable=#false
+            field "id" type="uint64" nullable=#false
+            field "amount" type="float64" nullable=#false
+            field "currency" type="utf8" nullable=#false
+            field "valid" type="boolean" nullable=#false
+            field "usd_amount" type="float64" nullable=#false
         }
     }
 
-    wasm "process_orders" module="target/wasm32-wasip3/release/order_processing_wasm.wasm" {
+    wasm "process_orders" path="target/wasm32-wasip3/release/order_processing_wasm.wasm" {
         config fx_eur="1.08" fx_gbp="1.27" fx_jpy="0.0067" fx_cad="0.74"
     }
 
-    sink "csv_out" type="FileSink" component="Transaction" transformer="csv_fmt" {
+    sink "csv_out" connector="file" component="Transaction" codec="csv_fmt" {
         config {
             path "/tmp/saci-first-out.csv"
             truncate #true
-            schema_fields "id" type="UInt64" nullable=#false
-            schema_fields "amount" type="Float64" nullable=#false
-            schema_fields "currency" type="Utf8" nullable=#false
-            schema_fields "valid" type="Boolean" nullable=#false
-            schema_fields "usd_amount" type="Float64" nullable=#false
+            field "id" type="uint64" nullable=#false
+            field "amount" type="float64" nullable=#false
+            field "currency" type="utf8" nullable=#false
+            field "valid" type="boolean" nullable=#false
+            field "usd_amount" type="float64" nullable=#false
         }
     }
 
@@ -165,25 +165,25 @@ observability log_format="pretty" log_level="info"
 What each part does:
 
 - `mode "standalone"` runs one process with no distributed coordination.
-- `run_mode kind="interval" interval_ms=5000` re-runs the workflow every five
-  seconds, so the service stays alive between iterations. `kind="one_shot"`
+- `run "interval" every_ms=5000` re-runs the workflow every five
+  seconds, so the service stays alive between iterations. `run "once"`
   would exit after the first iteration instead:
   [Run modes and persistence](@/service/config/run-modes.md).
-- One `workflow` node declares the whole graph. The `transformer "csv_fmt"`
-  node declares the codec; both the source and the sink reference it by id.
-- The `source` is a `FileSource` reading `order_processing_input.csv`, decoded
-  into the five fields of the `Transaction` component.
+- One `workflow` node declares the whole graph. The `codec "csv_fmt"`
+  node declares the byte format; both the source and the sink reference it by id.
+- The `source` uses the `file` connector to read `order_processing_input.csv`,
+  decoded into the five fields of the `Transaction` component.
 - The `wasm` node names the component you built. The `config` block holds the
   FX rates the processor reads back at run time.
-- The `sink` is a `FileSink`; `truncate #true` replaces the output file on
-  every start instead of appending to it.
+- The `sink` uses the `file` connector too; `truncate #true` replaces the
+  output file on every start instead of appending to it.
 - Each `link` is one edge of the graph: source to processor, processor to sink.
 - `http bind="127.0.0.1:8080"` turns on the control plane, which is also what
   serves the dashboard in step 7, and `observability` sets the log format and
   level.
 
 The paths are relative to the directory you run from, so run everything from
-the repository root. The output directory must exist before `FileSink` opens
+the repository root. The output directory must exist before the `file` sink opens
 the file. On Linux and macOS `/tmp` always does; on Windows the path
 `/tmp/saci-first-out.csv` resolves to `C:\tmp\saci-first-out.csv` on the current
 drive, so create it first:

@@ -78,7 +78,7 @@ use mysql_async::prelude::Queryable;
 use mysql_async::{Params, Row, Value};
 
 use crate::connector::mariadb::config::{
-    FieldSpec, MariadbFieldType, MariadbSourceConfig, Retention, Role, SourceMode, find_field,
+    MariadbSourceConfig, Retention, Role, SourceMode, find_field, is_reserved,
 };
 use crate::connector::mariadb::connection::{
     Connector, Session, TableRef, columns_of, exec_closing, mysql_detail, quote_ident, server_code,
@@ -89,6 +89,7 @@ use crate::connector::mariadb::source::sequence::{self, Holes, Passed, Release};
 use crate::connector::mariadb::source::triggers::{self, Installed, TriggerSpec};
 use crate::connector::mariadb::types::{Access, ResolvedColumn, validate_columns};
 use crate::connector::mariadb::values::{Cell, ColumnBuilder};
+use crate::connector::schema::{FieldSpec, FieldType};
 
 const WHAT: &str = "MariadbSource";
 
@@ -136,8 +137,8 @@ enum Bind {
 }
 
 impl Bind {
-    fn of(ty: MariadbFieldType) -> Self {
-        use MariadbFieldType as T;
+    fn of(ty: FieldType) -> Self {
+        use FieldType as T;
         match ty {
             T::Int8 | T::Int16 | T::Int32 | T::Int64 => Bind::Signed,
             T::UInt8 | T::UInt16 | T::UInt32 | T::UInt64 => Bind::Unsigned,
@@ -234,7 +235,7 @@ impl CursorColumn {
     fn resolve(fields: &[FieldSpec], name: &str) -> Result<Self, SaciError> {
         let field = find_field(fields, name).ok_or_else(|| {
             SaciError::configuration(format!(
-                "{WHAT}: '{name}' does not name a declared schema_fields entry"
+                "{WHAT}: '{name}' does not name a declared 'field' entry"
             ))
         })?;
         Ok(Self {
@@ -392,10 +393,10 @@ impl CursorReader {
         let gap_max_wait = cfg.mode.gap_max_wait();
 
         let offset_table = connector.resolve_table("mode.offset_table", cfg.mode.offset_table())?;
-        let cursor = CursorColumn::resolve(&cfg.schema_fields, &cursor_name)?;
+        let cursor = CursorColumn::resolve(&cfg.fields, &cursor_name)?;
         let tiebreak = tiebreak_name
             .as_deref()
-            .map(|name| CursorColumn::resolve(&cfg.schema_fields, name))
+            .map(|name| CursorColumn::resolve(&cfg.fields, name))
             .transpose()?;
 
         if !matches!(initial.as_str(), "beginning" | "now")
@@ -419,7 +420,7 @@ impl CursorReader {
             session: None,
             schema,
             table,
-            fields: cfg.schema_fields.clone(),
+            fields: cfg.fields.clone(),
             cursor,
             tiebreak,
             where_clause,
@@ -686,7 +687,7 @@ impl CursorReader {
                 // fields resolve against the changelog; `__table` has no
                 // column at all.
                 let (meta, data): (Vec<&FieldSpec>, Vec<&FieldSpec>) =
-                    self.fields.iter().partition(|f| f.is_reserved());
+                    self.fields.iter().partition(|f| is_reserved(f));
                 let (table, meta): (Vec<&FieldSpec>, Vec<&FieldSpec>) =
                     meta.into_iter().partition(|f| f.name == "__table");
                 let data = validate_columns(WHAT, Access::Query, data, &installed.watched)
@@ -1515,9 +1516,9 @@ mod tests {
          connection dsn=\"mysql://h:3306/sales\" ssl_mode=\"disabled\"\n\n";
 
     const FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"updated_at\" type=\"timestamp_micros_utc\" nullable=#false
-schema_fields \"label\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"updated_at\" type=\"timestamp_micros_utc\" nullable=#false
+field \"label\" type=\"utf8\"
 ";
 
     fn config_of(mode: &str, fields: &str) -> MariadbSourceConfig {
@@ -1531,9 +1532,9 @@ schema_fields \"label\" type=\"utf8\"
     fn reader_of(mode: &str, fields: &str) -> CursorReader {
         let cfg = config_of(mode, fields);
         let schema = Arc::new(Schema::new(
-            cfg.schema_fields
+            cfg.fields
                 .iter()
-                .map(|f| f.to_arrow_field().expect("field"))
+                .map(|f| f.to_arrow().expect("field"))
                 .collect::<Vec<_>>(),
         ));
         CursorReader::new(&cfg, schema).expect("reader")
@@ -1598,7 +1599,7 @@ schema_fields \"label\" type=\"utf8\"
         );
         let dated = reader_of(
             "mode kind=\"polling\" table=\"sales.orders\" cursor_column=\"day\"",
-            "schema_fields \"id\" type=\"int64\"\nschema_fields \"day\" type=\"date32\" nullable=#false\n",
+            "field \"id\" type=\"int64\"\nfield \"day\" type=\"date32\" nullable=#false\n",
         );
         assert!(
             dated
@@ -1756,7 +1757,7 @@ schema_fields \"label\" type=\"utf8\"
 
         let unsigned = reader_of(
             "mode kind=\"polling\" table=\"sales.orders\" cursor_column=\"n\"",
-            "schema_fields \"n\" type=\"uint64\" nullable=#false\n",
+            "field \"n\" type=\"uint64\" nullable=#false\n",
         );
         let (sql, params) = unsigned
             .count_statement(&Offset {
@@ -1824,8 +1825,8 @@ schema_fields \"label\" type=\"utf8\"
         let installed = reader_of(
             "mode kind=\"cdc_trigger\" table=\"sales.orders\" install_triggers=#true \
              gap_timeout_ms=70",
-            "schema_fields \"__seq\" type=\"uint64\" nullable=#false\n\
-             schema_fields \"__op\" type=\"utf8\" nullable=#false\n",
+            "field \"__seq\" type=\"uint64\" nullable=#false\n\
+             field \"__op\" type=\"utf8\" nullable=#false\n",
         );
         assert_eq!(installed.gap_timeout, Duration::from_millis(70));
     }
@@ -2009,11 +2010,11 @@ schema_fields \"label\" type=\"utf8\"
     fn an_installed_changelog_is_read_by_seq_with_table_filled_client_side() {
         let reader = reader_of(
             "mode kind=\"cdc_trigger\" table=\"sales.orders\" install_triggers=#true",
-            "schema_fields \"__seq\" type=\"uint64\" nullable=#false\n\
-             schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-             schema_fields \"__table\" type=\"utf8\" nullable=#false\n\
-             schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
-             schema_fields \"id\" type=\"int64\"\n",
+            "field \"__seq\" type=\"uint64\" nullable=#false\n\
+             field \"__op\" type=\"utf8\" nullable=#false\n\
+             field \"__table\" type=\"utf8\" nullable=#false\n\
+             field \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
+             field \"id\" type=\"int64\"\n",
         );
         assert_eq!(
             reader.select_sql(Shape::Cursor),
@@ -2047,10 +2048,10 @@ schema_fields \"label\" type=\"utf8\"
         let named = reader_of(
             "mode kind=\"cdc_trigger\" table=\"sales.orders\" install_triggers=#true \
              changelog_table=\"audit.log\"",
-            "schema_fields \"__seq\" type=\"uint64\" nullable=#false\n\
-             schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-             schema_fields \"__table\" type=\"utf8\" nullable=#false\n\
-             schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n",
+            "field \"__seq\" type=\"uint64\" nullable=#false\n\
+             field \"__op\" type=\"utf8\" nullable=#false\n\
+             field \"__table\" type=\"utf8\" nullable=#false\n\
+             field \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n",
         );
         assert_eq!(named.table.to_string(), "audit.log");
     }
@@ -2070,13 +2071,13 @@ schema_fields \"label\" type=\"utf8\"
     fn cdc_binlog_is_not_a_cursor_mode() {
         let cfg = config_of(
             "mode kind=\"cdc_binlog\" table=\"sales.orders\"",
-            "schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-             schema_fields \"__table\" type=\"utf8\" nullable=#false\n\
-             schema_fields \"__binlog_file\" type=\"utf8\" nullable=#false\n\
-             schema_fields \"__binlog_pos\" type=\"uint64\" nullable=#false\n\
-             schema_fields \"__gtid\" type=\"utf8\"\n\
-             schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
-             schema_fields \"id\" type=\"int64\"\n",
+            "field \"__op\" type=\"utf8\" nullable=#false\n\
+             field \"__table\" type=\"utf8\" nullable=#false\n\
+             field \"__binlog_file\" type=\"utf8\" nullable=#false\n\
+             field \"__binlog_pos\" type=\"uint64\" nullable=#false\n\
+             field \"__gtid\" type=\"utf8\"\n\
+             field \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
+             field \"id\" type=\"int64\"\n",
         );
         let Err(err) = CursorReader::new(&cfg, Arc::new(Schema::empty())) else {
             panic!("cdc_binlog is not a cursor mode");

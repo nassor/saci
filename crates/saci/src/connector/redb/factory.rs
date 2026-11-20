@@ -1,26 +1,26 @@
-//! The redb source and sink factories.
+//! The redb [`Connector`].
 //!
-//! Both resolve their byte format through the codec the host bound to
-//! this connector instance via a declared `transformer` key. Both need the
-//! declared `schema_fields`: a source's schema is read at load time by
+//! Both roles resolve their byte format through the codec the host bound to
+//! this connector instance via a declared `codec` key. Both need the
+//! declared `field` entries: a source's schema is read at load time by
 //! `validate_workflow_graph`, before the file is opened, so it cannot be
 //! discovered from the table, and a sink writes with it.
 
 use serde::Deserialize;
 
-use crate::connector::schema::without_schema_fields;
+use crate::connector::schema::without_fields;
 use crate::connector::{
-    ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
+    ConfigValue, Connector, ConnectorContext, Rebuild, Role, parse_fields, schema_of,
 };
-use crate::error::SaciError;
+use crate::error::{SaciError, SaciResult};
 use crate::io::{Sink, Source};
 
 use crate::connector::redb::config::{RedbSinkConfig, RedbSourceConfig};
 use crate::connector::redb::{RedbSink, RedbSource};
 
-/// Factory for [`RedbSource`].
+/// The embedded redb connector: a `redb` node of either role.
 ///
-/// Config fields:
+/// Source config fields ([`RedbSource`]):
 /// - `directory` (string, required): directory the redb file lives in.
 /// - `file` (string, optional): file name inside it, `saci.redb` by default.
 /// - `table` (string, optional): table name inside the file, `records` by
@@ -34,50 +34,17 @@ use crate::connector::redb::{RedbSink, RedbSource};
 ///   a read-only open cannot.
 /// - `cache_size_bytes` (int, optional): page cache budget; redb's own default
 ///   when absent.
-/// - `schema_fields` (list, required): the declared Arrow schema.
+/// - `field` (one or more, required): the declared Arrow schema.
 ///
 /// redb gives the source's read-only handle a shared OS lock, so several
-/// sources may read one file at once. A `RedbSink` on the same path still
-/// cannot run at the same time: its write handle is exclusive. A read-only
-/// open also never repairs, so a file whose last write left no allocator
-/// state table is refused with a message naming `check_integrity`; the sink's
+/// sources may read one file at once. A sink on the same path still cannot
+/// run at the same time: its write handle is exclusive. A read-only open also
+/// never repairs, so a file whose last write left no allocator state table is
+/// refused with a message naming `check_integrity`; the sink's
 /// `quick_repair`/`two_phase_commit` defaults keep every file it writes out
 /// of that state.
 ///
-/// The byte format is whatever codec the `source` node's `transformer`
-/// key names; see [`ConnectorContext::codec`].
-pub struct RedbSourceFactory;
-
-impl SourceFactory for RedbSourceFactory {
-    fn type_name(&self) -> &'static str {
-        "RedbSource"
-    }
-
-    fn build(
-        &self,
-        config: &ConfigValue,
-        ctx: &ConnectorContext,
-    ) -> Result<Box<dyn Source>, SaciError> {
-        let cfg = RedbSourceConfig::deserialize(without_schema_fields(config))
-            .map_err(|e| SaciError::configuration(format!("RedbSource config: {e}")))?;
-        let codec = ctx.codec("RedbSource")?;
-        let schema = parse_schema_fields(config, "RedbSource")?;
-        Ok(Box::new(RedbSource::new(cfg, schema, codec)?))
-    }
-
-    /// The table is scanned once per instance, so a fresh one re-delivers
-    /// every entry already read.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Err(
-            "the table is listed once, so a second build re-delivers every entry \
-             already read",
-        )
-    }
-}
-
-/// Factory for [`RedbSink`].
-///
-/// Config fields:
+/// Sink config fields ([`RedbSink`]):
 /// - `directory` (string, required): directory the redb file lives in,
 ///   created if absent.
 /// - `file` (string, optional): file name inside it, `saci.redb` by default.
@@ -95,39 +62,109 @@ impl SourceFactory for RedbSourceFactory {
 ///   tries, `immediate` by default.
 /// - `two_phase_commit` (bool, optional): on by default.
 /// - `quick_repair` (bool, optional): on by default.
-/// - `schema_fields` (list, required): the Arrow schema the rows are written
+/// - `field` (one or more, required): the Arrow schema the rows are written
 ///   with.
 ///
-/// redb locks the file exclusively from the build until `finish`, so no other
-/// handle, `RedbSource` included, can open the same path at the same time.
+/// A sink locks the file exclusively from the build until `finish`, so no
+/// other handle, a source included, can open the same path at the same time.
 ///
-/// The byte format is whatever codec the `sink` node's `transformer` key
-/// names; see [`ConnectorContext::codec`].
-pub struct RedbSinkFactory;
+/// The byte format is whatever codec the node's `codec` key names; see
+/// [`ConnectorContext::codec`].
+pub struct RedbConnector;
 
-impl SinkFactory for RedbSinkFactory {
-    fn type_name(&self) -> &'static str {
-        "RedbSink"
+impl Connector for RedbConnector {
+    fn name(&self) -> &'static str {
+        "redb"
     }
 
-    fn build(
-        &self,
-        config: &ConfigValue,
-        ctx: &ConnectorContext,
-    ) -> Result<Box<dyn Sink>, SaciError> {
-        let cfg = RedbSinkConfig::deserialize(without_schema_fields(config))
+    fn source(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Source>> {
+        let cfg = RedbSourceConfig::deserialize(without_fields(config))
+            .map_err(|e| SaciError::configuration(format!("RedbSource config: {e}")))?;
+        let codec = ctx.codec("RedbSource")?;
+        let schema = schema_of(&parse_fields(config, "RedbSource")?)?;
+        Ok(Box::new(RedbSource::new(cfg, schema, codec)?))
+    }
+
+    fn sink(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Sink>> {
+        let cfg = RedbSinkConfig::deserialize(without_fields(config))
             .map_err(|e| SaciError::configuration(format!("RedbSink config: {e}")))?;
         let codec = ctx.codec("RedbSink")?;
-        let schema = parse_schema_fields(config, "RedbSink")?;
+        let schema = schema_of(&parse_fields(config, "RedbSink")?)?;
         Ok(Box::new(RedbSink::new(cfg, schema, codec)?))
     }
 
-    /// Every accepted batch is its own committed transaction, so nothing is
-    /// buffered for a rebuild to discard. The host drops the failed instance
-    /// before it builds the replacement, which releases the file lock, and the
-    /// fresh instance resumes the key sequence from the file itself.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
+    /// The source's table is scanned once per instance, so a fresh one
+    /// re-delivers every entry already read. Every batch a sink accepts is
+    /// its own committed transaction, so nothing is buffered for a rebuild to
+    /// discard; the host drops the failed instance before it builds the
+    /// replacement, which releases the file lock, and the fresh instance
+    /// resumes the key sequence from the file itself.
+    fn rebuild(&self, role: Role, _config: &ConfigValue) -> Rebuild {
+        match role {
+            Role::Source => Rebuild::No(
+                "the table is listed once, so a second build re-delivers every entry \
+                 already read",
+            ),
+            Role::Sink => Rebuild::Yes,
+        }
+    }
+
+    fn detail_keys(&self, role: Role) -> &'static [&'static str] {
+        match role {
+            Role::Source => &["directory", "file", "table", "key_prefix", "key_suffix"],
+            Role::Sink => &[
+                "directory",
+                "file",
+                "table",
+                "key_prefix",
+                "key_suffix",
+                "durability",
+                "compact",
+            ],
+        }
+    }
+}
+
+#[cfg(test)]
+mod connector_tests {
+    use super::*;
+    use crate::connector::ConfigMap;
+
+    fn empty_config() -> ConfigValue {
+        ConfigValue::Object(ConfigMap::new())
+    }
+
+    #[test]
+    fn the_connector_name_roles_and_detail_keys() {
+        assert_eq!(RedbConnector.name(), "redb");
+        assert_eq!(RedbConnector.roles(), &[Role::Source, Role::Sink]);
+        assert_eq!(
+            RedbConnector.detail_keys(Role::Source),
+            &["directory", "file", "table", "key_prefix", "key_suffix"]
+        );
+        assert_eq!(
+            RedbConnector.detail_keys(Role::Sink),
+            &[
+                "directory",
+                "file",
+                "table",
+                "key_prefix",
+                "key_suffix",
+                "durability",
+                "compact"
+            ]
+        );
+        assert!(!RedbConnector.live(&empty_config()));
+    }
+
+    #[test]
+    fn the_sink_is_rebuildable_and_the_source_is_not() {
+        let config = empty_config();
+        assert_eq!(RedbConnector.rebuild(Role::Sink, &config), Rebuild::Yes);
+        assert!(matches!(
+            RedbConnector.rebuild(Role::Source, &config),
+            Rebuild::No(_)
+        ));
     }
 }
 
@@ -156,19 +193,13 @@ mod tests {
     }
 
     const SCHEMA: &str = r#"
-schema_fields "id" type="Int64" nullable=#false
+field "id" type="int64" nullable=#false
 "#;
-
-    #[test]
-    fn the_type_names_match_the_config_type_key() {
-        assert_eq!(RedbSourceFactory.type_name(), "RedbSource");
-        assert_eq!(RedbSinkFactory.type_name(), "RedbSink");
-    }
 
     #[test]
     fn a_missing_directory_is_a_configuration_error() {
         let config = config(SCHEMA);
-        let Err(err) = RedbSourceFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
+        let Err(err) = RedbConnector.source(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("missing directory must fail");
         };
@@ -186,7 +217,7 @@ schema_fields "id" type="Int64" nullable=#false
 bogus_key "x"
 {SCHEMA}"#
         ));
-        let Err(err) = RedbSinkFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
+        let Err(err) = RedbConnector.sink(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("an unknown key must fail");
         };
@@ -205,7 +236,7 @@ bogus_key "x"
 durability "bogus"
 {SCHEMA}"#
         ));
-        let Err(err) = RedbSinkFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
+        let Err(err) = RedbConnector.sink(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("an unknown durability level must fail");
         };
@@ -223,25 +254,25 @@ durability "bogus"
             r#"directory "/tmp/saci-redb-factory-test"
 {SCHEMA}"#
         ));
-        let Err(err) = RedbSourceFactory.build(&config, &ConnectorContext::new(None)) else {
+        let Err(err) = RedbConnector.source(&config, &ConnectorContext::new(None)) else {
             panic!("no codec bound must fail");
         };
         assert_eq!(err.category(), "configuration");
         assert_eq!(
             err.message(),
-            "RedbSource moves bytes and needs a 'transformer' key naming a declared transformer"
+            "RedbSource moves bytes and needs a 'codec' key naming a declared codec"
         );
     }
 
     #[test]
-    fn a_missing_schema_fields_is_a_configuration_error() {
+    fn a_missing_field_is_a_configuration_error() {
         let config = config(r#"directory "/tmp/saci-redb-factory-test""#);
-        let Err(err) = RedbSourceFactory.build(&config, &ConnectorContext::new(Some(csv_codec())))
+        let Err(err) = RedbConnector.source(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("missing schema must fail");
         };
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("schema_fields"));
+        assert!(err.message().contains("'field'"), "got: {err}");
     }
 
     #[test]
@@ -250,15 +281,8 @@ durability "bogus"
             r#"directory "/tmp/saci-redb-no-such-directory"
 {SCHEMA}"#
         ));
-        RedbSourceFactory
-            .build(&config, &ConnectorContext::new(Some(csv_codec())))
+        RedbConnector
+            .source(&config, &ConnectorContext::new(Some(csv_codec())))
             .expect("source builds without opening the file");
-    }
-
-    #[test]
-    fn the_sink_is_rebuildable_and_the_source_is_not() {
-        let config = empty_config();
-        assert!(RedbSinkFactory.rebuildable(&config).is_ok());
-        assert!(RedbSourceFactory.rebuildable(&config).is_err());
     }
 }

@@ -26,7 +26,7 @@ happens before the first row moves.
         <title id="svc-what-t">One config file names a source, a format, a processor and a sink, and saci-service runs them</title>
         <desc id="svc-what-d">
             A file or a topic on the left feeds a source node. The source names a
-            declared transformer node, the codec that decodes its bytes. The source links to a
+            declared codec node, the byte format that decodes its bytes. The source links to a
             wasm processor node drawn on the WebAssembly boundary, and that processor
             links to a sink node. The sink writes a file or a table on the right. The
             source, the codec, the processor and the sink all live inside one
@@ -59,7 +59,7 @@ happens before the first row moves.
         </g>
         <g class="anim anim-4">
             <rect class="blk blk-ctl" x="132" y="144" width="238" height="26" rx="6"/>
-            <text class="t-sm t-ctl" x="142" y="161">transformer &quot;csv_fmt&quot; format=&quot;csv&quot;</text>
+            <text class="t-sm t-ctl" x="142" y="161">codec &quot;csv_fmt&quot; format=&quot;csv&quot;</text>
             <text class="t-sm" x="384" y="161">two links wire the three nodes</text>
             <path class="arw arw-data" d="M490 102 H544" marker-end="url(#svc-what-a)"/>
             <rect class="blk blk-data" x="548" y="76" width="112" height="52" rx="8"/>
@@ -87,15 +87,17 @@ happens before the first row moves.
 
 ## The vocabulary
 
-Nine words cover the whole config file.
+Ten words cover the whole config file.
 
 - **workflow** is one graph of nodes, and one file may declare several:
   [Workflows and links](@/service/config/workflows.md).
 - **source** reads rows into the workflow, from a file, an HTTP endpoint, a
   topic, a table, a socket or another workflow:
   [Sources and sinks](@/service/connectors/_index.md).
-- **transformer** declares a codec, the byte format that a source decodes with and a
-  sink encodes with: [Formats](@/service/formats/_index.md).
+- **codec** declares the byte format that a source decodes with and a sink
+  encodes with: [Formats](@/service/formats/_index.md).
+- **schema** declares a field list once, for every source and sink that names
+  its component: [Workflows and links](@/service/config/workflows.md).
 - **processor** is a WebAssembly component that takes rows in and hands rows
   back: [Processors in a workflow](@/service/processors/_index.md).
 - **plugin** is the same contract in a native shared library, for when the

@@ -11,8 +11,10 @@
 //! payload has to carry it.
 //!
 //! ```kdl
-//! source "trades" type="FileSource" {
-//!     config path="/data/trades.parquet" format="parquet"
+//! codec "pq" format="parquet"
+//!
+//! source "trades" connector="file" codec="pq" component="Trade" {
+//!     config path="/data/trades.parquet"
 //! }
 //! ```
 

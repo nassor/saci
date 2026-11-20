@@ -1,6 +1,6 @@
 ---
-name: saci-transformers
-description: Use when adding, changing, configuring, testing or documenting a SACI byte format (`saci::codec` and every `codec-*` feature of the `saci` crate), a CodecFactory or format registration, a `transformer` node in a KDL config, or how a connector reaches its codec.
+name: saci-codecs
+description: Use when adding, changing, configuring, testing or documenting a SACI byte format (`saci::codec` and every `codec-*` feature of the `saci` crate), a CodecFactory or format registration, a `codec` node in a KDL config, or how a connector reaches its codec.
 ---
 
 # SACI codecs
@@ -25,18 +25,18 @@ continue a file that already holds batches (`true` for ndjson and csv without a 
 otherwise). A new writer implementation sets both.
 
 A connector moves bytes and a codec turns bytes into `RecordBatch`es and back, so transport and
-format are separate modules. A byte-carrying source or sink node names a declared `transformer`
-node's id with `transformer="id"`; those are the KDL spellings of the codec declaration and
+format are separate modules. A byte-carrying source or sink node names a declared `codec`
+node's id with `codec="id"`; those are the KDL spellings of the codec declaration and
 reference. `ServiceBuilder` resolves that node's `format` against the `CodecRegistry` in
-`saci::codec` once per workflow build and hands the result to the factory inside a
+`saci::codec` once per workflow build and hands the result to the connector inside a
 `ConnectorContext`, which a connector reads with `ConnectorContext::codec(what)`. No connector
 resolves a format itself, and none resolves one implicitly: the declared node's own `format` key is
 what the registry resolves. The `service` feature owns the `Registry`; `ServiceBuilder::new()`
-fills it through `register_builtin_factories` (`pub(crate)`), and the chain extends it through
-`register_source`, `register_sink`, and
-`ServiceBuilder::codec(factory)` (`Registry::register_codec`). `Registry::codecs()` returns the
-`CodecRegistry`, `Registry::codec_count()` its size; `CodecRegistry` has `len`, `is_empty` and
-`names`.
+fills it through `register_builtin_factories` (`pub(crate)`) with every compiled-in connector and
+codec, `ServiceBuilder::empty()` registers nothing, and the chain extends it through
+`ServiceBuilder::connector(c)` and `ServiceBuilder::codec(f)` (`Registry::register_codec`).
+`Registry::codecs()` returns the `CodecRegistry`, `Registry::codec_count()` its size;
+`CodecRegistry` has `len`, `is_empty` and `names`.
 
 ## Formats
 
@@ -74,8 +74,8 @@ config key it does not read with `"{format}: unknown option '{key}'"`.
 implies `codec-arrow-ipc`, so the connector feature alone is runnable. `connector-file`,
 `connector-http`, `connector-redb` and `connector-s3` imply no codec, so the config picks which formats the binary
 carries. `connector-peer` implies none either, and like `connector-channel`, `connector-postgresql`,
-`connector-mariadb` and `connector-turso` it resolves none: a `saci` node carries `RecordBatch`es
-over Arrow IPC natively and takes no `transformer` key, so `ConnectorContext::codec` is never
+`connector-mariadb` and `connector-turso` it resolves none: a `peer` node carries `RecordBatch`es
+over Arrow IPC natively and takes no `codec` key, so `ConnectorContext::codec` is never
 called on it.
 
 `BUILTIN_CODEC_FEATURES` (`crates/saci/src/service/factories.rs`) pairs every format name this
@@ -146,7 +146,7 @@ codec shares that pin with the processor wire format, see skill `saci-processors
 Update this file in the same change that: adds or removes a codec module or feature; changes
 `Codec`, `BatchReader`, `BatchWriter`, `MessageDecoder`, `CodecFactory`, `CodecRegistry` or
 `ReadInput`; adds, renames or changes the default of a format option or a codec constructor
-setter; changes how `ServiceBuilder` resolves a `transformer` node; changes the missing-format
+setter; changes how `ServiceBuilder` resolves a `codec` node; changes the missing-format
 wording or `BUILTIN_CODEC_FEATURES` (also update skill `saci-service`); changes which connector
 features imply which codec (also update skill `saci-connectors`); changes the IO layer contract
 quoted here and in skill `saci-connectors` (also check that skill; the canonical copy is skill

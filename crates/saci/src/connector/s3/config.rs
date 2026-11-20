@@ -19,6 +19,7 @@ use object_store::ObjectStore;
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use serde::Deserialize;
 
+use crate::connector::SchemaFrom;
 use crate::error::SaciError;
 
 /// Endpoint, credentials and client options shared by both halves.
@@ -124,21 +125,6 @@ impl ConnectionConfig {
             .map_err(|e| SaciError::configuration(format!("{what}: {e}")))?;
         Ok(Arc::new(store))
     }
-}
-
-/// Where the Arrow schema a source hands the format comes from.
-#[derive(Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SchemaFrom {
-    /// `schema_fields` is handed to the format: what `csv` needs, and what
-    /// `parquet`, `avro` and `arrow-ipc` project the object onto.
-    #[default]
-    Config,
-    /// The format reads its own schema out of the object and the reader's
-    /// schema must then equal `schema_fields` field for field. What a source
-    /// wants when the object's own schema is what it reads, `parquet` and
-    /// `avro` included.
-    Object,
 }
 
 /// Configuration for [`crate::connector::s3::source::S3Source`].
@@ -261,8 +247,8 @@ mod tests {
     }
 
     #[test]
-    fn the_schema_fields_key_belongs_to_the_factory_not_the_structs() {
-        let text = "connection { bucket \"b\" }\nschema_fields \"id\" type=\"int64\"";
+    fn the_field_key_belongs_to_the_factory_not_the_structs() {
+        let text = "connection { bucket \"b\" }\nfield \"id\" type=\"int64\"";
         assert!(S3SourceConfig::deserialize(config(text)).is_err());
         assert!(S3SinkConfig::deserialize(config(text)).is_err());
     }
@@ -291,10 +277,10 @@ mod tests {
     #[test]
     fn schema_from_parses_snake_case_names() {
         let cfg = S3SourceConfig::deserialize(config(
-            "connection { bucket \"b\" }\nschema_from \"object\"",
+            "connection { bucket \"b\" }\nschema_from \"payload\"",
         ))
         .expect("source config parses");
-        assert_eq!(cfg.schema_from, SchemaFrom::Object);
+        assert_eq!(cfg.schema_from, SchemaFrom::Payload);
     }
 
     #[test]

@@ -80,7 +80,7 @@ on to the collectors it names.
   sink in one service feeds a `udp` source in another.
 - A collector on the sink's `connect` address. It receives whatever arrives and answers nothing,
   unless you enable the probe below.
-- `run_mode kind="stream"` whenever a `udp` source is declared. The source blocks for the next
+- `run "stream"` whenever a `udp` source is declared. The source blocks for the next
   datagram and never reaches EOF, and validation rejects it in any other run mode. A `udp` sink
   carries no such rule.
 - The processor component the config names, at `pipelines/ticks.wasm`, for the `serve` step.
@@ -89,13 +89,13 @@ on to the collectors it names.
 
 ## 1. Declare the format
 
-A datagram's payload is bytes, so both halves name a declared `transformer`.
+A datagram's payload is bytes, so both halves name a declared `codec`.
 
 <div class="code">
 <div class="code-cap"><span>KDL</span><em>one row per datagram</em></div>
 
 ```kdl
-transformer "json" format="ndjson"
+codec "json" format="ndjson"
 ```
 
 </div>
@@ -109,15 +109,15 @@ batch in one, so keep the source's admission target below `max_datagram_bytes` w
 ## 2. Read from a bound port: the source node
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>a udp source needs run_mode kind="stream"</em></div>
+<div class="code-cap"><span>KDL</span><em>a udp source needs run "stream"</em></div>
 
 ```kdl
-source "ticks_in" type="udp" component="Tick" transformer="json" {
+source "ticks_in" connector="udp" component="Tick" codec="json" {
     config {
         bind "0.0.0.0:9700"
         buffer 64
 
-        schema_fields "price" type="Float64" nullable=#false
+        field "price" type="float64" nullable=#false
     }
 }
 ```
@@ -129,7 +129,7 @@ decoded batches queue before the receive loop stops reading the socket. Add
 `multicast_group "239.255.0.1"` to join a group of the same IP family as `bind`, for a feed several
 receivers read; run one receiver per port per host, since the socket takes no address reuse option.
 
-`schema_fields` is required, because the decoder is built from it while the node is built. That is
+`field` lines are required, because the decoder is built from them while the node is built. That is
 also where a format with no message decoder is refused.
 
 ## 3. Write to a collector: the sink node
@@ -138,14 +138,14 @@ also where a format with no message decoder is refused.
 <div class="code-cap"><span>KDL</span><em>the sink resolves every address at build and opens its sockets on the first batch</em></div>
 
 ```kdl
-sink "ticks_out" type="udp" component="EnrichedTick" transformer="json" {
+sink "ticks_out" connector="udp" component="EnrichedTick" codec="json" {
     config {
         connect "collector.internal:9701"
         max_datagram_bytes 65507
 
         probe kind="icmp" interval_ms=5000 timeout_ms=1000 on_failure="refuse"
 
-        schema_fields "price" type="Float64" nullable=#false
+        field "price" type="float64" nullable=#false
     }
 }
 ```
@@ -159,12 +159,12 @@ is enough: every property has a default. `kind="icmp"` is the kind for a collect
 SACI service, because it reads only what the OS relays and needs no answer; the default
 `kind="echo"` waits for a datagram back, which only another service's `udp` source sends. One round
 probes every peer at the same time, so it costs one `timeout_ms` however many addresses `connect`
-names. `schema_fields` is required here too, and one batch becomes one datagram per message the
+names. `field` lines are required here too, and one batch becomes one datagram per message the
 format encodes.
 
 ## 4. Validate and run
 
-`examples/configs/udp.kdl` declares both nodes and sets `run_mode kind="stream"`.
+`examples/configs/udp.kdl` declares both nodes and sets `run "stream"`.
 
 Runs the same on Linux, macOS and Windows (PowerShell):
 
@@ -273,7 +273,7 @@ Source:
 | `bind` | string | required | the address the socket receives datagrams on |
 | `buffer` | integer | `64` | decoded batches queued before the receive loop stops reading; at least 1 |
 | `multicast_group` | string | none | a multicast address to join, of the same IP family as `bind` |
-| `schema_fields` | list of fields | required | the schema each payload decodes against |
+| `field` | lines | required | the schema each payload decodes against |
 
 Sink:
 
@@ -287,11 +287,11 @@ Sink:
 | `probe interval_ms` | integer | `5000` | the gap between rounds |
 | `probe timeout_ms` | integer | `1000` | how long one round waits for an answer |
 | `probe on_failure` | string | `"refuse"` | `"refuse"` stops sending to a failed peer, `"warn"` logs and keeps sending |
-| `schema_fields` | list of fields | required | the schema the datagrams are written with |
+| `field` | lines | required | the schema the datagrams are written with |
 
 An unrecognised key inside `config` is a configuration error naming the key, and so is a value of
-the wrong type, so a typo reaches you as a message rather than as the default. `schema_fields` is
-read beside these keys on both halves.
+the wrong type, so a typo reaches you as a message rather than as the default. `field` lines sit
+beside these keys on both halves.
 
 ## When it refuses to start
 
@@ -299,7 +299,7 @@ read beside these keys on both halves.
 |---|---|
 | ``UdpSource config: missing field `bind` `` | add `bind "host:port"` to the source's `config` |
 | ``UdpSink config: missing field `connect` `` | add `connect "host:port"` to the sink's `config` |
-| `udp moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
+| `udp moves bytes and needs a 'codec' key naming a declared codec` | add `codec="<id>"` to the node |
 | `format '{format}' does not support decoding discrete messages` | name a format that decodes discrete messages |
 | `UdpSink: format '{format}' has no message codec` | the same, for the sink |
 | `UdpSource config: multicast_group: {reason}` | write the group as a bare address, `"239.255.0.1"` |
@@ -319,7 +319,7 @@ read beside these keys on both halves.
 | `UdpSink: 'max_datagram_bytes' must be between 1 and 65507, got {n}` | lower the cap to an IPv4 payload |
 | `UdpSink: 'probe' needs one answering peer; it cannot be combined with 'broadcast' or a multicast 'connect' address` | drop the probe, or the broadcast and multicast peers |
 | `UdpSink: probe 'interval_ms' and 'timeout_ms' must be at least 1` | give both a positive number of milliseconds |
-| `source type 'udp' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"`, or drop the `udp` source |
+| `source connector 'udp' never reaches EOF; it requires standalone mode with run "stream"` | set `run "stream"`, or drop the `udp` source |
 
 ## Next
 

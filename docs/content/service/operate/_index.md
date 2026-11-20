@@ -6,7 +6,7 @@ sort_by = "weight"
 weight = 8
 aliases = ["/operations/", "/operations/running-saci/"]
 +++
-`saci-service` has four subcommands, five global flags and seven environment
+`saci-service` has four subcommands, one global flag and seven environment
 variables.
 
 <div class="dgm animate-in">
@@ -70,12 +70,13 @@ variables.
 
 | Command | What it does |
 |---|---|
-| `serve` | Start and keep running. `--node-id N` overrides `node.id`; `--port P` overrides the port in `http.bind`, and `--port 0` prints the address the OS assigned on stdout. |
-| `validate` | Check the config and exit without moving anything. A declared `type` that is a connector this binary was built without fails, naming the feature to rebuild with. `--strict` also turns a warning about a type no crate here provides into a failure. `--connectors-only` builds every source, sink and codec instead of loading the processor and checking the graph, so a config whose processor artifact is missing still validates. |
-| `status --addr URL` | One summary line from `/status`. `--full` prints the whole JSON document. |
-| `cluster init` | Pre-flight only: confirms `mode "cluster"` and `bootstrap #true`, then tells you to run `serve`. It starts nothing. |
-| `cluster status --addr URL` | Reads `/status` and prints `node ID  mode=cluster` for a cluster node. |
-| `cluster join --leader URL`, `cluster leave` | Membership is manual. Both print the procedure, editing the `peer` nodes on every node and restarting, and exit 0. Every `cluster` subcommand needs `--features service-cluster`; without it the command exits 1. |
+| `serve` | Start and keep running. `--node-id N` overrides `node.id`; `--bind ADDR` replaces `http.bind` whole, and `--bind 127.0.0.1:0` prints the address the OS assigned on stdout. `--log-format`, `--log-level` and `--otlp-endpoint` are `serve` flags. |
+| `validate` | Check the config and exit without moving anything. A declared connector this binary was built without fails, naming the feature to rebuild with. `--strict` also turns a warning about a connector name no crate here provides into a failure. `--connectors-only` builds every source, sink and codec instead of loading the processor and checking the graph, so a config whose processor artifact is missing still validates. |
+| `status --url URL` | One summary line from `/status`. `--full` prints the whole JSON document. With no `--url` it loads `--config` and uses `http://{http.bind}`. |
+| `cluster init` | Pre-flight only: confirms `mode "cluster"` and `cluster { bootstrap #true }`, then tells you to run `serve`. It starts nothing. |
+| `cluster status --url URL` | Reads `/status` and prints `node ID  mode=cluster` for a cluster node. With no `--url` it loads `--config` and uses `http://{http.bind}`. |
+
+Every `cluster` subcommand needs `--features service-cluster`; without it the command exits 1.
 
 Start with `validate`: it is the one command that touches nothing.
 
@@ -90,8 +91,7 @@ OK: config is structurally valid
 
 ## 2. Global flags and environment variables
 
-Five flags work on every subcommand: `--config`/`-c`, `--addr`,
-`--log-format`, `--log-level` and `--otlp-endpoint`. `--config` defaults to
+One flag works on every subcommand: `--config`/`-c`. It defaults to
 `saci.kdl` in the current directory, so `serve` in a directory holding that file
 needs no flags at all. Every flag below has an environment variable, and the
 flag wins when both are set.
@@ -100,11 +100,11 @@ flag wins when both are set.
 |---|---|---|
 | `SACI_CONFIG` | `-c`, `--config` | Config file path |
 | `SACI_NODE_ID` | `--node-id` | Node id override, on `serve` |
-| `SACI_HTTP_PORT` | `--port` | HTTP port override, on `serve` |
-| `SACI_ADDR` | `--addr` | Control-plane address, on `status` and `cluster` |
-| `SACI_LOG_FORMAT` | `--log-format` | `pretty` or `json` |
-| `SACI_LOG_LEVEL` | `--log-level` | The log filter |
-| `SACI_OTLP_ENDPOINT` | `--otlp-endpoint` | OTLP/HTTP collector root for span export |
+| `SACI_HTTP_BIND` | `--bind` | HTTP bind address, on `serve` |
+| `SACI_URL` | `--url` | Node base URL, on `status` and `cluster status` |
+| `SACI_LOG_FORMAT` | `--log-format` | `pretty` or `json`, on `serve` |
+| `SACI_LOG_LEVEL` | `--log-level` | The log filter, on `serve` |
+| `SACI_OTLP_ENDPOINT` | `--otlp-endpoint` | OTLP/HTTP collector root for span export, on `serve` |
 
 The last three override the `observability` block:
 [Logs, metrics and traces](@/service/operate/observability.md).
@@ -145,13 +145,13 @@ system, so copy the one nearest your own and edit its `config` blocks.
 | `kafka.kdl` | a Kafka source and sink: [Kafka](@/service/connectors/kafka.md) | no: `--features connector-kafka` |
 | `tcp.kdl` | a live socket ingest stream: [TCP](@/service/connectors/tcp.md) | yes |
 | `udp.kdl` | fire-and-forget datagrams at both ends: [UDP](@/service/connectors/udp.md) | yes |
-| `saci.kdl` | a service-to-service link at both ends: [SACI](@/service/connectors/saci.md) | yes |
+| `saci.kdl` | a service-to-service link at both ends: [Peer](@/service/connectors/peer.md) | yes |
 | `http.kdl` | an endpoint spooled through a format: [HTTP](@/service/connectors/http.md) | yes |
 | `s3.kdl` | objects read and written in a bucket: [S3](@/service/connectors/s3.md) | no: `--features connector-s3` |
 | `turso.kdl` | rows read and written in an embedded or synced database: [Turso](@/service/connectors/turso.md) | no: `--features connector-turso` |
 | `redb.kdl` | a stream run persisting its cursors and priors: [Run modes and persistence](@/service/config/run-modes.md) | yes |
 | `cluster.kdl` | a three-node cluster template: [Running a cluster](@/service/operate/cluster.md) | no: `--features service-cluster` |
-| `extension_example.kdl` | the template for your own source and sink factories: [Embedding saci-service](@/library/service/_index.md) | no: `MongoSource` and `ClickHouseSink` are no built-in connector, so the stock binary cannot run it at any feature level; a custom server registers them with `saci::service::cli::main_with` |
+| `extension_example.kdl` | the template for your own connectors: [Embedding saci-service](@/library/service/_index.md) | no: the `mongo` and `clickhouse-enriched` connectors are not built in, so the stock binary cannot run it at any feature level; a custom server registers them with `saci::service::cli::main_with` |
 
 Validate one, then serve it:
 
@@ -171,23 +171,18 @@ dashboard at http://127.0.0.1:8080/ui
 
 | Exit | Condition |
 |---|---|
-| `0` | Clean exit: a completed `one_shot` run, or a drained shutdown after Ctrl-C or `SIGTERM` |
+| `0` | Clean exit: a completed `run "once"` run, or a drained shutdown after Ctrl-C or `SIGTERM` |
 | `1` | A runner error, a rejected config, or a shutdown that exceeded the 30 second budget |
 
 A `validate` run that names a connector left out of this build prints the
 feature to add and exits 1:
 
 ```text
-ERROR: no source factory registered for type 'PostgresSource' (required by source 'pg_orders'): that is a built-in connector this binary was built without, so rebuild or reinstall with `--features connector-postgresql`, or register your own factory under that name
+ERROR: no connector named 'postgresql' is registered (required by source 'pg_orders'): that is a built-in connector this binary was built without, so rebuild or reinstall with `--features connector-postgresql`, or register your own connector under that name
 ```
 
 [Install saci-service](@/service/install.md) lists the flag for each of the
 eight opt-in connectors.
-
-`cluster join` and `cluster leave` change nothing in a binary built with
-`--features service-cluster`: both print the manual procedure for a membership
-change and exit 0. Every `cluster` subcommand exits 1 in a binary built
-without that feature, naming the flag to rebuild with.
 
 A clean stop prints `saci-service stopped cleanly` as its last line. A stop
 without that line was not a drain:

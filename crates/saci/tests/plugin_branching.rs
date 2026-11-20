@@ -103,13 +103,13 @@ fn branching_built(
         .link("in", "router")
         .link_branch("router", "out_a", "a")
         .link_branch("router", "out_b", "b")
-        .run_mode(RunMode::OneShot)
+        .run_mode(RunMode::Once)
         .build()
         .expect("build workflow");
-    built.nodes[0].type_name = "ChannelSource".to_string();
-    built.nodes[1].type_name = "plugin".to_string();
-    built.nodes[2].type_name = "ChannelSink".to_string();
-    built.nodes[3].type_name = "ChannelSink".to_string();
+    built.nodes[0].connector = "channel".to_string();
+    built.nodes[1].connector = "plugin".to_string();
+    built.nodes[2].connector = "channel".to_string();
+    built.nodes[3].connector = "channel".to_string();
     (built, tx, rx_a, rx_b)
 }
 

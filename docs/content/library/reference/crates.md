@@ -33,12 +33,12 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 | crate root | `engine` (default) | `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, plus the `Source` and `Sink` traits; the rest of the IO surface (`read_all`, `write_all`, `cast_batch`, the retry wrappers) is in `saci::io`. Arrow and serde are always present; tokio and rayon arrive with `engine`, and `futures` with `service` or `connector-udp`. |
 | `saci::config` | `config` | The configuration language: parses KDL into `ConfigValue` (an alias for `serde_json::Value`) plus `ConfigMap`, and exports `from_kdl_str`, `from_kdl_str_with_vars`, `one_or_many`, `substitute_env_vars` and `substitute_vars`. `from_kdl_str_with_vars` substitutes and parses in one call, and a parse failure over substituted text names the variables whose values were inserted, plus any holding a backslash or double quote. Values stay out of the message. |
 | `saci::codec` | `codec-api` | The byte-format contract: `Codec`, `BatchReader`, `BatchWriter`, `MessageDecoder`, `MessageShape`, `CodecFactory`, `CodecRegistry` and `ReadInput`. The traits live in `codec::contract`. |
-| `saci::codec::arrow_ipc` | `codec-arrow-ipc` | `ArrowIpcCodec`: stream read and write plus `PerBatch` messages, both over the same Arrow IPC stream encapsulation. Takes no options. |
-| `saci::codec::avro` | `codec-avro` | `AvroCodec`: object container files plus `PerRow` messages, framed single-object or Confluent. Options `compression` (`AvroCompression`), `schema_id`. |
-| `saci::codec::csv` | `codec-csv` | `CsvCodec`: stream read and write plus `PerRow` messages, one record per payload. Option `has_headers`. |
-| `saci::codec::ndjson` | `codec-ndjson` | `NdjsonCodec`: stream plus `PerRow` messages. Option `infer_max`. |
-| `saci::codec::parquet` | `codec-parquet` | `ParquetCodec`: stream read and write plus `PerBatch` messages, one whole file per payload. Snappy compression is fixed and the factory reads no options; the reader reports `estimated_rows` from row-group metadata. |
-| `saci::connector` | `connector-api` | The factory contract: `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` and `parse_optional_schema_fields`. `connector::bridge` holds the `ChannelBridge` trait. A connector needs no dependency on the host. |
+| `saci::codec::arrow_ipc` | `codec-arrow-ipc` | `ArrowIpcCodec`: stream read and write plus `PerBatch` messages, both over the same Arrow IPC stream encapsulation. Takes no config keys. |
+| `saci::codec::avro` | `codec-avro` | `AvroCodec`: object container files plus `PerRow` messages, framed single-object or Confluent. Config keys `compression` (`AvroCompression`), `schema_id`. |
+| `saci::codec::csv` | `codec-csv` | `CsvCodec`: stream read and write plus `PerRow` messages, one record per payload. Config key `has_headers`. |
+| `saci::codec::ndjson` | `codec-ndjson` | `NdjsonCodec`: stream plus `PerRow` messages. Config key `infer_max`. |
+| `saci::codec::parquet` | `codec-parquet` | `ParquetCodec`: stream read and write plus `PerBatch` messages, one whole file per payload. Snappy compression is fixed and the factory reads no config keys; the reader reports `estimated_rows` from row-group metadata. |
+| `saci::connector` | `connector-api` | The connector contract: `Connector`, `Role`, `ConnectorContext`, `parse_fields` and `parse_optional_fields`. `connector::bridge` holds the `ChannelBridge` trait. A connector needs no dependency on the host. |
 | `saci::connector::channel` | `connector-channel` | `ChannelSource`, `ChannelSink`: in-memory mpsc transport. `ChannelRegistry` is the name-keyed bridge pairing a sink in one workflow with a source in another. |
 | `saci::connector::clickhouse` | `connector-clickhouse` | `ClickhouseSource`, `ClickhouseSink`: ClickHouse HTTP client with native `ArrowStream` format. Source modes `polling`, `dump` and `query`; sink write mode `append` with optional `truncate_before_first_write`. No codec: ClickHouse sends and accepts Arrow IPC streams directly. |
 | `saci::connector::file` | `connector-file` | `FileSource`, `FileSink`: local-file IO, format from a codec. |
@@ -62,7 +62,7 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 | `saci::distributed` | `distributed` | `PartitionSource`, `CheckpointStore`, `DistributedRunner`, `CheckpointStrategy` and `RedbSharedStore`. |
 | `saci::inspector` | `inspector` | The in-process telemetry behind the `/ui` dashboard. |
 | `saci::metrics` | `metrics` | The OpenTelemetry instruments. |
-| `saci::service` | `service` | The host: HTTP control plane, config loading, the factory `Registry`, the runners, and `saci::service::cli`, the `saci-service` command line. It ships no `Source`, `Sink` or `Codec` of its own. |
+| `saci::service` | `service` | The host: HTTP control plane, config loading, the connector `Registry`, the runners, and `saci::service::cli`, the `saci-service` command line. It ships no `Source`, `Sink` or `Codec` of its own. |
 
 ## Features
 
@@ -94,7 +94,7 @@ authoring SDK.
   `codec-arrow-ipc`, so the connector feature alone is runnable. `connector-file`,
   `connector-http`, `connector-redb` and `connector-s3` imply no codec, so the config picks
   which formats the build carries. `connector-peer` implies none either: Arrow IPC is its fixed
-  wire format and a `saci` node takes no `transformer` key. TLS is always compiled into
+  wire format and a `peer` node takes no `codec` key. TLS is always compiled into
   `connector-postgresql`, `connector-mariadb` and `connector-clickhouse`.
 - `codec-arrow-ipc`, `codec-avro`, `codec-csv`, `codec-ndjson`,
   `codec-parquet`: one per byte format.
@@ -152,7 +152,7 @@ are not meant to be combined in one build, but doing so is redundant, not ambigu
 ## Which feature adds which node
 
 `service` registers no source, sink or format by itself. With `service` on, each `connector-*`
-feature registers one connector's factories and each `codec-*` one byte format.
+feature registers one connector and each `codec-*` one byte format.
 Without `service`, those features give the module and nothing else. `mode "cluster"` needs
 `service-cluster` and nothing else. Neither `service` nor `connector-*` implies `wasm-host`, and
 `plugin-host` is its own feature.
@@ -236,11 +236,11 @@ fn main() -> std::process::ExitCode {
 ```
 
 `saci::service::cli::main_with` takes a closure over the `ServiceBuilder` that `serve` and
-`validate` use. It runs after the built-in factories, so a user connector registers beside them:
+`validate` use. It runs after the built-in connectors and codecs, so a user connector registers beside them:
 
 ```rust
 fn main() -> std::process::ExitCode {
-    saci::service::cli::main_with(|builder| builder.register_source(MyFactory))
+    saci::service::cli::main_with(|builder| builder.connector(MyConnector))
 }
 ```
 
@@ -270,6 +270,6 @@ Add `windows` for windowed aggregation, or use `plugin` for a native plugin.
 |---|---|---|---|
 | Traits and helpers | `Source`, `Sink`, `RetryingSource`, `RetryingSink`, `read_all`, `write_all` | `saci::io` | `engine` |
 | Cast helper | `cast_batch` | `saci::io` | `engine` |
-| Factory contract | `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` | `saci::connector` | `connector-api` |
+| Connector contract | `Connector`, `Role`, `ConnectorContext`, `parse_fields` | `saci::connector` | `connector-api` |
 | Codec contract | `Codec`, `BatchReader`, `BatchWriter`, `MessageDecoder` | `saci::codec` | `codec-api` |
 | Config registration | `Registry`, `ServiceBuilder`, `BuiltWorkflow`, `RunOptions`, `serve` | `saci::service` | `service` |

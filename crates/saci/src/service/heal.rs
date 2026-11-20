@@ -15,8 +15,8 @@
 //!
 //! ## What a rebuild is allowed to cost
 //!
-//! Only a connector that answers `Ok(())` from
-//! [`SourceFactory::rebuildable`](crate::connector::SourceFactory::rebuildable)
+//! Only a connector that answers `Rebuild::Yes` from
+//! [`Connector::rebuild`](crate::connector::Connector::rebuild)
 //! is ever healed, so the loss a rebuild can cause is bounded by what that
 //! connector already documents. The builder is what consults it; by the time
 //! a [`HealingSource`] or [`HealingSink`] exists, the answer was `Ok`.
@@ -50,12 +50,12 @@ use async_trait::async_trait;
 use tokio::time::Instant;
 
 use crate::codec::Codec;
-use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity};
+use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity, Role};
 use crate::error::SaciError;
 use crate::io::{RetryingSink, RetryingSource, Sink, Source};
 use crate::retry::RetryMode;
 
-use super::factories::missing_factory_error;
+use super::factories::lookup_connector;
 use super::registry::Registry;
 use super::sampling::HEAL_TARGET;
 
@@ -123,35 +123,19 @@ impl HealSettings {
     }
 }
 
-/// Whether a wrapper drives a source or a sink, for the metric attribute key
-/// and the log field name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Source,
-    Sink,
+/// Record a successful heal of the `role` node `id`.
+fn role_healed(role: Role, id: &str) {
+    match role {
+        Role::Source => crate::metrics::instruments().source_heal(id),
+        Role::Sink => crate::metrics::instruments().sink_heal(id),
+    }
 }
 
-impl Role {
-    fn healed(self, id: &str) {
-        match self {
-            Self::Source => crate::metrics::instruments().source_heal(id),
-            Self::Sink => crate::metrics::instruments().sink_heal(id),
-        }
-    }
-
-    fn heal_failed(self, id: &str) {
-        match self {
-            Self::Source => crate::metrics::instruments().source_heal_failure(id),
-            Self::Sink => crate::metrics::instruments().sink_heal_failure(id),
-        }
-    }
-
-    /// `"source"` or `"sink"`, the log field naming the node.
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Source => "source",
-            Self::Sink => "sink",
-        }
+/// Record a failed heal attempt of the `role` node `id`.
+fn role_heal_failed(role: Role, id: &str) {
+    match role {
+        Role::Source => crate::metrics::instruments().source_heal_failure(id),
+        Role::Sink => crate::metrics::instruments().sink_heal_failure(id),
     }
 }
 
@@ -159,12 +143,12 @@ impl Role {
 /// heal so the two can never drift.
 ///
 /// `Send + Sync` because every part is: [`Registry`] holds
-/// `Box<dyn SourceFactory>` and both factory traits are `Send + Sync +
-/// 'static`, [`Codec`] and [`ChannelBridge`] likewise, and
-/// [`ConfigValue`] is a `serde_json::Value`.
+/// `Box<dyn Connector>` and the trait is `Send + Sync + 'static`, [`Codec`]
+/// and [`ChannelBridge`] likewise, and [`ConfigValue`] is a
+/// `serde_json::Value`.
 pub(crate) struct Rebuilder {
     registry: Arc<Registry>,
-    type_name: String,
+    connector: String,
     node_id: String,
     config: ConfigValue,
     codec: Option<Arc<dyn Codec>>,
@@ -174,8 +158,7 @@ pub(crate) struct Rebuilder {
     /// store's own source and sink.
     identity: Option<NodeIdentity>,
     /// The retry policy the built instance is wrapped in. `None` for a source
-    /// in `run_mode kind="stream"`, where the runner's own re-poll is the
-    /// retry loop.
+    /// in `run "stream"`, where the runner's own re-poll is the retry loop.
     retry: Option<RetryMode>,
 }
 
@@ -185,7 +168,7 @@ impl Rebuilder {
     /// [`with_identity`](Self::with_identity).
     pub(crate) fn new(
         registry: Arc<Registry>,
-        type_name: &str,
+        connector: &str,
         node_id: &str,
         config: ConfigValue,
         codec: Option<Arc<dyn Codec>>,
@@ -194,7 +177,7 @@ impl Rebuilder {
     ) -> Self {
         Self {
             registry,
-            type_name: type_name.to_string(),
+            connector: connector.to_string(),
             node_id: node_id.to_string(),
             config,
             codec,
@@ -229,14 +212,13 @@ impl Rebuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] when no factory is registered for
-    /// the declared type, or whatever the factory itself refused with.
+    /// Returns [`SaciError::Configuration`] when no connector is registered
+    /// under the declared name or it serves no source, or whatever the
+    /// connector itself refused with.
     pub(crate) fn build_source(&self) -> Result<Box<dyn Source>, SaciError> {
-        let factory = self
-            .registry
-            .source(&self.type_name)
-            .ok_or_else(|| missing_factory_error("source", &self.type_name, &self.node_id))?;
-        let built = factory.build(&self.config, &self.context())?;
+        let connector =
+            lookup_connector(&self.registry, Role::Source, &self.connector, &self.node_id)?;
+        let built = connector.source(&self.config, &self.context())?;
         Ok(match self.retry {
             Some(retry) => Box::new(RetryingSource::new(built, retry, &self.node_id)),
             None => built,
@@ -247,14 +229,13 @@ impl Rebuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] when no factory is registered for
-    /// the declared type, or whatever the factory itself refused with.
+    /// Returns [`SaciError::Configuration`] when no connector is registered
+    /// under the declared name or it serves no sink, or whatever the
+    /// connector itself refused with.
     pub(crate) fn build_sink(&self) -> Result<Box<dyn Sink>, SaciError> {
-        let factory = self
-            .registry
-            .sink(&self.type_name)
-            .ok_or_else(|| missing_factory_error("sink", &self.type_name, &self.node_id))?;
-        let built = factory.build(&self.config, &self.context())?;
+        let connector =
+            lookup_connector(&self.registry, Role::Sink, &self.connector, &self.node_id)?;
+        let built = connector.sink(&self.config, &self.context())?;
         Ok(match self.retry {
             Some(retry) => Box::new(RetryingSink::new(built, retry, &self.node_id)),
             None => built,
@@ -344,13 +325,13 @@ impl Healer {
     fn built(&mut self, attempt: u32) {
         self.down = None;
         self.state = HealState::Probing { attempt };
-        self.role.healed(&self.node_id);
+        role_healed(self.role, &self.node_id);
         #[cfg(feature = "tracing")]
         tracing::warn!(
             target: HEAL_TARGET,
             workflow = %self.workflow_id,
             node = %self.node_id,
-            role = self.role.label(),
+            role = self.role.as_str(),
             attempt,
             "connector healed"
         );
@@ -359,13 +340,13 @@ impl Healer {
     /// Record that attempt `attempt` produced nothing usable, and schedule
     /// the next one.
     fn build_failed(&mut self, attempt: u32, error: String) {
-        self.role.heal_failed(&self.node_id);
+        role_heal_failed(self.role, &self.node_id);
         #[cfg(feature = "tracing")]
         tracing::warn!(
             target: HEAL_TARGET,
             workflow = %self.workflow_id,
             node = %self.node_id,
-            role = self.role.label(),
+            role = self.role.as_str(),
             attempt,
             error = %error,
             "connector heal failed"
@@ -384,7 +365,7 @@ impl Healer {
                 target: HEAL_TARGET,
                 workflow = %self.workflow_id,
                 node = %self.node_id,
-                role = self.role.label(),
+                role = self.role.as_str(),
                 attempts = self.settings.max_attempts,
                 "connector heal exhausted"
             );
@@ -400,7 +381,7 @@ impl Healer {
             target: HEAL_TARGET,
             workflow = %self.workflow_id,
             node = %self.node_id,
-            role = self.role.label(),
+            role = self.role.as_str(),
             attempt,
             delay_ms = delay.as_millis() as u64,
             consecutive = consecutive.unwrap_or(0),
@@ -423,7 +404,7 @@ impl Healer {
                     target: HEAL_TARGET,
                     workflow = %self.workflow_id,
                     node = %self.node_id,
-                    role = self.role.label(),
+                    role = self.role.as_str(),
                     "connector recovered"
                 );
             }
@@ -586,7 +567,7 @@ impl Source for HealingSource {
 /// The old instance is dropped without `finish`: it was unwritable, so
 /// `finish` would fail too. Whatever it had accepted and not yet written is
 /// gone, which is why a sink that buffers across an outage refuses
-/// [`SinkFactory::rebuildable`](crate::connector::SinkFactory::rebuildable) and
+/// [`Connector::rebuild`](crate::connector::Connector::rebuild) and
 /// is never wrapped in this.
 pub struct HealingSink {
     inner: Option<Box<dyn Sink>>,
@@ -716,7 +697,7 @@ mod tests {
 
     #[cfg(feature = "connector-peer")]
     use crate::connector::from_kdl_str;
-    use crate::connector::{ConfigMap, ConfigValue, SinkFactory, SourceFactory};
+    use crate::connector::{ConfigMap, ConfigValue, Connector, Rebuild};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
 
@@ -847,12 +828,12 @@ mod tests {
         }
     }
 
-    impl SourceFactory for ScriptedFactory {
-        fn type_name(&self) -> &'static str {
+    impl Connector for ScriptedFactory {
+        fn name(&self) -> &'static str {
             "scripted"
         }
 
-        fn build(
+        fn source(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
@@ -870,17 +851,7 @@ mod tests {
             }))
         }
 
-        fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-            Ok(())
-        }
-    }
-
-    impl SinkFactory for ScriptedFactory {
-        fn type_name(&self) -> &'static str {
-            "scripted"
-        }
-
-        fn build(
+        fn sink(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
@@ -892,15 +863,14 @@ mod tests {
             }))
         }
 
-        fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-            Ok(())
+        fn rebuild(&self, _role: Role, _config: &ConfigValue) -> Rebuild {
+            Rebuild::Yes
         }
     }
 
     fn rebuilder(script: &Arc<Script>) -> Rebuilder {
         let mut registry = Registry::new();
-        registry.register_source(ScriptedFactory(Arc::clone(script)));
-        registry.register_sink(ScriptedFactory(Arc::clone(script)));
+        registry.register(ScriptedFactory(Arc::clone(script)));
         Rebuilder::new(
             Arc::new(registry),
             "scripted",
@@ -1334,20 +1304,19 @@ mod tests {
     #[test]
     fn a_rebuilt_peer_source_binds_a_fresh_port_and_keeps_its_identity() {
         let mut registry = Registry::new();
-        registry.register_source(crate::connector::peer::SaciSourceFactory);
-        registry.register_sink(crate::connector::peer::SaciSinkFactory);
+        registry.register(crate::connector::peer::PeerConnector);
 
         let config = from_kdl_str(
             r#"
 bind "127.0.0.1:0"
-schema_fields "v" type="Int64" nullable=#false
+field "v" type="int64" nullable=#false
 "#,
         )
         .expect("parse saci source config");
 
         let rebuilder = Rebuilder::new(
             Arc::new(registry),
-            "saci",
+            "peer",
             "node-1",
             config,
             None,

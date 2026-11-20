@@ -1,13 +1,13 @@
-//! The whole standalone service path over S3: config file, factories, source
+//! The whole standalone service path over S3: config file, connector, source
 //! drain, pipeline run, sink drain.
 //!
 //! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this is
 //! the end to end proof that a `connector-s3` build moves rows from one S3
 //! prefix through a pipeline into another via the registered
-//! `S3SourceFactory`/`S3SinkFactory`, not just via the connector's own
+//! `S3Connector`, not just via the connector's own
 //! direct API (already covered by the S3 connector's own tests, `crates/saci/tests/s3_round_trip.rs`).
 //!
-//! The first test needs no daemon: neither factory opens a connection at build
+//! The first test needs no daemon: the connector opens no connection at build
 //! time, so a config pointing at an unreachable endpoint still builds. The
 //! second soft-skips without Docker.
 
@@ -22,8 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use saci::connector::SchemaFrom;
 use saci::connector::s3::{
-    ConnectionConfig, Flush, S3Sink, S3SinkConfig, S3Source, S3SourceConfig, SchemaFrom,
+    ConnectionConfig, Flush, S3Sink, S3SinkConfig, S3Source, S3SourceConfig,
 };
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
@@ -66,12 +67,12 @@ mode "standalone"
 
 node id=1 name="saci-s3-service" data_dir="/tmp/saci-s3-service"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "s3-service-test" {{
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="S3Source" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="s3" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             prefix "{in_prefix}"
 
@@ -83,15 +84,15 @@ workflow "s3-service-test" {{
                 allow_http #true
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="S3Sink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="s3" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             prefix "{out_prefix}"
             suffix ".ndjson"
@@ -105,9 +106,9 @@ workflow "s3-service-test" {{
                 allow_http #true
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
@@ -115,7 +116,7 @@ workflow "s3-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#,

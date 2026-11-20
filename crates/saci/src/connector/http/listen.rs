@@ -3,7 +3,7 @@
 //! The other three connectors in this crate dial out. This one binds, accepts,
 //! and yields one or more [`RecordBatch`]es per request body. It never reaches
 //! EOF: `next_batch` blocks until the next request arrives, so only the stream
-//! runner (`run_mode kind="stream"`) can drive it, and the service config
+//! runner (`run "stream"`) can drive it, and the service config
 //! validator rejects every other run mode.
 //!
 //! ## Protocol
@@ -57,14 +57,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::codec::Codec;
-use crate::connector::NodeIdentity;
+use crate::connector::{NodeIdentity, SchemaFrom};
 use crate::error::SaciError;
 use crate::io::Source;
 
 use crate::connector::http::client;
 use crate::connector::http::document;
 use crate::connector::http::metrics::Instruments;
-use crate::connector::http::source::SchemaFrom;
 
 /// The connector name every error and metric label of this half carries.
 const WHAT: &str = "HttpListenSource";
@@ -815,9 +814,9 @@ impl Handler {
         self.metrics.bytes("in", body.len() as u64);
         let declared = match self.schema_from {
             SchemaFrom::Config => Some(Arc::clone(&self.declared)),
-            SchemaFrom::Body => None,
+            SchemaFrom::Payload => None,
         };
-        let check = self.schema_from == SchemaFrom::Body;
+        let check = self.schema_from == SchemaFrom::Payload;
         let expected = Arc::clone(&self.declared);
         let codec = Arc::clone(&self.codec);
 

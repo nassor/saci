@@ -31,8 +31,8 @@ pub async fn topology() -> Result<Topology, String> {
 }
 
 /// One frame of live numbers.
-pub async fn snapshot(window_secs: u64) -> Result<Snapshot, String> {
-    get_json(&format!("/api/snapshot?window_secs={window_secs}")).await
+pub async fn snapshot(window_ms: u64) -> Result<Snapshot, String> {
+    get_json(&format!("/api/snapshot?window_ms={window_ms}")).await
 }
 
 /// Newest-first trace list.

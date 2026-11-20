@@ -424,7 +424,7 @@ pub async fn write_all(
             <rect class="hd hd-ctl" x="336" y="192" width="318" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="336" y="204" width="318" height="8"/>
             <text class="t-lbl t-ctl" x="348" y="206">BuiltWorkflow::run</text>
-            <text class="t-sm" x="348" y="228">only on the OneShot exit or on</text>
+            <text class="t-sm" x="348" y="228">only on the Once exit or on</text>
             <text class="t-sm" x="348" y="242">cancellation. Continuous and</text>
             <text class="t-sm" x="348" y="256">Interval keep the sink open and</text>
             <text class="t-sm" x="348" y="270">clear() the Dataset each loop</text>
@@ -591,7 +591,7 @@ while let Some(batch) = src.next_batch().await? {
 <p>
     The traits, the retry wrappers, <code>read_all</code>, <code>write_all</code> and
     <code>cast_batch</code> live in <code>saci::io</code> behind the <code>engine</code> feature.
-    The factory contract lives in
+    The connector contract lives in
     <code>saci::connector</code>. A connector module carries bytes over one transport and a
     codec module turns bytes into batches, each behind its own feature, so a build
     pulls in <code>parquet</code>, <code>arrow-csv</code> or
@@ -609,8 +609,8 @@ while let Some(batch) = src.next_batch().await? {
             <td><code>saci::io</code></td>
         </tr>
         <tr>
-            <td><strong>Factory contract</strong></td>
-            <td colspan="2"><code>SourceFactory</code>, <code>SinkFactory</code>, <code>ConnectorContext</code>, <code>parse_schema_fields</code></td>
+            <td><strong>Connector contract</strong></td>
+            <td colspan="2"><code>Connector</code>, <code>ConnectorContext</code>, <code>parse_fields</code>, <code>parse_optional_fields</code>, <code>schema_of</code></td>
             <td><code>saci::connector</code></td>
         </tr>
         <tr>
@@ -679,7 +679,7 @@ while let Some(batch) = src.next_batch().await? {
             <td><code>saci::connector::udp</code></td>
         </tr>
         <tr>
-            <td><strong>SACI</strong></td>
+            <td><strong>Peer</strong></td>
             <td><code>PeerSource</code></td>
             <td><code>PeerSink</code></td>
             <td><code>saci::connector::peer</code></td>
@@ -756,7 +756,7 @@ while let Some(batch) = src.next_batch().await? {
 
 <p>
     No connector resolves a format implicitly. A node that moves bytes names a declared
-    <code>transformer</code> node by id, and that node's own <code>format</code> key is
+    <code>codec</code> node by id, and that node's own <code>format</code> key is
     what the registry resolves. Which modules a build carries is one
     <code>connector-*</code> or <code>codec-*</code> feature per module, listed on
     <a href="{{ get_url(path='@/library/reference/crates.md') }}">Crates and features</a>.
@@ -804,7 +804,7 @@ ChannelSink::with_sender    (Arc&lt;Schema&gt;, buffer: usize, mpsc::Sender&lt;R
 </div>
 
 <p>
-    Only <code>ndjson</code> infers a schema, and only when <code>schema_fields</code> is
+    Only <code>ndjson</code> infers a schema, and only when <code>field</code> is
     absent: <code>csv</code> requires one, and <code>parquet</code>, <code>avro</code> and
     <code>arrow-ipc</code> reject one on a read, since the stream carries its own.
     <code>FileSource</code> and <code>HttpSource</code> report
@@ -858,13 +858,13 @@ assert!(src.next_batch().await?.is_none());</code></pre>
 </p>
 
 <p>
-    One caveat if you reach these through the config file. <code>ChannelSourceFactory</code> and
-    <code>ChannelSinkFactory</code> resolve the halves through the host's channel registry, so
+    One caveat if you reach these through the config file. The <code>channel</code> connector
+    resolves the halves through the host's channel registry, so
     neither hands the other endpoint back to you. The source takes the receiver, its paired
     sink the sender, and the source's EOF is that sink being dropped. A half whose counterpart
     never builds waits on a channel nothing will fill, which is why
     <code>ServiceConfig::validate</code> requires every channel <code>name</code> to pair
-    exactly one <code>ChannelSink</code> with one <code>ChannelSource</code>. For real use,
+    exactly one <code>channel</code> sink with one <code>channel</code> source. For real use,
     construct the channel yourself and pass the endpoint in programmatically.
 </p>
 

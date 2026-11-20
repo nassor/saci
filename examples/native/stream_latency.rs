@@ -102,8 +102,8 @@ async fn native_latency() -> Vec<u64> {
         .run_mode(RunMode::Stream)
         .build()
         .expect("build workflow");
-    service.nodes[0].type_name = "ChannelSource".to_string();
-    service.nodes[2].type_name = "ChannelSink".to_string();
+    service.nodes[0].connector = "channel".to_string();
+    service.nodes[2].connector = "channel".to_string();
 
     let cancel = CancellationToken::new();
     let cancel_runner = cancel.clone();

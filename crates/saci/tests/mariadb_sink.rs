@@ -121,8 +121,8 @@ fn id_value_batch(sink: &MariadbSink, rows: &[(i64, &str)]) -> RecordBatch {
     RecordBatch::try_new(sink.schema(), columns).expect("batch")
 }
 
-const ID_VALUE_FIELDS: &str = "schema_fields \"id\" type=\"int64\" nullable=#false\n\
-                               schema_fields \"v\" type=\"utf8\"\n";
+const ID_VALUE_FIELDS: &str = "field \"id\" type=\"int64\" nullable=#false\n\
+                               field \"v\" type=\"utf8\"\n";
 
 fn id_value_sink(server: &Server, table: &str, mode: &str, extra: &str) -> MariadbSink {
     common::sink(
@@ -149,25 +149,25 @@ async fn append_writes_every_declared_type_and_reads_back_equal(server: &Server)
     let mut sink = common::sink(
         &server.dsn(),
         "name \"every\"\ntable \"every\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"c_flag\" type=\"boolean\"\n\
-         schema_fields \"c_i8\" type=\"int8\"\n\
-         schema_fields \"c_u8\" type=\"uint8\"\n\
-         schema_fields \"c_i16\" type=\"int16\"\n\
-         schema_fields \"c_u16\" type=\"uint16\"\n\
-         schema_fields \"c_i32\" type=\"int32\"\n\
-         schema_fields \"c_u32\" type=\"uint32\"\n\
-         schema_fields \"c_i64\" type=\"int64\"\n\
-         schema_fields \"c_u64\" type=\"uint64\"\n\
-         schema_fields \"c_f32\" type=\"float32\"\n\
-         schema_fields \"c_f64\" type=\"float64\"\n\
-         schema_fields \"c_dec\" type=\"decimal128\" precision=20 scale=4\n\
-         schema_fields \"c_txt\" type=\"utf8\"\n\
-         schema_fields \"c_bin\" type=\"binary\"\n\
-         schema_fields \"c_date\" type=\"date32\"\n\
-         schema_fields \"c_time\" type=\"time64_micros\"\n\
-         schema_fields \"c_dt\" type=\"timestamp_micros\"\n\
-         schema_fields \"c_ts\" type=\"timestamp_micros_utc\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"c_flag\" type=\"boolean\"\n\
+         field \"c_i8\" type=\"int8\"\n\
+         field \"c_u8\" type=\"uint8\"\n\
+         field \"c_i16\" type=\"int16\"\n\
+         field \"c_u16\" type=\"uint16\"\n\
+         field \"c_i32\" type=\"int32\"\n\
+         field \"c_u32\" type=\"uint32\"\n\
+         field \"c_i64\" type=\"int64\"\n\
+         field \"c_u64\" type=\"uint64\"\n\
+         field \"c_f32\" type=\"float32\"\n\
+         field \"c_f64\" type=\"float64\"\n\
+         field \"c_dec\" type=\"decimal128\" precision=20 scale=4\n\
+         field \"c_txt\" type=\"utf8\"\n\
+         field \"c_bin\" type=\"binary\"\n\
+         field \"c_date\" type=\"date32\"\n\
+         field \"c_time\" type=\"time64_micros\"\n\
+         field \"c_dt\" type=\"timestamp_micros\"\n\
+         field \"c_ts\" type=\"timestamp_micros_utc\"\n",
     );
 
     // 2023-11-14 22:13:20.123456 UTC
@@ -317,7 +317,7 @@ async fn a_key_only_upsert_resolves_like_ignore_conflicts(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"k\"\ntable \"keys_only\"\nwrite_mode \"upsert\"\nconflict_columns \"id\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[1, 2]);
     sink.write_batch(&batch).await.expect("first");
@@ -342,9 +342,9 @@ async fn dedupe_order_column_picks_the_highest_order_value(server: &Server) {
         &server.dsn(),
         "name \"d\"\ntable \"deduped\"\nwrite_mode \"upsert\"\nconflict_columns \"id\"\n\
          dedupe_order_column \"seq\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"seq\" type=\"int64\"\n\
-         schema_fields \"v\" type=\"utf8\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"seq\" type=\"int64\"\n\
+         field \"v\" type=\"utf8\"\n",
     );
     let columns: Vec<ArrayRef> = vec![
         Arc::new(Int64Array::from(vec![1_i64, 1, 1, 2, 2])),
@@ -359,9 +359,9 @@ async fn dedupe_order_column_picks_the_highest_order_value(server: &Server) {
     );
 }
 
-const CHANGES_FIELDS: &str = "schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-                              schema_fields \"id\" type=\"int64\" nullable=#false\n\
-                              schema_fields \"v\" type=\"utf8\"\n";
+const CHANGES_FIELDS: &str = "field \"__op\" type=\"utf8\" nullable=#false\n\
+                              field \"id\" type=\"int64\" nullable=#false\n\
+                              field \"v\" type=\"utf8\"\n";
 
 fn changes_batch(sink: &MariadbSink, rows: &[(&str, i64, &str)]) -> RecordBatch {
     let columns: Vec<ArrayRef> = vec![
@@ -435,10 +435,10 @@ async fn apply_changes_with_a_composite_key_deletes_the_right_rows(server: &Serv
     let mut sink = common::sink(
         &server.dsn(),
         "name \"p\"\ntable \"pairs\"\nwrite_mode \"apply_changes\"\nconflict_columns \"a\" \"b\"\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"a\" type=\"int64\" nullable=#false\n\
-         schema_fields \"b\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"v\" type=\"int32\"\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"a\" type=\"int64\" nullable=#false\n\
+         field \"b\" type=\"utf8\" nullable=#false\n\
+         field \"v\" type=\"int32\"\n",
     );
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec!["D", "D", "U", "I"])),
@@ -498,9 +498,9 @@ async fn apply_changes_deletes_in_chunks_of_a_thousand_keys(server: &Server) {
         &server.dsn(),
         "name \"mp\"\ntable \"many_pairs\"\nwrite_mode \"apply_changes\"\n\
          conflict_columns \"a\" \"b\"\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"a\" type=\"int64\" nullable=#false\n\
-         schema_fields \"b\" type=\"int64\" nullable=#false\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"a\" type=\"int64\" nullable=#false\n\
+         field \"b\" type=\"int64\" nullable=#false\n",
     );
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec!["D"; 2500])),
@@ -556,9 +556,9 @@ async fn a_delete_for_a_null_key_is_refused(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"n\"\ntable \"null_key\"\nwrite_mode \"apply_changes\"\nconflict_columns \"k\"\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"k\" type=\"int64\"\n\
-         schema_fields \"v\" type=\"utf8\"\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"k\" type=\"int64\"\n\
+         field \"v\" type=\"utf8\"\n",
     );
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec!["D"])),
@@ -586,9 +586,9 @@ async fn conflict_columns_that_match_no_unique_key_are_refused(server: &Server) 
          v VARCHAR(10), UNIQUE KEY by_code (code))",
     )
     .await;
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\n\
-                  schema_fields \"code\" type=\"utf8\" nullable=#false\n\
-                  schema_fields \"v\" type=\"utf8\"\n";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\n\
+                  field \"code\" type=\"utf8\" nullable=#false\n\
+                  field \"v\" type=\"utf8\"\n";
     let build = |key: &str| {
         common::sink(
             &server.dsn(),
@@ -647,7 +647,7 @@ async fn flush_rows_buffers_until_the_threshold_and_finish_drains_the_rest(serve
     let mut sink = common::sink(
         &server.dsn(),
         "name \"b\"\ntable \"buffered\"\nflush_rows 5\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[1, 2]);
     sink.write_batch(&batch).await.expect("buffer");
@@ -680,7 +680,7 @@ async fn a_failed_flush_keeps_the_rows_an_earlier_call_accepted(server: &Server)
     let mut sink = common::sink(
         &server.dsn(),
         "name \"r\"\ntable \"retried\"\nflush_rows 3\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let accepted = id_batch(&sink, &[2]);
     sink.write_batch(&accepted).await.expect("buffered");
@@ -725,7 +725,7 @@ async fn a_failed_finish_keeps_its_rows_for_the_next_attempt(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"f\"\ntable \"finished\"\nflush_rows 100\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[2, 1]);
     sink.write_batch(&batch).await.expect("buffered");
@@ -757,7 +757,7 @@ async fn truncate_before_first_write_replaces_the_contents_once(server: &Server)
     let mut sink = common::sink(
         &server.dsn(),
         "name \"t\"\ntable \"replaced\"\ntruncate_before_first_write #true\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[10, 11]);
     sink.write_batch(&batch).await.expect("first");
@@ -785,7 +785,7 @@ async fn a_failed_truncating_flush_rolls_the_delete_back(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"g\"\ntable \"guarded\"\ntruncate_before_first_write #true\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[7, 7]);
     sink.write_batch(&batch)
@@ -817,7 +817,7 @@ async fn first_write_truncates_only_once_across_a_reconnect(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"rc\"\ntable \"reconnected\"\ntruncate_before_first_write #true\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[1]);
     sink.write_batch(&batch).await.expect("first");
@@ -850,7 +850,7 @@ async fn a_missing_table_is_a_configuration_error_naming_it(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"m\"\ntable \"no_such_table\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[1]);
     let err = sink.write_batch(&batch).await.expect_err("no table");
@@ -877,8 +877,8 @@ async fn strict_mode_refuses_an_out_of_range_value_and_writes_nothing(server: &S
     let mut sink = common::sink(
         &server.dsn(),
         "name \"st\"\ntable \"tiny\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"v\" type=\"int32\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"v\" type=\"int32\"\n",
     );
     let columns: Vec<ArrayRef> = vec![
         Arc::new(Int64Array::from(vec![1_i64, 2])),
@@ -912,8 +912,8 @@ async fn a_value_finer_than_the_column_fraction_is_refused(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"f\"\ntable \"coarse\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"at\" type=\"timestamp_micros\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"at\" type=\"timestamp_micros\"\n",
     );
     let write = |sink: &MariadbSink, id: i64, micros: i64| -> RecordBatch {
         let columns: Vec<ArrayRef> = vec![
@@ -954,7 +954,7 @@ async fn a_table_name_with_a_backtick_is_written_not_injected(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"bt\"\ntable \"t`; DROP TABLE victim; --\"\n\
-         schema_fields \"c`; -- x\" type=\"int64\" nullable=#false\n",
+         field \"c`; -- x\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[42]);
     sink.write_batch(&batch)
@@ -985,9 +985,9 @@ async fn chunking_stays_under_the_placeholder_limit(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"w\"\ntable \"wide\"\nchunk_rows 100000\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"a\" type=\"int32\"\nschema_fields \"b\" type=\"int32\"\n\
-         schema_fields \"c\" type=\"int32\"\nschema_fields \"d\" type=\"int32\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"a\" type=\"int32\"\nfield \"b\" type=\"int32\"\n\
+         field \"c\" type=\"int32\"\nfield \"d\" type=\"int32\"\n",
     );
     // 13 108 rows of 5 columns is 65 540 placeholders, 5 over the server limit,
     // so an uncapped chunk would be refused.
@@ -1044,7 +1044,7 @@ async fn a_batch_the_caller_retries_is_written_once(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"rt\"\ntable \"retried_once\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n",
     );
     let batch = id_batch(&sink, &[1, 2]);
     sink.write_batch(&batch)
@@ -1080,9 +1080,9 @@ async fn a_decimal_delete_key_matches_exactly(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"dk\"\ntable \"dkeys\"\nwrite_mode \"apply_changes\"\nconflict_columns \"k\"\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"k\" type=\"decimal128\" precision=38 scale=0 nullable=#false\n\
-         schema_fields \"v\" type=\"utf8\"\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"k\" type=\"decimal128\" precision=38 scale=0 nullable=#false\n\
+         field \"v\" type=\"utf8\"\n",
     );
     let keys = Decimal128Array::from(vec![12345678901234567890123456789012345678_i128])
         .with_precision_and_scale(38, 0)
@@ -1114,8 +1114,8 @@ async fn a_statement_over_max_allowed_packet_is_split(server: &Server) {
     let mut sink = common::sink(
         &server.dsn(),
         "name \"mp\"\ntable \"blobs\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"b\" type=\"binary\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"b\" type=\"binary\"\n",
     );
     // 20 rows of 200 000 bytes: 4 MB in one `chunk_rows 1000` statement, four
     // times what the server accepts, and each row alone well under it.
@@ -1174,13 +1174,13 @@ async fn the_edges_of_every_temporal_and_decimal_type_round_trip(server: &Server
     let mut sink = common::sink(
         &server.dsn(),
         "name \"e\"\ntable \"edges\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"d\" type=\"date32\"\n\
-         schema_fields \"dt\" type=\"timestamp_micros\"\n\
-         schema_fields \"ts\" type=\"timestamp_micros_utc\"\n\
-         schema_fields \"t\" type=\"time64_micros\"\n\
-         schema_fields \"dec_a\" type=\"decimal128\" precision=38 scale=0\n\
-         schema_fields \"dneg\" type=\"decimal128\" precision=10 scale=4\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"d\" type=\"date32\"\n\
+         field \"dt\" type=\"timestamp_micros\"\n\
+         field \"ts\" type=\"timestamp_micros_utc\"\n\
+         field \"t\" type=\"time64_micros\"\n\
+         field \"dec_a\" type=\"decimal128\" precision=38 scale=0\n\
+         field \"dneg\" type=\"decimal128\" precision=10 scale=4\n",
     );
     let widest = 99_999_999_999_999_999_999_999_999_999_999_999_999_i128;
     let columns: Vec<ArrayRef> = vec![
@@ -1262,7 +1262,7 @@ async fn a_connection_lost_mid_flush_is_recovered_by_a_retry(server: &Server) {
     exec(&mut conn, "CREATE TABLE lost (id BIGINT NOT NULL)").await;
     let mut sink = common::sink(
         &server.dsn(),
-        "name \"l\"\ntable \"lost\"\nschema_fields \"id\" type=\"int64\" nullable=#false\n",
+        "name \"l\"\ntable \"lost\"\nfield \"id\" type=\"int64\" nullable=#false\n",
     );
     let first = id_batch(&sink, &[1]);
     sink.write_batch(&first).await.expect("opens the session");

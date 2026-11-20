@@ -105,9 +105,9 @@ connection dsn={dsn} sslmode="disable"
 
 mode kind="polling" table="saci_roundtrip_in" cursor_column="id" offset_table="saci_roundtrip_offsets"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "label" type="utf8"
-schema_fields "amount" type="decimal128" precision=18 scale=4
+field "id" type="int64" nullable=#false
+field "label" type="utf8"
+field "amount" type="decimal128" precision=18 scale=4
 "#,
         dsn = quoted(dsn)
     ))?;
@@ -130,9 +130,9 @@ chunk_rows 100
 
 connection dsn={dsn} sslmode="disable"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "label" type="utf8"
-schema_fields "amount" type="decimal128" precision=18 scale=4
+field "id" type="int64" nullable=#false
+field "label" type="utf8"
+field "amount" type="decimal128" precision=18 scale=4
 "#,
         dsn = quoted(dsn)
     ))?;

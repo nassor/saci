@@ -19,7 +19,7 @@ description: Use when changing, operating, testing or documenting the saci-servi
   config, checks capabilities, applies the flag overrides and hands off to `saci::service::serve`.
   `main_with(|builder| ...)` hands
   the `ServiceBuilder` that `serve` and `validate` use to the caller after the built-in factories
-  are registered, so a custom server registers its own `SourceFactory`/`SinkFactory` there.
+  are registered, so a custom server registers its own `Connector` there.
   `required-features = ["service"]` on the `[[bin]]` keeps a build without `service` from
   compiling it.
 - `saci-service-ui`: the `/ui` live dashboard. CSR Leptos, wasm32-unknown-unknown only, so **not**
@@ -66,15 +66,15 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
   `connector-mariadb`, `connector-nats`, `connector-otlp`, `connector-peer`, `connector-postgresql`, `connector-redb`,
   `connector-s3`, `connector-tcp`, `connector-turso`, `connector-udp`:
-  one per connector module `connector::<name>`. Each implies `connector-api`. Its factories
-  register in `ServiceBuilder::new()` only when `service` is also on; without `service` the
+  one per connector module `connector::<name>`. Each implies `connector-api`. Its connector
+  registers in `ServiceBuilder::new()` only when `service` is also on; without `service` the
   feature is a library module.
   TLS is always compiled into `connector-postgresql`, `connector-mariadb` and
   `connector-clickhouse`; there is no `tls` feature.
   `connector-kafka`, `connector-nats` and `connector-udp` imply `codec-ndjson` and
   `connector-tcp` implies
   `codec-arrow-ipc`, so the connector feature alone is runnable. No connector resolves a
-  format implicitly: a byte-carrying node names a declared `transformer` node's id, and that
+  format implicitly: a byte-carrying node names a declared `codec` node's id, and that
   node's own `format` key is what the registry resolves. `connector-file`, `connector-http`,
   `connector-redb` and `connector-s3` imply no codec, so the config picks which formats the
   binary carries. `connector-peer` implies none and resolves none, since Arrow IPC is its fixed
@@ -137,8 +137,8 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
 
 A custom server is a binary crate depending on `saci` with `default-features = false` and
 the features it needs (`service`, the `connector-*` and `codec-*` it carries), whose
-`main.rs` is `fn main() -> std::process::ExitCode { saci::service::cli::main() }`. To add factories of its own it calls
-`saci::service::cli::main_with(|builder| builder.register_source(MyFactory))`.
+`main.rs` is `fn main() -> std::process::ExitCode { saci::service::cli::main() }`. To add a connector of its own it calls
+`saci::service::cli::main_with(|builder| builder.connector(MyConnector))`.
 
 `cargo xtask server` (`xtask/src/server.rs`) builds a narrowed `saci-service` from the repo:
 `--connectors=`, `--codecs=` and `--processors=` (`wasm`, `plugin`) take short names,
@@ -190,7 +190,7 @@ replicates:
   `replication_lag_threshold` derived as `snapshot_log_interval.saturating_mul(2)`, which holds
   openraft's documented `replication_lag_threshold > LogsSinceLast` relation for any configured
   interval instead of leaving the library default of 5000 below it, with a cluster node filling it
-  in through `driver_config` (`src/service/cluster.rs`) from the cluster header. The handle exposes
+  in through `driver_config` (`src/service/cluster.rs`) from the `cluster` block. The handle exposes
   `propose`, `app_db`, `metrics`, `initialize`, `spawn_tcp_server` and `shutdown`
 - `transport/`: length-prefixed request/response TCP with a `serde_json` body,
   `MAX_FRAME_BYTES` 16 MiB. `TcpNetworkFactory`/`TcpNetwork` implement `RaftNetworkV2` over a
@@ -207,7 +207,7 @@ replicates:
 - `RedbStateClient` (`src/service/redb_state.rs`, `service` feature): the standalone/stream
   persistence path. Config bytes, processor priors and source cursors in one local unreplicated
   redb file declared by `store "redb"`. Stream mode persists cursors and priors whenever a store
-  is configured; interval/one-shot *persistence* is opt-in via
+  is configured; `interval`/`once` *persistence* is opt-in via
   `store "redb" { batch_resume #true }`. In-memory prior threading between passes follows the
   same flag, except for a processor node declaring a `window` block, which threads
   unconditionally: a backlog reaches such a node over several passes, and it accumulates
@@ -225,7 +225,7 @@ Key types:
   a `store` block, because a cluster node's state is the raft-replicated `cluster-app.redb` under
   `node.data_dir`
 - `WorkflowSpec`: one declared workflow (standalone may declare several; cluster mode takes
-  exactly one). Declared `transformer`, `source`, `wasm`, `plugin` and `sink` nodes, each with a
+  exactly one). Declared `codec`, `source`, `wasm`, `plugin` and `sink` nodes, each with a
   mandatory id and an optional name, plus `link` nodes carrying `from`, `to` and an optional
   `branch`. `#[serde(deny_unknown_fields)]` means a key the service cannot honour is a parse
   error, not a silently dropped section. The `wasm` and `plugin` fields, and the `window`
@@ -244,7 +244,7 @@ Key types:
   every `link` naming a declared node, the graph is acyclic, every source has an outbound link
   and every sink an inbound one, a processor may be fed by any mix of sources and processors
   (the fan-in merge that windowing processors rely on), cluster mode declares exactly one
-  processor and no source/sink/link, `run_mode kind="stream"` declares at least one source
+  processor and no source/sink/link, `run "stream"` declares at least one source
   (pulled round-robin), no source outside stream mode is one that never reaches EOF, and every
   `window` block is geometrically sane. Rule 17 and the cluster-mode window refusal in rule 10
   run whether or not this build carries the node's host or the windowing engine, since a bad
@@ -253,15 +253,15 @@ Key types:
   a builder-time gate in `src/service/validation.rs`.
 - `ServiceBuilder`, `BuiltWorkflow` and `BuiltNode`: `ServiceBuilder::new()` registers every
   compiled-in connector and codec plus the channel registry (`register_builtin_factories`,
-  `pub(crate)`); `ServiceBuilder::empty()` registers nothing. The chain is `register_source`,
-  `register_sink`, `codec`, `runtime(id, impl PipelineRuntime + 'static)`, `wasm_engine`,
+  `pub(crate)`); `ServiceBuilder::empty()` registers nothing. The chain is `connector`,
+  `codec`, `runtime(id, impl PipelineRuntime + 'static)`, `wasm_engine`,
   `inspector`, `dlq_registry` and `channels`. `build(&config)` assembles one `BuiltWorkflow` per
   declared workflow, one `BuiltNode` per declared node, in topological order, from config plus
-  registered factories. A `BuiltNode` holds its declared id/name/type_name, its component (`None`
+  registered factories. A `BuiltNode` holds its declared id/name/connector, its component (`None`
   for a processor), a `BuiltNodeKind::{Source,Processor,Sink}` and its `downstream` indices into
   `BuiltWorkflow::nodes`. `BuiltNode` and `BuiltWorkflow` are `#[non_exhaustive]`: their fields
   stay readable, and construction goes through `build` or `BuiltWorkflow::builder`. A
-  `wasm`/`plugin` node with no `module`/`library` gets its runtime from `runtime(id, ..)`, keyed by
+  `wasm`/`plugin` node with no `path` gets its runtime from `runtime(id, ..)`, keyed by
   that node's declared id. With `inspector(...)` the build also publishes the `Topology` into that
   inspector, because the builder is the only place that knows every node's concrete kind and
   detail.
@@ -273,7 +273,7 @@ Key types:
   and copies them into each workflow it builds. The lifecycle plane keeps the factory, because
   `start` and `restart` rebuild one workflow at a time.
   `rebuild_blocker(&WorkflowSpec)` names the two shapes that cannot be built twice, both proven by
-  the code: a `wasm` node with no `module` or a `plugin` node with no `library`, whose injected
+  the code: a `wasm` or `plugin` node with no `path`, whose injected
   runtime `build_processor_node` **removes** from the builder; and a `ChannelSource` or
   `ChannelSink`, which `ChannelRegistry` latches per name and refuses a second time. Such a
   workflow reports `restartable: false` and 409s on `start`, `stop` and `restart`. `stop` is
@@ -287,32 +287,25 @@ Key types:
   (default off), `inspector`, `dlq`, `build`. Nodes keep declaration order; `build` resolves link
   ids to indices and returns `SaciError::configuration` for an unknown id, a duplicate id, or a
   link whose target was declared before its origin. It does not run `validate_workflow_graph`,
-  and a node added this way has `type_name` `"native"` (processor) or `"custom"` (source, sink),
+  and a node added this way has `connector` `"native"` (processor) or `"custom"` (source, sink),
   no retry or heal wrapper and an empty `Registry`.
-- `Registry` plus `saci::connector::{SourceFactory, SinkFactory}`, re-exported from
-  `saci::service`: the whole extension surface. `source_names` and `sink_names`
-  enumerate what actually registered, the counterpart of `CodecRegistry::names`.
-- `BUILTIN_CONNECTOR_FEATURES` and `builtin_feature` (`src/service/factories.rs`): the eighteen
-  connector type names this crate carries, each paired with the feature that compiles it in
-  (`tcp` and `saci` are one entry each, since both halves register under that name). Listed
+- `Registry` plus `saci::connector::Connector`, re-exported from
+  `saci::service`: the whole extension surface. `Registry::connector(name)` and
+  `Registry::names()` enumerate what actually registered, the counterpart of `CodecRegistry::names`.
+- `BUILTIN_CONNECTOR_FEATURES` and `builtin_feature` (`src/service/factories.rs`): the sixteen
+  connector names this crate carries, each paired with the feature that compiles it in
+  (`http` and `http-listen` are separate entries that share `connector-http`). Listed
   unconditionally,
-  because a factory compiled out takes its `type_name` with it and the binary would otherwise
+  because a connector compiled out takes its `name` with it and the binary would otherwise
   have no way to tell a connector it ships from a name nothing here provides. Read on the
   failure path only, by `missing_factory_error`, which `build_source_node`, `build_sink_node`
   and both `Rebuilder` halves share: a miss on a tabled name names the `--features` flag that
-  supplies it, a miss on any other name keeps the plain wording, so a user-defined type is never
+  supplies it, a miss on any other name keeps the plain wording, so a user-defined connector is never
   told a flag would provide it. The lookup runs after the registry already missed, so a binary
-  registering its own `PostgresSource` never reaches it.
+  registering its own `postgresql` connector never reaches it.
   `builtin_connector_table_matches_the_registry` (unit test, gated on `all`) asserts the table
   equals the registry's key set in both directions, failing on a new connector with no entry and
-  on an entry a removed connector left behind. The table is also what `build_topology`'s
-  `DETAIL_ALLOWLIST` is pinned against, rather than the registry:
-  `every_allowlist_key_is_a_connector_type_this_crate_ships` (`src/service/topology.rs`) fails on
-  an allowlist key that names no connector this crate ships, and it runs in every build,
-  including one carrying no connector at all. Chained with the test above it still says no
-  allowlist key is a name nothing ever registers. The converse is deliberately unasserted:
-  `HttpSource` and `HttpSink` are tabled with no allowlisted key, because a URL carries
-  credentials.
+  on an entry a removed connector left behind.
 - `BUILTIN_CODEC_FEATURES` and `builtin_codec_feature`
   (`src/service/factories.rs`): the same table for the five format names, `arrow-ipc`, `avro`,
   `csv`, `ndjson`, `parquet`, each paired with its `codec-*` feature. Kept separate from
@@ -320,7 +313,7 @@ Key types:
   both go through one private `tabled_feature`. Read only by `missing_codec_error`, the
   sole producer of the unregistered-format wording, which `build_codecs` calls: a tabled
   format names the `--features` flag, any other format keeps the plain
-  `transformer '<id>' names format '<fmt>', which no codec is registered for
+  `codec '<id>' names format '<fmt>', which no codec is registered for
   (registered: ...)` wording. `builtin_codec_table_matches_the_registry` (unit test,
   gated on `all`) pins the table against `CodecRegistry::names` in both directions.
   This matters most in `--no-default-features --features service`, the reduced build CI
@@ -362,11 +355,11 @@ Key types:
   straight to `ServiceBuilder` is refused rather than silently stripped of its geometry.
 - `build_topology(&ServiceConfig, &[&[BuiltNode]], version)` (`src/service/topology.rs`): what the
   dashboard draws. One `TopoNode` per `BuiltNode`, in the same topological order, and connector
-  options copied through a per-`type` allowlist keyed on the string `SourceFactory::type_name`
-  returns, never a blanket copy of `SourceSpec.config`, which holds DSNs and credentials. Keys
+  config copied through the connector's own `Connector::detail_keys(role)` list,
+  never a blanket copy of `SourceSpec.config`, which holds DSNs and credentials. Keys
   outside the allowlist are dropped, not masked. A `TopoEdge` is one declared `link`, by node id
   directly: node ids are exactly the declared config ids, with no synthetic prefixing or chain
-  indexing. A `link` never crosses a workflow, so a `ChannelSink`/`ChannelSource` pair sharing one
+  indexing. A `link` never crosses a workflow, so a `channel` sink/source pair sharing one
   channel `name` is reported separately as a `Topology::bridges` entry (`BridgeEdge`), outside
   either workflow's `edges`.
 - `validate_workflow_graph(workflow_id, &[BuiltNode])` (`src/service/validation.rs`): the load-time
@@ -421,7 +414,7 @@ Key types:
   uncontrolled run passes. There are two pause points, both between passes so staged
   batches, carry-over slices, flow controllers and window trackers all survive a park: the head of
   `standalone.rs`'s loop, just before its cancellation drain, and the head of `stream.rs`'s. Both
-  pacing arms also skip their wait while a pause is pending, so an `interval_ms` of a
+  pacing arms also skip their wait while a pause is pending, so an `every_ms` of a
   minute does not hold a `pause` request at `Pausing` for a minute. The two halves of the pair own
   opposite ends of both `watch` channels, so dropping either closes exactly one: a dropped
   supervisor releases a parked runner rather than stranding it, and a finished runner ends the
@@ -431,7 +424,7 @@ Key types:
   it is exactly one `BuiltWorkflow::run`, and with `Some` it builds, runs, parks, drains and rebuilds
   the workflow in response to commands, sharing one `&RefCell<WorkflowFactory>` across every
   supervisor (all polled by the one `join_all` on one task, and the borrow never spans an await).
-  A completed runner returns, so a one-shot service exits when its workflow does; a failed one
+  A completed runner returns, so a `run "once"` service exits when its workflow does; a failed one
   parks only when it is controlled **and** restartable. `LifecycleRegistry::command` applies the
   transition table and waits up to `LIFECYCLE_ACK_BUDGET` (5 s) for the published state to reach
   the verb's target; `command_all` is that per workflow, concurrently, because ten workflows in
@@ -491,7 +484,7 @@ Key types:
   string.
   `ServiceConfig::validate` refuses a `flow_control` block in cluster mode outright, the way it
   refuses a `store` block: a cluster workflow declares no source node, so there is no admission
-  to govern. `RunMode::OneShot`
+  to govern. `RunMode::Once`
   engages no controller, because a single pass must drain every source by definition.
   `flow_control { enabled #false }` restores drain-to-EOF iterations; `flow_control { rows N }`
   pins a fixed size and disables the search entirely. `Source::request_batch_rows` is the
@@ -502,11 +495,11 @@ Key types:
   arrival but never splits the one in hand, and the runner withholds `request_batch_rows`
   from it as well, because a windowed node observes event time at every pass boundary, so
   both a credit-sized slice and a credit-sized fetch would put a throughput measurement in
-  its output. Such a connector keeps its configured `batch_size`/`batch_rows`, no boundary is
+  its output. Such a connector keeps its configured `batch_rows`, no boundary is
   ever drawn inside an arrival, and `max_chunk_bytes` does not bound it. A source feeding both
   a windowed and a non-windowed node counts as windowed: both see the same `RecordBatch`. In
   `stream` those two suppressions leave the credit deciding nothing, so the stream runner builds
-  **no controller** at all for such a source (`controllers[i] = None`, `RunMode::OneShot`'s
+  **no controller** at all for such a source (`controllers[i] = None`, `RunMode::Once`'s
   shape in the standalone runner): no samples, no epoch experiment, no `saci_flow_*` series, and one
   `tracing::info!` startup line naming it. The batch runners keep theirs, because `remaining
   == 0` still ends the drain there, so the credit decides how many whole arrivals one pass
@@ -536,13 +529,13 @@ Key types:
   controls it.
   `Rebuilder` is the single connector-construction path: `build_source_node`/`build_sink_node`
   build the initial instance through it too, so a heal cannot drift from the first build. It
-  captures `Arc<Registry>` plus the node's `type_name`, `config`, bound codec, channel
+  captures `Arc<Registry>` plus the node's `connector` name, `config`, bound codec, channel
   bridge and `Option<RetryMode>` (`None` for a stream-mode source, matching
   `sources_take_retry_wrapper`).
-  Which nodes are reached is the factory's answer, not a list here: `builder::resolve_heal`
-  consults `SourceFactory::rebuildable`/`SinkFactory::rebuildable` for that node's own config.
-  An `Err` on a node that declares its **own** `heal` block is a load-time configuration error
-  (`workflow 'w' sink 's': heal is not available for type 'T': <reason>`); the same `Err` under
+  Which nodes are reached is the connector's answer, not a list here: `builder::resolve_heal`
+  consults `Connector::rebuild(role, &config)` for that node's own config.
+  A `Rebuild::No` on a node that declares its **own** `heal` block is a load-time configuration error
+  (`workflow 'w' sink 's': heal is not available for connector 'T': <reason>`); the same answer under
   an inherited policy silently skips the node, because a channel half appears in most
   multi-workflow configs and an inherited policy is not a request by name.
   `ServiceConfig::validate` refuses a `heal` block in cluster mode outright, the way it refuses
@@ -565,10 +558,10 @@ Key types:
   `poll_timeout_ms` window, so its end of stream confirms nothing and a replay of it never sets
   `known`.
   One letter is one row of `envelope_schema()`, eight columns derived from `ENVELOPE_FIELDS` so
-  the Arrow schema and the `schema_fields` both halves are built with cannot drift; the refused
+  the Arrow schema and the `field` lines both halves are built with cannot drift; the refused
   batch rides in `payload` as one Arrow IPC stream, the one format that round-trips a `Binary`
   column and schema metadata. `half_config` is the merge: the block's shared keys, that half's
-  own block over them, the injected defaults where a key is still absent, then `schema_fields`
+  own block over them, the injected defaults where a key is still absent, then `field` lines
   unconditionally. `reason_of` unwraps `RetryExhausted` recursively, so the grouping key does
   not carry the varying attempt count.
   `record` runs inside `write_staged` (both runners) and never fails outward: a store that
@@ -669,12 +662,18 @@ Key types:
   decision line and the inspector record share one formatted `reason`.
 - `SpanMetricsLayer`: turns each `pipeline.stage` span into a `saci_stage_duration_seconds` sample.
 
-CLI subcommands (`src/service/cli.rs`, one file per command in `src/service/cli/commands/`): `serve`, `validate`, `status`, `cluster init`, `cluster join`, `cluster leave`,
-`cluster status`. `--config`/`-c` (env `SACI_CONFIG`) defaults to `saci.kdl`, so `saci-service serve`
+CLI subcommands (`src/service/cli.rs`, one file per command in `src/service/cli/commands/`): `serve`, `validate`, `status`, `cluster init`,
+`cluster status`. `--config`/`-c` (env `SACI_CONFIG`) is the only global option and defaults to `saci.kdl`, so `saci-service serve`
 needs no flags; a missing file surfaces as
-`error: Configuration error: reading config file saci.kdl: <os error>` with exit code 1.
+`error: Configuration error: reading config file saci.kdl: <os error>` with exit code 1. `serve` takes
+`--node-id` (env `SACI_NODE_ID`), `--bind <ADDR>` (env `SACI_HTTP_BIND`, replaces `http.bind` whole),
+`--log-format`, `--log-level` and `--otlp-endpoint` (envs `SACI_LOG_FORMAT`, `SACI_LOG_LEVEL`,
+`SACI_OTLP_ENDPOINT`). `status` and `cluster status` take `--url <URL>` (env `SACI_URL`); with no
+`--url` they load `--config` and use `http://{http.bind}`, and a failed load is
+`pass --url, or --config pointing at the node's config`. A cluster node prints `node {id}  mode=cluster`
+and the `/status` JSON carries no `cluster` object.
 
-`validate` sorts a declared type the registry does not hold into two kinds. A name in
+`validate` sorts a declared connector name the registry does not hold into two kinds. A name in
 `BUILTIN_CONNECTOR_FEATURES` is a connector this crate ships whose feature is off, which no
 serve-time registration can supply: `ERROR:` on stderr naming the feature, and exit 1 in every
 mode, `--strict` included and irrelevant to it. Any other name may be a user-defined factory
@@ -933,9 +932,9 @@ both sides on the next `cargo xtask ui`.
   scheduling, checkpointing into the raft-replicated `cluster-app.redb`, Docker Compose deployment
   of the three nodes. One `[[example]]` target of `saci`.
 - `examples/branching/`: one long-running stream workflow (`branching.kdl`) demonstrating every
-  fan-out split: a core-subject `NatsSource` multicasting to a mirror sink and two routing
+  fan-out split: a core-subject `nats` source multicasting to a mirror sink and two routing
   processors, the branching-wasm component processor and the branching-plugin native plugin, each
-  delivering per message to branch-labelled `FileSink`s. The `branching_publish` `saci`
+  delivering per message to branch-labelled `file` sinks. The `branching_publish` `saci`
   example feeds the stream. Demo processors in `wasm/` and `plugin/`; see its `README.md`.
 - `examples/windowing/`: Beam-style windowing, one runnable workflow per window kind,
   `tumbling/tumbling.kdl`, `sliding/sliding.kdl` and `session/session.kdl`. Each fans the same two
@@ -950,21 +949,21 @@ both sides on the next `cargo xtask ui`.
   instant, so a session closes at each burst boundary rather than wherever the random symbol draw
   happens to leave a `gap_ms`-wide hole; the other two modes leave both at 0. See its `README.md`.
 - `examples/multi_workflow/`: two workflows in one config, bridged in process. A routing wasm
-  processor splits a core-subject `NatsSource` into a PostgreSQL sink and a `ChannelSink`, and the
-  second workflow's `ChannelSource` feeds the tumbling windowing example's processor unchanged. No
+  processor splits a core-subject `nats` source into a PostgreSQL sink and a `channel` sink, and the
+  second workflow's `channel` source feeds the tumbling windowing example's processor unchanged. No
   link crosses a workflow; the shared channel name does. The `multi_workflow_publish`
   `saci` example (an `[[example]]` target, `required-features connector-nats`) feeds both
   NATS subjects. Router component in `wasm/`; see its `README.md`.
 - `examples/integrity/`: end-to-end proof that every published row is processed correctly, across
-  two `saci-service` processes because `run_mode` is a whole-config property. `integrity.kdl` runs
-  the ingest and settle workflows in stream mode (a Kafka NDJSON source and a CSV `FileSource` fan
-  into the integrity-classify-wasm processor, which routes each batch to an ndjson `HttpSink`, a
-  csv `HttpSink` and a `ChannelSink`; the channel plus a JetStream NDJSON source fan into the
-  windowed integrity-aggregate-wasm processor and an arrow-ipc `HttpSink`), while
+  two `saci-service` processes because `run` is a whole-config property. `integrity.kdl` runs
+  the ingest and settle workflows in stream mode (a `kafka` NDJSON source and a CSV `file` source fan
+  into the integrity-classify-wasm processor, which routes each batch to an ndjson `http` sink, a
+  csv `http` sink and a `channel` sink; the channel plus a JetStream NDJSON source fan into the
+  windowed integrity-aggregate-wasm processor and an arrow-ipc `http` sink), while
   `integrity_audit.kdl` runs the audit workflow in interval mode, because every PostgreSQL read
   mode reports EOF once caught up and the stream runner retires such a source for good. That one
   reads `public.order_audit` through a `cdc_logical` replication slot into integrity-audit-wasm and
-  a parquet `HttpSink`. All four sinks POST to one endpoint served by `integrity_check`, the
+  a parquet `http` sink. All four sinks POST to one endpoint served by `integrity_check`, the
   `saci` example that is publisher, verifier and lifecycle driver at once: it recomputes
   every derived field and FNV-1a checksum from what it published and exits non-zero on any
   mismatch. Both stream-half workflows hold a Channel node, so the control plane answers 409 to
@@ -1007,7 +1006,7 @@ store, so it needs no Docker and no running service. Lib unit tests that assert 
 
 Update this file in the same change that: adds, removes or re-implies a `saci` host feature (`service`, `server`, `wasm-host`, `plugin-host`, `distributed*`, `inspector`, `metrics`);
 adds or renames a config block or key (`ServiceConfig`, `WorkflowSpec`, `StoreConfig`,
-`FlowControlConfig`, `HealConfig`, `DlqBlock`, `ObservabilityConfig`, the cluster header); changes the
+`FlowControlConfig`, `HealConfig`, `DlqBlock`, `ObservabilityConfig`, the `cluster` block); changes the
 service's Rust API (`ServiceBuilder`'s chain, `BuiltWorkflow`, `BuiltWorkflowBuilder`, `RunOptions`,
 `WorkflowStats`, `serve`, `ServeOptions`, `ServeExit`, `ServiceConfig::from_kdl`, `PipelineRuntime::run_batch`);
 changes `serve.rs` or a runner, the

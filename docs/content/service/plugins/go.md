@@ -242,7 +242,7 @@ The plugin works on the same `Order` rows as `examples/wasm/settle/`, so
 `plugin` node naming the library, and the two `link` lines name the new node.
 
 ```kdl,name=The standalone settle config, with a plugin node instead
-plugin "settle" library="examples/plugins/settle-go/libsettle_go.so" {
+plugin "settle" path="examples/plugins/settle-go/libsettle_go.so" {
     config "settle.rate_JPY"="0.0068"
 }
 

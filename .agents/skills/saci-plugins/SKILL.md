@@ -55,7 +55,7 @@ does, and `saci_processor_metric` stays empty for a plugin.
 
 `processor.batch` is the `debug` span the plugin host opens under `runtime.run`.
 
-A `plugin` node with no `library` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
+A `plugin` node with no `path` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
 `build_processor_node` **removes** that injected runtime from the builder, so `rebuild_blocker`
 reports such a workflow as `restartable: false` and the control plane answers 409 to `start`,
 `stop` and `restart`.
@@ -112,7 +112,7 @@ runtimes and resolves the artifact through `Fixtures::resolve`.
 Update this file in the same change that: changes the C ABI, its version or either vtable; changes
 `#[plugin]` or `saci::sdk`; changes `NativePluginRuntime`, its manifest validation or its metrics; changes
 the smoketest fixture or its build; adds or removes a plugin example; changes `rebuild_blocker`'s
-`restartable` rule for a `plugin` node with no `library` (also check skill `saci-service`'s Service
+`restartable` rule for a `plugin` node with no `path` (also check skill `saci-service`'s Service
 layer section, the canonical copy); changes `NativePluginRuntime::with_identity`, its metric
 attribution, or the `host-io::metric`/native ABI metric-callback relationship (also update skill
 `saci-service`'s Observability section, the canonical copy).

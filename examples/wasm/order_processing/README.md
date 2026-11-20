@@ -68,7 +68,7 @@ and Windows (PowerShell) unless a block says otherwise.
    and its paths are relative to the repository root:
 
    ```text
-   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_wasm.kdl --strict
+   cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- validate --config examples/configs/standalone_wasm.kdl --strict
    ```
 
    The run ends with `OK: workflow graph validated`, which means the host
@@ -77,10 +77,10 @@ and Windows (PowerShell) unless a block says otherwise.
 5. Run the pipeline:
 
    ```text
-   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_wasm.kdl
+   cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- serve --config examples/configs/standalone_wasm.kdl
    ```
 
-   `run_mode` is `one_shot`, so `serve` processes
+   `run "once"` makes `serve` process
    `examples/configs/fixtures/order_processing_input.csv` once and exits.
 
 6. Read the output.
@@ -102,7 +102,7 @@ and Windows (PowerShell) unless a block says otherwise.
    is `-50.0`. `usd_amount` is `amount` times the rate in the config.
 
 The fixture seeds `valid` with `false` and `usd_amount` with `0.0`. The
-processor cannot add columns, and the CSV transformer turns an empty field into
+processor cannot add columns, and the CSV codec turns an empty field into
 a NULL, which the non-nullable `Transaction` schema rejects, so one blank cell
 fails the whole batch.
 

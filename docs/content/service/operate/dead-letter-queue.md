@@ -168,8 +168,8 @@ The two `mode` blocks take different keys: a JetStream consumer filters with
 `filter_subjects` and a publisher names one `subject`, so each goes in the
 half that takes it. `poll_timeout_ms` is a source key as well, and a sink half
 given it refuses the workflow at load time with
-`` NatsSink config: unknown field `poll_timeout_ms`, expected one of
-`connection`, `mode`, `schema_fields` ``. Both halves are built when the
+`` NatsSink config: unknown field `poll_timeout_ms`, expected `connection` or
+`mode` ``. Both halves are built when the
 workflow is, so either one's bad key is a startup failure rather than
 something a replay discovers later.
 
@@ -314,7 +314,7 @@ Invoke-WebRequest -Method POST localhost:8080/api/workflows/orders/dlq/replay `
 
 The answer is `200` once the replay ran and `202` while it is still queued,
 which is the normal answer for an idle workflow: the runner serves the request
-when it next reaches its replay point. In `run_mode kind="stream"` the head of
+when it next reaches its replay point. In `run "stream"` the head of
 the loop is reached only when an item arrives, the same limit a `pause` has,
 so a silent stream holds a queued replay until something comes in.
 
@@ -341,9 +341,9 @@ reaches the purge, because the source half fails on it first.
 
 | Store | Sink half | Source half | Notes |
 |---|---|---|---|
-| `redb` (default) | `RedbSink` | `RedbSource` | one embedded file on local disk, needs `connector-redb`, which is in the `server` feature |
-| `kafka` | `KafkaSink` | `KafkaSource` | one topic, needs `connector-kafka`; an elapsed poll window ends a drain, so an empty read is not a confirmed empty topic |
-| `nats` | `NatsSink` | `NatsSource` | JetStream only, needs `connector-nats`; a drain ends only once the server reports nothing waiting and nothing unacknowledged |
+| `redb` (default) | the `redb` sink | the `redb` source | one embedded file on local disk, needs `connector-redb`, which is in the `server` feature |
+| `kafka` | the `kafka` sink | the `kafka` source | one topic, needs `connector-kafka`; an elapsed poll window ends a drain, so an empty read is not a confirmed empty topic |
+| `nats` | the `nats` sink | the `nats` source | JetStream only, needs `connector-nats`; a drain ends only once the server reports nothing waiting and nothing unacknowledged |
 
 A store's payload is always Arrow IPC bytes. IPC is already the host to
 processor wire format, reproduces the batch and its schema metadata exactly,
@@ -383,7 +383,7 @@ dead letter store may not do.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| the block's argument | string | `redb` | which store backs the queue: `redb`, `kafka` or `nats` |
+| the block's argument | string | `redb` | which store backs the queue: `redb`, `kafka` or `nats`; the id is the connector's name |
 | `replay` | string | `before_sources` | where in a pass a replay runs; the other value is `after_sources` |
 | `source` | block | empty | keys only the store's source half takes |
 | `sink` | block | empty | keys only the store's sink half takes |
@@ -392,7 +392,7 @@ dead letter store may not do.
 The keys a store's own halves accept are that connector's, documented on its
 page: [redb](@/service/connectors/redb.md),
 [Kafka](@/service/connectors/kafka.md), [NATS](@/service/connectors/nats.md).
-A key the receiving factory does not know is refused by name at load time, as
+A key the receiving connector does not know is refused by name at load time, as
 in `RedbSource config: unknown field 'compact'`, which is the signal to move
 it from the block into the `sink` half.
 
@@ -404,8 +404,8 @@ Three things the layer fills in, per half, where the block left the key out:
 | `redb` | `consume` on the source half | `#true`, so a delivered letter is deleted at the end of the drain |
 | `kafka`, `nats` | `stop_at_end` on the source half | `#true`, so the drain ends once it is caught up |
 
-`schema_fields` is always the layer's: both halves are built with the envelope
-schema, and a declared `schema_fields` is replaced.
+`field` lines are always the layer's: both halves are built with the envelope
+schema, and a declared `field` is replaced.
 
 ## When it refuses to start
 
@@ -415,7 +415,7 @@ schema, and a declared `schema_fields` is replaced.
 | `` mode "cluster" does not take a `dlq` block (workflow 'w'): a cluster workflow declares no sink node, so there is nothing to dead-letter `` | Delete the block. A cluster node writes through claims and checkpoints, not sinks. |
 | `workflow 'orders' dlq "nats": source needs a mode block` | Add `source { mode kind="jetstream" ... }`. The NATS connector needs a mode named. |
 | `workflow 'orders' dlq "nats": source mode kind must be "jetstream"; core NATS is at-most-once and drops a letter published with no subscriber` | Use JetStream on both halves, or pick another store. |
-| `` no source factory registered for type 'RedbSource' (required by source 'orders/dlq'): that is a built-in connector this binary was built without, so rebuild or reinstall with `--features connector-redb`, or register your own factory under that name `` | Build with the connector the store needs. Both halves are built when the workflow is, so the message names whichever one is missing. |
+| `` no connector named 'redb' is registered (required by source 'orders/dlq'): that is a built-in connector this binary was built without, so rebuild or reinstall with `--features connector-redb`, or register your own connector under that name `` | Build with the connector the store needs. Both halves are built when the workflow is, so the message names whichever one is missing. |
 | `` RedbSource config: unknown field `compact` `` | A sink key sat at the block level or in `source`. Move it into `sink`. The mirror case, a source key the sink half refuses, reads `RedbSink config: unknown field …`. |
 
 An unknown `replay` value is a parse error naming the value, because the key

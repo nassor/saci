@@ -10,11 +10,11 @@
 //! fails at build with the codec contract's `unsupported` error.
 //!
 //! ```kdl
-//! transformer "csv_fmt" format="csv" {
-//!     options has_headers=#true
+//! codec "csv_fmt" format="csv" {
+//!     config has_headers=#true
 //! }
 //!
-//! source "orders" type="FileSource" component="Order" transformer="csv_fmt" {
+//! source "orders" connector="file" component="Order" codec="csv_fmt" {
 //!     config {
 //!         path "/data/orders.csv"
 //!     }

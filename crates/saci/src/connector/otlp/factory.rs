@@ -1,8 +1,8 @@
-//! Factories for [`OtlpMetricsSource`] and [`OtlpMetricsSink`].
+//! The OpenTelemetry metrics connector.
 
-use crate::connector::schema::without_schema_fields;
+use crate::connector::schema::without_fields;
 use crate::connector::{
-    ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_optional_schema_fields,
+    ConfigValue, Connector, ConnectorContext, Rebuild, Role, parse_optional_fields, schema_of,
 };
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
@@ -12,69 +12,81 @@ use crate::connector::otlp::config::{OtlpMetricsSinkConfig, OtlpMetricsSourceCon
 use crate::connector::otlp::sink::OtlpMetricsSink;
 use crate::connector::otlp::source::OtlpMetricsSource;
 
-/// Factory for [`OtlpMetricsSource`].
+/// The `otlp-metrics` connector: an OTLP/HTTP metrics source and sink.
 ///
-/// The `config` table is [`OtlpMetricsSourceConfig`]: the push mode's
-/// shorthand keys, or a `mode` block naming `push` or `pull`, and the
-/// `schema_fields` entries declaring the Arrow schema to emit. No codec
-/// is resolved: the connector carries `RecordBatch`es and owns the OTLP
-/// decoding itself.
-pub struct OtlpMetricsSourceFactory;
+/// The source's `config` table is [`OtlpMetricsSourceConfig`]: the push
+/// mode's shorthand keys, or a `mode` block naming `push` or `pull`, and the
+/// `field` entries declaring the Arrow schema to emit. The sink's is
+/// [`OtlpMetricsSinkConfig`]: the collector's `url`, the body `encoding`, the
+/// `headers` every export carries, and the timeouts and counts documented on
+/// the config type. No codec is resolved for either role: the connector
+/// carries `RecordBatch`es and owns the OTLP wire format itself.
+pub struct OtlpMetricsConnector;
 
-impl SourceFactory for OtlpMetricsSourceFactory {
-    fn type_name(&self) -> &'static str {
-        "OpenTelemetryMetricsSource"
+impl Connector for OtlpMetricsConnector {
+    fn name(&self) -> &'static str {
+        "otlp-metrics"
     }
 
-    fn build(
+    fn source(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let cfg = OtlpMetricsSourceConfig::deserialize(without_schema_fields(config))
+        let cfg = OtlpMetricsSourceConfig::deserialize(without_fields(config))
             .map_err(|e| SaciError::configuration(format!("OtlpMetricsSource config: {e}")))?;
-        let schema = parse_optional_schema_fields(config, "OtlpMetricsSource")?;
+        let schema = parse_optional_fields(config, "OtlpMetricsSource")?
+            .map(|fields| schema_of(&fields))
+            .transpose()?;
         Ok(Box::new(OtlpMetricsSource::new(cfg, schema)?))
     }
 
-    /// A second build binds the same address, which succeeds once the first
-    /// instance has released it, and a push source holds nothing a rebuild
-    /// would drop: every body it took is already down the channel. A pull
-    /// source re-reads its url, which is the at-least-once contract it already
-    /// documents.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
-    }
-}
-
-/// Factory for [`OtlpMetricsSink`].
-///
-/// The `config` table is [`OtlpMetricsSinkConfig`]: the collector's
-/// `url`, the body `encoding`, the `headers` every export carries, and the
-/// timeouts and counts documented on the config type. No codec is
-/// resolved: an OTLP request is the wire format.
-pub struct OtlpMetricsSinkFactory;
-
-impl SinkFactory for OtlpMetricsSinkFactory {
-    fn type_name(&self) -> &'static str {
-        "OpenTelemetryMetricsSink"
-    }
-
-    fn build(
+    fn sink(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let cfg = OtlpMetricsSinkConfig::deserialize(without_schema_fields(config))
+        let cfg = OtlpMetricsSinkConfig::deserialize(without_fields(config))
             .map_err(|e| SaciError::configuration(format!("OtlpMetricsSink config: {e}")))?;
-        let schema = parse_optional_schema_fields(config, "OtlpMetricsSink")?;
+        let schema = parse_optional_fields(config, "OtlpMetricsSink")?
+            .map(|fields| schema_of(&fields))
+            .transpose()?;
         Ok(Box::new(OtlpMetricsSink::new(cfg, schema)?))
     }
 
-    /// `write_batch` awaits every export it starts, so a failed write leaves
-    /// nothing queued for a rebuild to discard.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
+    /// A second source build binds the same address, which succeeds once the
+    /// first instance has released it, and a push source holds nothing a
+    /// rebuild would drop: every body it took is already down the channel. A
+    /// pull source re-reads its url, which is the at-least-once contract it
+    /// already documents. `write_batch` awaits every export it starts, so a
+    /// failed write leaves nothing queued for a rebuild to discard.
+    fn rebuild(&self, _role: Role, _config: &ConfigValue) -> Rebuild {
+        Rebuild::Yes
+    }
+
+    /// A push listener has no last request and a pull source repeats unless
+    /// `stop_at_end` is set. A source with no `mode` block is the push
+    /// listener. Read straight off the table, so a `mode` block the source
+    /// would refuse still answers the way the key says.
+    fn live(&self, config: &ConfigValue) -> bool {
+        let mode = config.get("mode");
+        let pull = matches!(
+            mode.and_then(|mode| mode.get("kind"))
+                .and_then(ConfigValue::as_str),
+            Some("pull")
+        );
+        let stop_at_end = mode
+            .and_then(|mode| mode.get("stop_at_end"))
+            .and_then(ConfigValue::as_bool)
+            .unwrap_or(false);
+        !pull || !stop_at_end
+    }
+
+    fn detail_keys(&self, role: Role) -> &'static [&'static str] {
+        match role {
+            Role::Source => &["bind", "path", "mode.kind", "mode.url"],
+            Role::Sink => &["url", "encoding", "service_name"],
+        }
     }
 }
 
@@ -93,7 +105,7 @@ mod tests {
     /// Written out rather than taken from `expect_err`, which needs the built
     /// value to be `Debug` and a `Box<dyn Source>` is not.
     fn refused_source(config: &ConfigValue) -> SaciError {
-        match OtlpMetricsSourceFactory.build(config, &ConnectorContext::new(None)) {
+        match OtlpMetricsConnector.source(config, &ConnectorContext::new(None)) {
             Ok(_) => panic!("the config is refused"),
             Err(error) => error,
         }
@@ -101,56 +113,68 @@ mod tests {
 
     /// The error one refused sink build reports.
     fn refused_sink(config: &ConfigValue) -> SaciError {
-        match OtlpMetricsSinkFactory.build(config, &ConnectorContext::new(None)) {
+        match OtlpMetricsConnector.sink(config, &ConnectorContext::new(None)) {
             Ok(_) => panic!("the config is refused"),
             Err(error) => error,
         }
     }
 
     #[test]
-    fn the_type_names_are_the_strings_a_config_declares() {
+    fn the_connector_declares_its_name_roles_and_detail_keys() {
+        assert_eq!(OtlpMetricsConnector.name(), "otlp-metrics");
+        assert_eq!(OtlpMetricsConnector.roles(), &[Role::Source, Role::Sink]);
         assert_eq!(
-            OtlpMetricsSourceFactory.type_name(),
-            "OpenTelemetryMetricsSource"
+            OtlpMetricsConnector.detail_keys(Role::Source),
+            &["bind", "path", "mode.kind", "mode.url"]
         );
         assert_eq!(
-            OtlpMetricsSinkFactory.type_name(),
-            "OpenTelemetryMetricsSink"
+            OtlpMetricsConnector.detail_keys(Role::Sink),
+            &["url", "encoding", "service_name"]
         );
     }
 
     #[test]
+    fn a_push_listener_and_a_repeating_pull_are_live_and_a_bounded_pull_is_not() {
+        assert!(OtlpMetricsConnector.live(&parse("bind \"127.0.0.1:0\"")));
+        assert!(OtlpMetricsConnector.live(&ConfigValue::Object(Default::default())));
+        assert!(OtlpMetricsConnector.live(&parse(
+            "mode kind=\"pull\" url=\"http://127.0.0.1:1/\" interval_ms=1000"
+        )));
+        assert!(!OtlpMetricsConnector.live(&parse(
+            "mode kind=\"pull\" url=\"http://127.0.0.1:1/\" stop_at_end=#true interval_ms=0"
+        )));
+    }
+
+    #[test]
     fn both_halves_declare_a_second_build_sound() {
-        assert!(
-            OtlpMetricsSourceFactory
-                .rebuildable(&ConfigValue::Null)
-                .is_ok()
+        assert_eq!(
+            OtlpMetricsConnector.rebuild(Role::Source, &ConfigValue::Null),
+            Rebuild::Yes
         );
-        assert!(
-            OtlpMetricsSinkFactory
-                .rebuildable(&ConfigValue::Null)
-                .is_ok()
+        assert_eq!(
+            OtlpMetricsConnector.rebuild(Role::Sink, &ConfigValue::Null),
+            Rebuild::Yes
         );
     }
 
     #[test]
     fn a_source_builds_a_listener_outside_the_host() {
         let config = parse("bind \"127.0.0.1:0\"");
-        let source = OtlpMetricsSourceFactory
-            .build(&config, &ConnectorContext::new(None))
+        let source = OtlpMetricsConnector
+            .source(&config, &ConnectorContext::new(None))
             .expect("the listener binds");
-        // The canonical schema is what a source with no `schema_fields` emits.
+        // The canonical schema is what a source with no `field` emits.
         assert_eq!(source.schema().fields().len(), 10);
     }
 
     #[test]
     fn a_source_honours_the_declared_schema() {
         let config = parse(
-            "bind \"127.0.0.1:0\"\nschema_fields \"id\" type=\"int64\" nullable=#false\n\
-             schema_fields \"label\" type=\"utf8\" nullable=#false",
+            "bind \"127.0.0.1:0\"\nfield \"id\" type=\"int64\" nullable=#false\n\
+             field \"label\" type=\"utf8\" nullable=#false",
         );
-        let source = OtlpMetricsSourceFactory
-            .build(&config, &ConnectorContext::new(None))
+        let source = OtlpMetricsConnector
+            .source(&config, &ConnectorContext::new(None))
             .expect("the listener binds");
         let schema = source.schema();
         assert_eq!(schema.fields().len(), 2);
@@ -175,19 +199,18 @@ mod tests {
     #[test]
     fn a_sink_builds_without_touching_the_endpoint() {
         let config = parse("url \"http://127.0.0.1:1\"");
-        let sink = OtlpMetricsSinkFactory
-            .build(&config, &ConnectorContext::new(None))
+        let sink = OtlpMetricsConnector
+            .sink(&config, &ConnectorContext::new(None))
             .expect("no request is made at build time");
         assert_eq!(sink.schema().fields().len(), 10);
     }
 
     #[test]
     fn a_sink_reports_the_schema_its_config_declares() {
-        let config = parse(
-            "url \"http://127.0.0.1:1\"\nschema_fields \"id\" type=\"int64\" nullable=#false",
-        );
-        let sink = OtlpMetricsSinkFactory
-            .build(&config, &ConnectorContext::new(None))
+        let config =
+            parse("url \"http://127.0.0.1:1\"\nfield \"id\" type=\"int64\" nullable=#false");
+        let sink = OtlpMetricsConnector
+            .sink(&config, &ConnectorContext::new(None))
             .expect("the sink builds");
         let schema = sink.schema();
         assert_eq!(schema.fields().len(), 1);

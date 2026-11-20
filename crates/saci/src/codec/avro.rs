@@ -34,16 +34,18 @@
 //! columns, because the fingerprint is over the schema itself.
 //!
 //! ```kdl
-//! transformer "avro_fmt" format="avro" {
-//!     options schema_id=42
+//! codec "avro_fmt" format="avro" {
+//!     config schema_id=42
 //! }
 //!
-//! source "orders_file" type="FileSource" component="Order" transformer="avro_fmt" {
+//! source "orders_file" connector="file" component="Order" codec="avro_fmt" {
 //!     config path="/data/orders.avro"
 //! }
 //!
-//! sink "orders_topic" type="KafkaSink" component="Order" transformer="avro_fmt" {
-//!     config topic="orders"
+//! sink "orders_topic" connector="kafka" component="Order" codec="avro_fmt" {
+//!     config brokers="localhost:9092" topic="orders" {
+//!         field "id" type="int64" nullable=#false
+//!     }
 //! }
 //! ```
 

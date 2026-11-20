@@ -1,7 +1,7 @@
 //! [`ConnectorContext`]: what a factory can reach while it builds.
 //!
 //! The context carries the codec, if any, the host bound to this
-//! connector instance through a declared `transformer` id. Resolution against
+//! connector instance through a declared `codec` id. Resolution against
 //! the `CodecRegistry` happens in the host, once per workflow build, so
 //! every byte-carrying connector uses what it is handed instead of resolving a
 //! `format` key itself.
@@ -46,7 +46,7 @@ pub struct ConnectorContext {
 impl ConnectorContext {
     /// Wrap the codec the host resolved for this connector instance.
     ///
-    /// `None` for a connector declared with no `transformer` key, which is
+    /// `None` for a connector declared with no `codec` key, which is
     /// valid for a connector that produces `RecordBatch`es directly (for
     /// example `PostgresSource`) and an error for one that moves bytes.
     pub fn new(codec: Option<Arc<dyn Codec>>) -> Self {
@@ -100,11 +100,11 @@ impl ConnectorContext {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] when the source or sink declared no
-    /// `transformer` key.
+    /// `codec` key.
     pub fn codec(&self, what: &str) -> Result<Arc<dyn Codec>, SaciError> {
         self.codec.clone().ok_or_else(|| {
             SaciError::configuration(format!(
-                "{what} moves bytes and needs a 'transformer' key naming a declared transformer"
+                "{what} moves bytes and needs a 'codec' key naming a declared codec"
             ))
         })
     }
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(err.category(), "configuration");
         assert_eq!(
             err.message(),
-            "FileSource moves bytes and needs a 'transformer' key naming a declared transformer"
+            "FileSource moves bytes and needs a 'codec' key naming a declared codec"
         );
     }
 

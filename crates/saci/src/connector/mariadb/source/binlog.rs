@@ -114,7 +114,7 @@ use super::gtid::{GtidSet, format_gtid};
 use super::history::{Definition, Entry, History, HistoryStore, reached};
 use super::snapshot::{Snapshot, SnapshotSpec, plan_keys};
 use crate::connector::mariadb::config::{
-    FieldSpec, MariadbSourceConfig, PositionMode, Role, SnapshotMode, SourceMode,
+    MariadbSourceConfig, PositionMode, Role, SnapshotMode, SourceMode, is_reserved,
 };
 use crate::connector::mariadb::connection::{
     Connector, ER_ACCESS_DENIED_ERROR, ER_MASTER_FATAL_ERROR_READING_BINLOG,
@@ -126,6 +126,7 @@ use crate::connector::mariadb::types::{
     Access, CatalogColumn, Family, ResolvedColumn, validate_columns,
 };
 use crate::connector::mariadb::values::{Cell, ColumnBuilder};
+use crate::connector::schema::FieldSpec;
 
 /// How long closing a stream may take before it is abandoned.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -972,7 +973,7 @@ fn build_plan(
     if lenient
         && let Some(spec) = declared
             .iter()
-            .find(|spec| !spec.is_reserved() && !spec.nullable && !definition.has(&spec.name))
+            .find(|spec| !is_reserved(spec) && !spec.nullable && !definition.has(&spec.name))
     {
         return Err(SaciError::configuration(format!(
             "{WHAT}: column '{}' is declared nullable=#false, but a definition of '{table}' in \
@@ -987,7 +988,7 @@ fn build_plan(
         Access::Binlog,
         declared
             .iter()
-            .filter(|spec| !spec.is_reserved() && (!lenient || definition.has(&spec.name))),
+            .filter(|spec| !is_reserved(spec) && (!lenient || definition.has(&spec.name))),
         catalog,
     )?;
     let mut data = resolved.into_iter();
@@ -995,7 +996,7 @@ fn build_plan(
     let mut select = 0;
     for spec in declared {
         match meta_of(&spec.name) {
-            Some(meta) if spec.is_reserved() => fields.push(FieldPlan {
+            Some(meta) if is_reserved(spec) => fields.push(FieldPlan {
                 column: ResolvedColumn::synthetic(spec),
                 slot: Slot::Meta(meta),
             }),
@@ -1605,7 +1606,7 @@ impl BinlogReader {
             table,
             server_id: mode.effective_server_id(&cfg.name),
             schema,
-            fields: cfg.schema_fields.clone(),
+            fields: cfg.fields.clone(),
             position_mode: mode.position,
             initial: mode.initial.clone(),
             snapshot_initial: mode.snapshot == SnapshotMode::Initial,
@@ -1952,7 +1953,7 @@ impl BinlogReader {
             .fields
             .iter()
             .filter(|spec| {
-                !spec.is_reserved() && !definition.has(&spec.name) && !current.has(&spec.name)
+                !is_reserved(spec) && !definition.has(&spec.name) && !current.has(&spec.name)
             })
             .collect();
         if unknown.is_empty() {
@@ -2595,7 +2596,7 @@ fn handle_rows(
 mod tests {
 
     use super::*;
-    use crate::connector::mariadb::config::MariadbFieldType;
+    use crate::connector::schema::FieldType;
 
     const UUID: [u8; 16] = [
         0x3e, 0x11, 0xfa, 0x47, 0x71, 0xca, 0x11, 0xe1, 0x9e, 0x33, 0xc8, 0x0a, 0xa9, 0x42, 0x95,
@@ -3211,14 +3212,15 @@ mod tests {
         })
     }
 
-    fn declared(name: &str, ty: MariadbFieldType, nullable: bool) -> FieldSpec {
+    fn declared(name: &str, ty: FieldType, nullable: bool) -> FieldSpec {
         FieldSpec {
             name: name.to_string(),
             ty,
             nullable,
             precision: None,
             scale: None,
-            mariadb_type: None,
+            item: None,
+            native_type: None,
         }
     }
 
@@ -3233,9 +3235,9 @@ mod tests {
     fn a_declared_column_a_definition_lacks_reads_null_when_nullable_and_is_refused_otherwise() {
         let def = definition(&[("id", "bigint"), ("note", "varchar")]);
         let fields = [
-            declared("id", MariadbFieldType::Int64, false),
-            declared("extra", MariadbFieldType::Int64, true),
-            declared("note", MariadbFieldType::Utf8, true),
+            declared("id", FieldType::Int64, false),
+            declared("extra", FieldType::Int64, true),
+            declared("note", FieldType::Utf8, true),
         ];
         let plan = build_plan(&orders(), &fields, &def, Missing::Null).expect("a plan");
         let slots: Vec<Slot> = plan.fields.iter().map(|field| field.slot).collect();
@@ -3259,8 +3261,8 @@ mod tests {
 
         // A field that may not be NULL cannot stand in for a missing column.
         let required = [
-            declared("id", MariadbFieldType::Int64, false),
-            declared("extra", MariadbFieldType::Int64, false),
+            declared("id", FieldType::Int64, false),
+            declared("extra", FieldType::Int64, false),
         ];
         let err = build_plan(&orders(), &required, &def, Missing::Null).expect_err("refused");
         assert!(
@@ -3277,7 +3279,7 @@ mod tests {
             primary_key: vec!["id".to_string()],
             ..(*wide).clone()
         });
-        let fields = [declared("id", MariadbFieldType::Int64, false)];
+        let fields = [declared("id", FieldType::Int64, false)];
         let plan = build_plan(&orders(), &fields, &wide, Missing::Null).expect("a plan");
         assert_eq!(plan.pk_ordinals, [1]);
         assert_eq!(plan.pk_names, ["id"]);
@@ -3291,8 +3293,8 @@ mod tests {
     fn a_plan_disagrees_with_a_table_map_of_another_count_or_type() {
         let def = definition(&[("id", "bigint"), ("n", "int")]);
         let fields = [
-            declared("id", MariadbFieldType::Int64, false),
-            declared("n", MariadbFieldType::Int64, true),
+            declared("id", FieldType::Int64, false),
+            declared("n", FieldType::Int64, true),
         ];
         let plan = build_plan(&orders(), &fields, &def, Missing::Null).expect("a plan");
         assert_eq!(

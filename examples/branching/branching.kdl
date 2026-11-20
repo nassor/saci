@@ -20,7 +20,7 @@
 //
 // Start NATS, then run the service and the publisher:
 //   docker run -d --name saci-nats -p 4222:4222 nats:2.11-alpine
-//   cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
+//   cargo run -p saci --features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host -- serve \
 //     --config examples/branching/branching.kdl
 //   cargo run -p saci --features connector-nats --example branching_publish -- --rate 50
 //
@@ -40,7 +40,7 @@ node id=1 name="saci-branching" data_dir="${SACI_DATA_DIR:-/tmp/saci-branching}"
 // spin on a source that is never done. The stream runner drives a live source
 // batch by batch instead, and requires exactly one declared source, which
 // this config has.
-run_mode kind="stream"
+run "stream"
 
 // Adaptive flow control: one admitted chunk multicasts to three downstream
 // nodes at once (the mirror sink and both routers), and each router then
@@ -59,20 +59,20 @@ flow_control {
 
 workflow "branching" {
     // The source decodes one JSON object per message; the sinks write CSV.
-    // One transformer per byte format the workflow touches.
-    transformer "ndjson_fmt" format="ndjson"
+    // One codec per byte format the workflow touches.
+    codec "ndjson_fmt" format="ndjson"
 
-    transformer "csv_fmt" format="csv" {
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {
+        config has_headers=#true
     }
 
     // `component` must be "Order": the load-time graph check compares it
     // against the component names the processors report from `describe()`.
     // Both routers decide per pass from this source's first row, so how many
     // messages a pass carries changes which branch some rows take.
-    source "in" type="NatsSource" component="Order" transformer="ndjson_fmt" {
+    source "in" connector="nats" component="Order" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -85,67 +85,67 @@ workflow "branching" {
             // Both `Order` fields, non-nullable, in schema order. The NDJSON
             // decode rejects a message that violates the declared types, so
             // the publisher's output is the contract here.
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "priority" type="utf8" nullable=#false
         }
     }
 
     // `cargo build --release --target wasm32-wasip3` writes the finished
     // component here: rustc links the cdylib into a component itself.
-    wasm "router_wasm" module="target/wasm32-wasip3/release/branching_wasm.wasm"
+    wasm "router_wasm" path="target/wasm32-wasip3/release/branching_wasm.wasm"
 
     // A cdylib's file name is platform specific: libbranching_plugin.so on
     // Linux, libbranching_plugin.dylib on macOS, branching_plugin.dll on
     // Windows. Override SACI_PLUGIN_LIB to pick another one.
-    plugin "router_plugin" library="${SACI_PLUGIN_LIB:-target/release/libbranching_plugin.so}"
+    plugin "router_plugin" path="${SACI_PLUGIN_LIB:-target/release/libbranching_plugin.so}"
 
     // The mirror sink proves the source split: every message is written here
     // verbatim while the same batch also feeds both routers. Within a run
-    // FileSink appends and the CSV header is written once, before the first
+    // the `file` sink appends and the CSV header is written once, before the first
     // batch. Every sink here sets truncate, so each `serve` starts its five
     // files over rather than adding to the previous run's rows.
-    sink "out_mirror" type="FileSink" component="Order" transformer="csv_fmt" {
+    sink "out_mirror" connector="file" component="Order" codec="csv_fmt" {
         config {
             path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-mirror.csv"
             truncate #true
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "priority" type="utf8" nullable=#false
         }
     }
 
-    sink "out_wasm_high" type="FileSink" component="Order" transformer="csv_fmt" {
+    sink "out_wasm_high" connector="file" component="Order" codec="csv_fmt" {
         config {
             path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-wasm-high.csv"
             truncate #true
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "priority" type="utf8" nullable=#false
         }
     }
 
-    sink "out_wasm_low" type="FileSink" component="Order" transformer="csv_fmt" {
+    sink "out_wasm_low" connector="file" component="Order" codec="csv_fmt" {
         config {
             path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-wasm-low.csv"
             truncate #true
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "priority" type="utf8" nullable=#false
         }
     }
 
-    sink "out_plugin_premium" type="FileSink" component="Order" transformer="csv_fmt" {
+    sink "out_plugin_premium" connector="file" component="Order" codec="csv_fmt" {
         config {
             path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-plugin-premium.csv"
             truncate #true
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "priority" type="utf8" nullable=#false
         }
     }
 
-    sink "out_plugin_standard" type="FileSink" component="Order" transformer="csv_fmt" {
+    sink "out_plugin_standard" connector="file" component="Order" codec="csv_fmt" {
         config {
             path "${SACI_OUT_DIR:-/tmp/saci-branching}/out-plugin-standard.csv"
             truncate #true
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "priority" type="utf8" nullable=#false
         }
     }
 
@@ -166,7 +166,7 @@ workflow "branching" {
     link from="router_plugin" to="out_plugin_standard" branch="standard"
 }
 
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Every live message opens a source-drain span, three runtime spans where
 // it fans out to the mirror sink and both routers, and one more sink-write

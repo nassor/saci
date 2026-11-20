@@ -24,7 +24,8 @@ use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Source;
 
-use crate::connector::s3::config::{S3SourceConfig, SchemaFrom};
+use crate::connector::SchemaFrom;
+use crate::connector::s3::config::S3SourceConfig;
 
 /// Batches the reader thread may queue before it blocks. Matches
 /// the `file` connector's.
@@ -52,7 +53,7 @@ const CHANNEL_CAPACITY: usize = 4;
 ///         ..Default::default()
 ///     },
 ///     prefix: "incoming".to_string(),
-///     schema_from: saci::connector::s3::SchemaFrom::Config,
+///     schema_from: saci::connector::SchemaFrom::Config,
 /// };
 /// let src = S3Source::new(
 ///     config,
@@ -80,7 +81,7 @@ impl S3Source {
     /// `schema` is the declared Arrow schema the config named, whatever
     /// `schema_from` says; what the codec receives depends on
     /// [`SchemaFrom`] (`Config` hands it over to project the object onto,
-    /// `Object` hides it and the object's own schema must then match field for
+    /// `Payload` hides it and the object's own schema must then match field for
     /// field).
     ///
     /// # Errors
@@ -119,7 +120,7 @@ impl Source for S3Source {
     /// A location leaves the listing only when its object's batch stream ends
     /// cleanly, so every other outcome leaves it at the front: a listing
     /// error, a download or spool error, a reader the object's bytes refuse,
-    /// the `schema_from="object"` schema check, and a decode error raised part
+    /// the `schema_from="payload"` schema check, and a decode error raised part
     /// way through the object. A caller's retry therefore re-attempts that
     /// same object rather than advancing past it.
     ///
@@ -226,7 +227,7 @@ impl Source for S3Source {
             //    when the config asked the object to be the schema source.
             let declared_arg = match self.schema_from {
                 SchemaFrom::Config => Some(Arc::clone(&self.declared)),
-                SchemaFrom::Object => None,
+                SchemaFrom::Payload => None,
             };
             let codec = Arc::clone(&self.codec);
             let (mut reader, object_schema) = tokio::task::spawn_blocking(move || {
@@ -236,7 +237,7 @@ impl Source for S3Source {
             })
             .await
             .map_err(|e| SaciError::generic(format!("S3Source: spawn_blocking panic: {e}")))??;
-            if self.schema_from == SchemaFrom::Object
+            if self.schema_from == SchemaFrom::Payload
                 && object_schema.fields() != self.declared.fields()
             {
                 return Err(SaciError::configuration(format!(
@@ -322,10 +323,10 @@ mod tests {
             prefix: Path::from("prefix"),
             codec: Arc::new(ParquetCodec::new()),
             declared: Arc::new(Schema::empty()),
-            // `Object` so the malformed bytes fail inside the Parquet
+            // `Payload` so the malformed bytes fail inside the Parquet
             // reader builder itself, not the earlier configuration check
             // on the object's own schema.
-            schema_from: SchemaFrom::Object,
+            schema_from: SchemaFrom::Payload,
             pending: None,
             current: None,
         };

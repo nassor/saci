@@ -120,7 +120,7 @@ pub struct TopoNode {
     pub kind: String,
     /// Declared name, absent when the config named none.
     pub name: Option<String>,
-    /// Connector `type` for a source or sink, runtime kind for a processor.
+    /// Connector name for a source or sink, runtime kind for a processor.
     pub type_name: String,
     /// The component this node reads or writes. `None` for a processor.
     pub component: Option<String>,
@@ -501,7 +501,7 @@ pub struct TraceDetail {
 /// `Starting`, `Pausing` and `Stopping` are transient: a control request that
 /// returns one of them was accepted but had not settled when the response was
 /// written. `Completed` is a runner that reached the end of its work on its
-/// own (a `one_shot` pass, or every source at EOF); `Stopped` is one an
+/// own (a `once` pass, or every source at EOF); `Stopped` is one an
 /// operator stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -725,7 +725,7 @@ mod tests {
             id: "orders-in".to_string(),
             kind: "source".to_string(),
             name: Some("Authorizations".to_string()),
-            type_name: "NatsSource".to_string(),
+            type_name: "nats".to_string(),
             component: Some("Order".to_string()),
             runtime: None,
             window: None,

@@ -83,8 +83,8 @@ observability {
     inspector {
         enabled #true            // #false: no capture, no /api/*, no /ui
         ui #true                 // #false: keeps /api/*, drops /ui
-        retention_secs 3600
-        sample_interval_secs 1
+        retention_ms 3600000
+        sample_interval_ms 1000
         max_spans 10000
         max_logs 10000
         max_samples 3600
@@ -111,13 +111,13 @@ Windows (PowerShell):
 ```
 
 The four caps size four in-memory buffers, and each is bounded twice: by
-`retention_secs` and by its own entry count.
+`retention_ms` and by its own entry count.
 
 | Buffer | Key | Default | Filled by |
 |---|---|---|---|
 | spans | `max_spans` | 10 000 | each span that closes |
 | log events | `max_logs` | 10 000 | each log record |
-| metric samples | `max_samples` | 3 600 | one sample per series per `sample_interval_secs` |
+| metric samples | `max_samples` | 3 600 | one sample per series per `sample_interval_ms` |
 | flow decisions | `max_flow_decisions` | 1 000 | one entry per flow-control episode a source went through |
 
 Time evictions run first on every push, then capacity ones. A capacity
@@ -194,15 +194,16 @@ history.
 
 Nothing else in either table plots history. That is the job of the node boxes'
 sparklines and the chart below. A node that has recorded nothing shows a dash,
-and so does a sink whose connector reports no backlog. `ChannelSink`,
-`PostgresSink`, `MariadbSink` and `S3Sink` report one, while `FileSink`, `HttpSink`, Kafka,
-NATS and TCP do not. Clicking a row opens the same detail sheet the box does.
+and so does a sink whose connector reports no backlog. The `channel`, `clickhouse`,
+`mariadb`, `postgresql`, `s3` and `turso` sinks report one (the `otlp-metrics` sink always
+reports zero), while the `file`, `http`, `kafka`, `nats`, `peer`, `redb`, `tcp` and `udp`
+sinks do not. Clicking a row opens the same detail sheet the box does.
 
 <img src="../../../dashboard/pipelines.png" alt="The Pipelines tab draws the multi-workflow example as one card per workflow, with a channel-bridges card below them.">
 
 A workflow card's header carries its own run and error badges, read under
 `workflow="<id>"`. A `channel bridges` card below the workflows lists every
-in-process channel joining a `ChannelSink` to a `ChannelSource` across
+in-process channel joining a `channel` sink to a `channel` source across
 workflows, with its live rate.
 
 The same header carries that workflow's lifecycle state, its start count and
@@ -365,24 +366,30 @@ decisions at all, which is the normal reading of an empty axis.
 ## Node detail is allowlisted
 
 A connector's `config` table holds `connection.dsn`, passwords and credential
-file paths, so the topology copies values through a per-`type` allowlist. A key
-outside it is dropped, never masked. A `type` the allowlist does not name gets
-no detail at all.
+file paths, so the topology copies values through a per-connector allowlist. Each
+connector declares its own keys, a key outside them is dropped, never masked,
+and a connector that declares none gets no detail at all.
 
-| `type` | Keys shown |
+| Connector | Keys shown |
 |---|---|
-| `NatsSource`, `NatsSink` | `mode.kind`, `mode.stream`, `mode.subject` |
-| `PostgresSource` | `mode.kind`, `mode.table` |
-| `PostgresSink` | `table`, `write_mode` |
-| `MariadbSource` | `mode.kind`, `mode.table`, `mode.position`, `mode.snapshot`, `mode.install_triggers` |
-| `MariadbSink` | `table`, `write_mode` |
-| `TursoSource` | `mode.kind`, `mode.table` |
-| `TursoSink` | `table`, `write_mode` |
-| `S3Source`, `S3Sink` | `connection.bucket`, `prefix` |
-| `FileSource`, `FileSink` | `path` |
-| `KafkaSource`, `KafkaSink` | `topic` |
-| `tcp` | `bind`, `connect` |
-| `ChannelSource`, `ChannelSink` | `name` |
+| `nats` | `mode.kind`, `mode.stream`, `mode.subject` |
+| `postgresql`, `turso` source | `mode.kind`, `mode.table` |
+| `postgresql`, `turso` sink | `table`, `write_mode` |
+| `mariadb` source | `mode.kind`, `mode.table`, `mode.position`, `mode.snapshot`, `mode.install_triggers` |
+| `mariadb` sink | `table`, `write_mode` |
+| `clickhouse` source | `mode.kind`, `mode.table`, `mode.query` |
+| `clickhouse` sink | `table`, `write_mode` |
+| `s3` | `connection.bucket`, `prefix` |
+| `file` | `path` |
+| `kafka` | `topic` |
+| `tcp`, `peer` | `bind`, `connect` |
+| `udp` | `bind`, `connect`, `multicast_group`, `broadcast`, `probe.kind`, `probe.interval_ms`, `probe.timeout_ms`, `probe.on_failure` |
+| `channel` | `name` |
+| `http-listen` source | `bind`, `path`, `quic_bind` |
+| `redb` source | `directory`, `file`, `table`, `key_prefix`, `key_suffix` |
+| `redb` sink | `directory`, `file`, `table`, `key_prefix`, `key_suffix`, `durability`, `compact` |
+| `otlp-metrics` source | `bind`, `path`, `mode.kind`, `mode.url` |
+| `otlp-metrics` sink | `url`, `encoding`, `service_name` |
 
 <img src="../../../dashboard/detail.png" alt="A source node's detail sheet lists its allowlisted connector options, its component and its node facts.">
 
@@ -454,12 +461,12 @@ lifecycle endpoints, on
 | Route | Body |
 |---|---|
 | `GET /api/topology` | the node, its mode, and the workflow graph |
-| `GET /api/snapshot?window_secs=60` | one document with series, edge rates, span statistics, flow-control decisions and buffer occupancy |
+| `GET /api/snapshot?window_ms=60000` | one document with series, edge rates, span statistics, flow-control decisions and buffer occupancy |
 | `GET /api/traces?limit=100` | newest-first trace summaries |
 | `GET /api/traces/{trace_id}` | the spans and log lines of one trace, 404 once it ages out |
 | `GET /api/logs?limit=200&level=warn` | newest-first log records, filtered at or above `level` |
 
-`window_secs` is capped at 24 hours and `limit` at 1000. Every route reads the
+`window_ms` is clamped to between 1 second and 24 hours (86 400 000) and `limit` is capped at 1000. Every route reads the
 buffers and returns. None mutate anything, and none block a pipeline.
 `trace_id` and `span_id` are local to this process, so they do not correlate
 with a collector's ids.
@@ -467,7 +474,7 @@ with a collector's ids.
 Linux/macOS:
 
 ```bash,name=Read the snapshot by hand
-curl -s 'http://localhost:8080/api/snapshot?window_secs=60' \
+curl -s 'http://localhost:8080/api/snapshot?window_ms=60000' \
   | jq '{buffers, edges: [.edges[] | {from, to, rate_per_sec}]}'
 
 {
@@ -483,14 +490,14 @@ curl -s 'http://localhost:8080/api/snapshot?window_secs=60' \
 Windows (PowerShell):
 
 ```powershell
-$snap = curl.exe -s 'http://localhost:8080/api/snapshot?window_secs=60' | ConvertFrom-Json
+$snap = curl.exe -s 'http://localhost:8080/api/snapshot?window_ms=60000' | ConvertFrom-Json
 $snap.buffers
 $snap.edges | Select-Object from, to, rate_per_sec
 ```
 
 `rate_per_sec` is the derivative over a trailing window for a counter or a
 histogram, and the raw value for a gauge. The window is the newest five sample
-intervals, five seconds at the default `sample_interval_secs`. A source's rows
+intervals, five seconds at the default `sample_interval_ms`. A source's rows
 are counted as it admits them, and a sink's when it writes the staged batch at
 the end of the pass. A window narrower than a pass therefore reads the two ends
 of one flow as different throughputs. Cumulative totals reconcile exactly

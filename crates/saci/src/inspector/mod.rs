@@ -136,13 +136,13 @@ const SYSTEM_SPAN: &str = "system.execute";
 const RATE_WINDOW_INTERVALS: usize = 5;
 
 /// Default retention window, one hour.
-fn default_retention_secs() -> u64 {
-    3600
+fn default_retention_ms() -> u64 {
+    3_600_000
 }
 
 /// Default metric export interval, one second.
-fn default_sample_interval_secs() -> u64 {
-    1
+fn default_sample_interval_ms() -> u64 {
+    1_000
 }
 
 fn default_max_spans() -> usize {
@@ -182,6 +182,7 @@ fn default_true() -> bool {
 /// Every field carries a `serde` default, so `[observability.inspector]` can be
 /// omitted entirely or given one key.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct InspectorConfig {
     /// Master switch. `false` installs no layer, attaches no metric reader, and
     /// merges no routes, so `/api/*` and `/ui` return 404.
@@ -190,12 +191,12 @@ pub struct InspectorConfig {
     /// Whether to serve the dashboard at `/ui`. `false` keeps the JSON API.
     #[serde(default = "default_true")]
     pub ui: bool,
-    /// How long a record stays readable, in seconds.
-    #[serde(default = "default_retention_secs")]
-    pub retention_secs: u64,
-    /// How often metrics are copied out of the SDK, in seconds.
-    #[serde(default = "default_sample_interval_secs")]
-    pub sample_interval_secs: u64,
+    /// How long a record stays readable, in milliseconds.
+    #[serde(default = "default_retention_ms")]
+    pub retention_ms: u64,
+    /// How often metrics are copied out of the SDK, in milliseconds.
+    #[serde(default = "default_sample_interval_ms")]
+    pub sample_interval_ms: u64,
     /// Hard cap on retained span records.
     #[serde(default = "default_max_spans")]
     pub max_spans: usize,
@@ -215,8 +216,8 @@ impl Default for InspectorConfig {
         Self {
             enabled: true,
             ui: true,
-            retention_secs: default_retention_secs(),
-            sample_interval_secs: default_sample_interval_secs(),
+            retention_ms: default_retention_ms(),
+            sample_interval_ms: default_sample_interval_ms(),
             max_spans: default_max_spans(),
             max_logs: default_max_logs(),
             max_samples: default_max_samples(),
@@ -228,14 +229,14 @@ impl Default for InspectorConfig {
 impl InspectorConfig {
     /// Retention as a [`Duration`].
     pub fn retention(&self) -> Duration {
-        Duration::from_secs(self.retention_secs)
+        Duration::from_millis(self.retention_ms)
     }
 
-    /// Export interval as a [`Duration`], never below one second.
+    /// Export interval as a [`Duration`], never below one millisecond.
     ///
     /// A zero interval would make the `PeriodicReader` collect in a tight loop.
     pub fn sample_interval(&self) -> Duration {
-        Duration::from_secs(self.sample_interval_secs.max(1))
+        Duration::from_millis(self.sample_interval_ms.max(1))
     }
 }
 
@@ -802,7 +803,7 @@ mod tests {
 
     fn config() -> InspectorConfig {
         InspectorConfig {
-            retention_secs: 60,
+            retention_ms: 60_000,
             ..InspectorConfig::default()
         }
     }
@@ -887,7 +888,7 @@ mod tests {
         let mut nodes = vec![topo_node("p", "processor", "wasm", None)];
         let mut edges = Vec::new();
         for name in sources {
-            nodes.push(topo_node(name, "source", "NatsSource", Some("Order")));
+            nodes.push(topo_node(name, "source", "nats", Some("Order")));
             edges.push(TopoEdge {
                 from: (*name).to_string(),
                 to: "p".to_string(),
@@ -895,7 +896,7 @@ mod tests {
             });
         }
         for name in sinks {
-            nodes.push(topo_node(name, "sink", "PostgresSink", Some("Order")));
+            nodes.push(topo_node(name, "sink", "postgresql", Some("Order")));
             edges.push(TopoEdge {
                 from: "p".to_string(),
                 to: (*name).to_string(),
@@ -919,10 +920,10 @@ mod tests {
     /// A two-processor chain: `orders-in -> validate -> settle -> settlements`.
     fn two_processor_topology() -> Topology {
         let nodes = vec![
-            topo_node("orders-in", "source", "NatsSource", Some("Order")),
+            topo_node("orders-in", "source", "nats", Some("Order")),
             topo_node("validate", "processor", "wasm", None),
             topo_node("settle", "processor", "wasm", None),
-            topo_node("settlements", "sink", "PostgresSink", Some("Order")),
+            topo_node("settlements", "sink", "postgresql", Some("Order")),
         ];
         let edges = vec![
             TopoEdge {
@@ -1188,8 +1189,8 @@ mod tests {
                 name: None,
                 nodes: vec![
                     topo_node("validate", "processor", "wasm", None),
-                    topo_node("out_high", "sink", "PostgresSink", Some("Order")),
-                    topo_node("out_plain", "sink", "PostgresSink", Some("Order")),
+                    topo_node("out_high", "sink", "postgresql", Some("Order")),
+                    topo_node("out_plain", "sink", "postgresql", Some("Order")),
                 ],
                 edges: vec![
                     TopoEdge {
@@ -1263,7 +1264,7 @@ mod tests {
                 name: None,
                 nodes: vec![
                     topo_node("validate", "processor", "wasm", None),
-                    topo_node("out_high", "sink", "PostgresSink", Some("Order")),
+                    topo_node("out_high", "sink", "postgresql", Some("Order")),
                 ],
                 edges: vec![TopoEdge {
                     from: "validate".to_string(),
@@ -1519,17 +1520,32 @@ mod tests {
         let cfg = InspectorConfig::default();
         assert!(cfg.enabled);
         assert!(cfg.ui);
-        assert_eq!(cfg.retention_secs, 3600);
+        assert_eq!(cfg.retention_ms, 3_600_000);
         assert_eq!(cfg.sample_interval(), Duration::from_secs(1));
         assert_eq!(
             InspectorConfig {
-                sample_interval_secs: 0,
+                sample_interval_ms: 0,
                 ..InspectorConfig::default()
             }
             .sample_interval(),
-            Duration::from_secs(1),
+            Duration::from_millis(1),
             "a zero interval must not make the reader spin"
         );
+    }
+
+    #[test]
+    fn the_duration_keys_are_milliseconds_and_the_seconds_spelling_is_gone() {
+        let cfg = InspectorConfig::deserialize(serde_json::json!({
+            "retention_ms": 5_000,
+            "sample_interval_ms": 250,
+        }))
+        .expect("the millisecond keys parse");
+        assert_eq!(cfg.retention(), Duration::from_millis(5_000));
+        assert_eq!(cfg.sample_interval(), Duration::from_millis(250));
+
+        let err = InspectorConfig::deserialize(serde_json::json!({ "retention_secs": 5 }))
+            .expect_err("`retention_secs` was replaced by `retention_ms`");
+        assert!(err.to_string().contains("retention_secs"), "{err}");
     }
 
     /// A `producer` workflow whose `ChannelSink` bridges into a `consumer`
@@ -1545,8 +1561,8 @@ mod tests {
                     id: "producer".to_string(),
                     name: None,
                     nodes: vec![
-                        topo_node("orders_in", "source", "FileSource", Some("Order")),
-                        topo_node("bridge_out", "sink", "ChannelSink", Some("Order")),
+                        topo_node("orders_in", "source", "file", Some("Order")),
+                        topo_node("bridge_out", "sink", "channel", Some("Order")),
                     ],
                     edges: vec![TopoEdge {
                         from: "orders_in".to_string(),
@@ -1558,8 +1574,8 @@ mod tests {
                     id: "consumer".to_string(),
                     name: None,
                     nodes: vec![
-                        topo_node("bridge_in", "source", "ChannelSource", Some("Order")),
-                        topo_node("orders_out", "sink", "FileSink", Some("Order")),
+                        topo_node("bridge_in", "source", "channel", Some("Order")),
+                        topo_node("orders_out", "sink", "file", Some("Order")),
                     ],
                     edges: vec![TopoEdge {
                         from: "bridge_in".to_string(),

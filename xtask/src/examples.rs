@@ -43,7 +43,7 @@ pub struct Example {
     /// `(name, value)` pairs an injected `variables` block resolves, so the
     /// config needs no OS env export. The value is computed from the context.
     pub variables: &'static [(&'static str, VariableValue)],
-    /// Whether `serve` returns on its own (`run_mode kind="one_shot"`). A
+    /// Whether `serve` returns on its own (`run "once"`). A
     /// streaming config runs until Ctrl-C, so `demo` prints its run commands
     /// rather than blocking.
     pub one_shot: bool,
@@ -229,7 +229,7 @@ pub const EXAMPLES: &[Example] = &[
         one_shot: true,
     },
     // Two entries, one example: `Example` carries one config, and this demo
-    // runs two `saci-service` processes. `run_mode` is a whole-config
+    // runs two `saci-service` processes. `run` is a whole-config
     // property, and the stream half's live sources and the CDC half's
     // cycle-EOF source need opposite runners. Registering both is what puts
     // each config under `cargo xtask validate`.

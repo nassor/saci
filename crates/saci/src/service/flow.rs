@@ -105,10 +105,10 @@
 //! - `RunMode::Continuous` and `RunMode::Interval`: one sample per iteration
 //!   per source. An iteration that exhausts its credit with the source still
 //!   live, or that leaves a carry-over slice, is a backlogged iteration and
-//!   skips run-mode pacing, so `interval_ms` stays the idle poll cadence
+//!   skips run-mode pacing, so `every_ms` stays the idle poll cadence
 //!   rather than a throughput ceiling.
 //! - `RunMode::Stream`: one sample per chunk, each chunk one workflow pass.
-//! - `RunMode::OneShot` engages no controller. A single pass must drain
+//! - `RunMode::Once` engages no controller. A single pass must drain
 //!   everything by definition, so admitting a credit-sized prefix and exiting
 //!   would silently drop the rest of the source.
 //!
@@ -132,7 +132,7 @@
 //! measurement dependence; a short arrival, and the tail of a longer one,
 //! still make a shorter pass. One that acts on the hint resizes its own
 //! fetch to it: `enabled #false` hands the connector back its configured
-//! `batch_size`, widening the pass instead of settling it, and any N above
+//! `batch_rows`, widening the pass instead of settling it, and any N above
 //! 1 still leaves a fetch window gathering toward N. Only `rows 1` is
 //! structurally sufficient there, because a fetch of one cannot gather a
 //! second message.
@@ -1135,9 +1135,7 @@ impl FlowPlan {
     /// nothing would read.
     pub fn from_config(config: &ServiceConfig) -> Self {
         let defaults = match &config.mode {
-            ServiceMode::Standalone { config: standalone }
-                if standalone.run_mode == RunMode::Stream =>
-            {
+            ServiceMode::Standalone { config: standalone } if standalone.run == RunMode::Stream => {
                 FlowSettings::stream_defaults()
             }
             _ => FlowSettings::default(),
@@ -1169,7 +1167,7 @@ impl FlowPlan {
     /// [`RunMode::Stream`]; pass this
     /// constructor to its `flow` method only to restate it.
     /// [`from_config`](Self::from_config) resolves the same defaults from
-    /// `run_mode` for a config-driven service.
+    /// the `run` node for a config-driven service.
     pub fn stream_default() -> Self {
         Self {
             fallback: FlowSettings::stream_defaults(),

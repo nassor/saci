@@ -25,7 +25,7 @@
 //! # Rows
 //!
 //! `schema` describes the Arrow view: one row per OTLP data point, under the
-//! ten canonical columns or under the `schema_fields` a config declares.
+//! ten canonical columns or under the `field` entries a config declares.
 //! `schema::metrics_schema` is the canonical one, and `schema` documents how a
 //! declared schema is filled, which attribute keys are reserved, and what the
 //! view does not carry.
@@ -55,7 +55,7 @@ pub use config::{
     AuthConfig, Encoding, OtlpMetricsSinkConfig, OtlpMetricsSourceConfig, PullMode, PushMode,
     SourceMode,
 };
-pub use factory::{OtlpMetricsSinkFactory, OtlpMetricsSourceFactory};
+pub use factory::OtlpMetricsConnector;
 pub use sink::OtlpMetricsSink;
 pub use source::OtlpMetricsSource;
 

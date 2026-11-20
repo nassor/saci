@@ -106,7 +106,7 @@ processor's `host-io::log` lines in the trace. Processor code reaches `tracing` 
 `host-io::log` import, so field content is untrusted: values are truncated at `MAX_FIELD_BYTES`
 (512), records capped at `MAX_FIELDS` (32), and `("truncated","true")` appended when either bites.
 
-A `wasm` node with no `module` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
+A `wasm` node with no `path` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
 `build_processor_node` **removes** that injected runtime from the builder, so `rebuild_blocker`
 reports such a workflow as `restartable: false`.
 
@@ -244,7 +244,7 @@ Update this file in the same change that: changes the WIT package or its exports
 `WasmEngine`, `WasmPipelineRuntime`, `PipelineRuntimeLoader`, `PipelineRuntime::run_batch`, `HostState`, the pooling constants or the `host-io` imports;
 changes the smoketest fixture or its build; changes the conformance corpus generator or
 `packages/arrow-ipc-conformance/`; adds or removes a processor example; changes
-`rebuild_blocker`'s `restartable` rule for a `wasm` node with no `module` (also check skill
+`rebuild_blocker`'s `restartable` rule for a `wasm` node with no `path` (also check skill
 `saci-service`'s Service layer section, the canonical copy); changes
 `WasmPipelineRuntime::with_warm_instances` or the smoketest's `count` config key; changes
 `WasmPipelineRuntime::with_identity` or how a processor's metrics or spans are attributed (also

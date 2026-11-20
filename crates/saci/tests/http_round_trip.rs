@@ -34,10 +34,10 @@ use saci::codec::Codec;
 use saci::codec::csv::CsvCodec;
 use saci::codec::ndjson::NdjsonCodec;
 use saci::codec::parquet::ParquetCodec;
+use saci::connector::SchemaFrom;
 use saci::connector::http::{
     BatchWindow, ContentEncoding, HttpListenConfig, HttpListenSource, HttpSink, HttpSinkConfig,
-    HttpSource, HttpSourceConfig, HttpVersion, Pagination, ReadMode, SchemaFrom, ServerTls,
-    TlsFiles,
+    HttpSource, HttpSourceConfig, HttpVersion, Pagination, ReadMode, ServerTls, TlsFiles,
 };
 use saci::io::Sink;
 use saci::io::Source;
@@ -908,7 +908,7 @@ async fn a_decode_error_mid_document_ends_the_read_and_re_arms() {
     assert_eq!(captured.len(), 2, "one GET per read");
 }
 
-/// `schema_from "body"` takes the body's own schema rather than projecting
+/// `schema_from "payload"` takes the body's own schema rather than projecting
 /// onto the declared one. The declared schema is still what the graph is
 /// validated against, so it is checked rather than dropped.
 #[tokio::test]
@@ -916,7 +916,7 @@ async fn a_self_describing_body_is_read_with_its_own_schema() {
     let (url, server) = serve(1, "200 OK", parquet_body(schema(), &batch(&[1, 2, 3])));
     let mut source = HttpSource::new(
         HttpSourceConfig {
-            schema_from: SchemaFrom::Body,
+            schema_from: SchemaFrom::Payload,
             ..HttpSourceConfig::new(&url)
         },
         Some(schema()),
@@ -1006,7 +1006,7 @@ async fn a_body_schema_that_differs_from_the_declared_one_is_a_configuration_err
     let (url, server) = serve(1, "200 OK", body);
     let mut source = HttpSource::new(
         HttpSourceConfig {
-            schema_from: SchemaFrom::Body,
+            schema_from: SchemaFrom::Payload,
             ..HttpSourceConfig::new(&url)
         },
         Some(schema()),
@@ -1034,19 +1034,19 @@ async fn a_body_schema_that_differs_from_the_declared_one_is_a_configuration_err
 /// With no declared schema there is nothing for the graph check to compare, so
 /// the source refuses while it builds rather than failing the link later.
 #[test]
-fn schema_from_body_without_a_declared_schema_is_a_configuration_error() {
+fn schema_from_payload_without_a_declared_schema_is_a_configuration_error() {
     let Err(err) = HttpSource::new(
         HttpSourceConfig {
-            schema_from: SchemaFrom::Body,
+            schema_from: SchemaFrom::Payload,
             ..HttpSourceConfig::new("https://example.invalid/orders.parquet")
         },
         None,
         parquet(),
     ) else {
-        panic!("schema_from body needs a schema to check against");
+        panic!("schema_from payload needs a schema to check against");
     };
     assert_eq!(err.category(), "configuration", "got: {err}");
-    assert!(err.message().contains("schema_fields"), "got: {err}");
+    assert!(err.message().contains("'field'"), "got: {err}");
 }
 
 // ── the source half, streaming modes ────────────────────────────────────────
@@ -1151,7 +1151,7 @@ fn live_source(url: &str, mode: ReadMode) -> HttpSource {
     HttpSource::new(config, Some(schema()), ndjson()).expect("source builds")
 }
 
-/// A window closes on `poll_timeout` as well as on `batch_size`, so a live
+/// A window closes on `poll_timeout` as well as on `batch_rows`, so a live
 /// body that pauses hands over what it has instead of holding it.
 #[tokio::test]
 async fn a_line_stream_closes_a_window_on_the_poll_timeout() {
@@ -1167,7 +1167,7 @@ async fn a_line_stream_closes_a_window_on_the_poll_timeout() {
     let mut source = live_source(
         &url,
         ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_secs(30),
         }),
@@ -1195,9 +1195,9 @@ async fn a_line_stream_closes_a_window_on_the_poll_timeout() {
     server.join().expect("server thread");
 }
 
-/// `batch_size` closes a window before `poll_timeout` does.
+/// `batch_rows` closes a window before `poll_timeout` does.
 #[tokio::test]
-async fn a_line_stream_closes_a_window_on_batch_size() {
+async fn a_line_stream_closes_a_window_on_batch_rows() {
     let (url, server) = serve_live(
         1,
         "application/x-ndjson",
@@ -1209,7 +1209,7 @@ async fn a_line_stream_closes_a_window_on_batch_size() {
     let mut source = live_source(
         &url,
         ReadMode::Lines(BatchWindow {
-            batch_size: 2,
+            batch_rows: 2,
             poll_timeout: Duration::from_secs(30),
             reconnect: Duration::from_secs(30),
         }),
@@ -1234,7 +1234,7 @@ async fn a_line_stream_reconnects_after_the_body_ends() {
     let mut source = live_source(
         &url,
         ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1282,7 +1282,7 @@ async fn an_event_stream_filters_by_name_and_remembers_the_last_id() {
         ReadMode::Events {
             event: Some("order".to_string()),
             window: BatchWindow {
-                batch_size: 1_000,
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 // Replaced by the stream's own `retry: 50`.
                 reconnect: Duration::from_secs(30),
@@ -1338,7 +1338,7 @@ async fn a_live_non_2xx_status_is_reported_and_the_reader_reconnects() {
     let mut source = live_source(
         &url,
         ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1377,7 +1377,7 @@ async fn a_live_transport_failure_is_reported_on_every_attempt() {
     let mut source = live_source(
         &url,
         ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1413,7 +1413,7 @@ async fn a_live_body_that_stalls_past_the_timeout_fails_and_reconnects() {
     );
     let mut config = HttpSourceConfig {
         mode: ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1459,7 +1459,7 @@ async fn a_configured_accept_wins_over_the_event_stream_media_type() {
         mode: ReadMode::Events {
             event: None,
             window: BatchWindow {
-                batch_size: 1_000,
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_secs(30),
             },
@@ -1512,7 +1512,7 @@ async fn an_event_stream_with_no_filter_decodes_every_event() {
         ReadMode::Events {
             event: None,
             window: BatchWindow {
-                batch_size: 1_000,
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_secs(30),
             },
@@ -1546,7 +1546,7 @@ async fn dropping_a_streaming_source_ends_the_reader_task() {
     let mut source = live_source(
         &url,
         ReadMode::Lines(BatchWindow {
-            batch_size: 1,
+            batch_rows: 1,
             poll_timeout: Duration::from_secs(30),
             reconnect: Duration::from_secs(30),
         }),
@@ -1583,7 +1583,7 @@ fn a_streaming_mode_without_a_declared_schema_is_a_configuration_error() {
     };
     assert_eq!(err.category(), "configuration");
     assert!(
-        err.message().contains("needs a 'schema_fields' list"),
+        err.message().contains("needs a 'field' entry"),
         "got: {err}"
     );
 }
@@ -1591,10 +1591,10 @@ fn a_streaming_mode_without_a_declared_schema_is_a_configuration_error() {
 /// A live body's schema is the declared one: there is no document whose own
 /// schema could be read instead.
 #[test]
-fn schema_from_body_with_a_streaming_mode_is_a_configuration_error() {
+fn schema_from_payload_with_a_streaming_mode_is_a_configuration_error() {
     let Err(err) = HttpSource::new(
         HttpSourceConfig {
-            schema_from: SchemaFrom::Body,
+            schema_from: SchemaFrom::Payload,
             mode: ReadMode::Lines(BatchWindow::default()),
             ..HttpSourceConfig::new("http://127.0.0.1:1/live")
         },
@@ -1605,7 +1605,7 @@ fn schema_from_body_with_a_streaming_mode_is_a_configuration_error() {
     };
     assert_eq!(
         err.message(),
-        "HttpSource: schema_from \"body\" applies to mode kind=\"document\" only"
+        "HttpSource: schema_from \"payload\" applies to mode kind=\"document\" only"
     );
 }
 
@@ -1639,7 +1639,7 @@ async fn a_refused_frame_does_not_poison_the_rest_of_a_line_stream() {
     let mut source = live_source(
         &url,
         ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_secs(30),
         }),
@@ -1689,7 +1689,7 @@ async fn a_frame_cap_measures_one_frame_not_the_chunk_that_carried_it() {
 
     let mut config = HttpSourceConfig {
         mode: ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_secs(30),
         }),
@@ -1730,7 +1730,7 @@ async fn a_frame_over_the_cap_ends_the_body_and_the_reader_reconnects() {
 
     let mut config = HttpSourceConfig {
         mode: ReadMode::Lines(BatchWindow {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1785,7 +1785,7 @@ async fn a_retry_block_with_no_data_still_governs_the_reconnect() {
         ReadMode::Events {
             event: None,
             window: BatchWindow {
-                batch_size: 1_000,
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_millis(50),
             },
@@ -1822,7 +1822,7 @@ async fn an_empty_event_id_clears_the_one_the_reconnect_sends() {
         ReadMode::Events {
             event: None,
             window: BatchWindow {
-                batch_size: 1_000,
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_millis(50),
             },
@@ -2536,14 +2536,14 @@ async fn a_refusal_declares_its_media_type_and_the_202_carries_none() {
     assert_eq!(column(&batch, "id"), vec![1, 2, 3]);
 }
 
-/// `schema_from "body"` on a listener judges each document by the schema it
+/// `schema_from "payload"` on a listener judges each document by the schema it
 /// turned out to carry: one that differs is a `400` naming it, and the same
 /// error reaches the source.
 #[tokio::test]
 async fn a_posted_body_is_judged_by_the_schema_it_carries() {
     let mut source = HttpListenSource::new(
         HttpListenConfig {
-            schema_from: SchemaFrom::Body,
+            schema_from: SchemaFrom::Payload,
             ..listen_config()
         },
         schema(),

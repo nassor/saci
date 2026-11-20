@@ -132,6 +132,30 @@
   `sink`, `link`, `link_branch`, `run_mode`, `flow`, ...); `BuiltWorkflow` and `BuiltNode` are
   `#[non_exhaustive]`. `NodeStats::id` is `Arc<str>` and `kind` is `&'static str`.
 - `service`: every module except `cli` is private; `saci::service::Item` is the one path.
+- Connectors: one `Connector` trait (`name`, `roles`, `source`, `sink`, `rebuild`, `live`,
+  `detail_keys`) replaces `SourceFactory` and `SinkFactory`; each connector registers once under
+  a lowercase name (`channel`, `file`, `redb`, `http`, `http-listen`, `tcp`, `udp`, `peer`,
+  `kafka`, `nats`, `s3`, `postgresql`, `mariadb`, `turso`, `clickhouse`, `otlp-metrics`).
+  `Registry::register`, `connector`, `names` and `len` replace the per-role lookups;
+  `ServiceBuilder::connector` replaces `register_source` and `register_sink`.
+- Config: a source or sink names its connector with `connector="file"` (was `type="FileSource"`)
+  and its codec with `codec="id"`; the `transformer "id" format=.. { options .. }` node is
+  `codec "id" format=.. { config .. }`.
+- Config: `run_mode kind=".."` is `run "once"`, `run "continuous"`, `run "stream"` or
+  `run "interval" every_ms=N` (`RunMode::Once`, `RunMode::Interval { every_ms }`); cluster keys
+  live in one `cluster { }` block; `http disabled=#true` is `http enabled=#false`; `wasm`/`plugin`
+  take `path=`; a window's `key_field` is `key_fields`; the inspector takes `retention_ms` and
+  `sample_interval_ms`. An unknown top-level key, or `mode "standalone"` with a `cluster` block,
+  is an error.
+- Config: `schema_fields` is `field` with one `FieldSpec`/`FieldType` for every connector
+  (lowercase type names only; `pg_type` and `mariadb_type` are `native_type`), and a workflow
+  can declare `schema "Component" { field .. }` once for every node of that component.
+  `batch_size` on a kafka or nats source and an http `mode` is `batch_rows`; `schema_from
+  "body"` and `"object"` are `"payload"`.
+- CLI: `serve` takes `--bind` (replaces `--port`/`SACI_HTTP_PORT`), `--log-format`,
+  `--log-level` and `--otlp-endpoint`; `status` and `cluster status` take `--url` (replaces
+  `--addr`/`SACI_ADDR`) or read the bind address from `--config`; `cluster join` and
+  `cluster leave` are removed. `GET /api/snapshot` takes `window_ms` (was `window_secs`).
 
 ### Added
 

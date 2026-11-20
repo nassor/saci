@@ -17,7 +17,7 @@
 //! length prefix, because the datagram boundary is the frame, so the two
 //! halves are wire compatible: the
 //! [`Codec`](crate::codec::Codec) the host resolved from the
-//! node's `transformer` key decodes or encodes the bytes.
+//! node's `codec` key decodes or encodes the bytes.
 //!
 //! A zero-length datagram is the liveness probe. The source answers one with a
 //! zero-length datagram to its sender and never decodes it; the sink never
@@ -33,23 +33,23 @@
 //!
 //! The source never reaches EOF, so only the stream runner can drive it. Its
 //! `config` table takes `bind`, an optional `buffer` and `multicast_group`,
-//! and a `schema_fields` array declaring the Arrow schema. The sink's takes
+//! and a `field` entry per column declaring the Arrow schema. The sink's takes
 //! `connect`, an optional `broadcast`, `max_datagram_bytes` and `probe` node,
-//! and `schema_fields`, and it runs under any run mode.
+//! and `field` entries, and it runs under any run mode.
 //!
 //! ```kdl
-//! transformer "json" format="ndjson"
+//! codec "json" format="ndjson"
 //!
-//! source "ingest" type="udp" transformer="json" component="Reading" {
+//! source "ingest" connector="udp" codec="json" component="Reading" {
 //!     config bind="0.0.0.0:9700" buffer=64 {
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //!
-//! sink "forward" type="udp" transformer="json" component="Reading" {
+//! sink "forward" connector="udp" codec="json" component="Reading" {
 //!     config connect="collector.internal:9701" max_datagram_bytes=65507 {
 //!         probe kind="icmp" interval_ms=5000 timeout_ms=1000 on_failure="refuse"
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //! ```
@@ -62,7 +62,7 @@ pub mod sink;
 pub mod source;
 
 pub use config::{UdpSinkConfig, UdpSourceConfig};
-pub use factory::{UdpSinkFactory, UdpSourceFactory};
+pub use factory::UdpConnector;
 pub use probe::{OnFailure, ProbeConfig, ProbeKind};
 pub use sink::{MAX_DATAGRAM_BYTES, UdpSink};
 pub use source::UdpSource;

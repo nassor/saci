@@ -72,7 +72,7 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::types::{Kind, Type};
 
 use crate::connector::postgresql::config::{
-    FieldSpec, PgFieldType, PostgresSinkConfig, Role, WriteMode, split_qualified,
+    PostgresSinkConfig, Role, WriteMode, forced_pg_type, split_qualified,
 };
 use crate::connector::postgresql::connection::{
     Connector, PgConnection, column_types, pg_detail, quote, quote_columns, quote_qualified,
@@ -84,6 +84,7 @@ use crate::connector::postgresql::types::{
     ColumnType, OID_NUMERIC, OID_NUMERIC_ARRAY, PgTypeRef, Wire, numeric_precision, numeric_scale,
     numeric_typmod, validate_columns,
 };
+use crate::connector::schema::{FieldSpec, FieldType};
 
 /// How one declared column is written.
 ///
@@ -158,9 +159,9 @@ impl PostgresSink {
 
         let what = "PostgresSink";
         let fields = cfg
-            .schema_fields
+            .fields
             .iter()
-            .map(|spec| spec.to_arrow_field())
+            .map(|spec| spec.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
         let (namespace, relation) = split_qualified(what, &cfg.table)?;
@@ -177,7 +178,7 @@ impl PostgresSink {
             sink = %cfg.name,
             target_db = %connector.target(),
             table = %cfg.table,
-            columns = cfg.schema_fields.len(),
+            columns = cfg.fields.len(),
             "postgres sink configured"
         );
 
@@ -185,7 +186,7 @@ impl PostgresSink {
             connector,
             connection: None,
             schema,
-            fields: cfg.schema_fields.clone(),
+            fields: cfg.fields.clone(),
             table: quote_qualified(what, &cfg.table)?,
             table_display: cfg.table.clone(),
             namespace,
@@ -608,7 +609,7 @@ impl PostgresSink {
             if want.name() != got.name() {
                 return Err(SaciError::generic(format!(
                     "PostgresSink: batch column '{}' does not match the declared column '{}'; \
-                     schema_fields order is the batch order",
+                     field order is the batch order",
                     got.name(),
                     want.name()
                 )));
@@ -650,7 +651,7 @@ impl PostgresSink {
 /// domain's constraints are left to the assignment coercion the `INSERT`
 /// performs on the way into the target, which raises instead.
 ///
-/// A modifier in `pg_type` is an *assertion*, not a coercion: the target type
+/// A modifier in `native_type` is an *assertion*, not a coercion: the target type
 /// always comes from the catalog, so a modifier the server's column does not
 /// carry is a refusal.
 ///
@@ -659,7 +660,7 @@ impl PostgresSink {
 /// Returns the reason the column cannot be written, without a column prefix:
 /// the caller adds one and reports every offending column at once.
 fn plan_column(spec: &FieldSpec, column: &ColumnType, wire: Wire) -> Result<ColumnPlan, String> {
-    let forced = spec.forced_pg_type()?;
+    let forced = forced_pg_type(spec)?;
     // A binary wire frames the target's own type, domain included, so the
     // cast route is exactly the text wire.
     let cast = wire == Wire::Text;
@@ -667,7 +668,7 @@ fn plan_column(spec: &FieldSpec, column: &ColumnType, wire: Wire) -> Result<Colu
     let copy_type = if cast {
         // A text wire carries PostgreSQL's canonical text for the type, which
         // is exactly what the target's input function reads back.
-        if spec.ty == PgFieldType::List {
+        if spec.ty == FieldType::List {
             Type::TEXT_ARRAY
         } else {
             Type::TEXT
@@ -676,7 +677,7 @@ fn plan_column(spec: &FieldSpec, column: &ColumnType, wire: Wire) -> Result<Colu
         Type::from_oid(column.oid).ok_or_else(|| {
             format!(
                 "the server type {} has no binary form this connector frames; declare \
-                 type = \"utf8\" with pg_type = \"{}\" to write it as text",
+                 type = \"utf8\" with native_type = \"{}\" to write it as text",
                 column.display, column.display
             )
         })?
@@ -700,7 +701,7 @@ fn plan_column(spec: &FieldSpec, column: &ColumnType, wire: Wire) -> Result<Colu
     })
 }
 
-/// Refuse a `pg_type` modifier the server's own column does not carry.
+/// Refuse a `native_type` modifier the server's own column does not carry.
 ///
 /// The target type comes from the catalog either way, so a modifier that
 /// disagrees means the configuration describes a column the server does not
@@ -709,7 +710,7 @@ fn plan_column(spec: &FieldSpec, column: &ColumnType, wire: Wire) -> Result<Colu
 fn check_modifier(forced: &PgTypeRef, modifier: &str, column: &ColumnType) -> Result<(), String> {
     let mismatch = || {
         format!(
-            "pg_type = \"{}\" but the server column is {}",
+            "native_type = \"{}\" but the server column is {}",
             forced.raw, column.display
         )
     };
@@ -736,7 +737,7 @@ fn check_modifier(forced: &PgTypeRef, modifier: &str, column: &ColumnType) -> Re
 }
 
 /// The parenthesised modifier of a `format_type` spelling, with its spaces
-/// removed so it compares against a `pg_type`'s own normalised form.
+/// removed so it compares against a `native_type`'s own normalised form.
 ///
 /// `format_type` never nests parentheses, so the first pair is the modifier:
 /// `character varying(64)` and `timestamp(3) with time zone` both yield the
@@ -758,7 +759,7 @@ fn display_modifier(display: &str) -> Option<String> {
 /// [`column_types`](crate::connector::postgresql::connection::column_types) carries `typtypmod`
 /// along the domain chain.
 fn check_scale(spec: &FieldSpec, column: &ColumnType, copy_type: &Type) -> Result<(), String> {
-    let decimal = spec.ty == PgFieldType::Decimal128 || spec.item == Some(PgFieldType::Decimal128);
+    let decimal = spec.ty == FieldType::Decimal128 || spec.item == Some(FieldType::Decimal128);
     if !decimal {
         return Ok(());
     }
@@ -870,14 +871,14 @@ mod tests {
     use arrow_schema::{DataType, Field};
 
     use super::*;
-    use crate::connector::from_kdl_str;
+    use crate::config::from_kdl_str;
     use crate::connector::postgresql::types::unconstrained_type_name;
     use serde::Deserialize as _;
 
     const FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"label\" type=\"utf8\"
-schema_fields \"seq\" type=\"int64\" nullable=#false
+field \"id\" type=\"int64\" nullable=#false
+field \"label\" type=\"utf8\"
+field \"seq\" type=\"int64\" nullable=#false
 ";
 
     fn sink(header: &str) -> PostgresSink {
@@ -1036,9 +1037,9 @@ schema_fields \"seq\" type=\"int64\" nullable=#false
     const VARCHAR_3: i32 = 3 + 4;
 
     const MIXED_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"payload\" type=\"utf8\" pg_type=\"jsonb\"
-schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numeric(12,2)\"
+field \"id\" type=\"int64\" nullable=#false
+field \"payload\" type=\"utf8\" native_type=\"jsonb\"
+field \"total\" type=\"decimal128\" precision=12 scale=2 native_type=\"numeric(12,2)\"
 ";
 
     /// A text-wire column and a forced modifier, beside a plain `bigint`.
@@ -1107,7 +1108,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     fn a_domain_over_a_binary_framed_type_stages_as_the_domain_itself() {
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"label\" type=\"utf8\" pg_type=\"public.short\"\n",
+            "field \"label\" type=\"utf8\" native_type=\"public.short\"\n",
         );
         let column = ColumnType {
             name: "label".to_string(),
@@ -1134,7 +1135,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     fn a_domain_over_an_enum_still_casts_and_casts_to_the_base() {
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"mood\" type=\"utf8\" pg_type=\"public.mood_dom\"\n",
+            "field \"mood\" type=\"utf8\" native_type=\"public.mood_dom\"\n",
         );
         let column = ColumnType {
             name: "mood".to_string(),
@@ -1162,7 +1163,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     fn a_bit_target_is_cast_through_a_quoted_name_not_the_bit_keyword() {
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"flags\" type=\"utf8\" pg_type=\"bit(4)\"\n",
+            "field \"flags\" type=\"utf8\" native_type=\"bit(4)\"\n",
         );
         let mut column = target(Type::BIT.oid(), "bit(4)");
         column.typmod = 4;
@@ -1178,10 +1179,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     /// modifier must not push the column onto the cast route.
     #[test]
     fn a_modifier_the_server_carries_stays_on_the_direct_route() {
-        let sink = sink_with(
-            "table \"orders\"",
-            "schema_fields \"label\" type=\"utf8\"\n",
-        );
+        let sink = sink_with("table \"orders\"", "field \"label\" type=\"utf8\"\n");
         let column = target(Type::VARCHAR.oid(), "character varying(64)");
         let plan = plan_column(&sink.fields[0], &column, Wire::Binary).expect("plan");
         assert!(plan.cast.is_none());
@@ -1190,7 +1188,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
         // The same target, now named with its modifier by the configuration.
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"label\" type=\"utf8\" pg_type=\"varchar(3)\"\n",
+            "field \"label\" type=\"utf8\" native_type=\"varchar(3)\"\n",
         );
         let column = target(Type::VARCHAR.oid(), "character varying(3)");
         let plan = plan_column(&sink.fields[0], &column, Wire::Binary).expect("plan");
@@ -1208,8 +1206,8 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     fn a_forced_modifier_the_server_does_not_carry_is_refused() {
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 \
-             pg_type=\"numeric(12,2)\"\n",
+            "field \"total\" type=\"decimal128\" precision=12 scale=2 \
+             native_type=\"numeric(12,2)\"\n",
         );
         // A wider target: `numeric(18,6)`.
         let mut column = target(Type::NUMERIC.oid(), "numeric(18,6)");
@@ -1231,7 +1229,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
         // A character width the server does not have, either way round.
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"label\" type=\"utf8\" pg_type=\"varchar(3)\"\n",
+            "field \"label\" type=\"utf8\" native_type=\"varchar(3)\"\n",
         );
         let reason = plan_column(
             &sink.fields[0],
@@ -1258,7 +1256,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     fn a_text_wire_numeric_still_compares_its_modifier_as_numeric() {
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"total\" type=\"utf8\" pg_type=\"numeric(12)\"\n",
+            "field \"total\" type=\"utf8\" native_type=\"numeric(12)\"\n",
         );
         let mut column = target(Type::NUMERIC.oid(), "numeric(12,0)");
         // `numeric(12,0)`: the scale half of the packed modifier is zero.
@@ -1285,8 +1283,8 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     fn a_domain_over_a_scaled_numeric_refuses_a_wider_declared_scale() {
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"total\" type=\"decimal128\" precision=20 scale=10 \
-             pg_type=\"public.money_amt\"\n",
+            "field \"total\" type=\"decimal128\" precision=20 scale=10 \
+             native_type=\"public.money_amt\"\n",
         );
         let column = ColumnType {
             name: "total".to_string(),
@@ -1306,8 +1304,8 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
         // what runs the domain's own constraints during the `COPY`.
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 \
-             pg_type=\"public.money_amt\"\n",
+            "field \"total\" type=\"decimal128\" precision=12 scale=2 \
+             native_type=\"public.money_amt\"\n",
         );
         let plan = plan_column(&sink.fields[0], &column, Wire::Binary).expect("scale 2 fits");
         assert_eq!(plan.stage_type, "public.money_amt");
@@ -1318,7 +1316,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
     fn a_target_scale_narrower_than_the_declared_one_is_refused() {
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"total\" type=\"decimal128\" precision=12 scale=4\n",
+            "field \"total\" type=\"decimal128\" precision=12 scale=4\n",
         );
         let mut column = target(Type::NUMERIC.oid(), "numeric(12,2)");
         column.typmod = NUMERIC_12_2;
@@ -1334,7 +1332,7 @@ schema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numer
         // `money` always keeps exactly two.
         let sink = sink_with(
             "table \"orders\"",
-            "schema_fields \"total\" type=\"decimal128\" precision=12 scale=1\n",
+            "field \"total\" type=\"decimal128\" precision=12 scale=1\n",
         );
         let reason = plan_column(
             &sink.fields[0],

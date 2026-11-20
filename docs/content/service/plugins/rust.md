@@ -156,12 +156,12 @@ Runs the same on all three platforms. The artifact name is platform specific:
 
 ## 4. Write the config node
 
-A `plugin` node in the workflow names the library. The key is `library`, not
-`module`; a `link` treats a plugin node exactly like a `wasm` node.
+A `plugin` node in the workflow names the library with `path`, the same key a `wasm` node uses;
+a `link` treats a plugin node exactly like a `wasm` node.
 
 ```kdl,name=The plugin node in a service config
 workflow "counter" {
-    plugin "process_counter" library="${SACI_PLUGIN_LIB:-target/debug/libsaci_plugin_smoketest.so}" {
+    plugin "process_counter" path="${SACI_PLUGIN_LIB:-target/debug/libsaci_plugin_smoketest.so}" {
         // Optional. Hex digest of the library file's bytes, with an optional
         // `sha3-256:` prefix; a mismatch refuses the load.
         // sha3_256="sha3-256:abc123..."
@@ -170,7 +170,7 @@ workflow "counter" {
 }
 ```
 
-A relative `library` resolves against the directory `saci-service` runs in, and an absolute path
+A relative `path` resolves against the directory `saci-service` runs in, and an absolute path
 is used as it stands. An unknown key in the node is a parse error.
 [Plugins in a workflow](@/service/plugins/_index.md) lists every key.
 

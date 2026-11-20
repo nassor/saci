@@ -99,8 +99,7 @@ mod tests {
 
     #[test]
     fn a_source_table_reads_its_defaults() {
-        let table =
-            from_kdl_str("bind \"127.0.0.1:0\"\nschema_fields \"v\" type=\"Int64\"\n").unwrap();
+        let table = from_kdl_str("bind \"127.0.0.1:0\"\nfield \"v\" type=\"int64\"\n").unwrap();
         let cfg: PeerSourceConfig = deserialize_config(&table, "PeerSource").unwrap();
         assert_eq!(cfg, PeerSourceConfig::new("127.0.0.1:0"));
     }

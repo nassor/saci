@@ -16,7 +16,7 @@
 //
 // reports one letter of five rows, grouped by (sink, reason), and so does
 // the dashboard's Dead letters tab at
-// http://127.0.0.1:8080/ui#dead-letters. A `FileSource` reaches EOF once, so
+// http://127.0.0.1:8080/ui#dead-letters. A `file` source reaches EOF once, so
 // the file produces exactly that one letter however long the service runs;
 // the automatic replay re-attempts it on a widening backoff, and every
 // attempt bumps its `replays` count.
@@ -41,7 +41,7 @@ node id=1 name="saci-dlq" data_dir="${SACI_DATA_DIR:-/tmp/saci-dlq}"
 
 // One pass a second. A source that keeps producing would put a letter in the
 // store on every failing pass; this one reaches EOF after the first.
-run_mode kind="interval" interval_ms=1000
+run "interval" every_ms=1000
 
 workflow "orders" {
     // The dead letter queue. `redb` is the default store, so `dlq` alone
@@ -55,18 +55,18 @@ workflow "orders" {
         directory "${SACI_DLQ_DIR:-/tmp/saci-dlq/dlq}"
     }
 
-    transformer "csv_fmt" format="csv" {
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {
+        config has_headers=#true
     }
 
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "csv_orders" type="FileSource" component="orders" transformer="csv_fmt" {
+    source "csv_orders" connector="file" component="orders" codec="csv_fmt" {
         config {
             path "examples/configs/fixtures/orders.csv"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "amount" type="float64" nullable=#true
-            schema_fields "status" type="utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#true
+            field "status" type="utf8" nullable=#true
         }
     }
 
@@ -74,7 +74,7 @@ workflow "orders" {
     // the dead letter queue on the first attempt instead of after four. With
     // the default policy the letter's `reason` would be the same, because a
     // `RetryExhausted` error is unwrapped to the failure underneath it.
-    sink "orders_out" type="HttpSink" component="orders" transformer="ndjson_fmt" {
+    sink "orders_out" connector="http" component="orders" codec="ndjson_fmt" {
         retry { max_attempts 1 }
         config {
             url "${SACI_DLQ_SINK_URL:-http://127.0.0.1:18099/orders}"
@@ -83,9 +83,9 @@ workflow "orders" {
             headers {
                 "content-type" "application/x-ndjson"
             }
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "amount" type="float64" nullable=#true
-            schema_fields "status" type="utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#true
+            field "status" type="utf8" nullable=#true
         }
     }
 
@@ -93,7 +93,7 @@ workflow "orders" {
 }
 
 // A fixed port, not 0: the curl lines above and the dashboard URL name it.
-http bind="127.0.0.1:8080" disabled=#false
+http bind="127.0.0.1:8080" enabled=#true
 
 // `log_level="info"` is what puts the `dead letter recorded` and `dead letter
 // replay finished` lines on stdout beside the runner's own. Both ride the

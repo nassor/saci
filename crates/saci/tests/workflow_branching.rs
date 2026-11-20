@@ -49,12 +49,13 @@ fn config(run_mode: RunMode) -> ServiceConfig {
             data_dir: PathBuf::from("/tmp/saci-branching-test"),
         },
         mode: ServiceMode::Standalone {
-            config: StandaloneConfig { run_mode },
+            config: StandaloneConfig { run: run_mode },
         },
         workflows: vec![WorkflowSpec {
             id: "w".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -98,10 +99,10 @@ fn branching_built(
         builder = builder.flow(flow);
     }
     let mut built = builder.build().expect("build workflow");
-    built.nodes[0].type_name = "ChannelSource".to_string();
-    built.nodes[1].type_name = "wasm".to_string();
-    built.nodes[2].type_name = "ChannelSink".to_string();
-    built.nodes[3].type_name = "ChannelSink".to_string();
+    built.nodes[0].connector = "channel".to_string();
+    built.nodes[1].connector = "wasm".to_string();
+    built.nodes[2].connector = "channel".to_string();
+    built.nodes[3].connector = "channel".to_string();
     (built, tx, rx_a, rx_b)
 }
 
@@ -117,7 +118,7 @@ fn three_row_batch() -> RecordBatch {
 async fn routing_processor_delivers_only_to_the_selected_branch() {
     let (built, tx, mut rx_a, mut rx_b) = branching_built(
         HashMap::from([("route".to_string(), "a".to_string())]),
-        RunMode::OneShot,
+        RunMode::Once,
         None,
     );
     tx.send(three_row_batch()).await.expect("send batch");
@@ -145,7 +146,7 @@ async fn routing_processor_delivers_only_to_the_selected_branch() {
 async fn routing_processor_can_fan_to_several_branches() {
     let (built, tx, mut rx_a, mut rx_b) = branching_built(
         HashMap::from([("route".to_string(), "a,b".to_string())]),
-        RunMode::OneShot,
+        RunMode::Once,
         None,
     );
     tx.send(three_row_batch()).await.expect("send batch");
@@ -162,7 +163,7 @@ async fn routing_processor_can_fan_to_several_branches() {
 
 #[tokio::test]
 async fn legacy_processor_without_routes_multicasts_to_every_labelled_edge() {
-    let (built, tx, mut rx_a, mut rx_b) = branching_built(HashMap::new(), RunMode::OneShot, None);
+    let (built, tx, mut rx_a, mut rx_b) = branching_built(HashMap::new(), RunMode::Once, None);
     tx.send(three_row_batch()).await.expect("send batch");
     drop(tx);
 

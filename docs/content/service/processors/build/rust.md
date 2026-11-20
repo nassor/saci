@@ -247,7 +247,7 @@ the build hub.
 CSV fixture.
 
 ```kdl,name=The wasm node in standalone_settle.kdl
-wasm "settle" module="target/wasm32-wasip3/release/settle_wasm.wasm" {
+wasm "settle" path="target/wasm32-wasip3/release/settle_wasm.wasm" {
     config ledger_tag="standalone"
 }
 ```
@@ -275,7 +275,7 @@ cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- serve 
 
 You can also validate and run the config in one command with `cargo xtask demo standalone_settle`.
 `validate` compiles the component and checks that every source and sink names a
-component the processor declares. `run_mode` is `one_shot`, so `serve`
+component the processor declares. The run mode is `once`, so `serve`
 processes the fixture once and exits.
 
 The column this stage fills is `settlement`, in `/tmp/saci-settle-out.csv`. All

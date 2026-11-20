@@ -2,7 +2,7 @@
 //!
 //! Covers the properties the batch loop cannot provide: per-item state carry,
 //! clean mid-stream cancellation, live TCP ingest, and the stream-mode
-//! dispatch that selects this runner from `run_mode kind = "stream"`.
+//! dispatch that selects this runner from `run "stream"`.
 
 #![cfg(all(
     feature = "connector-channel",

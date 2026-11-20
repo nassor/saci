@@ -44,8 +44,8 @@ fn sink(path: &str, url: &str, token: &str) -> TursoSink {
          connection path=\"{}\" {{\n\
          \x20   remote url=\"{url}\" token=\"{token}\"\n\
          }}\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSinkConfig = common::config_from_kdl(&body);
@@ -60,8 +60,8 @@ fn source(path: &str, url: &str, token: &str) -> TursoSource {
          \x20   remote url=\"{url}\" token=\"{token}\"\n\
          }}\n\
          mode kind=\"dump\" table=\"{TABLE}\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSourceConfig = common::config_from_kdl(&body);

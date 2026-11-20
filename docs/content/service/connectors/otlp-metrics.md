@@ -1,9 +1,9 @@
 +++
-title = "OpenTelemetry"
-description = "OTLP/HTTP metrics in and out: a source that listens for exporters or reads a url, a sink that posts to a collector, and the ten-column Arrow view both share."
+title = "otlp-metrics"
+description = "The otlp-metrics connector speaks OTLP/HTTP metrics in and out: a source that listens for exporters or reads a url, a sink that posts to a collector, and the ten-column Arrow view both share."
 template = "subpage.html"
 weight = 13
-aliases = ["/connectors/opentelemetry/"]
+aliases = ["/connectors/opentelemetry/", "/service/connectors/opentelemetry/"]
 [[extra.facts]]
 label = "Direction"
 value = "Source and sink"
@@ -84,25 +84,25 @@ can take rows from anywhere.
   included, so a busy port fails before the service starts.
 - The `connector-otlp` feature on both the `validate` and the `serve` run. It is not in
   the `server` feature, because an OpenTelemetry deployment is a deliberate choice of endpoint.
-- `run_mode kind="stream"` whenever a listening source is declared. It blocks for the next request
+- `run "stream"` whenever a listening source is declared. It blocks for the next request
   and never reaches EOF, and validation rejects it in any other run mode. A `stop_at_end` pull
   source reaches EOF after one body and runs in either mode.
 - An endpoint the sink can post to for the `serve` step. The sink opens no connection while the
   config is built, so `validate` succeeds whether or not that endpoint is up.
-- `schema_fields` on a node only when the pipeline wants columns other than the canonical ten. Both
+- `field` lines on a node only when the pipeline wants columns other than the canonical ten. Both
   ends then declare the same list, because the workflow graph check compares the source's schema
   against the sink's field for field.
 
-No `transformer` node and no `format` key. An OTLP request is the wire format, so there is nothing
+No `codec` node and no `format` key. An OTLP request is the wire format, so there is nothing
 for a codec to decode.
 
 ## 1. Receive: the source node
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>a listening source needs run_mode kind="stream"</em></div>
+<div class="code-cap"><span>KDL</span><em>a listening source needs run "stream"</em></div>
 
 ```kdl
-source "metrics_in" type="OpenTelemetryMetricsSource" component="Metric" {
+source "metrics_in" connector="otlp-metrics" component="Metric" {
     config {
         bind "0.0.0.0:4318"
         path "/v1/metrics"
@@ -139,7 +139,7 @@ arrive. Both modes build the same rows.
 <div class="code-cap"><span>KDL</span><em>stop_at_end is what lets the batch runner drive it</em></div>
 
 ```kdl
-source "metrics_in" type="OpenTelemetryMetricsSource" component="Metric" {
+source "metrics_in" connector="otlp-metrics" component="Metric" {
     config {
         mode kind="pull" url="http://127.0.0.1:8888/v1/metrics" stop_at_end=#true
         buffer 64
@@ -164,7 +164,7 @@ whichever kind it names.
 <div class="code-cap"><span>KDL</span><em>a base url gains the standard path</em></div>
 
 ```kdl
-sink "metrics_out" type="OpenTelemetryMetricsSink" component="Metric" {
+sink "metrics_out" connector="otlp-metrics" component="Metric" {
     config {
         url "http://collector.internal:4318"
         encoding "protobuf"
@@ -193,7 +193,7 @@ defaults to `saci_metric`.
 ## 4. Validate and run
 
 `examples/configs/opentelemetry_metrics.kdl` declares a listening source and a sink and sets
-`run_mode kind="stream"`.
+`run "stream"`.
 
 Runs the same on Linux, macOS and Windows (PowerShell):
 
@@ -247,24 +247,24 @@ the endpoint it forwards to.
 
 ## What one row is
 
-A source with no `schema_fields` emits the canonical schema, one row per OTLP data point, so a
+A source with no `field` lines emits the canonical schema, one row per OTLP data point, so a
 metric with three data points is three rows and the metric's own name, unit and description repeat
 on each.
 
 | Column | Type | Null | What it holds |
 |---|---|---|---|
-| `name` | Utf8 | no | the metric's name |
-| `value` | Float64 | no | a gauge's or sum's value, a histogram's or exponential histogram's sum, a summary's sum |
-| `timestamp` | UInt64 | no | the data point's time, in Unix nanoseconds |
-| `kind` | Utf8 | no | `gauge`, `sum`, `histogram`, `exponential_histogram` or `summary` |
-| `unit` | Utf8 | yes | the metric's unit |
-| `description` | Utf8 | yes | the metric's description |
-| `attributes` | Utf8 | yes | the data point's attributes as a JSON object |
-| `resource_attributes` | Utf8 | yes | the resource's attributes as a JSON object |
-| `count` | UInt64 | yes | a histogram's, exponential histogram's or summary's count |
-| `start_timestamp` | UInt64 | yes | the data point's start time, in Unix nanoseconds |
+| `name` | utf8 | no | the metric's name |
+| `value` | float64 | no | a gauge's or sum's value, a histogram's or exponential histogram's sum, a summary's sum |
+| `timestamp` | uint64 | no | the data point's time, in Unix nanoseconds |
+| `kind` | utf8 | no | `gauge`, `sum`, `histogram`, `exponential_histogram` or `summary` |
+| `unit` | utf8 | yes | the metric's unit |
+| `description` | utf8 | yes | the metric's description |
+| `attributes` | utf8 | yes | the data point's attributes as a JSON object |
+| `resource_attributes` | utf8 | yes | the resource's attributes as a JSON object |
+| `count` | uint64 | yes | a histogram's, exponential histogram's or summary's count |
+| `start_timestamp` | uint64 | yes | the data point's start time, in Unix nanoseconds |
 
-`schema_fields` replaces that list with the columns a pipeline declares, and the nodes on either
+`field` lines replace that list with the columns a pipeline declares, and the nodes on either
 side of a `link` must declare the same list: the graph check compares the source's schema against
 the sink's, field for field. A sink needs no declaration to read a batch, because the conversion
 reads the batch's own columns by name; declaring one is how the check is satisfied. Each declared
@@ -340,7 +340,7 @@ Source:
 | `mode.headers` | table | none | headers every pull read carries |
 | `mode.stop_at_end` | bool | `false` | read once and finish instead of repeating |
 | `mode.max_body_bytes` | integer | `16777216` | the largest pull body accepted |
-| `schema_fields` | list of fields | none | the columns to emit instead of the canonical ten |
+| `field` | lines | none | the columns to emit instead of the canonical ten |
 
 Sink:
 
@@ -353,7 +353,7 @@ Sink:
 | `metric_name` | string | `saci_metric` | the name for a batch whose name column is empty |
 | `service_name` | string | none | the `service.name` resource attribute every export carries |
 | `batch_rows` | integer | `8192` | rows one export carries at most |
-| `schema_fields` | list of fields | none | the schema this node declares to the workflow graph instead of the canonical ten |
+| `field` | lines | none | the schema this node declares to the workflow graph instead of the canonical ten |
 
 An unrecognised key inside `config` is a configuration error on this connector, and so is a
 shorthand key beside a `mode` block.
@@ -371,7 +371,7 @@ shorthand key beside a `mode` block.
 | `OtlpMetricsSink: url must start with 'http://' or 'https://'` | give the endpoint its scheme |
 | `OtlpMetricsSink: batch_rows must be at least 1` | raise the count, or drop the key |
 | `OtlpMetricsSink: 'not a name' is not a valid header name` | fix the header pair |
-| `source type 'OpenTelemetryMetricsSource' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"`, or make the pull read `stop_at_end` |
+| `source connector 'otlp-metrics' never reaches EOF; it requires standalone mode with run "stream"` | set `run "stream"`, or make the pull read `stop_at_end` |
 
 ## Next
 

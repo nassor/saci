@@ -125,7 +125,7 @@ impl PauseGate {
     /// parked yet.
     ///
     /// Synchronous, so a pacing sleep can cut itself short instead of waiting
-    /// out a whole `interval_ms` before the runner reaches its pause point.
+    /// out a whole `every_ms` before the runner reaches its pause point.
     pub fn is_paused(&self) -> bool {
         self.0
             .as_ref()

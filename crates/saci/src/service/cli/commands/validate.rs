@@ -32,13 +32,13 @@
 //! Runs Gate 1, then builds every source, sink and codec
 //! ([`ServiceBuilder::build_connectors_only`](crate::service::ServiceBuilder::build_connectors_only))
 //! instead of Gate 2: every connector config still gets checked against its
-//! `deny_unknown_fields` struct, but a processor node's module or library is
+//! `deny_unknown_fields` struct, but a processor node's `path` is
 //! never touched, so a config naming a build artifact that does not exist on
 //! this machine still validates.
 //!
 //! ## Unknown type handling
 //!
-//! A declared `type` the built-in registry does not hold is one of two very
+//! A declared `connector` the built-in registry does not hold is one of two very
 //! different things, and
 //! [`builtin_feature`]
 //! separates them.
@@ -61,7 +61,7 @@
 //! | Config is structurally valid but some types are unknown (default mode) | 0 (warnings printed to stderr) |
 //! | Unknown types present and `--strict` is set | 1 |
 //! | A declared type is a built-in connector this binary lacks the feature for | 1 |
-//! | A `transformer` node's `format` that no codec is registered for, whether this crate ships it and the feature is off or the name is unknown | 1 |
+//! | A `codec` node's `format` that no codec is registered for, whether this crate ships it and the feature is off or the name is unknown | 1 |
 //! | A declared `wasm`/`plugin` node, or `mode "cluster"`, needs a host this binary lacks the feature for | 1 |
 //! | Config fails structural validation | 1 |
 //! | Workflow graph mismatch (link component/schema disagreement) | 1 |
@@ -134,7 +134,7 @@ pub async fn run(
                     .wasm
                     .iter()
                     .map(|spec| spec
-                        .module
+                        .path
                         .as_deref()
                         .unwrap_or("(runtime supplied programmatically)"))
                     .collect::<Vec<_>>()
@@ -232,29 +232,27 @@ fn report_unknown_warnings(
     Ok(())
 }
 
-/// The `type` string a missing-factory message names.
+/// The connector name a missing-connector message names.
 ///
-/// `missing_factory_error` writes `for type '<name>'` into every message
-/// [`is_unknown_factory_error`] accepts, so reading the name back out is exact
-/// rather than a guess. The producing end of that contract is pinned by
-/// `factories::tests::the_feature_hint_keeps_the_classified_prefix`, which
+/// `missing_factory_error` writes `no connector named '<name>'` into every
+/// message [`is_unknown_factory_error`] accepts, so reading the name back out
+/// is exact rather than a guess. The producing end of that contract is pinned
+/// by `factories::tests::the_feature_hint_keeps_the_classified_prefix`, which
 /// covers the arm a build with every connector cannot reach through
 /// `build`; the reading end by
 /// `declared_type_reads_a_real_builder_message` below.
 fn declared_type(message: &str) -> Option<&str> {
-    let (_, after) = message.split_once("for type '")?;
+    let (_, after) = message.split_once("no connector named '")?;
     let (name, _) = after.split_once('\'')?;
     Some(name)
 }
 
-/// Returns `true` if the error is specifically a missing factory registration
-/// (as opposed to a factory build failure or schema error).
+/// Returns `true` if the error is specifically a missing connector
+/// registration (as opposed to a connector build failure or schema error).
 fn is_unknown_factory_error(e: &SaciError) -> bool {
-    // ServiceBuilder::build formats missing-factory errors as
-    // "no source/sink factory registered for type '...'".
-    e.category() == "configuration"
-        && (e.message().contains("no source factory registered")
-            || e.message().contains("no sink factory registered"))
+    // ServiceBuilder::build formats missing-connector errors as
+    // "no connector named '...' is registered (required by ...)".
+    e.category() == "configuration" && e.message().contains("no connector named '")
 }
 
 #[cfg(all(test, feature = "service"))]
@@ -282,6 +280,7 @@ mod tests {
             id: "test".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources,
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -331,7 +330,7 @@ mod tests {
                 heal: None,
                 id: "sink1".to_string(),
                 name: None,
-                type_name: "ClickHouseSink".to_string(), // not built-in
+                connector: "ghostdb".to_string(), // not built-in
                 codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
@@ -343,7 +342,7 @@ mod tests {
         assert_eq!(err.category(), "configuration");
         assert!(
             is_unknown_factory_error(&err),
-            "ClickHouseSink should be classified as unknown factory: {err}"
+            "ghostdb should be classified as unknown factory: {err}"
         );
     }
 
@@ -355,7 +354,7 @@ mod tests {
                 flow_control: None,
                 id: "src1".to_string(),
                 name: None,
-                type_name: "MongoSource".to_string(), // not built-in
+                connector: "mongodb".to_string(), // not built-in
                 codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
@@ -367,8 +366,36 @@ mod tests {
         let err = builder.build(&config).unwrap_err();
         assert!(
             is_unknown_factory_error(&err),
-            "MongoSource should be classified as unknown factory: {err}"
+            "mongodb should be classified as unknown factory: {err}"
         );
+    }
+
+    /// A built-in asked for a role it does not serve is a defect in the file,
+    /// not a name a serve-time registration could supply, so it is not an
+    /// unknown-factory warning.
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn a_role_the_connector_lacks_is_a_hard_error_not_an_unknown_name() {
+        let config = make_config(
+            vec![],
+            vec![SinkSpec {
+                heal: None,
+                id: "sink1".to_string(),
+                name: None,
+                connector: "http-listen".to_string(),
+                codec: None,
+                component: "orders".to_string(),
+                retry: RetryConfig::default(),
+                config: ConfigValue::Object(ConfigMap::new()),
+            }],
+        );
+        let err = ServiceBuilder::new().build(&config).unwrap_err();
+        assert!(
+            err.message()
+                .contains("connector 'http-listen' has no sink"),
+            "got: {err}"
+        );
+        assert!(!is_unknown_factory_error(&err), "got: {err}");
     }
 
     #[test]
@@ -387,7 +414,7 @@ mod tests {
         }
     }
 
-    /// The `for type '...'` shape [`declared_type`] reads is written by the
+    /// The `no connector named '...'` shape [`declared_type`] reads is written by the
     /// builder, not by this file, so the contract is checked against a message
     /// the builder really produced.
     #[test]
@@ -398,7 +425,7 @@ mod tests {
                 flow_control: None,
                 id: "src1".to_string(),
                 name: None,
-                type_name: "MongoSource".to_string(),
+                connector: "mongodb".to_string(),
                 codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
@@ -408,14 +435,14 @@ mod tests {
         );
         let builder = ServiceBuilder::new();
         let err = builder.build(&config).unwrap_err();
-        assert_eq!(declared_type(&err.message()), Some("MongoSource"));
+        assert_eq!(declared_type(&err.message()), Some("mongodb"));
     }
 
     /// A connector this crate ships is unusable by a binary built without its
     /// feature, so it fails whether or not `--strict` was passed.
     #[test]
     fn a_feature_gated_builtin_fails_in_both_modes() {
-        let message = "no source factory registered for type 'PostgresSource' \
+        let message = "no connector named 'postgresql' is registered \
                        (required by source 'pg_orders')"
             .to_string();
         for strict in [false, true] {
@@ -432,7 +459,7 @@ mod tests {
     /// it keeps the warning and the zero exit.
     #[test]
     fn a_user_defined_type_stays_a_warning() {
-        let message = "no source factory registered for type 'MongoSource' \
+        let message = "no connector named 'mongodb' is registered \
                        (required by source 'mongo_orders')"
             .to_string();
         assert!(report_unknown_warnings(std::slice::from_ref(&message), &args(false)).is_ok());

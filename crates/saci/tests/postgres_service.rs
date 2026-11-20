@@ -124,10 +124,10 @@ mode "standalone"
 
 node id=1 name="saci-postgres-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "postgres-service-test" {{
-    source "orders_in" type="PostgresSource" component="{COMPONENT}" {{
+    source "orders_in" connector="postgresql" component="{COMPONENT}" {{
         config {{
             name "orders_in"
             batch_rows 40
@@ -139,15 +139,15 @@ workflow "postgres-service-test" {{
 
             mode kind="polling" table="orders_in" cursor_column="id"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="PostgresSink" component="{COMPONENT}" {{
+    sink "orders_out" connector="postgresql" component="{COMPONENT}" {{
         config {{
             name "orders_out"
             table "orders_out"
@@ -159,9 +159,9 @@ workflow "postgres-service-test" {{
                 sslmode "disable"
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -169,7 +169,7 @@ workflow "postgres-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

@@ -4,12 +4,12 @@
 //! [`Sink`]: crate::io::Sink
 //!
 //! Both halves are declarative: the Arrow schema is written in the service
-//! configuration as `schema_fields`, not introspected at build time, because
-//! [`SourceFactory::build`] and [`SinkFactory::build`] are synchronous and
+//! configuration as `field` entries, not introspected at build time, because
+//! [`Connector::source`] and [`Connector::sink`] are synchronous and
 //! open no connection. That keeps `saci-service validate` database-free.
 //!
-//! [`SourceFactory::build`]: crate::connector::factory::SourceFactory::build
-//! [`SinkFactory::build`]: crate::connector::factory::SinkFactory::build
+//! [`Connector::source`]: crate::connector::Connector::source
+//! [`Connector::sink`]: crate::connector::Connector::sink
 //!
 //! # Source modes
 //!
@@ -58,9 +58,9 @@ pub mod sink;
 pub mod source;
 
 pub use config::{
-    ClickhouseFieldType, ClickhouseSinkConfig, ClickhouseSourceConfig, CompressionConfig,
-    ConnectionConfig, DumpMode, FieldSpec, PollingMode, QueryMode, SourceMode, WriteMode,
+    ClickhouseSinkConfig, ClickhouseSourceConfig, CompressionConfig, ConnectionConfig, DumpMode,
+    PollingMode, QueryMode, SourceMode, WriteMode,
 };
-pub use factory::{ClickhouseSinkFactory, ClickhouseSourceFactory};
+pub use factory::ClickhouseConnector;
 pub use sink::ClickhouseSink;
 pub use source::ClickhouseSource;

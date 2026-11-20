@@ -1,7 +1,7 @@
 -- The windowing demos' destination tables: one per mode, and two for
 -- tumbling, so its wasm and plugin paths land in visibly separate places.
 --
--- `PostgresSink` never issues CREATE TABLE, so these have to exist before
+-- The `postgresql` sink never issues CREATE TABLE, so these have to exist before
 -- the sinks' first write. Compose mounts this file into the container's
 -- /docker-entrypoint-initdb.d/, which PostgreSQL runs once on first
 -- initialisation of an empty data directory.

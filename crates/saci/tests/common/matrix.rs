@@ -9,19 +9,19 @@
 //!
 //! # Dimensions
 //!
-//! - **Connectors**: `channel`, `file`, `http`, `http-push`, `tcp`, `udp`,
-//!   `saci`, `kafka`, `nats`, `postgresql`, `mariadb`, `clickhouse`, `redb`,
-//!   `s3`, `turso`, `opentelemetry`. All of them drive both ends except `http-push`,
+//! - **Connectors**: `channel`, `file`, `http`, `http-listen`, `tcp`, `udp`,
+//!   `peer`, `kafka`, `nats`, `postgresql`, `mariadb`, `clickhouse`, `redb`,
+//!   `s3`, `turso`, `otlp-metrics`. All of them drive both ends except `http-listen`,
 //!   which registers a source and no sink, so the source dimension is one
 //!   longer than the sink dimension.
 //! - **Byte formats**: `arrow-ipc`, `avro`, `csv`, `ndjson`, `parquet`, plus
 //!   [`Format::None`] for the seven connectors that carry `RecordBatch`es
-//!   natively (`channel`, `postgresql`, `mariadb`, `turso`, `saci`,
-//!   `clickhouse`, `opentelemetry`).
+//!   natively (`channel`, `postgresql`, `mariadb`, `turso`, `peer`,
+//!   `clickhouse`, `otlp-metrics`).
 //! - **Processor runtimes**: a native [`Pipeline`] registered through
 //!   [`ServiceBuilder::runtime`], the `saci-processor-smoketest`
-//!   WebAssembly component loaded from `module`, and the
-//!   `saci-plugin-smoketest` cdylib loaded from `library`.
+//!   WebAssembly component and the `saci-plugin-smoketest` cdylib, each
+//!   loaded from its node's `path`.
 //!
 //! One format per case, applied to every byte-carrying end. The independent
 //! source-format x sink-format cross product is not taken: it is 25920 cases
@@ -46,7 +46,7 @@
 //! `crates/saci-plugin-smoketest/src/lib.rs` declare.
 //!
 //! The plugin's own state accumulates across batches, and the expected
-//! `1, 2, 3` holds under both batch shapes a case can produce. A `one_shot`
+//! `1, 2, 3` holds under both batch shapes a case can produce. A `run "once"`
 //! case delivers one batch of three rows, so `seen = (total + row + 1)` is
 //! `1, 2, 3` off `total = 0`. A `tcp`- or `udp`-sourced case with a `PerRow`
 //! format delivers three single-row batches instead, because both sources
@@ -63,11 +63,11 @@
 //!
 //! | Connector | Surface | Evidence |
 //! |---|---|---|
-//! | `channel`, `postgresql`, `mariadb`, `turso`, `saci`, `clickhouse`, `opentelemetry` | rows | none of them resolves a codec |
+//! | `channel`, `postgresql`, `mariadb`, `turso`, `peer`, `clickhouse`, `otlp-metrics` | rows | none of them resolves a codec |
 //! | `file` | stream | `connector/file/{source,sink}.rs` call `open_reader`/`open_writer` |
 //! | `redb` | stream | `connector/redb/{source,sink}.rs` spool one entry |
 //! | `http` | stream | `connector/http/{source,sink}.rs` spool a whole document |
-//! | `http-push` | stream | `connector/http/push.rs` decodes one request body as one document |
+//! | `http-listen` | stream | `connector/http/listen.rs` decodes one request body as one document |
 //! | `s3` | stream | `connector/s3/{source,sink}.rs` spool one object |
 //! | `tcp` | message | `connector/tcp/{source,sink}.rs` call `open_message_decoder`/`encode_messages`, the sink behind a `message_shape` gate |
 //! | `udp` | message | `connector/udp/{source,sink}.rs` call `open_message_decoder`/`encode_messages`, the sink behind a `message_shape` gate |
@@ -99,13 +99,13 @@
 //!   schema, so most of those cases declare none: `arrow-ipc`, `avro` and
 //!   `parquet` project onto a declared schema in `open_reader`, but a
 //!   document's own schema is what these cases are here to exercise.
-//!   `FileSource` passes `schema_fields` straight through, so it simply
-//!   declares none. `S3Source` has `schema_from "object"`, and `HttpSource`
-//!   and `HttpPushSource` have `schema_from "body"`: all three keep the
+//!   `FileSource` passes its `field` entries straight through, so it simply
+//!   declares none. `S3Source`, `HttpSource` and `HttpListenSource` have
+//!   `schema_from "payload"`: all three keep the
 //!   declared schema for the link check, hand the format nothing, and compare
 //!   the schema the document turned out to carry against the declared one
 //!   field for field. `RedbSource` is
-//!   the exception: it requires `schema_fields` and always hands it to the
+//!   the exception: it requires `field` entries and always hands them to the
 //!   format as a projection target, so every `redb` case declares one and
 //!   every self-describing format is cast back to it.
 //! - The Avro object container file has no unsigned integer type:
@@ -115,11 +115,11 @@
 //!   round-trip unchanged, because the message decoder casts back to the
 //!   declared schema. A schemaless stream read has no declaration to cast
 //!   back to, so the file's own `Int64` is what travels: `FileSource`
-//!   surfaces it as a build-time link mismatch, and the `http`, `http-push`
+//!   surfaces it as a build-time link mismatch, and the `http`, `http-listen`
 //!   and `s3` sources' `schema_from` cross-check surfaces it at drain time. A `redb`
 //!   source declares one, so its own `avro` reads cast back and pass.
-//! - `PgFieldType` (`connector/postgresql/config.rs`) has no unsigned
-//!   variant at all, so a `uint64` `schema_fields` entry is not a
+//! - The PostgreSQL connector (`connector/postgresql/config.rs`) maps no
+//!   unsigned type at all, so a `uint64` `field` entry is not a
 //!   PostgreSQL config. Every `postgresql` x WASM case is rejected while
 //!   parsing that node's `config`.
 //! - CSV is text and carries no types, so the declared schema governs both
@@ -135,10 +135,10 @@
 //!
 //! | Refusal | Site | Evidence |
 //! |---|---|---|
-//! | byte connector with no `transformer` key | build | `ConnectorContext::codec` |
+//! | byte connector with no `codec` key | build | `ConnectorContext::codec` |
 //! | `avro` + WASM on a `file` source | build | the container file's `Int64` disagrees with `Ping.seq` |
-//! | `avro` + WASM on an `http`/`http-push`/`s3` source | run | the `schema_from` cross-check compares the document's `Int64` against `Ping.seq` at drain time |
-//! | `uint64` on a `postgresql` node | build | no `PgFieldType` variant |
+//! | `avro` + WASM on an `http`/`http-listen`/`s3` source | run | the `schema_from` cross-check compares the document's `Int64` against `Ping.seq` at drain time |
+//! | `uint64` on a `postgresql` or `turso` node | build | the connector's `supported` type list has no `uint64` |
 //!
 //! Every codec implements all four codec methods, so every byte
 //! connector, on either end, has exactly one format it refuses,
@@ -167,15 +167,15 @@
 //!
 //! # Run modes
 //!
-//! `is_live_source` (`service/config.rs`) is what decides.
-//! `tcp`, `udp`, `saci` and `HttpPushSource` are EOF-free whatever their
-//! config says; `HttpSource` is EOF-free only under `mode kind="lines"` or
-//! `kind="events"`; `KafkaSource` is without `stop_at_end`/`compacted`, and
-//! `NatsSource` without `stop_at_end`. Every case here sets
+//! [`Connector::live`](saci::connector::Connector::live) is what decides.
+//! `tcp`, `udp`, `peer` and `http-listen` are EOF-free whatever their
+//! config says; `http` is EOF-free only under `mode kind="lines"` or
+//! `kind="events"`; `kafka` is without `stop_at_end`/`compacted`, and
+//! `nats` without `stop_at_end`. Every case here sets
 //! `stop_at_end #true` and leaves every `http` source on the default
-//! `mode kind="document"`, so `tcp`, `udp`, `saci` and `http-push` are the
-//! only sources that force `run_mode kind="stream"`; everything else runs
-//! `one_shot`. An `http` source reaches EOF after its single GET.
+//! `mode kind="document"`, so `tcp`, `udp`, `peer` and `http-listen` are the
+//! only sources that force `run "stream"`; everything else runs
+//! `run "once"`. An `http` source reaches EOF after its single GET.
 //!
 //! A stream-mode case ends by cancellation, because a `tcp` source has no EOF
 //! at all: its `rx` is closed only by dropping the source. The runner publishes
@@ -376,26 +376,10 @@ pub enum Surface {
 }
 
 impl Connector {
-    /// The name used in the report.
+    /// The name used in the report and in the ids of the nodes a workflow
+    /// declares: the name the registry knows the connector by.
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Channel => "channel",
-            Self::File => "file",
-            Self::Http => "http",
-            Self::HttpPush => "http-push",
-            Self::Tcp => "tcp",
-            Self::Udp => "udp",
-            Self::Saci => "saci",
-            Self::Kafka => "kafka",
-            Self::Nats => "nats",
-            Self::Postgresql => "postgresql",
-            Self::Mariadb => "mariadb",
-            Self::Clickhouse => "clickhouse",
-            Self::S3 => "s3",
-            Self::Turso => "turso",
-            Self::Redb => "redb",
-            Self::OpenTelemetry => "opentelemetry",
-        }
+        self.name()
     }
 
     fn surface(self) -> Surface {
@@ -434,72 +418,41 @@ impl Connector {
         }
     }
 
-    /// The `type =` key the registry registers this connector's source half
-    /// under.
+    /// The name the registry registers this connector under, which is what
+    /// every `source` and `sink` node this file writes declares as its
+    /// `connector` and what `dimensions_cover_the_registry` compares
+    /// `Registry::names()` against.
     ///
-    /// These are the strings
-    /// [`SourceFactory::type_name`](saci::connector::SourceFactory::type_name)
-    /// returns, which is what every `source` node this file writes declares
-    /// and what `dimensions_cover_the_registry` compares the registry's own
-    /// `source_names()` against. `tcp`, `udp` and `saci` register one name for
-    /// both halves, so those three answer the same string here and in
-    /// [`Connector::sink_type`].
-    pub fn source_type(self) -> &'static str {
+    /// One name covers both halves of a connector; `http-listen` is the
+    /// source-only entry, which [`Connector::has_sink`] answers from.
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Channel => "ChannelSource",
-            Self::File => "FileSource",
-            Self::Http => "HttpSource",
-            Self::HttpPush => "HttpPushSource",
+            Self::Channel => "channel",
+            Self::File => "file",
+            Self::Http => "http",
+            Self::HttpPush => "http-listen",
             Self::Tcp => "tcp",
             Self::Udp => "udp",
-            Self::Saci => "saci",
-            Self::Kafka => "KafkaSource",
-            Self::Nats => "NatsSource",
-            Self::Postgresql => "PostgresSource",
-            Self::Mariadb => "MariadbSource",
-            Self::Clickhouse => "ClickhouseSource",
-            Self::S3 => "S3Source",
-            Self::Turso => "TursoSource",
-            Self::Redb => "RedbSource",
-            Self::OpenTelemetry => "OpenTelemetryMetricsSource",
+            Self::Saci => "peer",
+            Self::Kafka => "kafka",
+            Self::Nats => "nats",
+            Self::Postgresql => "postgresql",
+            Self::Mariadb => "mariadb",
+            Self::Clickhouse => "clickhouse",
+            Self::S3 => "s3",
+            Self::Turso => "turso",
+            Self::Redb => "redb",
+            Self::OpenTelemetry => "otlp-metrics",
         }
     }
 
-    /// The `type =` key this connector's sink half registers under, `None` for
-    /// a connector that registers no sink at all.
+    /// Does this connector serve a sink at all?
     ///
-    /// `HttpPushSource` listens for documents and has no writing half, which is
-    /// the one `None` here and what [`Connector::has_sink`] answers from.
-    pub fn sink_type(self) -> Option<&'static str> {
-        match self {
-            Self::Channel => Some("ChannelSink"),
-            Self::File => Some("FileSink"),
-            Self::Http => Some("HttpSink"),
-            Self::HttpPush => None,
-            Self::Tcp => Some("tcp"),
-            Self::Udp => Some("udp"),
-            Self::Saci => Some("saci"),
-            Self::Kafka => Some("KafkaSink"),
-            Self::Nats => Some("NatsSink"),
-            Self::Postgresql => Some("PostgresSink"),
-            Self::Mariadb => Some("MariadbSink"),
-            Self::Clickhouse => Some("ClickhouseSink"),
-            Self::S3 => Some("S3Sink"),
-            Self::Turso => Some("TursoSink"),
-            Self::Redb => Some("RedbSink"),
-            Self::OpenTelemetry => Some("OpenTelemetryMetricsSink"),
-        }
-    }
-
-    /// Does this connector register a sink at all?
-    ///
-    /// `HttpPushSource` listens for documents and has no writing half, so the
+    /// `http-listen` listens for documents and has no writing half, so the
     /// sink dimension is [`CONNECTORS`] minus that one entry. Every list that
-    /// enumerates sinks filters on this, and `dimensions_cover_the_registry`
-    /// compares the registry's two name sets against the two lists rather than
-    /// against one.
+    /// enumerates sinks filters on this.
     pub fn has_sink(self) -> bool {
-        self.sink_type().is_some()
+        !matches!(self, Self::HttpPush)
     }
 }
 
@@ -581,9 +534,9 @@ impl Format {
 pub enum ProcessorKind {
     /// A native [`Pipeline`] injected with [`ServiceBuilder::runtime`].
     Native,
-    /// The `saci-processor-smoketest` component, loaded from `module`.
+    /// The `saci-processor-smoketest` component, loaded from `path`.
     Wasm,
-    /// The `saci-plugin-smoketest` cdylib, loaded from `library`.
+    /// The `saci-plugin-smoketest` cdylib, loaded from `path`.
     Plugin,
 }
 
@@ -800,8 +753,8 @@ impl RowKind {
         }
     }
 
-    /// `schema_fields` entries, one per line, at `indent`.
-    fn schema_fields_kdl(self, indent: &str) -> String {
+    /// `field` entries, one per line, at `indent`.
+    fn fields_kdl(self, indent: &str) -> String {
         self.schema()
             .fields()
             .iter()
@@ -814,7 +767,7 @@ impl RowKind {
                     other => unreachable!("no matrix row carries {other:?}"),
                 };
                 format!(
-                    "{indent}schema_fields \"{}\" type=\"{ty}\" nullable=#false",
+                    "{indent}field \"{}\" type=\"{ty}\" nullable=#false",
                     field.name()
                 )
             })
@@ -828,8 +781,8 @@ impl RowKind {
             Self::Order => {
                 "id bigint PRIMARY KEY, label text NOT NULL, total double precision NOT NULL"
             }
-            // Rejected before any table is needed: PgFieldType has no unsigned
-            // variant, so the source/sink config does not parse.
+            // Rejected before any table is needed: the PostgreSQL connector
+            // maps no unsigned type, so the source/sink config does not parse.
             Self::Ping => "seq bigint PRIMARY KEY",
             Self::Counter => "id bigint PRIMARY KEY, seen bigint NOT NULL",
         }
@@ -1080,32 +1033,29 @@ impl Case {
             })
         };
 
-        // The node's own `config` is deserialized before anything else, and
-        // `PgFieldType` has no unsigned variant to hold `Ping.seq`. The
-        // fragment is serde's own unknown-variant wording rather than the type
-        // name alone: `is_cursor_capable` refuses the same column with a
+        // The node's own `field` entries are validated before anything else,
+        // and the connector maps no unsigned type to hold `Ping.seq`. The
+        // fragment is the `supported` refusal's own wording rather than the
+        // type name alone: `is_cursor_capable` refuses the same column with a
         // message that also carries `uint64`, so the bare name would be
         // satisfied by a refusal from a different check.
         if connector == Connector::Postgresql && self.row() == RowKind::Ping {
             return rejected(
-                "PgFieldType has no unsigned variant",
-                "unknown variant `uint64`",
+                "postgresql maps no unsigned type",
+                "which this connector does not map",
             );
         }
         if connector == Connector::Turso && self.row() == RowKind::Ping {
             return rejected(
-                "TursoFieldType has no unsigned variant",
-                "unknown variant `uint64`",
+                "turso maps no unsigned type",
+                "which this connector does not map",
             );
         }
         if connector.surface() == Surface::Rows {
             return None;
         }
         if self.format == Format::None {
-            return rejected(
-                "a byte connector needs a codec",
-                "needs a 'transformer' key",
-            );
+            return rejected("a byte connector needs a codec", "needs a 'codec' key");
         }
         // Every codec implements both byte surfaces, so [`Format::None`]
         // above is the only format any byte connector refuses. Nothing else
@@ -1149,8 +1099,8 @@ impl Case {
         match connector {
             // Every stream source here hands the format nothing and
             // cross-checks the schema the document turned out to carry:
-            // `schema_from "body"` on an `http` or `http-push` source,
-            // `schema_from "object"` on an `s3` one. Every
+            // `schema_from "payload"` on an `http` or `http-listen` source
+            // and on an `s3` one. Every
             // self-describing format therefore reads, except that `arrow-avro`
             // reads the `long` it wrote for `Ping.seq` back as `Int64`, which
             // the cross-check refuses.
@@ -2554,7 +2504,7 @@ enum SourceProbe {
         prefix: String,
         format: Format,
         schema: Arc<Schema>,
-        schema_from: saci::connector::s3::SchemaFrom,
+        schema_from: saci::connector::SchemaFrom,
     },
     /// The one probe that is fed rather than read: an `HttpListenSource` reaches
     /// no EOF, so the refusal is taken from the one `next_batch` that the
@@ -2582,7 +2532,7 @@ impl SourceProbe {
                             timeout: Duration::from_secs(15),
                             ..Default::default()
                         },
-                        schema_from: saci::connector::http::SchemaFrom::Body,
+                        schema_from: saci::connector::SchemaFrom::Payload,
                         ..saci::connector::http::HttpSourceConfig::new(url)
                     },
                     Some(schema),
@@ -2651,7 +2601,7 @@ async fn push_refusal(
 ) -> Result<String, String> {
     let mut source = saci::connector::http::HttpListenSource::new(
         saci::connector::http::HttpListenConfig {
-            schema_from: saci::connector::http::SchemaFrom::Body,
+            schema_from: saci::connector::SchemaFrom::Payload,
             path: "/matrix".to_string(),
             ..saci::connector::http::HttpListenConfig::new("127.0.0.1:0")
         },
@@ -2916,9 +2866,9 @@ async fn prepare_source(
     let format = case.format;
     let codec_key = format
         .key()
-        .map(|_| " transformer=\"fmt\"".to_string())
+        .map(|_| " codec=\"fmt\"".to_string())
         .unwrap_or_default();
-    let fields = row.schema_fields_kdl("            ");
+    let fields = row.fields_kdl("            ");
     // A source cannot be seeded in a format it could not read: those cases are
     // refused, so the transport is left empty and the refusal is what the case
     // observes.
@@ -2954,16 +2904,16 @@ async fn prepare_source(
             let feed = unique("feed");
             side.paired = Some(format!(
                 "workflow \"{feed}\" {{\n\
-                 \x20   transformer \"{feed}_fmt\" format=\"ndjson\"\n\n\
-                 \x20   source \"{feed}_in\" type=\"FileSource\" component=\"{component}\" transformer=\"{feed}_fmt\" {{\n\
+                 \x20   codec \"{feed}_fmt\" format=\"ndjson\"\n\n\
+                 \x20   source \"{feed}_in\" connector=\"file\" component=\"{component}\" codec=\"{feed}_fmt\" {{\n\
                  \x20       config {{\n            path \"{}\"\n{fields}\n        }}\n    }}\n\n\
-                 \x20   sink \"{feed}_out\" type=\"ChannelSink\" component=\"{component}\" {{\n\
+                 \x20   sink \"{feed}_out\" connector=\"channel\" component=\"{component}\" {{\n\
                  \x20       config name=\"{name}\" buffer=8 {{\n{fields}\n        }}\n    }}\n\n\
                  \x20   link from=\"{feed}_in\" to=\"{feed}_out\"\n}}",
                 kdl_path(&path)
             ));
             side.kdl = format!(
-                "    source \"in\" type=\"ChannelSource\" component=\"{component}\" {{\n\
+                "    source \"in\" connector=\"channel\" component=\"{component}\" {{\n\
                  \x20       config name=\"{name}\" buffer=8 {{\n{fields}\n        }}\n    }}"
             );
             side._dir = Some(dir);
@@ -2980,7 +2930,7 @@ async fn prepare_source(
                 format!("\n{fields}")
             };
             side.kdl = format!(
-                "    source \"in\" type=\"FileSource\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"file\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            path \"{}\"{declared}\n        }}\n    }}",
                 kdl_path(&path)
             );
@@ -2989,11 +2939,11 @@ async fn prepare_source(
         Connector::Redb => {
             let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
             seed_redb(dir.path(), &seed_bytes)?;
-            // `RedbSource` requires `schema_fields` and hands it to the format
+            // `RedbSource` requires `field` entries and hands them to the format
             // as a projection target, whatever the format, so every `redb`
             // case declares one.
             side.kdl = format!(
-                "    source \"in\" type=\"RedbSource\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"redb\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            directory \"{}\"\n{fields}\n        }}\n    }}",
                 kdl_path(dir.path())
             );
@@ -3002,12 +2952,12 @@ async fn prepare_source(
         Connector::Http => {
             let body = seed_bytes;
             let probe = HttpProbe::spawn(body)?;
-            // `schema_from "body"` reads a self-describing format under the
+            // `schema_from "payload"` reads a self-describing format under the
             // schema the body carries rather than projecting it onto the
             // declared one: the declared schema stays behind for the link check
             // and is cross-checked against the body's own.
             let schema_from_kdl = if format.carries_its_own_schema() {
-                "\n            schema_from \"body\""
+                "\n            schema_from \"payload\""
             } else {
                 ""
             };
@@ -3017,7 +2967,7 @@ async fn prepare_source(
                 schema: row.schema(),
             });
             side.kdl = format!(
-                "    source \"in\" type=\"HttpSource\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"http\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            url \"{}\"{schema_from_kdl}\n            timeout_ms 15000\n{fields}\n        }}\n    }}",
                 probe.url
             );
@@ -3025,13 +2975,13 @@ async fn prepare_source(
         }
         Connector::HttpPush => {
             let bind = format!("127.0.0.1:{}", reserved_port()?);
-            // `schema_from "body"` reads a self-describing format under the
+            // `schema_from "payload"` reads a self-describing format under the
             // schema the request body carries rather than projecting it onto
             // the declared one: the declared schema stays behind for the link
             // check and is cross-checked against the body's own, exactly as on
             // an `http` source.
             let schema_from_kdl = if format.carries_its_own_schema() {
-                "\n            schema_from \"body\""
+                "\n            schema_from \"payload\""
             } else {
                 ""
             };
@@ -3053,7 +3003,7 @@ async fn prepare_source(
                     schema: row.schema(),
                 });
             side.kdl = format!(
-                "    source \"in\" type=\"HttpPushSource\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"http-listen\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            path \"/matrix\"\n            buffer 8{schema_from_kdl}\n{fields}\n        }}\n    }}"
             );
             side.http_push = Some((format!("http://{bind}/matrix"), documents));
@@ -3083,7 +3033,7 @@ async fn prepare_source(
             // link check sees the row's own schema and the body above is read
             // through it.
             side.kdl = format!(
-                "    source \"in\" type=\"OpenTelemetryMetricsSource\" component=\"{component}\" \
+                "    source \"in\" connector=\"otlp-metrics\" component=\"{component}\" \
                  {{\n            config {{\n            bind \"{bind}\"\n            \
                  path \"/v1/metrics\"\n            buffer 8\n{fields}\n        }}\n    }}"
             );
@@ -3100,7 +3050,7 @@ async fn prepare_source(
                 Vec::new()
             };
             side.kdl = format!(
-                "    source \"in\" type=\"tcp\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"tcp\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n            max_frame_bytes 1048576\n{fields}\n        }}\n    }}"
             );
             side.tcp = Some((bind, frames));
@@ -3119,7 +3069,7 @@ async fn prepare_source(
             // kernel holds every datagram the driver sends before the receive
             // loop starts. That is what stands in for tcp's accept backlog.
             side.kdl = format!(
-                "    source \"in\" type=\"udp\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"udp\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n{fields}\n        }}\n    }}"
             );
             side.udp = Some((bind, datagrams));
@@ -3134,7 +3084,7 @@ async fn prepare_source(
             // this half.
             let bytes = saci_hello_and_batch(&batch)?;
             side.kdl = format!(
-                "    source \"in\" type=\"saci\" component=\"{component}\" {{\n\
+                "    source \"in\" connector=\"peer\" component=\"{component}\" {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n            max_frame_bytes 1048576\n{fields}\n        }}\n    }}"
             );
             side.tcp = Some((bind, vec![bytes]));
@@ -3145,7 +3095,7 @@ async fn prepare_source(
                 seed_kafka(&endpoints.brokers, &topic, format, &batch).await?;
             }
             side.kdl = format!(
-                "    source \"in\" type=\"KafkaSource\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"kafka\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            brokers \"{}\"\n            topic \"{topic}\"\n\
                  \x20           group_id \"{}\"\n            stop_at_end #true\n            poll_timeout_ms 25000\n{fields}\n        }}\n    }}",
                 endpoints.brokers,
@@ -3159,7 +3109,7 @@ async fn prepare_source(
                 seed_nats(&endpoints.nats_url, &stream, &subject, format, &batch).await?;
             }
             side.kdl = format!(
-                "    source \"in\" type=\"NatsSource\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"nats\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            stop_at_end #true\n            poll_timeout_ms 20000\n\
                  \x20           connection {{\n                servers \"{}\"\n            }}\n\
                  \x20           mode kind=\"jetstream\" {{\n                stream \"{stream}\"\n\
@@ -3182,7 +3132,7 @@ async fn prepare_source(
                     .map_err(|e| format!("postgres seed: {e}"))?;
             }
             side.kdl = format!(
-                "    source \"in\" type=\"PostgresSource\" component=\"{component}\" {{\n\
+                "    source \"in\" connector=\"postgresql\" component=\"{component}\" {{\n\
                  \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
                  \x20           connection {{\n                dsn \"{}\"\n                sslmode \"disable\"\n            }}\n\
                  \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
@@ -3203,7 +3153,7 @@ async fn prepare_source(
                     .map_err(|e| format!("mariadb seed rows: {e}"))?;
             }
             side.kdl = format!(
-                "    source \"in\" type=\"MariadbSource\" component=\"{component}\" {{\n\
+                "    source \"in\" connector=\"mariadb\" component=\"{component}\" {{\n\
                  \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
                  \x20           connection {{\n                dsn \"{}\"\n                ssl_mode \"disabled\"\n            }}\n\
                  \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
@@ -3231,7 +3181,7 @@ async fn prepare_source(
                     .map_err(|e| format!("clickhouse seed rows: {e}"))?;
             }
             side.kdl = format!(
-                "    source \"in\" type=\"ClickhouseSource\" component=\"{component}\" {{\n\
+                "    source \"in\" connector=\"clickhouse\" component=\"{component}\" {{\n\
                  \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
                  \x20           connection url=\"{}\"\n\
                  \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
@@ -3260,7 +3210,7 @@ async fn prepare_source(
             // The PostgreSQL column list and seed are portable SQL, which the
             // engine accepts type-name for type-name.
             side.kdl = format!(
-                "    source \"in\" type=\"TursoSource\" component=\"{component}\" {{\n\
+                "    source \"in\" connector=\"turso\" component=\"{component}\" {{\n\
                  \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
                  \x20           connection path=\"{}\"\n\
                  \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
@@ -3279,17 +3229,17 @@ async fn prepare_source(
             if live {
                 seed_s3(&endpoints.s3, &prefix, format, &batch).await?;
             }
-            // `schema_from "object"` reads a self-describing format under the
+            // `schema_from "payload"` reads a self-describing format under the
             // schema the object carries rather than projecting it onto the
             // declared one: the declared schema is cross-checked against the
             // object's rather than handed to the reader.
             let (schema_from, schema_from_kdl) = if format.carries_its_own_schema() {
                 (
-                    saci::connector::s3::SchemaFrom::Object,
-                    "\n            schema_from \"object\"",
+                    saci::connector::SchemaFrom::Payload,
+                    "\n            schema_from \"payload\"",
                 )
             } else {
-                (saci::connector::s3::SchemaFrom::Config, "")
+                (saci::connector::SchemaFrom::Config, "")
             };
             side.probe = format.key().map(|_| SourceProbe::S3 {
                 connection: endpoints.s3.clone(),
@@ -3299,7 +3249,7 @@ async fn prepare_source(
                 schema_from,
             });
             side.kdl = format!(
-                "    source \"in\" type=\"S3Source\" component=\"{component}\"{codec_key} {{\n\
+                "    source \"in\" connector=\"s3\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            prefix \"{prefix}\"{schema_from_kdl}\n{}\n{fields}\n        }}\n    }}",
                 s3_connection_kdl(&endpoints.s3, "            ")
             );
@@ -3322,9 +3272,9 @@ async fn prepare_sink(
     let format = case.format;
     let codec_key = format
         .key()
-        .map(|_| " transformer=\"fmt\"".to_string())
+        .map(|_| " codec=\"fmt\"".to_string())
         .unwrap_or_default();
-    let fields = row.schema_fields_kdl("            ");
+    let fields = row.fields_kdl("            ");
     let mut paired = None;
 
     let (kdl, readback) = match case.sink {
@@ -3338,17 +3288,17 @@ async fn prepare_sink(
             let drain = unique("drain");
             paired = Some(format!(
                 "workflow \"{drain}\" {{\n\
-                 \x20   transformer \"{drain}_fmt\" format=\"ndjson\"\n\n\
-                 \x20   source \"{drain}_in\" type=\"ChannelSource\" component=\"{component}\" {{\n\
+                 \x20   codec \"{drain}_fmt\" format=\"ndjson\"\n\n\
+                 \x20   source \"{drain}_in\" connector=\"channel\" component=\"{component}\" {{\n\
                  \x20       config name=\"{name}\" buffer=8 {{\n{fields}\n        }}\n    }}\n\n\
-                 \x20   sink \"{drain}_out\" type=\"FileSink\" component=\"{component}\" transformer=\"{drain}_fmt\" {{\n\
+                 \x20   sink \"{drain}_out\" connector=\"file\" component=\"{component}\" codec=\"{drain}_fmt\" {{\n\
                  \x20       config {{\n            path \"{}\"\n            truncate #true\n{fields}\n        }}\n    }}\n\n\
                  \x20   link from=\"{drain}_in\" to=\"{drain}_out\"\n}}",
                 kdl_path(&path)
             ));
             (
                 format!(
-                    "    sink \"out\" type=\"ChannelSink\" component=\"{component}\" {{\n\
+                    "    sink \"out\" connector=\"channel\" component=\"{component}\" {{\n\
                      \x20       config name=\"{name}\" buffer=8 {{\n{fields}\n        }}\n    }}"
                 ),
                 Readback::File {
@@ -3363,7 +3313,7 @@ async fn prepare_sink(
             let path = dir.path().join("sink.dat");
             (
                 format!(
-                    "    sink \"out\" type=\"FileSink\" component=\"{component}\"{codec_key} {{\n\
+                    "    sink \"out\" connector=\"file\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            path \"{}\"\n            truncate #true\n{fields}\n        }}\n    }}",
                     kdl_path(&path)
                 ),
@@ -3379,7 +3329,7 @@ async fn prepare_sink(
             let directory = dir.path().to_path_buf();
             (
                 format!(
-                    "    sink \"out\" type=\"RedbSink\" component=\"{component}\"{codec_key} {{\n\
+                    "    sink \"out\" connector=\"redb\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            directory \"{}\"\n{fields}\n        }}\n    }}",
                     kdl_path(&directory)
                 ),
@@ -3393,7 +3343,7 @@ async fn prepare_sink(
         Connector::Http => {
             let probe = HttpProbe::spawn(Vec::new())?;
             let kdl = format!(
-                "    sink \"out\" type=\"HttpSink\" component=\"{component}\"{codec_key} {{\n\
+                "    sink \"out\" connector=\"http\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            url \"{}\"\n            method \"POST\"\n            timeout_ms 15000\n{fields}\n        }}\n    }}",
                 probe.url
             );
@@ -3414,7 +3364,7 @@ async fn prepare_sink(
             // success response, and keeps every body it was posted.
             let probe = HttpProbe::spawn(Vec::new())?;
             let kdl = format!(
-                "    sink \"out\" type=\"OpenTelemetryMetricsSink\" component=\"{component}\" {{\n\
+                "    sink \"out\" connector=\"otlp-metrics\" component=\"{component}\" {{\n\
                  \x20       config {{\n            url \"{}\"\n            encoding \"protobuf\"\n{fields}\n        }}\n    }}",
                 probe.url
             );
@@ -3429,7 +3379,7 @@ async fn prepare_sink(
                 .map_err(|e| format!("tcp collector addr: {e}"))?;
             (
                 format!(
-                    "    sink \"out\" type=\"tcp\" component=\"{component}\"{codec_key} {{\n\
+                    "    sink \"out\" connector=\"tcp\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            connect \"{addr}\"\n{fields}\n        }}\n    }}"
                 ),
                 Readback::Tcp { listener, format },
@@ -3446,7 +3396,7 @@ async fn prepare_sink(
             // echo probe would mark it down and refuse every write.
             (
                 format!(
-                    "    sink \"out\" type=\"udp\" component=\"{component}\"{codec_key} {{\n\
+                    "    sink \"out\" connector=\"udp\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            connect \"{addr}\"\n{fields}\n        }}\n    }}"
                 ),
                 Readback::Udp { socket, format },
@@ -3457,7 +3407,7 @@ async fn prepare_sink(
             let addr = probe.addr;
             (
                 format!(
-                    "    sink \"out\" type=\"saci\" component=\"{component}\" {{\n\
+                    "    sink \"out\" connector=\"peer\" component=\"{component}\" {{\n\
                      \x20       config {{\n            connect \"{addr}\"\n{fields}\n        }}\n    }}"
                 ),
                 Readback::Saci { probe },
@@ -3467,7 +3417,7 @@ async fn prepare_sink(
             let topic = unique("matrix-out");
             (
                 format!(
-                    "    sink \"out\" type=\"KafkaSink\" component=\"{component}\"{codec_key} {{\n\
+                    "    sink \"out\" connector=\"kafka\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            brokers \"{}\"\n            topic \"{topic}\"\n{fields}\n        }}\n    }}",
                     endpoints.brokers
                 ),
@@ -3483,7 +3433,7 @@ async fn prepare_sink(
             let subject = format!("matrix.out.{}", unique("s"));
             (
                 format!(
-                    "    sink \"out\" type=\"NatsSink\" component=\"{component}\"{codec_key} {{\n\
+                    "    sink \"out\" connector=\"nats\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            connection {{\n                servers \"{}\"\n            }}\n\
                      \x20           mode kind=\"jetstream\" {{\n                stream \"{stream}\"\n                subject \"{subject}\"\n            }}\n{fields}\n        }}\n    }}",
                     endpoints.nats_url
@@ -3509,7 +3459,7 @@ async fn prepare_sink(
             }
             (
                 format!(
-                    "    sink \"out\" type=\"PostgresSink\" component=\"{component}\" {{\n\
+                    "    sink \"out\" connector=\"postgresql\" component=\"{component}\" {{\n\
                      \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
                      \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n\
                      \x20           connection {{\n                dsn \"{}\"\n                sslmode \"disable\"\n            }}\n{fields}\n        }}\n    }}",
@@ -3533,7 +3483,7 @@ async fn prepare_sink(
             }
             (
                 format!(
-                    "    sink \"out\" type=\"MariadbSink\" component=\"{component}\" {{\n\
+                    "    sink \"out\" connector=\"mariadb\" component=\"{component}\" {{\n\
                      \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
                      \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n\
                      \x20           connection {{\n                dsn \"{}\"\n                ssl_mode \"disabled\"\n            }}\n{fields}\n        }}\n    }}",
@@ -3562,7 +3512,7 @@ async fn prepare_sink(
             }
             (
                 format!(
-                    "    sink \"out\" type=\"ClickhouseSink\" component=\"{component}\" {{\n\
+                    "    sink \"out\" connector=\"clickhouse\" component=\"{component}\" {{\n\
                      \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
                      \x20           connection url=\"{}\"\n{fields}\n        }}\n    }}",
                     endpoints.clickhouse_url
@@ -3588,7 +3538,7 @@ async fn prepare_sink(
             }
             (
                 format!(
-                    "    sink \"out\" type=\"TursoSink\" component=\"{component}\" {{\n\
+                    "    sink \"out\" connector=\"turso\" component=\"{component}\" {{\n\
                      \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
                      \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n\
                      \x20           connection path=\"{}\"\n{fields}\n        }}\n    }}",
@@ -3606,7 +3556,7 @@ async fn prepare_sink(
             let prefix = unique("out");
             (
                 format!(
-                    "    sink \"out\" type=\"S3Sink\" component=\"{component}\"{codec_key} {{\n\
+                    "    sink \"out\" connector=\"s3\" component=\"{component}\"{codec_key} {{\n\
                      \x20       config {{\n            prefix \"{prefix}\"\n            suffix \".dat\"\n\
                      \x20           flush max_rows=0 max_bytes=0 max_age_ms=0\n{}\n{fields}\n        }}\n    }}",
                     s3_connection_kdl(&endpoints.s3, "            ")
@@ -3935,7 +3885,7 @@ async fn read_back(
                     brokers,
                     topic,
                     group_id: unique("matrix-readback"),
-                    batch_size: 1000,
+                    batch_rows: 1000,
                     poll_timeout_ms: 20_000,
                     auto_offset_reset: "earliest".to_string(),
                     commit_on_drain: true,
@@ -3971,7 +3921,7 @@ async fn read_back(
                             ..Default::default()
                         },
                     )),
-                    batch_size: 1000,
+                    batch_rows: 1000,
                     poll_timeout_ms: 5_000,
                     stop_at_end: true,
                 },
@@ -4188,9 +4138,9 @@ async fn read_back(
                     connection,
                     prefix,
                     schema_from: if format.carries_its_own_schema() {
-                        saci::connector::s3::SchemaFrom::Object
+                        saci::connector::SchemaFrom::Payload
                     } else {
-                        saci::connector::s3::SchemaFrom::Config
+                        saci::connector::SchemaFrom::Config
                     },
                 },
                 row.readback_schema(widened_unsigned),
@@ -4214,9 +4164,9 @@ async fn read_back(
 fn processor_kdl(case: Case, fixtures: &Fixtures) -> String {
     match case.processor {
         ProcessorKind::Native => "    wasm \"proc\" name=\"native-pipeline\"".to_string(),
-        ProcessorKind::Wasm => format!("    wasm \"proc\" module=\"{}\"", kdl_path(&fixtures.wasm)),
+        ProcessorKind::Wasm => format!("    wasm \"proc\" path=\"{}\"", kdl_path(&fixtures.wasm)),
         ProcessorKind::Plugin => format!(
-            "    plugin \"proc\" library=\"{}\" {{\n        config \"smoketest.multiplier\"=\"1\"\n    }}",
+            "    plugin \"proc\" path=\"{}\" {{\n        config \"smoketest.multiplier\"=\"1\"\n    }}",
             kdl_path(&fixtures.plugin)
         ),
     }
@@ -4236,17 +4186,13 @@ fn case_kdl(
 ) -> String {
     let codec = match case.format.key() {
         Some("csv") => {
-            "    transformer \"fmt\" format=\"csv\" {\n        options has_headers=#true\n    }\n"
+            "    codec \"fmt\" format=\"csv\" {\n        config has_headers=#true\n    }\n"
                 .to_string()
         }
-        Some(key) => format!("    transformer \"fmt\" format=\"{key}\"\n"),
+        Some(key) => format!("    codec \"fmt\" format=\"{key}\"\n"),
         None => String::new(),
     };
-    let run_mode = if case.stream_mode() {
-        "stream"
-    } else {
-        "one_shot"
-    };
+    let run_kind = if case.stream_mode() { "stream" } else { "once" };
     let feeder = source
         .paired
         .as_deref()
@@ -4262,7 +4208,7 @@ fn case_kdl(
 
 node id=1 name="saci-matrix" data_dir="{data_dir}"
 
-run_mode kind="{run_mode}"
+run "{run_kind}"
 
 {feeder}workflow "matrix" {{
 {codec}{source_kdl}
@@ -4275,7 +4221,7 @@ run_mode kind="{run_mode}"
     link from="proc" to="out"
 }}
 {drainer}
-http disabled=#true
+http enabled=#false
 
 observability log_level="error"
 "#,
@@ -5058,12 +5004,9 @@ pub async fn run_maximal(
         let fmt_id = format!("fmt{index}");
         codecs.push(match format {
             Format::Csv => format!(
-                "    transformer \"{fmt_id}\" format=\"csv\" {{\n        options has_headers=#true\n    }}"
+                "    codec \"{fmt_id}\" format=\"csv\" {{\n        config has_headers=#true\n    }}"
             ),
-            other => format!(
-                "    transformer \"{fmt_id}\" format=\"{}\"",
-                other.label()
-            ),
+            other => format!("    codec \"{fmt_id}\" format=\"{}\"", other.label()),
         });
 
         let proc_id = format!("proc{index}");
@@ -5111,7 +5054,7 @@ pub async fn run_maximal(
                 kdl: side
                     .kdl
                     .replace("\"in\"", &format!("\"{id}\""))
-                    .replace("transformer=\"fmt\"", &format!("transformer=\"{fmt_id}\"")),
+                    .replace("codec=\"fmt\"", &format!("codec=\"{fmt_id}\"")),
             });
             links.push(format!("    link from=\"{id}\" to=\"{proc_id}\""));
             source_labels.push(format!("{id} ({})", connector.label()));
@@ -5138,7 +5081,7 @@ pub async fn run_maximal(
                 kdl: side
                     .kdl
                     .replace("\"out\"", &format!("\"{id}\""))
-                    .replace("transformer=\"fmt\"", &format!("transformer=\"{fmt_id}\"")),
+                    .replace("codec=\"fmt\"", &format!("codec=\"{fmt_id}\"")),
             });
             links.push(format!("    link from=\"{proc_id}\" to=\"{id}\""));
             sink_labels.push(format!("{id} ({})", connector.label()));
@@ -5165,14 +5108,14 @@ pub async fn run_maximal(
 
 node id=1 name="saci-matrix-maximal" data_dir="{}"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "maximal" {{
 {}
 }}
 
 {}
-http disabled=#true
+http enabled=#false
 
 observability log_level="error"
 "#,

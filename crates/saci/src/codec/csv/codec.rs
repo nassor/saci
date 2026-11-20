@@ -68,7 +68,7 @@ impl Codec for CsvCodec {
         declared: Option<Arc<Schema>>,
     ) -> Result<Box<dyn BatchReader>, SaciError> {
         let schema = declared.ok_or_else(|| {
-            SaciError::configuration("csv: reading needs a declared schema; add schema_fields")
+            SaciError::configuration("csv: reading needs a declared schema; add 'field' entries")
         })?;
         // `build` wraps the handle in its own `BufReader`.
         let reader = ReaderBuilder::new(Arc::clone(&schema))
@@ -150,9 +150,9 @@ impl Codec for CsvCodec {
 
 /// Factory for [`CsvCodec`].
 ///
-/// `options`:
+/// `config`:
 /// - `has_headers` (bool, optional, default `true`), written
-///   `options has_headers=#false`. Applies to the stream surface only; the
+///   `config has_headers=#false`. Applies to the stream surface only; the
 ///   message surface has no header row.
 pub struct CsvCodecFactory;
 
@@ -372,7 +372,7 @@ mod tests {
             panic!("csv cannot infer a schema");
         };
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("schema_fields"), "got: {err}");
+        assert!(err.message().contains("'field'"), "got: {err}");
     }
 
     #[test]

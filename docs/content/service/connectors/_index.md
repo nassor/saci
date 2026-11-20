@@ -1,23 +1,23 @@
 +++
 title = "Sources and sinks"
-description = "Fifteen transports a workflow can read from and write to, one page each, with the config node they accept."
+description = "The connectors a workflow reads from and writes to, one page per transport, with the config node each accepts."
 template = "section.html"
 sort_by = "weight"
 weight = 4
 aliases = ["/connectors/"]
 +++
 
-A workflow reads rows through a `source` node and writes them through a `sink` node. Fifteen
-transports ship with `saci-service`, and the pages below walk each one from an empty config file to a
+A workflow reads rows through a `source` node and writes them through a `sink` node. Sixteen
+connectors ship with `saci-service`, and the pages below walk each transport from an empty config file to a
 running pipeline.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 242" role="img" aria-labelledby="cx-t cx-d">
         <title id="cx-t">A source node turns a transport into rows for the workflow, and a sink node turns rows back into a transport</title>
-        <desc id="cx-d">Two lanes run left to right. In the top lane, a byte transport (file, http, kafka, nats, redb, s3, tcp or udp) hands bytes to a codec, which decodes them into rows for the workflow. In the bottom lane, a row transport (postgres, mariadb, turso, clickhouse, saci, channel or opentelemetry) hands rows to the workflow directly, with no format. The right half mirrors the left: the workflow's rows pass through a codec to a byte transport, or go straight to a row transport. A bracket over the left half names it the source node, and one over the right half the sink node.</desc>
+        <desc id="cx-d">Two lanes run left to right. In the top lane, a byte transport (file, http, http-listen, kafka, nats, redb, s3, tcp or udp) hands bytes to a codec, which decodes them into rows for the workflow. In the bottom lane, a row transport (postgresql, mariadb, turso, clickhouse, peer, channel or otlp-metrics) hands rows to the workflow directly, with no format. The right half mirrors the left: the workflow's rows pass through a codec to a byte transport, or go straight to a row transport. A bracket over the left half names it the source node, and one over the right half the sink node.</desc>
         <g class="anim anim-1">
             <text class="t-lbl t-data t-mid" x="126" y="14">source node</text>
-            <text class="t-sm t-mid" x="126" y="28">a type, plus a codec for bytes</text>
+            <text class="t-sm t-mid" x="126" y="28">a connector, plus a codec for bytes</text>
             <path class="ln" d="M0 42 V36 H252 V42"/>
             <rect class="blk blk-data" x="0" y="52" width="140" height="74" rx="8"/>
             <rect class="hd hd-data" x="0" y="52" width="140" height="18" rx="8"/>
@@ -30,10 +30,10 @@ running pipeline.
             <rect class="hd hd-data" x="0" y="146" width="140" height="18" rx="8"/>
             <rect class="hd hd-data" x="0" y="158" width="140" height="6"/>
             <text class="t-lbl" x="10" y="160">row transports</text>
-            <text class="t-sm" x="10" y="180">postgres  mariadb</text>
+            <text class="t-sm" x="10" y="180">postgresql  mariadb</text>
             <text class="t-sm" x="10" y="194">turso  clickhouse</text>
-            <text class="t-sm" x="10" y="208">saci  channel</text>
-            <text class="t-sm" x="10" y="222">opentelemetry</text>
+            <text class="t-sm" x="10" y="208">peer  channel</text>
+            <text class="t-sm" x="10" y="222">otlp-metrics</text>
             <path class="arw arw-data" d="M140 89 H158" marker-end="url(#cx-a)"/>
             <rect class="blk blk-bnd" x="162" y="52" width="90" height="74" rx="8"/>
             <rect class="hd hd-bnd" x="162" y="52" width="90" height="18" rx="8"/>
@@ -56,7 +56,7 @@ running pipeline.
         </g>
         <g class="anim anim-3">
             <text class="t-lbl t-data t-mid" x="534" y="14">sink node</text>
-            <text class="t-sm t-mid" x="534" y="28">a type, plus a codec for bytes</text>
+            <text class="t-sm t-mid" x="534" y="28">a connector, plus a codec for bytes</text>
             <path class="ln" d="M408 42 V36 H660 V42"/>
             <path class="arw arw-data" d="M386 89 H404" marker-end="url(#cx-a)"/>
             <rect class="blk blk-bnd" x="408" y="52" width="90" height="74" rx="8"/>
@@ -80,10 +80,10 @@ running pipeline.
             <rect class="hd hd-data" x="520" y="146" width="140" height="18" rx="8"/>
             <rect class="hd hd-data" x="520" y="158" width="140" height="6"/>
             <text class="t-lbl" x="530" y="160">row transports</text>
-            <text class="t-sm" x="530" y="180">postgres  mariadb</text>
+            <text class="t-sm" x="530" y="180">postgresql  mariadb</text>
             <text class="t-sm" x="530" y="194">turso  clickhouse</text>
-            <text class="t-sm" x="530" y="208">saci  channel</text>
-            <text class="t-sm" x="530" y="222">opentelemetry</text>
+            <text class="t-sm" x="530" y="208">peer  channel</text>
+            <text class="t-sm" x="530" y="222">otlp-metrics</text>
         </g>
         <defs>
             <marker id="cx-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -101,35 +101,38 @@ running pipeline.
 
 ## Pick a connector
 
-Every row is a source and a sink, so one transport serves both ends of a workflow. `Needs a format`
-means the node names a declared codec, a [`transformer` node](@/service/formats/_index.md); the seven row-carrying
+Each connector provides a source, a sink or both, and the `Source` and `Sink` columns say which.
+`Needs a format` means the node names a declared codec, a [`codec` node](@/service/formats/_index.md); the seven row-carrying
 connectors take none.
 
-| Connector | Source | Sink | Needs a format | Run modes | In the server build |
-|---|---|---|---|---|---|
-| [File](@/service/connectors/file.md) | yes | yes | yes | any | yes |
-| [HTTP](@/service/connectors/http.md) | yes | yes | yes | any | yes |
-| [Kafka](@/service/connectors/kafka.md) | yes | yes | yes | stream, or any run mode with `stop_at_end` or `compacted` | no: build with `--features connector-kafka` |
-| [NATS](@/service/connectors/nats.md) | yes | yes | yes | stream, or any run mode with `stop_at_end` | no: build with `--features connector-nats` |
-| [PostgreSQL](@/service/connectors/postgresql.md) | yes | yes | no | any | no: build with `--features connector-postgresql` |
-| [MariaDB](@/service/connectors/mariadb.md) | yes | yes | no | any | no: build with `--features connector-mariadb` |
-| [Turso](@/service/connectors/turso.md) | yes | yes | no | any | no: build with `--features connector-turso` |
-| [ClickHouse](@/service/connectors/clickhouse.md) | yes | yes | no | any | no: build with `--features connector-clickhouse` |
-| [redb](@/service/connectors/redb.md) | yes | yes | yes | any | yes |
-| [S3](@/service/connectors/s3.md) | yes | yes | yes | any | no: build with `--features connector-s3` |
-| [TCP](@/service/connectors/tcp.md) | yes | yes | yes | stream for the source, any for the sink | yes |
-| [UDP](@/service/connectors/udp.md) | yes | yes | yes | stream for the source, any for the sink | yes |
-| [SACI](@/service/connectors/saci.md) | yes | yes | no | stream for the source, any for the sink | yes |
-| [OpenTelemetry](@/service/connectors/opentelemetry.md) | yes | yes | no | stream for the source, any for the sink | no: build with `--features connector-otlp` |
-| [Channel](@/service/connectors/channel.md) | yes | yes | no | any | yes |
+| Connector | Source | Sink | Needs a format | Run modes | Feature | In the server build |
+|---|---|---|---|---|---|---|
+| [`file`](@/service/connectors/file.md) | yes | yes | yes | any | `connector-file` | yes |
+| [`http`](@/service/connectors/http.md) | yes | yes | yes | any | `connector-http` | yes |
+| [`http-listen`](@/service/connectors/http.md) | yes | no | yes | stream | `connector-http` | yes |
+| [`kafka`](@/service/connectors/kafka.md) | yes | yes | yes | stream, or any run mode with `stop_at_end` or `compacted` | `connector-kafka` | no |
+| [`nats`](@/service/connectors/nats.md) | yes | yes | yes | stream, or any run mode with `stop_at_end` | `connector-nats` | no |
+| [`postgresql`](@/service/connectors/postgresql.md) | yes | yes | no | any | `connector-postgresql` | no |
+| [`mariadb`](@/service/connectors/mariadb.md) | yes | yes | no | any | `connector-mariadb` | no |
+| [`turso`](@/service/connectors/turso.md) | yes | yes | no | any | `connector-turso` | no |
+| [`clickhouse`](@/service/connectors/clickhouse.md) | yes | yes | no | any | `connector-clickhouse` | no |
+| [`redb`](@/service/connectors/redb.md) | yes | yes | yes | any | `connector-redb` | yes |
+| [`s3`](@/service/connectors/s3.md) | yes | yes | yes | any | `connector-s3` | no |
+| [`tcp`](@/service/connectors/tcp.md) | yes | yes | yes | stream for the source, any for the sink | `connector-tcp` | yes |
+| [`udp`](@/service/connectors/udp.md) | yes | yes | yes | stream for the source, any for the sink | `connector-udp` | yes |
+| [`peer`](@/service/connectors/peer.md) | yes | yes | no | stream for the source, any for the sink | `connector-peer` | yes |
+| [`otlp-metrics`](@/service/connectors/otlp-metrics.md) | yes | yes | no | stream for the source, any for the sink | `connector-otlp` | no |
+| [`channel`](@/service/connectors/channel.md) | yes | yes | no | any | `connector-channel` | yes |
 
-A node picks its transport with a `type` string: `FileSource` and `FileSink`, `HttpSource` and
-`HttpSink`, `KafkaSource` and `KafkaSink`, `NatsSource` and `NatsSink`, `PostgresSource` and
-`PostgresSink`, `MariadbSource` and `MariadbSink`, `TursoSource` and `TursoSink`,
-`ClickhouseSource` and `ClickhouseSink`, `RedbSource` and `RedbSink`, `S3Source` and `S3Sink`,
-`OpenTelemetryMetricsSource` and `OpenTelemetryMetricsSink`, `ChannelSource` and `ChannelSink`,
-`tcp` in lower case for both halves of TCP, `udp` for both halves of UDP, and `saci` for both
-halves of a service-to-service link.
+The `server` feature includes every connector marked `yes`. A connector marked `no` needs its
+feature added to the build, for example `--features server,connector-kafka`.
+
+A node picks its connector with the `connector` property, which holds the lowercase name from the
+first column: `file`, `http`, `http-listen`, `kafka`, `nats`, `postgresql`, `mariadb`, `turso`,
+`clickhouse`, `redb`, `s3`, `otlp-metrics`, `channel`, `tcp`, `udp` or `peer`, the link between two
+services. The node kind, `source` or `sink`, gives the direction. A name no connector registers is
+refused with `no connector named '{name}' is registered`, and a name whose connector lacks that
+role with `connector '{name}' has no source` or `connector '{name}' has no sink`.
 
 ## The shape every node shares
 
@@ -137,25 +140,52 @@ A `source` or `sink` node carries the same five properties whatever the transpor
 
 | Property | What it does |
 |---|---|
-| `type` | the transport, from the table above |
+| `connector` | the connector, from the table above |
 | `component` | the row type the node fills on the way in, or drains on the way out |
-| `transformer` | the id of a declared `transformer` node, on every connector that moves bytes |
+| `codec` | the id of a declared `codec` node, on every connector that moves bytes |
 | `retry` | an optional child overriding the retry policy for this node |
-| `config` | the child node holding everything the transport itself reads |
+| `config` | the child node holding everything the connector itself reads |
 
-`transformer` is a property of the node, never a key inside `config`. The format is resolved before
-the transport is built, so a byte-carrying node with no `transformer` is rejected at load time
+`codec` is a property of the node, never a key inside `config`. The format is resolved before
+the transport is built, so a byte-carrying node with no `codec` is rejected at load time
 rather than at the first batch.
 
-`schema_fields` lives inside `config`, one entry per column, and the format decides what it means:
+`field` lines live inside `config`, one per column, and the format decides what they mean:
 required, optional, or a projection target for the self-describing formats, which read only those
-columns. Each connector page states which of the two ends needs it. An entry takes the column name
-as its leading argument, then `type` and `nullable`, which defaults to `#true`.
+columns. Each connector page states which of the two ends needs them. A `field` line takes the column
+name as its leading argument, then `type`, `nullable`, which defaults to `#true`, and the keys
+`precision` and `scale` for `decimal128`, `item` for `list` and `native_type` for a database
+connector. An unknown key on a `field` line is an error.
 
-The `type` names every connector but PostgreSQL, MariaDB and Turso accepts are `Boolean`, `Int8`, `Int16`,
-`Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `Float32`, `Float64`, `Utf8`, `LargeUtf8`,
-`Binary`, `Date32` and `Date64`, in any case. PostgreSQL, MariaDB and Turso each read their own
-vocabulary, listed on their pages.
+The `type` names are lower case: `boolean`, `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`,
+`uint32`, `uint64`, `float32`, `float64`, `utf8`, `largeutf8`, `json`, `binary`, `date32`, `date64`,
+`time64_micros`, `timestamp_micros`, `timestamp_micros_utc`, `timestamp_millis`, `uuid`,
+`decimal128`, `interval_month_day_nano` and `list`. `decimal128` needs `precision` and `scale`, and
+`list` needs `item`. `postgresql`, `mariadb`, `turso` and `clickhouse` each map their own subset,
+listed on their pages, and refuse any other with `{connector}: field '{name}' has type '{ty}',
+which this connector does not map`.
+
+A workflow can declare a schema once and share it. A `schema` node inside the `workflow` holds
+`field` lines, and a source or sink whose `component` equals the schema id and that declares no
+`field` lines of its own takes that schema's fields. A node that declares its own `field` lines keeps
+them. Schema ids are unique within a workflow, and each schema holds at least one valid `field`.
+
+<div class="code">
+<div class="code-cap"><span>KDL</span><em>the source takes the orders schema because its component matches</em></div>
+
+```kdl
+workflow "orders" {
+    schema "orders" {
+        field "id" type="int64" nullable=#false
+        field "status" type="utf8"
+    }
+    source "orders_in" connector="file" component="orders" codec="orders_csv" {
+        config path="/data/orders.csv"
+    }
+}
+```
+
+</div>
 
 A failed write retries with exponential backoff before the error reaches the runner: four attempts,
 a 100 ms base, 2.0x growth, a 30 s cap and 0.1 jitter. A `retry` child overrides those per node, and
@@ -164,12 +194,13 @@ a 100 ms base, 2.0x growth, a 30 s cap and 0.1 jitter. A `retry` child overrides
 [Workflows and links](@/service/config/workflows.md) has the key table.
 
 How many rows a source hands over per pass is not a connector key. The runner asks each source for
-an admission target and resizes it as the pipeline runs. `batch_size`, `batch_rows` and their twins
+an admission target and resizes it as the pipeline runs. `batch_rows` and the keys like it
 therefore only take effect when the runner sends no hint.
 [Flow control](@/service/operate/flow-control.md) says when that is.
 
-Teaching `saci-service` a transport it does not ship means writing a source or a sink in Rust and
-registering it in your own binary. [Writing a connector](@/library/service/connectors.md) is that
+Teaching `saci-service` a transport it does not ship means writing a `Connector` in Rust, which
+provides a source, a sink or both, and registering it in your own binary with
+`ServiceBuilder::connector`. [Writing a connector](@/library/service/connectors.md) is that
 route. The binary is a crate that depends on `saci` with the `service` feature, plus the built-in
 connectors it keeps:
 
@@ -178,15 +209,15 @@ connectors it keeps:
 saci = { version = "0.1", default-features = false, features = ["service", "connector-file", "codec-csv"] }
 ```
 
-Its `main` hands the factory to the same `serve` and `validate` subcommands as `saci-service`:
+Its `main` hands the connector to the same `serve` and `validate` subcommands as `saci-service`:
 
 ```rust
 fn main() -> std::process::ExitCode {
-    saci::service::cli::main_with(|builder| builder.register_source(MyFactory))
+    saci::service::cli::main_with(|builder| builder.connector(MyConnector))
 }
 ```
 
 ## Next
 
-- [Formats](@/service/formats/_index.md), the byte formats a `transformer` node names.
+- [Formats](@/service/formats/_index.md), the byte formats a `codec` node names.
 - [Workflows and links](@/service/config/workflows.md), the nodes these sources and sinks sit in.

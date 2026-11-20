@@ -74,7 +74,7 @@ table.
 
 ## What you need
 
-- A binary built with `--features server,connector-postgresql`; PostgreSQL is one of eight connectors
+- A binary built with `--features server,connector-postgresql`; `postgresql` is one of eight connectors
   that need a specific service installed and running, so it sits outside the `server` feature.
 - A reachable server. One in a container is enough, and this command starts it with the settings
   logical decoding needs:
@@ -112,7 +112,7 @@ trigger-written outbox table, and `cdc_logical` decodes the write-ahead log.
 <div class="code-cap"><span>KDL</span><em>the whole config table is read by the connector, so name is repeated inside it</em></div>
 
 ```kdl
-source "pg_orders" type="PostgresSource" component="OrderChange" {
+source "pg_orders" connector="postgresql" component="OrderChange" {
     config {
         name "pg_orders"
 
@@ -123,7 +123,7 @@ source "pg_orders" type="PostgresSource" component="OrderChange" {
             cursor_column "id"
         }
 
-        schema_fields "id" type="int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
@@ -137,7 +137,7 @@ required connection key, and `${SACI_PG_DSN}` reads it from the environment.
 in an offset table they create for themselves. `cdc_logical` needs `slot`, `publication` and
 `table`, and creates the slot unless `slot_autocreate` says otherwise.
 
-`schema_fields` is required and uses this connector's own type vocabulary, listed under
+`field` lines are required and use this connector's own type vocabulary, listed under
 [Every key](#every-key) below.
 
 ## 2. Write to a table: the sink node
@@ -146,7 +146,7 @@ in an offset table they create for themselves. `cdc_logical` needs `slot`, `publ
 <div class="code-cap"><span>KDL</span><em>upsert makes a replayed drain cycle idempotent</em></div>
 
 ```kdl
-sink "pg_enriched" type="PostgresSink" component="EnrichedOrder" {
+sink "pg_enriched" connector="postgresql" component="EnrichedOrder" {
     config {
         name "pg_enriched"
         table "public.enriched_orders"
@@ -157,9 +157,9 @@ sink "pg_enriched" type="PostgresSink" component="EnrichedOrder" {
 
         connection dsn="${SACI_PG_DSN}" sslmode="require"
 
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "source_lsn" type="int64" nullable=#false
-        schema_fields "total" type="decimal128" precision=18 scale=4 nullable=#true pg_type="numeric(18,4)"
+        field "id" type="int64" nullable=#false
+        field "source_lsn" type="int64" nullable=#false
+        field "total" type="decimal128" precision=18 scale=4 nullable=#true native_type="numeric(18,4)"
     }
 }
 ```
@@ -173,7 +173,7 @@ those.
 `dedupe_order_column` is required when one batch can repeat a conflict key, and the highest value
 of that column wins. Without it the server refuses to touch the same row twice in one statement.
 
-`pg_type` pins the exact server column, modifier included, so a narrower `scale` than the column's
+`native_type` pins the exact server column, modifier included, so a narrower `scale` than the column's
 own is refused before any row is written.
 
 ## 3. Validate and run
@@ -199,7 +199,7 @@ OK: every source, sink and codec built
 OK: all declared types resolved in built-in registry
 ```
 
-Then run it. The config sets `run_mode kind="interval" interval_ms=2000`, so the source is redrained
+Then run it. The config sets `run "interval" every_ms=2000`, so the source is redrained
 every two seconds:
 
 Linux/macOS:
@@ -289,7 +289,7 @@ Source, at the top of `config`:
 | `batch_rows` | integer | `8192` | rows per query when the runner sends no admission hint |
 | `max_batches_per_cycle` | integer | `0` | batches per drain cycle; `0` is no cap |
 | `notify` | node | absent | wait on a `LISTEN` channel instead of a timer; takes a required `channel` and `timeout_ms`, default `30000` |
-| `schema_fields` | list of fields | required | the declared columns, in the order the component holds them |
+| `field` | lines | required | the declared columns, in the order the component holds them |
 
 Sink, at the top of `config`:
 
@@ -305,7 +305,7 @@ Sink, at the top of `config`:
 | `chunk_rows` | integer | `65536` | rows per bulk-load chunk inside one transaction |
 | `flush_rows` | integer | `0` | rows buffered before a flush; `0` flushes on every batch |
 | `truncate_before_first_write` | bool | `#false` | empty the target before the first write |
-| `schema_fields` | list of fields | required | the columns written, in the component's order |
+| `field` | lines | required | the columns written, in the component's order |
 
 A misspelled key anywhere in this `config` fails the parse and is named in the error.
 
@@ -341,7 +341,7 @@ A `reconnect` child takes `max_attempts` `3`, `base_delay_ms` `100`, `multiplier
 | `slot_autocreate` | bool | `#true` | create the slot when it is missing |
 | `max_changes_per_cycle` | integer | `10000` | decoded changes per drain cycle |
 
-### schema_fields
+### field
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
@@ -350,21 +350,23 @@ A `reconnect` child takes `max_attempts` `3`, `base_delay_ms` `100`, `multiplier
 | `nullable` | bool | `#true` | whether the column may hold nulls |
 | `precision`<br>`scale` | integer | required for `decimal128` | the decimal width, and its fractional digits |
 | `item` | string | required for `list` | the element type, which is any scalar name below |
-| `pg_type` | string | absent | the server type the column really has; see below |
+| `native_type` | string | absent | the server type the column really has; see below |
 
 The accepted `type` names are `boolean`, `int16`, `int32`, `int64`, `float32`, `float64`, `utf8`,
 `binary`, `date32`, `time64_micros`, `timestamp_micros`, `timestamp_micros_utc`, `uuid`, `json`,
-`decimal128`, `interval_month_day_nano` and `list`. That vocabulary is this connector's own: it adds
-the temporal, `uuid`, `json`, `decimal128`, `interval_month_day_nano` and `list` names, and it drops
-`int8`, the unsigned widths, `largeutf8` and `date64`.
+`decimal128`, `interval_month_day_nano` and `list`, all in lower case. That vocabulary is this
+connector's own: it adds the temporal, `uuid`, `json`, `decimal128`, `interval_month_day_nano` and
+`list` names, and it drops `int8`, the unsigned widths, `largeutf8`, `date64` and `timestamp_millis`.
+A dropped name is refused with `postgresql: field '{name}' has type '{ty}', which this connector
+does not map`. An unknown key on a `field` line is a configuration error naming the key.
 
 Every PostgreSQL type is readable and writable. One with no direct counterpart arrives as `utf8` in
 the server's own canonical text form. A `money` column declared `decimal128` needs a `scale` of at
 least 2, because `money` carries two fractional digits and a narrower scale would lose them.
 
-### pg_type
+### native_type
 
-`pg_type` is an optional key on each `schema_fields` entry, on both halves. It names the PostgreSQL
+`native_type` is an optional key on each `field` line, on both halves. It names the PostgreSQL
 type the column really has, which does two things `type` alone cannot: it asserts the server's
 column really is that type, and it picks the wire form the values travel in, binary or that type's
 own text. It never changes the column's own type; `type` alone decides that.
@@ -376,17 +378,17 @@ the name (`numeric(12,2)`, `varchar(64)`, `timestamp(3) with time zone`), and a 
 one-byte internal type, unquoted `char` is the `bpchar` alias, and `public."Mood"` names a
 mixed-case enum that `public.mood` never matches.
 
-On a source, `pg_type` asserts the server's column really is that type. Reading a column whose
-default is not `utf8` as `type = "utf8"` needs `pg_type` naming that exact type; without it the
+On a source, `native_type` asserts the server's column really is that type. Reading a column whose
+default is not `utf8` as `type = "utf8"` needs `native_type` naming that exact type; without it the
 column is refused once the connection opens and the real type is known.
 
-On a sink, `pg_type` picks the parameter type the value is encoded to. A declared integer forced
-into a narrower one (`type = "int64"` into `pg_type = "int2"`) turns on a per-value range check. An
+On a sink, `native_type` picks the parameter type the value is encoded to. A declared integer forced
+into a narrower one (`type = "int64"` into `native_type = "int2"`) turns on a per-value range check. An
 out-of-range value is refused rather than truncated, and the error names the column, the row and
 the value. A source never widens this way, and the identical declaration there is a load-time
 error.
 
-A modifier in `pg_type` must equal the server column's own modifier on a sink, and a mismatch is
+A modifier in `native_type` must equal the server column's own modifier on a sink, and a mismatch is
 refused once the connection opens, naming both spellings. On a source it asserts the type and not
 the modifier, so a `decimal128` read from a wider `numeric` is still protected per value. A value
 carrying more fractional digits than the declared `scale` is refused rather than rounded.
@@ -400,7 +402,7 @@ against the server's catalog on the first connection.
 The canonical table has one row per PostgreSQL type. Each row names that type, the `type` a column
 of it maps to when nothing forces it, and any other `type` it also fills over the binary wire when
 declared explicitly. Every type not listed as its own `type` name arrives as `utf8` by the rule
-above, and `pg_type` naming it explicitly is what makes that a declared choice.
+above, and `native_type` naming it explicitly is what makes that a declared choice.
 
 `numeric` is the one type whose default is not what its own binary route accepts. An unconstrained
 column carries no modifier to size a `decimal128` from, so it defaults to `utf8`. It takes
@@ -495,30 +497,31 @@ column carries no modifier to size a `decimal128` from, so it defaults to `utf8`
 
 `list` and its `item` fill the row of the element type instead: `text[]` with `item = "utf8"`
 reaches `list` over `utf8`'s own binary route. `item = "utf8"` over any other element type needs
-`pg_type` naming the array (`int4[]` or `_int4`) to read it as text on purpose.
+`native_type` naming the array (`int4[]` or `_int4`) to read it as text on purpose.
 
 ## When it refuses to start
 
-Each message is prefixed with the half it came from, `PostgresSource:` or `PostgresSink:`.
+Each message is prefixed with the half it came from, `PostgresSource:` or `PostgresSink:`, except the type refusal, which starts `postgresql:`.
 
 | Message | What to change |
 |---|---|
 | `notify is not supported with mode kind = "cdc_logical"; the slot interface has no notification channel` | drop the `notify` node, or pick another mode |
 | `retention = "delete_acked" applies to kind = "cdc_trigger" only, not "polling": deleting rows from a live table would destroy data` | keep `retention "keep"` on a polling source |
-| `schema_fields '{name}' uses the reserved '__' prefix, which only kind = "cdc_logical" fills, not "{kind}"` | drop the metadata column, or switch to `cdc_logical` |
-| `schema_fields '{other}' is not a reserved metadata column; the '__' prefix is reserved, and the known names are {names}` | use one of `__op`, `__lsn`, `__xid`, `__commit_ts` and `__table` |
+| `field '{name}' uses the reserved '__' prefix, which only kind = "cdc_logical" fills, not "{kind}"` | drop the metadata column, or switch to `cdc_logical` |
+| `field '{other}' is not a reserved metadata column; the '__' prefix is reserved, and the known names are {names}` | use one of `__op`, `__lsn`, `__xid`, `__commit_ts` and `__table` |
 | `reserved column '{name}' must be declared type "{expected}", not "{actual}"` | declare `utf8` for `__op` and `__table`, `int64` for `__lsn` and `__xid`, `timestamp_micros_utc` for `__commit_ts` |
 | `write_mode "{mode}" requires a non-empty conflict_columns` | add `conflict_columns` to the sink |
 | `update_columns '{column}' is also a conflict column; a conflict key cannot be rewritten by its own upsert` | remove that column from `update_columns` |
-| `'item' applies to type "list" only, not "{type}"` | drop `item`, or declare `type "list"` |
-| `type "list" requires 'item'` | add `item` naming the element type |
-| `'item' must be a scalar type, not "list"; Arrow's List is one-dimensional` | name a scalar element type |
-| `precision/scale apply to type "decimal128" only, not "{type}"` | drop the two keys, or declare `decimal128` |
-| `pg_type = "{name}" is multi-dimensional; Arrow's List is one-dimensional, so only a single '[]' is supported` | name a one-dimensional array |
-| `pg_type = "{name}" names an array type, so declare type = "list" with an 'item', not "{type}"` | declare `type "list"` with an `item` |
-| `pg_type = "{name}" cannot carry a declared "{type}"; {options}` | pick one of the `type` names the message lists |
-| `pg_type = "{name}" keeps {scale} fractional digit(s) but the field declares scale {declared_scale}; a narrower target would round rather than error` | raise `scale` to the column's own |
+| `field '{name}': 'item' applies to type "list" only, not "{type}"` | drop `item`, or declare `type "list"` |
+| `field '{name}': type "list" requires 'item'` | add `item` naming the element type |
+| `field '{name}': 'item' must be a scalar type, not "list"; Arrow's List is one-dimensional` | name a scalar element type |
+| `field '{name}': precision/scale apply to type "decimal128" only, not "{type}"` | drop the two keys, or declare `decimal128` |
+| `native_type = "{name}" is multi-dimensional; Arrow's List is one-dimensional, so only a single '[]' is supported` | name a one-dimensional array |
+| `native_type = "{name}" names an array type, so declare type = "list" with an 'item', not "{type}"` | declare `type "list"` with an `item` |
+| `native_type = "{name}" cannot carry a declared "{type}"; {options}` | pick one of the `type` names the message lists |
+| `native_type = "{name}" keeps {scale} fractional digit(s) but the field declares scale {declared_scale}; a narrower target would round rather than error` | raise `scale` to the column's own |
 | `money keeps 2 fractional digits, so scale {scale} would lose them; declare scale = 2 or wider` | declare `scale 2` or wider |
+| `postgresql: field '{name}' has type '{ty}', which this connector does not map` | declare one of the `type` names listed under `field` |
 
 ## Next
 

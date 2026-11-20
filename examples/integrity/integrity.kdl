@@ -21,9 +21,9 @@
 // each checksum from what it published and compares.
 //
 // The PostgreSQL CDC third of the demo lives in `integrity_audit.kdl`, a
-// separate process. `run_mode` is a property of the whole config, and the two
+// separate process. `run` is a property of the whole config, and the two
 // halves want opposite ones: a Kafka consumer, a JetStream consumer and a
-// ChannelSource never reach EOF, which only the stream runner can drive, while
+// `channel` source never reach EOF, which only the stream runner can drive, while
 // every PostgreSQL read mode returns EOF once it is caught up and needs a
 // runner that re-enters. In stream mode an EOF retires a source permanently.
 //
@@ -56,22 +56,22 @@
 // the publisher's startup reset deletes this topic, its consumer group, the
 // JetStream messages, the audit table and the replication slot, so it refuses
 // to run at all while either control plane answers.
-//   cargo run -p saci --features service,transformer-arrow-ipc,transformer-csv,transformer-ndjson,transformer-parquet --example integrity_check
+//   cargo run -p saci --features service,codec-arrow-ipc,codec-csv,codec-ndjson,codec-parquet --example integrity_check
 //   cargo run -p saci \
-//     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm-host,windows \
+//     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,codec-ndjson,codec-csv,codec-arrow-ipc,wasm-host,windows \
 //     -- serve --config examples/integrity/integrity.kdl
 //   cargo run -p saci \
-//     --features server,connector-postgresql,connector-http,transformer-parquet,wasm-host \
+//     --features server,connector-postgresql,connector-http,codec-parquet,wasm-host \
 //     -- serve --config examples/integrity/integrity_audit.kdl
 
 mode "standalone"
 
 node id=1 name="saci-integrity" data_dir="${SACI_DATA_DIR:-/tmp/saci-integrity/stream}"
 
-// A Kafka consumer, a JetStream consumer and a ChannelSource all block rather
+// A Kafka consumer, a JetStream consumer and a `channel` source all block rather
 // than report EOF, so the stream runner drives them item by item, one batch
 // from one source per pass, rotating round-robin.
-run_mode kind="stream"
+run "stream"
 
 // No `store "redb"` block on purpose. Both processors carry cross-batch state,
 // and in stream mode the runner threads every processor's checkpoint blob from
@@ -90,12 +90,12 @@ run_mode kind="stream"
 
 workflow "ingest" name="Order ingest and classification" {
     // One JSON object per line for Kafka messages and for the express sink.
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
     // One record per line for the catalog file and the standard sink. On a
-    // stream surface, which is what both FileSource and HttpSink use,
+    // stream surface, which is what both the `file` source and the `http` sink use,
     // `has_headers` defaults to #true, so the catalog file is read with a
     // header row and every POST /sink/standard body carries one.
-    transformer "csv_fmt" format="csv"
+    codec "csv_fmt" format="csv"
 
     // ---------------------------------------------------------------- sources
 
@@ -111,14 +111,14 @@ workflow "ingest" name="Order ingest and classification" {
     // has not seen yet is not an error, it just classifies as
     // taxable=false, which is a different answer than the verifier expects.
     //
-    // FileSource reads the file once and reports EOF; there is no tailing
+    // A `file` source reads the file once and reports EOF; there is no tailing
     // and no re-read. EOF only drops it from the rotation, which is why a
     // one-shot source is legal here at all: `orders_kafka` keeps feeding
     // items.
-    source "catalog_file" type="FileSource" component="Catalog" transformer="csv_fmt" {
+    source "catalog_file" connector="file" component="Catalog" codec="csv_fmt" {
         config {
             // Committed beside this config, so `cargo xtask validate` and a
-            // clean checkout both resolve it: FileSource opens its path when
+            // clean checkout both resolve it: the `file` source opens its path when
             // the factory is built, `validate` included. The publisher reads
             // the same file to predict every `taxable` flag, so all three
             // must name one file.
@@ -128,19 +128,19 @@ workflow "ingest" name="Order ingest and classification" {
             // must match `integrity-classify-wasm`'s `Catalog` field for
             // field: the host compares the two at load time and refuses the
             // link otherwise.
-            schema_fields "sku" type="utf8" nullable=#false
-            schema_fields "name" type="utf8" nullable=#false
-            schema_fields "taxable" type="boolean" nullable=#false
-            schema_fields "weight_kg" type="float64" nullable=#false
+            field "sku" type="utf8" nullable=#false
+            field "name" type="utf8" nullable=#false
+            field "taxable" type="boolean" nullable=#false
+            field "weight_kg" type="float64" nullable=#false
         }
     }
 
-    source "orders_kafka" type="KafkaSource" component="Order" transformer="ndjson_fmt" {
+    source "orders_kafka" connector="kafka" component="Order" codec="ndjson_fmt" {
         // Branch routing is per batch: the processor reads the first row's
         // priority and the whole batch follows it. A batch that mixed
         // priorities would post half its rows to the wrong sink. The
         // publisher therefore gives each Kafka message one priority, and this
-        // block is what keeps one message equal to one batch: `batch_size 1`
+        // block is what keeps one message equal to one batch: `batch_rows 1`
         // alone is not enough, because `Source::request_batch_rows` overwrites
         // it before every poll whenever a flow controller is live.
         flow_control {
@@ -157,7 +157,7 @@ workflow "ingest" name="Order ingest and classification" {
             group_id "saci-integrity"
             // Messages per RecordBatch, in force only because the controller
             // above is off.
-            batch_size 1
+            batch_rows 1
             // How long one poll keeps collecting after its first message.
             // Short, because a batch is one message anyway.
             poll_timeout_ms 5
@@ -177,13 +177,13 @@ workflow "ingest" name="Order ingest and classification" {
             }
 
             // Matches `integrity-classify-wasm`'s `Order` field for field.
-            schema_fields "order_id" type="int64" nullable=#false
-            schema_fields "sku" type="utf8" nullable=#false
-            schema_fields "qty" type="int32" nullable=#false
-            schema_fields "unit_price" type="float64" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
-            schema_fields "event_ms" type="int64" nullable=#false
+            field "order_id" type="int64" nullable=#false
+            field "sku" type="utf8" nullable=#false
+            field "qty" type="int32" nullable=#false
+            field "unit_price" type="float64" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "priority" type="utf8" nullable=#false
+            field "event_ms" type="int64" nullable=#false
         }
     }
 
@@ -195,7 +195,7 @@ workflow "ingest" name="Order ingest and classification" {
     // the stream runner delivers one source's batch per item and clears the
     // dataset afterwards, so the other component is simply empty that pass.
 
-    wasm "classify" module="target/wasm32-wasip3/release/integrity_classify_wasm.wasm"
+    wasm "classify" path="target/wasm32-wasip3/release/integrity_classify_wasm.wasm"
 
     // ----------------------------------------------------------------- sinks
     //
@@ -205,7 +205,7 @@ workflow "ingest" name="Order ingest and classification" {
     // just shortens the default backoff, because the verifier is a local
     // process and a slow retry ladder would look like a dropped batch.
 
-    sink "express_http" type="HttpSink" component="ClassifiedOrder" transformer="ndjson_fmt" {
+    sink "express_http" connector="http" component="ClassifiedOrder" codec="ndjson_fmt" {
         retry max_attempts=5 base_delay_ms=50 multiplier=2.0 max_delay_ms=2000 jitter=0.1
 
         config {
@@ -218,21 +218,21 @@ workflow "ingest" name="Order ingest and classification" {
             }
 
             // A sink always declares the schema its bodies are written with.
-            schema_fields "order_id" type="int64" nullable=#false
-            schema_fields "sku" type="utf8" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
-            schema_fields "qty" type="int32" nullable=#false
-            schema_fields "unit_price" type="float64" nullable=#false
-            schema_fields "line_total" type="float64" nullable=#false
-            schema_fields "taxable" type="boolean" nullable=#false
-            schema_fields "branch" type="utf8" nullable=#false
-            schema_fields "checksum" type="int64" nullable=#false
-            schema_fields "event_ms" type="int64" nullable=#false
+            field "order_id" type="int64" nullable=#false
+            field "sku" type="utf8" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "priority" type="utf8" nullable=#false
+            field "qty" type="int32" nullable=#false
+            field "unit_price" type="float64" nullable=#false
+            field "line_total" type="float64" nullable=#false
+            field "taxable" type="boolean" nullable=#false
+            field "branch" type="utf8" nullable=#false
+            field "checksum" type="int64" nullable=#false
+            field "event_ms" type="int64" nullable=#false
         }
     }
 
-    sink "standard_http" type="HttpSink" component="ClassifiedOrder" transformer="csv_fmt" {
+    sink "standard_http" connector="http" component="ClassifiedOrder" codec="csv_fmt" {
         retry max_attempts=5 base_delay_ms=50 multiplier=2.0 max_delay_ms=2000 jitter=0.1
 
         config {
@@ -244,36 +244,36 @@ workflow "ingest" name="Order ingest and classification" {
                 content-type "text/csv"
             }
 
-            schema_fields "order_id" type="int64" nullable=#false
-            schema_fields "sku" type="utf8" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
-            schema_fields "qty" type="int32" nullable=#false
-            schema_fields "unit_price" type="float64" nullable=#false
-            schema_fields "line_total" type="float64" nullable=#false
-            schema_fields "taxable" type="boolean" nullable=#false
-            schema_fields "branch" type="utf8" nullable=#false
-            schema_fields "checksum" type="int64" nullable=#false
-            schema_fields "event_ms" type="int64" nullable=#false
+            field "order_id" type="int64" nullable=#false
+            field "sku" type="utf8" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "priority" type="utf8" nullable=#false
+            field "qty" type="int32" nullable=#false
+            field "unit_price" type="float64" nullable=#false
+            field "line_total" type="float64" nullable=#false
+            field "taxable" type="boolean" nullable=#false
+            field "branch" type="utf8" nullable=#false
+            field "checksum" type="int64" nullable=#false
+            field "event_ms" type="int64" nullable=#false
         }
     }
 
-    // The in-process bridge into the `settle` workflow. No transformer: a
+    // The in-process bridge into the `settle` workflow. No codec: a
     // channel carries RecordBatches, not bytes. `buffer` is the mpsc depth in
     // batches; the sink reports the queued row backlog to flow control.
-    sink "settle_bridge" type="ChannelSink" component="ClassifiedOrder" {
+    sink "settle_bridge" connector="channel" component="ClassifiedOrder" {
         config name="classified" buffer=256 {
-            schema_fields "order_id" type="int64" nullable=#false
-            schema_fields "sku" type="utf8" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
-            schema_fields "qty" type="int32" nullable=#false
-            schema_fields "unit_price" type="float64" nullable=#false
-            schema_fields "line_total" type="float64" nullable=#false
-            schema_fields "taxable" type="boolean" nullable=#false
-            schema_fields "branch" type="utf8" nullable=#false
-            schema_fields "checksum" type="int64" nullable=#false
-            schema_fields "event_ms" type="int64" nullable=#false
+            field "order_id" type="int64" nullable=#false
+            field "sku" type="utf8" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "priority" type="utf8" nullable=#false
+            field "qty" type="int32" nullable=#false
+            field "unit_price" type="float64" nullable=#false
+            field "line_total" type="float64" nullable=#false
+            field "taxable" type="boolean" nullable=#false
+            field "branch" type="utf8" nullable=#false
+            field "checksum" type="int64" nullable=#false
+            field "event_ms" type="int64" nullable=#false
         }
     }
 
@@ -293,29 +293,29 @@ workflow "ingest" name="Order ingest and classification" {
 workflow "settle" name="Windowed settlement" {
     // Node ids are unique across every workflow in a config, so this cannot
     // reuse `ingest`'s `ndjson_fmt` id even though the format is the same.
-    transformer "payments_ndjson" format="ndjson"
+    codec "payments_ndjson" format="ndjson"
     // Self-describing, so the sink writes the schema into every body and the
     // verifier reads it back without a declaration of its own.
-    transformer "arrow_fmt" format="arrow-ipc"
+    codec "arrow_fmt" format="arrow-ipc"
 
     // ---------------------------------------------------------------- sources
 
     // The consumer half of the `classified` channel. Exactly one
-    // ChannelSource and one ChannelSink may claim a name; a dangling half is
+    // `channel` source and one `channel` sink may claim a name; a dangling half is
     // a load-time error.
-    source "bridge_in" type="ChannelSource" component="ClassifiedOrder" {
+    source "bridge_in" connector="channel" component="ClassifiedOrder" {
         config name="classified" buffer=256 {
-            schema_fields "order_id" type="int64" nullable=#false
-            schema_fields "sku" type="utf8" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "priority" type="utf8" nullable=#false
-            schema_fields "qty" type="int32" nullable=#false
-            schema_fields "unit_price" type="float64" nullable=#false
-            schema_fields "line_total" type="float64" nullable=#false
-            schema_fields "taxable" type="boolean" nullable=#false
-            schema_fields "branch" type="utf8" nullable=#false
-            schema_fields "checksum" type="int64" nullable=#false
-            schema_fields "event_ms" type="int64" nullable=#false
+            field "order_id" type="int64" nullable=#false
+            field "sku" type="utf8" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "priority" type="utf8" nullable=#false
+            field "qty" type="int32" nullable=#false
+            field "unit_price" type="float64" nullable=#false
+            field "line_total" type="float64" nullable=#false
+            field "taxable" type="boolean" nullable=#false
+            field "branch" type="utf8" nullable=#false
+            field "checksum" type="int64" nullable=#false
+            field "event_ms" type="int64" nullable=#false
         }
     }
 
@@ -324,9 +324,9 @@ workflow "settle" name="Windowed settlement" {
     // core NATS is at-most-once with no subscriber. THIS SERVICE owns the
     // stream's settings through `stream_provision`; the publisher waits for
     // the stream to exist rather than creating it, so there is one owner.
-    source "payments_nats" type="NatsSource" component="Payment" transformer="payments_ndjson" {
+    source "payments_nats" connector="nats" component="Payment" codec="payments_ndjson" {
         config {
-            batch_size 500
+            batch_rows 500
             poll_timeout_ms 5
             // A JetStream consumer is a live source; an EOF would retire it.
             stop_at_end #false
@@ -359,13 +359,13 @@ workflow "settle" name="Windowed settlement" {
             }
 
             // Matches `integrity-aggregate-wasm`'s `Payment` field for field.
-            schema_fields "payment_id" type="int64" nullable=#false
-            schema_fields "order_id" type="int64" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
-            schema_fields "currency" type="utf8" nullable=#false
-            schema_fields "settled" type="boolean" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "event_ms" type="int64" nullable=#false
+            field "payment_id" type="int64" nullable=#false
+            field "order_id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#false
+            field "currency" type="utf8" nullable=#false
+            field "settled" type="boolean" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "event_ms" type="int64" nullable=#false
         }
     }
 
@@ -381,16 +381,16 @@ workflow "settle" name="Windowed settlement" {
     // A source on a path to a windowed node builds no flow controller at all:
     // a credit-sized slice would let a throughput measurement choose the
     // boundaries at which the node observes event time. Arrivals stay whole,
-    // sized by each connector's own `batch_size`.
-    wasm "aggregate" module="target/wasm32-wasip3/release/integrity_aggregate_wasm.wasm" {
+    // sized by each connector's own `batch_rows`.
+    wasm "aggregate" path="target/wasm32-wasip3/release/integrity_aggregate_wasm.wasm" {
         window kind="tumbling" size_ms=10000 time_field="event_ms" allowed_lateness_ms=2000 {
-            key_field "region"
+            key_fields "region"
         }
     }
 
     // ------------------------------------------------------------------ sink
 
-    sink "window_http" type="HttpSink" component="RegionTotal" transformer="arrow_fmt" {
+    sink "window_http" connector="http" component="RegionTotal" codec="arrow_fmt" {
         retry max_attempts=5 base_delay_ms=50 multiplier=2.0 max_delay_ms=2000 jitter=0.1
 
         config {
@@ -402,13 +402,13 @@ workflow "settle" name="Windowed settlement" {
                 content-type "application/vnd.apache.arrow.stream"
             }
 
-            schema_fields "window_id" type="int64" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "order_count" type="int64" nullable=#false
-            schema_fields "payment_count" type="int64" nullable=#false
-            schema_fields "order_amount" type="float64" nullable=#false
-            schema_fields "payment_amount" type="float64" nullable=#false
-            schema_fields "checksum" type="int64" nullable=#false
+            field "window_id" type="int64" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "order_count" type="int64" nullable=#false
+            field "payment_count" type="int64" nullable=#false
+            field "order_amount" type="float64" nullable=#false
+            field "payment_amount" type="float64" nullable=#false
+            field "checksum" type="int64" nullable=#false
         }
     }
 

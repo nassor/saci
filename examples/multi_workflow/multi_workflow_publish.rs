@@ -105,7 +105,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 /// One sale as the NDJSON line the source decodes, field order matching the
-/// config's `schema_fields`.
+/// config's `field` entries.
 fn line(ts: i64, symbol: &str, amount: f64) -> String {
     format!(r#"{{"timestamp_ms":{ts},"symbol":"{symbol}","amount":{amount:.2}}}"#)
 }

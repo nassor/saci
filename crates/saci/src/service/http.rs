@@ -59,7 +59,7 @@
 //!     let cancel = CancellationToken::new();
 //!     let _watchdog = spawn_watchdog(state.clone(), cancel.child_token());
 //!
-//!     let cfg = HttpConfig { bind: "127.0.0.1:8080".to_string(), disabled: false, control: true };
+//!     let cfg = HttpConfig { bind: "127.0.0.1:8080".to_string(), enabled: true, control: true };
 //!     serve_http(&cfg, state, cancel).await.unwrap();
 //! }
 //! # }
@@ -444,7 +444,7 @@ async fn handle_status(State(state): State<ServiceState>) -> impl IntoResponse {
 
 /// Bind and serve the HTTP control plane.
 ///
-/// If `config.disabled` is `true` this function logs a notice and returns
+/// If `config.enabled` is `false` this function logs a notice and returns
 /// immediately without binding any port.
 ///
 /// The server runs until `cancel` is cancelled, at which point axum drains
@@ -460,7 +460,7 @@ pub async fn serve_http(
     state: ServiceState,
     cancel: CancellationToken,
 ) -> SaciResult<()> {
-    if config.disabled {
+    if !config.enabled {
         tracing::info!("HTTP control plane disabled");
         return Ok(());
     }
@@ -735,7 +735,7 @@ mod tests {
         let state = make_state(ServiceModeLabel::Standalone);
         let cfg = HttpConfig {
             bind: addr.to_string(),
-            disabled: false,
+            enabled: true,
             control: false,
         };
         let cancel = CancellationToken::new();
@@ -757,7 +757,7 @@ mod tests {
         let state = make_state(ServiceModeLabel::Standalone);
         let cfg = HttpConfig {
             bind: "127.0.0.1:0".to_string(),
-            disabled: true,
+            enabled: false,
             control: false,
         };
         let cancel = CancellationToken::new();

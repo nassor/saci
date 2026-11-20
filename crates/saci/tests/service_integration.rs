@@ -8,7 +8,7 @@
 //! cargo test --test service_integration --all-features -- --test-threads=4
 //! ```
 //!
-//! Tests pass `--port 0` and parse the `saci-service listening on <addr>` line from
+//! Tests pass `--bind 127.0.0.1:0` and parse the `saci-service listening on <addr>` line from
 //! stdout, so no port is hardcoded. Each test gets its own
 //! [`tempfile::TempDir`] for `node.data_dir`, and [`Service`] kills and reaps
 //! the child even if the test panics.
@@ -75,7 +75,7 @@ impl Drop for Service {
 }
 
 impl Service {
-    /// Spawn `serve --config <path> --port 0` and wait for its bind address.
+    /// Spawn `serve --config <path> --bind 127.0.0.1:0` and wait for its bind address.
     ///
     /// # Panics
     ///
@@ -88,8 +88,8 @@ impl Service {
             .arg("serve")
             .arg("--config")
             .arg(config_path)
-            .arg("--port")
-            .arg("0")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::from(stderr_sink))
             .spawn()
@@ -314,22 +314,22 @@ mode "standalone"
 
 node id=1 data_dir="{data_dir_str}"
 
-run_mode kind="continuous"
+run "continuous"
 
 workflow "smoke" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
-    source "in" type="FileSource" component="Ping" transformer="csv_fmt" {{
+    source "in" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{input_path_str}"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }}
     }}
-    sink "out" type="FileSink" component="Ping" transformer="csv_fmt" {{
+    sink "out" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{output_path_str}"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }}
     }}
     link from="in" to="out"
@@ -495,7 +495,7 @@ async fn test_status_subcommand_hits_running_service() {
     let addr = service.url("");
     let output = std::process::Command::new(BIN)
         .arg("status")
-        .arg("--addr")
+        .arg("--url")
         .arg(&addr)
         .output()
         .expect("failed to run status");

@@ -3,6 +3,7 @@ title = "Writing a codec"
 description = "Implement Codec and register it under a format name."
 template = "page.html"
 weight = 2
+aliases = ["/library/service/transformers/"]
 +++
 # Writing a codec
 
@@ -100,7 +101,7 @@ on `saci` with `codec-api`, which brings `SaciError` and the traits, and on noth
 else of SACI: no connector, no host. Implement `Codec` for the codec and
 `CodecFactory` for the name a `format` key selects it with.
 
-```rust,name=The factory reads options, the codec it builds is shared
+```rust,name=The factory reads its config table, the codec it builds is shared
 // saci::codec
 pub trait CodecFactory: Send + Sync + 'static {
     fn format_name(&self) -> &'static str;
@@ -112,16 +113,16 @@ let builder = ServiceBuilder::new()
     .codec(ProtobufCodecFactory);
 ```
 
-`ServiceBuilder::codec` installs it, and from then on
-`transformer "p" format="protobuf"` resolves, with no change to any connector.
+`ServiceBuilder::codec(f)` registers it in the builder's `CodecRegistry`, and from then on
+`codec "p" format="protobuf"` resolves, with no change to any connector.
 Registering a `format_name` that is already taken replaces the earlier factory,
 so a custom `csv` can stand in for the built-in one.
 
 ## Features
 
 With `service` on, one feature per codec decides what
-`ServiceBuilder::new()` installs: `codec-csv`, `codec-ndjson`,
-`codec-parquet`, `codec-avro` and `codec-arrow-ipc`.
+`ServiceBuilder::new()` registers: `codec-csv`, `codec-ndjson`,
+`codec-parquet`, `codec-avro` and `codec-arrow-ipc`. `ServiceBuilder::empty()` registers nothing.
 `connector-kafka`, `connector-nats` and `connector-udp` each imply
 `codec-ndjson` and `connector-tcp` implies `codec-arrow-ipc`, so
 any one of the four is runnable on its own.
@@ -133,8 +134,8 @@ cargo build -p saci --bin saci-service --no-default-features --features service,
 <div class="note note-warn">
 <span class="note-label">Sharp edge</span>
 <p>
-A <code>format</code> the build does not carry fails loudly rather than falling
-back: <code>transformer 'orders_json' names format 'parquet', which no
+A <code>format</code> the build does not carry fails at load:
+<code>codec 'orders_json' names format 'parquet', which no
 codec is registered for (registered: csv, ndjson)</code>. The registry
 holds exactly what the features compiled in, so the fix is a feature or a
 <code>ServiceBuilder::codec</code> call.

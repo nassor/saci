@@ -121,8 +121,10 @@ The runner parks between passes, so `pause` waits out the pass in flight and
 answers `paused`. It answers `pausing` only when that pass outlasts the 5
 second budget in the status codes below. `GET /status` reports the same state
 beside that workflow's counters, and its `iterations` stops climbing.
+`saci-service status --url http://localhost:8080 --full` (env `SACI_URL`) prints
+that `/status` document from the command line.
 
-In `run_mode kind="stream"` the park happens between items, so a pause settles
+In `run "stream"` the park happens between items, so a pause settles
 when the next message arrives. A source that is idle keeps the workflow at
 `pausing` until it produces something.
 
@@ -165,7 +167,7 @@ drops its connectors, so the call that would have acknowledged the batch
 already processed never comes. The broker or the cursor replays it after
 `start`, which makes delivery across a rebuild at least once. A sink that
 cannot absorb a repeat needs an idempotent write, such as
-`write_mode "upsert"` on a PostgreSQL sink, or a consumer that deduplicates on
+`write_mode "upsert"` on a `postgresql` sink, or a consumer that deduplicates on
 a key the rows carry.
 
 `examples/integrity/` proves both halves of that. It publishes a known
@@ -216,8 +218,8 @@ with a `restart_blocked_reason`, answers `409` to `start`, `stop` and
 
 | Shape | Why |
 |---|---|
-| A `wasm` node with no `module`, or a `plugin` node with no `library` | Its runtime came from `ServiceBuilder::runtime` and the build consumed it |
-| A `ChannelSource` or `ChannelSink` | It is bound to one in-process channel, and its sink is the only sender the consumer's end of file depends on |
+| A `wasm` node or a `plugin` node with no `path` | Its runtime came from `ServiceBuilder::runtime` and the build consumed it |
+| A `channel` source or sink | It is bound to one in-process channel, and its sink is the only sender the consumer's end of file depends on |
 
 `stop` is refused too, deliberately, because stopping a workflow that cannot
 be started again would leave no way to bring it back.
@@ -236,7 +238,7 @@ A verb that is already satisfied is `200` with the status unchanged: `pause` on
 a paused workflow, `stop` on a stopped one.
 
 A workflow that finished its own work reports `completed`. Its supervisor has
-returned, which is what lets a `one_shot` service exit, so `start` and
+returned, which is what lets a `run "once"` service exit, so `start` and
 `restart` answer `503` rather than building it again. Bringing it back needs a
 service restart.
 

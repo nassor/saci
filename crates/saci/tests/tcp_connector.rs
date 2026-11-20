@@ -103,26 +103,26 @@ mode "standalone"
 
 node id=1 name="saci-tcp-connector" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "tcp-connector-test" {{
-    transformer "ipc" format="arrow-ipc"
+    codec "ipc" format="arrow-ipc"
 
-    source "frames_in" type="tcp" component="{COMPONENT}" transformer="ipc" {{
+    source "frames_in" connector="tcp" component="{COMPONENT}" codec="ipc" {{
         config {{
             bind "{bind}"
             buffer 8
             max_frame_bytes 65536
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
     wasm "relay" name="Relay"
 
-    sink "frames_out" type="tcp" component="{COMPONENT}" transformer="ipc" {{
+    sink "frames_out" connector="tcp" component="{COMPONENT}" codec="ipc" {{
         config {{
             connect "{connect}"
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
@@ -130,7 +130,7 @@ workflow "tcp-connector-test" {{
     link from="relay" to="frames_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -138,7 +138,7 @@ observability log_level="warn"
 }
 
 /// A free port for the source's `bind`, which the config needs before the
-/// factory binds it for real.
+/// connector binds it for real.
 fn reserved_port() -> u16 {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
     let port = probe.local_addr().expect("probe addr").port();
@@ -174,7 +174,7 @@ async fn frames_pushed_into_the_tcp_source_come_back_out_of_the_tcp_sink() {
 
     let stats = local
         .run_until(async move {
-            // The listener is already bound by the factory, so this connection
+            // The listener is already bound by the connector, so this connection
             // waits in the backlog until the accept loop starts.
             let mut producer = TcpStream::connect(&bind_addr)
                 .await
@@ -206,18 +206,18 @@ async fn frames_pushed_into_the_tcp_source_come_back_out_of_the_tcp_sink() {
     assert_eq!(stats.iteration_errors, 0);
 }
 
-fn validation_kdl(run_mode: &str, source_type: &str) -> String {
+fn validation_kdl(run: &str, source_connector: &str) -> String {
     format!(
         r#"
 mode "standalone"
 
 node id=1 data_dir="/tmp/saci-tcp-validate"
 
-run_mode {run_mode}
+run {run}
 
 workflow "w" {{
-    source "in" type="{source_type}" component="{COMPONENT}"
-    sink "out" type="tcp" component="{COMPONENT}"
+    source "in" connector="{source_connector}" component="{COMPONENT}"
+    sink "out" connector="tcp" component="{COMPONENT}"
     link from="in" to="out"
 }}
 "#
@@ -232,20 +232,16 @@ fn load_from_text(text: &str) -> saci::SaciResult<()> {
 /// mode even though a `tcp` source is stream-only.
 #[test]
 fn a_tcp_sink_is_accepted_outside_stream_mode() {
-    for run_mode in [
-        r#"kind="one_shot""#,
-        r#"kind="interval" interval_ms=1000"#,
-        r#"kind="stream""#,
-    ] {
-        load_from_text(&validation_kdl(run_mode, "NoopSource"))
-            .unwrap_or_else(|e| panic!("a tcp sink under {run_mode} must validate: {e}"));
+    for run in [r#""once""#, r#""interval" every_ms=1000"#, r#""stream""#] {
+        load_from_text(&validation_kdl(run, "noop"))
+            .unwrap_or_else(|e| panic!("a tcp sink under {run} must validate: {e}"));
     }
 }
 
 /// The mirror of the rule above: the source half is still stream-only.
 #[test]
 fn a_tcp_source_is_still_rejected_outside_stream_mode() {
-    let err = load_from_text(&validation_kdl(r#"kind="one_shot""#, "tcp"))
+    let err = load_from_text(&validation_kdl(r#""once""#, "tcp"))
         .expect_err("a tcp source outside stream mode must fail");
     assert_eq!(err.category(), "configuration", "got: {err}");
     assert!(err.to_string().contains("never reaches EOF"), "got: {err}");

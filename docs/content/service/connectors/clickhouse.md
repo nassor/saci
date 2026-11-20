@@ -91,7 +91,7 @@ docker run -d --name saci-clickhouse -p 8123:8123 clickhouse/clickhouse-server:2
 The connector exchanges Apache Arrow stream batches directly with ClickHouse over HTTP.
 
 ```kdl
-source "ch_events" type="ClickhouseSource" component="Event" {
+source "ch_events" connector="clickhouse" component="Event" {
     config {
         name "ch_events"
         batch_rows 8192
@@ -103,13 +103,13 @@ source "ch_events" type="ClickhouseSource" component="Event" {
 
         mode kind="polling" table="events_in" cursor_column="id"
 
-        schema_fields "id" type="uint64" nullable=#false
-        schema_fields "device_id" type="utf8" nullable=#true
-        schema_fields "metric" type="float64" nullable=#true
+        field "id" type="uint64" nullable=#false
+        field "device_id" type="utf8" nullable=#true
+        field "metric" type="float64" nullable=#true
     }
 }
 
-sink "ch_enriched" type="ClickhouseSink" component="EnrichedEvent" {
+sink "ch_enriched" connector="clickhouse" component="EnrichedEvent" {
     config {
         name "ch_enriched"
         table "events_out"
@@ -121,9 +121,9 @@ sink "ch_enriched" type="ClickhouseSink" component="EnrichedEvent" {
             database "default"
         }
 
-        schema_fields "id" type="uint64" nullable=#false
-        schema_fields "device_id" type="utf8" nullable=#true
-        schema_fields "metric" type="float64" nullable=#true
+        field "id" type="uint64" nullable=#false
+        field "device_id" type="utf8" nullable=#true
+        field "metric" type="float64" nullable=#true
     }
 }
 ```
@@ -220,7 +220,7 @@ truncated again, and a run that writes no row leaves it alone.
 | `mode.query` | string | required for query | Custom SQL query |
 | `batch_rows` | integer | `8192` | Maximum rows per emitted batch |
 | `max_batches_per_cycle` | integer | `0` | Batch limit per pass (0 is unconstrained) |
-| `schema_fields` | list | required | Declared Arrow schema fields |
+| `field` | lines | required | Declared Arrow schema fields |
 
 ### Sink keys
 
@@ -234,4 +234,11 @@ truncated again, and a run that writes no row leaves it alone.
 | `chunk_rows` | integer | `65536` | Maximum rows per chunk (0 = no limit) |
 | `flush_rows` | integer | `0` | Buffer threshold before flush (0 flushes every batch) |
 | `truncate_before_first_write` | boolean | `#false` | Runs TRUNCATE TABLE at the start of the first flush, again on a retry until a flush completes |
-| `schema_fields` | list | required | Declared Arrow schema fields |
+| `field` | lines | required | Declared Arrow schema fields |
+
+A `field` line takes `type` and `nullable`, plus `precision` and `scale` for `decimal128`. The accepted
+`type` names are `boolean`, `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`,
+`float32`, `float64`, `utf8`, `binary`, `date32`, `date64`, `timestamp_micros`, `timestamp_millis`
+and `decimal128`, all in lower case. Another name is refused with `clickhouse: field '{name}' has
+type '{ty}', which this connector does not map`, and an unknown key on a `field` line is a
+configuration error naming the key.

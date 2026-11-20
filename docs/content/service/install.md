@@ -92,7 +92,7 @@ aggregation.
 
 | Capability | In the `server` feature |
 |---|---|
-| Sources and sinks | File, redb, HTTP, TCP, UDP, SACI and in-process channels |
+| Sources and sinks | `file`, `redb`, `http`, `http-listen`, `tcp`, `udp`, `peer` and `channel` |
 | Formats | csv, ndjson, parquet, avro and arrow-ipc |
 | Processors | the WebAssembly component runtime, windowing included |
 | PostgreSQL | no: opt in with `--features connector-postgresql` |
@@ -102,7 +102,7 @@ aggregation.
 | Kafka | no: opt in with `--features connector-kafka` |
 | Turso | no: opt in with `--features connector-turso` |
 | ClickHouse | no: opt in with `--features connector-clickhouse` |
-| OpenTelemetry | no: opt in with `--features connector-otlp` |
+| OTLP metrics | no: opt in with `--features connector-otlp` |
 | Native plugins | no: opt in with `--features plugin-host` |
 | Cluster mode | no: opt in with `--features service-cluster` |
 
@@ -149,7 +149,7 @@ A `command not found` here means the cargo bin directory is not on your PATH.
 ## What stays opt-in
 
 A connector ships in `server` only when nothing has to be installed or already running for it to
-work. PostgreSQL, MariaDB, NATS, S3, Kafka, Turso, ClickHouse and OpenTelemetry each need their own database,
+work. PostgreSQL, MariaDB, NATS, S3, Kafka, Turso, ClickHouse and OTLP metrics each need their own database,
 broker, object store or OTLP endpoint running before the connector does anything, so each sits
 outside `server` alongside native plugins and cluster mode. Add one by reinstalling with
 its flag after `server`, from the same checkout:
@@ -165,8 +165,8 @@ its flag after `server`, from the same checkout:
   Turso endpoint, so it stays opt-in. Install with `--features connector-turso`.
 - ClickHouse needs a running ClickHouse server. Install with `--features connector-clickhouse` when
   you need [ClickHouse](@/service/connectors/clickhouse.md).
-- OpenTelemetry needs a running OTLP endpoint. Install with `--features connector-otlp`
-  when you need [OpenTelemetry](@/service/connectors/opentelemetry.md).
+- `otlp-metrics` needs a running OTLP endpoint. Install with `--features connector-otlp`
+  when you need [OTLP metrics](@/service/connectors/otlp-metrics.md).
 - Native plugins replace the sandbox with a shared library, so opting in is an
   explicit choice. Install with `--features plugin-host`, then follow
   [A Rust plugin](@/service/plugins/rust.md).

@@ -79,7 +79,7 @@ fn core_source_cfg(url: &str, subject: &str) -> NatsSourceConfig {
             subject: subject.to_string(),
             queue_group: None,
         }),
-        batch_size: 1000,
+        batch_rows: 1000,
         poll_timeout_ms: 2_000,
         stop_at_end: true,
     }
@@ -105,7 +105,7 @@ fn js_source_cfg(url: &str, stream: &str, durable: &str) -> NatsSourceConfig {
             fetch_expires_ms: 2_000,
             ..JetstreamSourceMode::default()
         })),
-        batch_size: 1000,
+        batch_rows: 1000,
         poll_timeout_ms: 2_000,
         stop_at_end: true,
     }
@@ -772,12 +772,12 @@ async fn a_cancelled_window_keeps_the_messages_already_pulled() {
         ndjson(),
     )
     .expect("sink builds");
-    // Live rather than `stop_at_end`, and `batch_size` 2: a window this source
+    // Live rather than `stop_at_end`, and `batch_rows` 2: a window this source
     // cannot close on one message is a window that can be cancelled while it
     // holds that message.
     let mut source = NatsSource::new(
         NatsSourceConfig {
-            batch_size: 2,
+            batch_rows: 2,
             poll_timeout_ms: 5_000,
             stop_at_end: false,
             ..js_source_cfg(&nats.url(), &stream, "saci-cancel")
@@ -794,12 +794,12 @@ async fn a_cancelled_window_keeps_the_messages_already_pulled() {
         tokio::time::timeout(Duration::from_millis(1_500), source.next_batch())
             .await
             .is_err(),
-        "a window one message short of batch_size must still be open, \
+        "a window one message short of batch_rows must still be open, \
          or this test cancels nothing"
     );
 
     // Two more, so the resumed window has to ask for the one place it has
-    // left rather than for another whole `batch_size`.
+    // left rather than for another whole `batch_rows`.
     sink.write_batch(&batch_of(schema.clone(), &[2, 3], &["b", "c"], &[2.0, 3.0]))
         .await
         .expect("write_batch");
@@ -813,7 +813,7 @@ async fn a_cancelled_window_keeps_the_messages_already_pulled() {
         vec![1, 2],
         "message 1 was pulled by the cancelled call, so it must be handed over \
          by this one rather than acknowledged unseen, and the resumed window \
-         must still hold at most batch_size rows"
+         must still hold at most batch_rows rows"
     );
 }
 
@@ -940,7 +940,7 @@ async fn estimated_rows_reports_what_jetstream_still_owes() {
 
     let mut source = NatsSource::new(
         NatsSourceConfig {
-            batch_size: 1,
+            batch_rows: 1,
             ..js_source_cfg(&nats.url(), &stream, "saci-pending")
         },
         schema,

@@ -1,7 +1,7 @@
 //! Workflow lifecycle control, over a real socket.
 //!
 //! The fixture is a CSV `FileSource` linked straight to a CSV `FileSink` under
-//! `run_mode kind="continuous"`: no wasm artifact, no Docker, no external
+//! `run "continuous"`: no wasm artifact, no Docker, no external
 //! service, and a runner that keeps iterating so a pause is observable as
 //! iterations that stop climbing.
 //!
@@ -54,7 +54,7 @@ fn path_text(path: &std::path::Path) -> String {
 /// One workflow, `orders`: a CSV file straight into a CSV file.
 ///
 /// `run_mode` is `"continuous"` for a runner that keeps iterating, or
-/// `"one_shot"` for one that reaches the end of its own work.
+/// `"once"` for one that reaches the end of its own work.
 fn config_kdl(input: &str, output: &str, data_dir: &str, run_mode: &str, control: bool) -> String {
     let control = if control { "#true" } else { "#false" };
     format!(
@@ -63,26 +63,26 @@ mode "standalone"
 
 node id=1 name="saci-workflow-lifecycle" data_dir="{data_dir}"
 
-run_mode kind="{run_mode}"
+run "{run_mode}"
 
 workflow "orders" name="Orders" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="FileSource" component="Order" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="Order" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "orders_out" type="FileSink" component="Order" transformer="csv_fmt" {{
+    sink "orders_out" connector="file" component="Order" codec="csv_fmt" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -105,26 +105,26 @@ mode "standalone"
 
 node id=1 name="saci-workflow-lifecycle-pair" data_dir="{data_dir}"
 
-run_mode kind="continuous"
+run "continuous"
 
 workflow "orders" {{
-    transformer "orders_csv" format="csv" {{
-        options has_headers=#true
+    codec "orders_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="FileSource" component="Order" transformer="orders_csv" {{
+    source "orders_in" connector="file" component="Order" codec="orders_csv" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "orders_out" type="FileSink" component="Order" transformer="orders_csv" {{
+    sink "orders_out" connector="file" component="Order" codec="orders_csv" {{
         config {{
             path "{output}.orders.csv"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -132,23 +132,23 @@ workflow "orders" {{
 }}
 
 workflow "refunds" {{
-    transformer "refunds_csv" format="csv" {{
-        options has_headers=#true
+    codec "refunds_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "refunds_in" type="FileSource" component="Order" transformer="refunds_csv" {{
+    source "refunds_in" connector="file" component="Order" codec="refunds_csv" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "refunds_out" type="FileSink" component="Order" transformer="refunds_csv" {{
+    sink "refunds_out" connector="file" component="Order" codec="refunds_csv" {{
         config {{
             path "{output}.refunds.csv"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -176,25 +176,25 @@ mode "standalone"
 
 node id=1 name="saci-workflow-lifecycle-channel" data_dir="{data_dir}"
 
-run_mode kind="continuous"
+run "continuous"
 
 workflow "bridged" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="FileSource" component="Order" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="Order" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "bridge_out" type="ChannelSink" component="Order" {{
+    sink "bridge_out" connector="channel" component="Order" {{
         config name="lifecycle-bridge" {{
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -202,22 +202,22 @@ workflow "bridged" {{
 }}
 
 workflow "drain" {{
-    transformer "out_csv" format="csv" {{
-        options has_headers=#true
+    codec "out_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "bridge_in" type="ChannelSource" component="Order" {{
+    source "bridge_in" connector="channel" component="Order" {{
         config name="lifecycle-bridge" {{
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "orders_out" type="FileSink" component="Order" transformer="out_csv" {{
+    sink "orders_out" connector="file" component="Order" codec="out_csv" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -659,7 +659,7 @@ async fn stop_then_start_drains_and_rebuilds() {
         .await;
 }
 
-/// A `one_shot` workflow finishes its own work, and its supervisor returns so
+/// A `once` workflow finishes its own work, and its supervisor returns so
 /// the process can exit. Three behaviours hang off that, and this pins all
 /// three: the published state is `completed`, the entry survives for reading,
 /// and a rebuild verb answers `503` because nothing is listening any more.
@@ -671,7 +671,7 @@ async fn a_completed_workflow_cannot_be_started_again() {
     let output = dir.path().join("orders_out.csv");
     let out_text = path_text(&output);
     let config_path = fixture(dir.path(), |input, data_dir| {
-        config_kdl(input, &out_text, data_dir, "one_shot", true)
+        config_kdl(input, &out_text, data_dir, "once", true)
     });
 
     LocalSet::new()
@@ -769,7 +769,7 @@ async fn a_channel_workflow_refuses_the_rebuild_verbs_but_still_pauses() {
                 status["restart_blocked_reason"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("ChannelSink"),
+                    .contains("`channel` source or sink"),
                 "the reason names the channel halves: {status}"
             );
 
@@ -921,7 +921,7 @@ async fn a_service_wide_verb_reports_the_workflows_it_cannot_reach() {
                 report["refused"][0]["error"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("ChannelSink"),
+                    .contains("`channel` source or sink"),
                 "the refusal carries the reason: {report}"
             );
 

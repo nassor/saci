@@ -6,17 +6,17 @@
 //! [`KafkaSource`] consumes a topic (or several) with `rdkafka`'s
 //! `StreamConsumer`; [`KafkaSink`] produces to one with a `FutureProducer`.
 //! What a message payload means is the
-//! [`Codec`](crate::codec::Codec) the node's `transformer` key
+//! [`Codec`](crate::codec::Codec) the node's `codec` key
 //! names, and its [`MessageShape`](crate::codec::MessageShape) decides
 //! whether a batch becomes one message per row or one message in total.
 //!
 //! Both sides are declarative: the Arrow schema is written in the service
 //! configuration, not introspected, because
-//! [`SourceFactory::build`]/[`SinkFactory::build`] are synchronous and open no
+//! [`Connector::source`] and [`Connector::sink`] are synchronous and open no
 //! connection.
 //!
-//! [`SourceFactory::build`]: crate::connector::factory::SourceFactory::build
-//! [`SinkFactory::build`]: crate::connector::factory::SinkFactory::build
+//! [`Connector::source`]: crate::connector::Connector::source
+//! [`Connector::sink`]: crate::connector::Connector::sink
 //!
 //! # Delivery semantics
 //!
@@ -39,6 +39,6 @@ pub mod sink;
 pub mod source;
 
 pub use config::{KafkaSinkConfig, KafkaSourceConfig, TopicProvision};
-pub use factory::{KafkaSinkFactory, KafkaSourceFactory};
+pub use factory::KafkaConnector;
 pub use sink::KafkaSink;
 pub use source::KafkaSource;

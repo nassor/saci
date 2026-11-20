@@ -151,7 +151,7 @@ Async rather than WASI 0.2.
 A component that verifies is one `wasm` node away from running:
 
 ```kdl,name=Declaring the component you just built
-wasm "settle" module="target/wasm32-wasip3/release/settle_wasm.wasm" {
+wasm "settle" path="target/wasm32-wasip3/release/settle_wasm.wasm" {
     config ledger_tag="prod"
 }
 ```

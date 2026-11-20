@@ -179,15 +179,15 @@ async fn main() -> Result<(), SaciError> {
         .link("trades_a", "windowed")
         .link("trades_b", "windowed")
         .link("windowed", "totals")
-        .run_mode(RunMode::OneShot)
+        .run_mode(RunMode::Once)
         .build()?;
     built.nodes[0].name = Some("Trades A".to_string());
-    built.nodes[0].type_name = "ChannelSource".to_string();
+    built.nodes[0].connector = "channel".to_string();
     built.nodes[1].name = Some("Trades B".to_string());
-    built.nodes[1].type_name = "ChannelSource".to_string();
+    built.nodes[1].connector = "channel".to_string();
     built.nodes[2].name = Some("Windowed aggregate".to_string());
     built.nodes[3].name = Some("Window totals".to_string());
-    built.nodes[3].type_name = "ChannelSink".to_string();
+    built.nodes[3].connector = "channel".to_string();
 
     let stats = built.run(CancellationToken::new()).await?;
     println!();

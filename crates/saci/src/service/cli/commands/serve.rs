@@ -33,26 +33,20 @@ pub async fn run(
     if let Some(node_id) = args.node_id {
         config.node.id = node_id;
     }
-    if let Some(level) = &global.log_level {
+    if let Some(level) = &args.log_level {
         config.observability.log_level = level.clone();
     }
-    if let Some(format) = &global.log_format {
+    if let Some(format) = &args.log_format {
         config.observability.log_format = match format {
             LogFormatArg::Pretty => LogFormat::Pretty,
             LogFormatArg::Json => LogFormat::Json,
         };
     }
-    if let Some(endpoint) = &global.otlp_endpoint {
+    if let Some(endpoint) = &args.otlp_endpoint {
         config.observability.otlp_endpoint = Some(endpoint.clone());
     }
-    if let Some(port) = args.port {
-        // Replace only the port portion of the existing bind address.
-        let existing = &config.http.bind;
-        let host = existing
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or("127.0.0.1");
-        config.http.bind = format!("{host}:{port}");
+    if let Some(bind) = &args.bind {
+        config.http.bind = bind.clone();
     }
 
     let options = ServeOptions {

@@ -9,11 +9,11 @@
 //! which is what a Kafka topic of JSON records needs.
 //!
 //! ```kdl
-//! transformer "ndjson_fmt" format="ndjson" {
-//!     options infer_max=1024
+//! codec "ndjson_fmt" format="ndjson" {
+//!     config infer_max=1024
 //! }
 //!
-//! source "orders" type="FileSource" component="Order" transformer="ndjson_fmt" {
+//! source "orders" connector="file" component="Order" codec="ndjson_fmt" {
 //!     config {
 //!         path "/data/orders.ndjson"
 //!     }

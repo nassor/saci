@@ -56,29 +56,29 @@ mode "standalone"
 
 node id=1 name="saci-file-connector" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "file-connector-test" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
-    transformer "parquet_fmt" format="parquet"
+    codec "parquet_fmt" format="parquet"
 
-    source "orders_in" type="FileSource" component="{COMPONENT}" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="FileSink" component="{COMPONENT}" transformer="parquet_fmt" {{
+    sink "orders_out" connector="file" component="{COMPONENT}" codec="parquet_fmt" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -86,7 +86,7 @@ workflow "file-connector-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -165,29 +165,29 @@ mode "standalone"
 
 node id=1 name="saci-file-append" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "file-append-test" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="FileSource" component="{COMPONENT}" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="FileSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="file" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -195,7 +195,7 @@ workflow "file-append-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

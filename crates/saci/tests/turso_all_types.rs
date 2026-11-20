@@ -16,13 +16,13 @@ use saci::connector::turso::{TursoSink, TursoSinkConfig, TursoSource, TursoSourc
 use saci::io::{Sink, Source};
 
 const FIELDS: &str = "\
-schema_fields \"id\" type=\"int64\" nullable=#false\n\
-schema_fields \"i\" type=\"int64\" nullable=#true\n\
-schema_fields \"f\" type=\"float64\" nullable=#true\n\
-schema_fields \"s\" type=\"utf8\" nullable=#true\n\
-schema_fields \"b\" type=\"bool\" nullable=#true\n\
-schema_fields \"bin\" type=\"binary\" nullable=#true\n\
-schema_fields \"d\" type=\"decimal128\" precision=10 scale=2 nullable=#true\n";
+field \"id\" type=\"int64\" nullable=#false\n\
+field \"i\" type=\"int64\" nullable=#true\n\
+field \"f\" type=\"float64\" nullable=#true\n\
+field \"s\" type=\"utf8\" nullable=#true\n\
+field \"b\" type=\"boolean\" nullable=#true\n\
+field \"bin\" type=\"binary\" nullable=#true\n\
+field \"d\" type=\"decimal128\" precision=10 scale=2 nullable=#true\n";
 
 fn sink(path: &str) -> TursoSink {
     let body = format!(

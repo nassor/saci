@@ -12,8 +12,7 @@
 //! `saci-service validate` stays broker-free.
 //!
 //! The `mode` child node is internally tagged on `kind` and picks core NATS
-//! (`kind="core"`) or JetStream (`kind="jetstream"`), matching the `run_mode`
-//! node the service config already uses.
+//! (`kind="core"`) or JetStream (`kind="jetstream"`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
@@ -289,8 +288,8 @@ pub struct NatsSourceConfig {
     /// source's `flow_control` block sets `enabled #false`, or the source is
     /// on a path to a windowed node, where the runner withholds the hint so
     /// this value alone decides how large an arrival is.
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
+    #[serde(default = "default_batch_rows")]
+    pub batch_rows: usize,
     /// How long one `next_batch` keeps collecting after its first message.
     #[serde(default = "default_poll_timeout_ms")]
     pub poll_timeout_ms: u64,
@@ -433,7 +432,7 @@ pub struct JetstreamSourceMode {
     /// How long a `stop_at_end` pull request stays open server-side.
     #[serde(default = "default_fetch_expires_ms")]
     pub fetch_expires_ms: u64,
-    /// Byte ceiling on one collected window. 0 leaves it to `batch_size`.
+    /// Byte ceiling on one collected window. 0 leaves it to `batch_rows`.
     #[serde(default)]
     pub fetch_max_bytes: usize,
     /// Idle heartbeat interval on a pull request. 0 keeps the library default.
@@ -614,9 +613,9 @@ impl NatsSourceConfig {
         let what = "NatsSource";
         self.connection.validate(what)?;
 
-        if self.batch_size == 0 {
+        if self.batch_rows == 0 {
             return Err(SaciError::configuration(format!(
-                "{what} config: 'batch_size' must be at least 1"
+                "{what} config: 'batch_rows' must be at least 1"
             )));
         }
         if self.poll_timeout_ms == 0 {
@@ -1233,7 +1232,7 @@ fn default_client_capacity() -> usize {
 fn default_read_buffer_capacity() -> u16 {
     65_535
 }
-fn default_batch_size() -> usize {
+fn default_batch_rows() -> usize {
     1_000
 }
 fn default_poll_timeout_ms() -> u64 {
@@ -1316,7 +1315,7 @@ mod tests {
     #[test]
     fn a_full_source_config_parses_every_key() {
         let raw = r#"
-batch_size 64
+batch_rows 64
 poll_timeout_ms 250
 stop_at_end #true
 
@@ -1602,11 +1601,11 @@ mode kind="jetstream" stream="ORDERS" subject="orders.enriched" {
     }
 
     #[test]
-    fn a_zero_batch_size_or_poll_timeout_is_rejected() {
-        let err = core_source("batch_size 0")
+    fn a_zero_batch_rows_or_poll_timeout_is_rejected() {
+        let err = core_source("batch_rows 0")
             .validate()
             .expect_err("a zero batch collects nothing");
-        assert!(err.message().contains("'batch_size'"), "got: {err}");
+        assert!(err.message().contains("'batch_rows'"), "got: {err}");
 
         let err = core_source("poll_timeout_ms 0")
             .validate()

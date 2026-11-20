@@ -1,16 +1,16 @@
 // SACI standalone service configuration reading documents pushed over HTTP.
 //
 // Run:
-//   cargo run --features server,connector-http,transformer-ndjson,wasm-host --bin saci-service -- validate \
+//   cargo run --features server,connector-http,codec-ndjson,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/http_push.kdl
-//   cargo run --features server,connector-http,transformer-ndjson,wasm-host --bin saci-service -- serve \
+//   cargo run --features server,connector-http,codec-ndjson,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/http_push.kdl
 //
 // The source listens and the sink dials: `bind` is an address this process
 // accepts documents on, `url` is an endpoint this process sends each batch to.
-// One request carries one whole document in the format the transformer names,
-// which is exactly what an HttpSink writes, so a sink there feeds this source
-// here.
+// One request carries one whole document in the format the codec names,
+// which is exactly what an `http` sink writes, so a sink there feeds this
+// source here.
 //
 // One listener serves HTTP/1.1 and HTTP/2 on that port: the HTTP/2 connection
 // preface is sniffed, so a client with prior knowledge and an HTTP/1.1 client
@@ -38,26 +38,26 @@ node id=1 name="saci-http-push" data_dir="${SACI_DATA_DIR:-/tmp/saci-http-push}"
 
 // The source never reaches EOF: it blocks until the next request arrives.
 // Only the stream runner can drive that, so config validation rejects
-// `type="HttpPushSource"` on a source node in any other run mode. One workflow
-// pass runs per queued batch. The sink half carries no such rule and runs in
-// every mode.
-run_mode kind="stream"
+// `connector="http-listen"` on a source node in any other run mode. One
+// workflow pass runs per queued batch. The sink half carries no such rule and
+// runs in every mode.
+run "stream"
 
 // One workflow declares the whole DAG: the byte format each end speaks, the
 // source, the processor, the sink, and the explicit links between them.
 workflow "orders" {
-    // The transformer that reads each arriving body and writes each body the
+    // The codec that reads each arriving body and writes each body the
     // sink sends. "ndjson" is a block of JSON objects decoded against
-    // schema_fields below; csv, parquet, avro and arrow-ipc work the same way,
-    // one whole document per request. connector-http implies no transformer
-    // feature, so this config picks.
-    transformer "json_fmt" format="ndjson"
+    // the `field` lines below; csv, parquet, avro and arrow-ipc work the same
+    // way, one whole document per request. connector-http implies no
+    // codec feature, so this config picks.
+    codec "json_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- source
 
     // The processor's `describe()` supplies the component list, so `component`
     // on this source and the sink below must name components it declares.
-    source "orders_in" type="HttpPushSource" component="Order" transformer="json_fmt" {
+    source "orders_in" connector="http-listen" component="Order" codec="json_fmt" {
         config {
             // Listen address. Clients send documents here; several at once is
             // fine, and ordering holds within one request.
@@ -98,35 +98,35 @@ workflow "orders" {
 
             // ndjson carries no schema, so the declared one is handed to it. A
             // format that carries its own (parquet, avro) refuses this key, so
-            // a push source over one adds schema_from "body": the fields below
-            // stay behind for the workflow graph check and are compared
+            // a listen source over one adds schema_from "payload": the fields
+            // below stay behind for the workflow graph check and are compared
             // against the schema each body turned out to carry.
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "process_orders" module="pipelines/orders.wasm"
+    wasm "process_orders" path="pipelines/orders.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // A different component than the source's: the processor declares both,
-    // reads Order and writes EnrichedOrder. A sink's schema_fields must match
+    // reads Order and writes EnrichedOrder. A sink's `field` lines must match
     // the component's RecordBatch field for field, in order.
 
-    sink "orders_out" type="HttpSink" component="EnrichedOrder" transformer="json_fmt" {
+    sink "orders_out" connector="http" component="EnrichedOrder" codec="json_fmt" {
         config {
             // Endpoint every batch is sent to, one request per batch. Point it
-            // at another service's HttpPushSource to chain the two.
+            // at another service's `http-listen` source to chain the two.
             url "${SACI_HTTP_PUSH_SINK_URL:-http://127.0.0.1:9701/orders}"
 
             method "POST"
 
             timeout_ms 30000
 
-            // content-type follows the transformer's format, so ndjson sends
+            // content-type follows the codec's format, so ndjson sends
             // application/x-ndjson unless a `headers` entry names one. A push
             // source on the other end needs the bearer token its `auth` block
             // demands:
@@ -134,8 +134,8 @@ workflow "orders" {
             //       authorization "Bearer ${SACI_HTTP_PUSH_TOKEN:-dev-token}"
             //   }
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#true
         }
     }
 
@@ -145,7 +145,7 @@ workflow "orders" {
 
 // HTTP control plane. /metrics carries the service's own counters, including
 // the connector's own saci_http_* series.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a 15% grade:
 // one workflow.batch span opens per queued batch, so a live client at any real

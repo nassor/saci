@@ -66,7 +66,7 @@ the dashboard shows.
             <text class="t-sm" x="468" y="136">3  drain sinks</text>
             <rect class="row-w" x="460" y="146" width="186" height="20" rx="3"/>
             <text class="t-sm" x="468" y="160">4  publish stats, clear</text>
-            <text class="t-sm" x="468" y="184">5  pace by run_mode</text>
+            <text class="t-sm" x="468" y="184">5  pace by run mode</text>
         </g>
         <g class="anim anim-4">
             <rect class="blk blk-ctl" x="232" y="228" width="200" height="48" rx="8"/>
@@ -153,9 +153,9 @@ root keeps its whole tree, and a dropped root drops its children with it. An
 error inside a dropped trace is still rolled against `error_sample_ratio` and
 reaches the Logs tab on its own. Metrics are never sampled.
 
-Three things override the block, in this order: the flag beats the environment
+Three things override the block, in this order: the `serve` flag beats the environment
 variable, the environment variable beats the config file, and a set `RUST_LOG`
-beats all of them.
+beats all of them. `--log-format`, `--log-level` and `--otlp-endpoint` are `serve` flags.
 
 Linux/macOS:
 
@@ -242,7 +242,8 @@ spawned, so a 200 means the config loaded, every artifact matched every link
 and the control plane is listening. It never means an iteration succeeded: read
 `iterations` on `/status` for that.
 
-`http disabled=#true` turns the whole control plane off, the dashboard with it.
+`http enabled=#false` turns the whole control plane off, the dashboard with it.
+`saci-service serve --bind ADDR` (env `SACI_HTTP_BIND`) overwrites `http.bind` whole.
 
 <div class="note note-warn">
 <span class="note-label">Security</span>
@@ -408,10 +409,10 @@ Each entry names the series, then its type and its labels, then what moves it.
 :   one flow-control guard trip; see [Flow control](@/service/operate/flow-control.md)
 
 `saci_connector_heals_total` <small>counter, labels `source` or `sink`, plus an unattributed total</small>
-:   one rebuild whose factory returned an instance, counted before that instance has run anything; see [Self-healing](@/service/operate/self-healing.md)
+:   one rebuild whose connector returned an instance, counted before that instance has run anything; see [Self-healing](@/service/operate/self-healing.md)
 
 `saci_connector_heal_failures_total` <small>counter, labels `source` or `sink`, plus an unattributed total</small>
-:   one rebuild the factory refused. A fresh instance that fails its first operation is not counted here; it just schedules the next attempt
+:   one rebuild the connector refused. A fresh instance that fails its first operation is not counted here; it just schedules the next attempt
 
 `saci_dlq_letters_recorded_total` <small>counter, labels `sink`, plus an unattributed total</small>
 :   one batch a sink refused that the dead letter queue stored; see [Dead letter queue](@/service/operate/dead-letter-queue.md)

@@ -26,9 +26,9 @@ fn config_path_text(path: &std::path::Path) -> String {
 /// the `bridge` channel; `consumer` reads the `bridge` channel and writes a
 /// CSV file. Neither workflow names the other; they meet by declared channel
 /// `name` alone, through the registry `ServiceBuilder::new` attaches.
-/// Every declared id, including a `transformer`'s, is unique across the whole
+/// Every declared id, including a `codec`'s, is unique across the whole
 /// config (`ServiceConfig::validate`), so each workflow names its own
-/// `transformer` id even though both declare the same `format`.
+/// `codec` id even though both declare the same `format`.
 fn config_kdl(input: &str, output: &str, data_dir: &str) -> String {
     format!(
         r#"
@@ -36,25 +36,25 @@ mode "standalone"
 
 node id=1 name="saci-channel-bridge-test" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "producer" {{
-    transformer "producer_csv" format="csv" {{
-        options has_headers=#true
+    codec "producer_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="FileSource" component="Order" transformer="producer_csv" {{
+    source "orders_in" connector="file" component="Order" codec="producer_csv" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "bridge_out" type="ChannelSink" component="Order" {{
+    sink "bridge_out" connector="channel" component="Order" {{
         config name="bridge" {{
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -62,29 +62,29 @@ workflow "producer" {{
 }}
 
 workflow "consumer" {{
-    transformer "consumer_csv" format="csv" {{
-        options has_headers=#true
+    codec "consumer_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "bridge_in" type="ChannelSource" component="Order" {{
+    source "bridge_in" connector="channel" component="Order" {{
         config name="bridge" {{
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "orders_out" type="FileSink" component="Order" transformer="consumer_csv" {{
+    sink "orders_out" connector="file" component="Order" codec="consumer_csv" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
     link from="bridge_in" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

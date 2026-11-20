@@ -1,4 +1,4 @@
-//! The Turso source and sink factories.
+//! The Turso [`Connector`].
 //!
 //! Both deserialise the whole `config` sub-table with serde rather than
 //! reading [`ConfigValue`] keys by hand: the connector's configuration is a
@@ -14,25 +14,33 @@
 
 use serde::Deserialize;
 
-use crate::connector::{ConfigValue, ConnectorContext, SinkFactory, SourceFactory};
+use crate::connector::{
+    ConfigValue, Connector, ConnectorContext, REBUILD_UNDECLARED, Rebuild, Role,
+};
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
 
 use crate::connector::turso::{TursoSink, TursoSinkConfig, TursoSource, TursoSourceConfig};
 
-/// Factory for [`TursoSource`].
+/// Connector for Turso, named `turso`: builds [`TursoSource`] and
+/// [`TursoSink`].
 ///
-/// The `config` table is [`TursoSourceConfig`]: a `name`, a `connection`
-/// table, a `mode` table tagged by `kind` (`polling`, `dump` or `cdc`), and a
-/// `schema_fields` array declaring the Arrow schema.
-pub struct TursoSourceFactory;
+/// A `source` node's `config` table is [`TursoSourceConfig`]: a `name`, a
+/// `connection` table, a `mode` table tagged by `kind` (`polling`, `dump` or
+/// `cdc`), and a `field` array declaring the Arrow schema.
+///
+/// A `sink` node's `config` table is [`TursoSinkConfig`]: a `name`, a
+/// `connection` table, the target `table`, a `field` array, and the
+/// `write_mode` (`append`, `upsert` or `ignore_conflicts`) with its conflict
+/// columns.
+pub struct TursoConnector;
 
-impl SourceFactory for TursoSourceFactory {
-    fn type_name(&self) -> &'static str {
-        "TursoSource"
+impl Connector for TursoConnector {
+    fn name(&self) -> &'static str {
+        "turso"
     }
 
-    fn build(
+    fn source(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -41,27 +49,7 @@ impl SourceFactory for TursoSourceFactory {
         Ok(Box::new(TursoSource::new(parsed)?))
     }
 
-    /// The `polling` and `cdc` cursors live in the offset table in the database
-    /// and a synced source pulls fresh state, so a fresh reader resumes where
-    /// the last committed position left off.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
-    }
-}
-
-/// Factory for [`TursoSink`].
-///
-/// The `config` table is [`TursoSinkConfig`]: a `name`, a `connection` table,
-/// the target `table`, a `schema_fields` array, and the `write_mode`
-/// (`append`, `upsert` or `ignore_conflicts`) with its conflict columns.
-pub struct TursoSinkFactory;
-
-impl SinkFactory for TursoSinkFactory {
-    fn type_name(&self) -> &'static str {
-        "TursoSink"
-    }
-
-    fn build(
+    fn sink(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -70,9 +58,25 @@ impl SinkFactory for TursoSinkFactory {
         Ok(Box::new(TursoSink::new(parsed)?))
     }
 
-    // No `rebuildable` override: a sink buffers rows it has accepted but not yet
-    // flushed, so replacing the instance would discard them. The trait default
-    // refuses it, exactly as the PostgreSQL sink does.
+    /// The `polling` and `cdc` cursors of a source live in the offset table in
+    /// the database and a synced source pulls fresh state, so a fresh reader
+    /// resumes where the last committed position left off. A sink declares
+    /// nothing: it buffers rows it has accepted but not yet flushed, so
+    /// replacing the instance would discard them, exactly as the PostgreSQL
+    /// sink does.
+    fn rebuild(&self, role: Role, _config: &ConfigValue) -> Rebuild {
+        match role {
+            Role::Source => Rebuild::Yes,
+            Role::Sink => Rebuild::No(REBUILD_UNDECLARED),
+        }
+    }
+
+    fn detail_keys(&self, role: Role) -> &'static [&'static str] {
+        match role {
+            Role::Source => &["mode.kind", "mode.table"],
+            Role::Sink => &["table", "write_mode"],
+        }
+    }
 }
 
 /// Deserialise a connector's config table, naming the connector on failure.
@@ -87,35 +91,58 @@ mod tests {
     use crate::connector::from_kdl_str;
 
     #[test]
-    fn source_factory_builds_without_connecting() {
+    fn the_connector_is_named_turso_and_serves_both_roles() {
+        assert_eq!(TursoConnector.name(), "turso");
+        assert_eq!(TursoConnector.roles(), &[Role::Source, Role::Sink]);
+        assert!(!TursoConnector.live(&ConfigValue::Null));
+        assert_eq!(
+            TursoConnector.detail_keys(Role::Source),
+            &["mode.kind", "mode.table"]
+        );
+        assert_eq!(
+            TursoConnector.detail_keys(Role::Sink),
+            &["table", "write_mode"]
+        );
+        assert_eq!(
+            TursoConnector.rebuild(Role::Source, &ConfigValue::Null),
+            Rebuild::Yes
+        );
+        assert_eq!(
+            TursoConnector.rebuild(Role::Sink, &ConfigValue::Null),
+            Rebuild::No(REBUILD_UNDECLARED)
+        );
+    }
+
+    #[test]
+    fn the_source_builds_without_connecting() {
         let kdl = r#"
             name "orders"
             mode kind="polling" table="orders" cursor_column="id"
             connection path=":memory:"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64"
         "#;
         let config = from_kdl_str(kdl).expect("kdl parses");
-        let source = TursoSourceFactory
-            .build(&config, &ConnectorContext::new(None))
+        let source = TursoConnector
+            .source(&config, &ConnectorContext::new(None))
             .expect("source builds");
         assert_eq!(source.schema().fields().len(), 2);
     }
 
     #[test]
-    fn sink_factory_builds_without_connecting() {
+    fn the_sink_builds_without_connecting() {
         let kdl = r#"
             name "enriched"
             table "enriched_orders"
             write_mode "upsert"
             conflict_columns "id"
             connection path=":memory:"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64"
         "#;
         let config = from_kdl_str(kdl).expect("kdl parses");
-        let sink = TursoSinkFactory
-            .build(&config, &ConnectorContext::new(None))
+        let sink = TursoConnector
+            .sink(&config, &ConnectorContext::new(None))
             .expect("sink builds");
         assert_eq!(sink.schema().fields().len(), 2);
     }
@@ -128,7 +155,7 @@ mod tests {
             connection path="replica.db" {
                 remote url="libsql://example.turso.io" token="secret"
             }
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         "#;
         let config = from_kdl_str(kdl).expect("kdl parses");
         let parsed: TursoSinkConfig = serde_json::from_value(config).expect("config deserializes");
@@ -143,10 +170,10 @@ mod tests {
             name "changes"
             connection path="orders.db"
             mode kind="cdc" table="orders" cdc_table="turso_cdc" retention="delete_acked"
-            schema_fields "__op" type="utf8" nullable=#false
-            schema_fields "__change_id" type="int64" nullable=#false
-            schema_fields "__txn_id" type="int64" nullable=#false
-            schema_fields "id" type="int64" nullable=#true
+            field "__op" type="utf8" nullable=#false
+            field "__change_id" type="int64" nullable=#false
+            field "__txn_id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#true
         "#;
         let config = from_kdl_str(kdl).expect("kdl parses");
         let parsed: TursoSourceConfig =
@@ -171,7 +198,7 @@ mod tests {
             connection path="sealed.db" {
                 encryption cipher="aegis256" hexkey="2d7a30108d3eb3e45c90a732041fe54778bdcf707c76749fab7da335d1b39c1d"
             }
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         "#,
         );
         let encryption = parsed
@@ -192,7 +219,7 @@ mod tests {
             connection path="sealed.db" {
                 encryption cipher="aes128gcm" hexkey="abcd"
             }
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         "#,
         );
         let error = parsed.validate().expect_err("a 4-digit key is too short");
@@ -209,7 +236,7 @@ mod tests {
                 encryption cipher="aes128gcm" hexkey="5f3e2a8c9b1d4f6e7a2c8d4b9e1f3a6c"
                 remote url="libsql://example.turso.io" token="secret"
             }
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         "#,
         );
         let error = parsed
@@ -231,7 +258,7 @@ mod tests {
             transaction "concurrent"
             connection path="orders.db"
             capture mode="full"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         "#,
         );
         let error = parsed.validate().expect_err("MVCC and CDC are exclusive");
@@ -249,14 +276,31 @@ mod tests {
             name "orders"
             table "orders"
             connection path="orders.db"
-            schema_fields "bad name; DROP TABLE orders; --" type="utf8"
+            field "bad name; DROP TABLE orders; --" type="utf8"
         "#,
         );
         let error = parsed
             .validate()
             .expect_err("a column name reaches SQL unquoted");
+        assert!(error.message().contains("field id"), "{}", error.message());
+    }
+
+    #[test]
+    fn a_field_of_an_unmapped_type_is_rejected() {
+        let parsed = parse_sink(
+            r#"
+            name "orders"
+            table "orders"
+            connection path="orders.db"
+            field "tags" type="list" item="utf8"
+        "#,
+        );
+        let error = parsed.validate().expect_err("turso maps no list type");
+        assert!(error.message().contains("tags"), "{}", error.message());
         assert!(
-            error.message().contains("schema_fields id"),
+            error
+                .message()
+                .contains("which this connector does not map"),
             "{}",
             error.message()
         );

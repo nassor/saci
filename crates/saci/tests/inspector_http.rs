@@ -37,8 +37,8 @@ use saci::inspector_wire::{Snapshot, Topology};
 use saci::prelude::*;
 use saci::service::BuiltWorkflow;
 use saci::service::ServiceConfig;
+use saci::service::{ServiceBuilder, build_router, build_topology};
 use saci::service::{ServiceModeLabel, ServiceState};
-use saci::service::{build_router, build_topology};
 
 /// Two sources and one sink, with a password in one and a DSN in the other.
 ///
@@ -51,16 +51,16 @@ mode "standalone"
 node id=42 data_dir="/tmp/saci-inspector-http"
 
 workflow "inspector-http" {
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders-eu" type="NatsSource" component="Reading" transformer="ndjson_fmt" {
+    source "orders-eu" connector="nats" component="Reading" codec="ndjson_fmt" {
         config {
             mode kind="core" subject="authorizations.eu"
             connection url="nats://localhost:4222" password="hunter2-eu"
         }
     }
 
-    source "orders-us" type="NatsSource" component="Reading" transformer="ndjson_fmt" {
+    source "orders-us" connector="nats" component="Reading" codec="ndjson_fmt" {
         config {
             mode kind="core" subject="authorizations.us"
             connection url="nats://localhost:4222" password="hunter2-us"
@@ -69,7 +69,7 @@ workflow "inspector-http" {
 
     wasm "scale" name="Scale"
 
-    sink "settlements" type="PostgresSink" component="Reading" {
+    sink "settlements" connector="postgresql" component="Reading" {
         config {
             table "public.settlements"
             write_mode "upsert"
@@ -207,13 +207,19 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
         .link("scale", "settlements")
         .build()
         .expect("build workflow");
-    built.nodes[0].type_name = "NatsSource".to_string();
-    built.nodes[1].type_name = "NatsSource".to_string();
+    built.nodes[0].connector = "nats".to_string();
+    built.nodes[1].connector = "nats".to_string();
     built.nodes[2].name = Some("Scale".to_string());
-    built.nodes[3].type_name = "PostgresSink".to_string();
+    built.nodes[3].connector = "postgresql".to_string();
     let nodes = built.nodes;
 
-    inspector.set_topology(build_topology(&config, &[nodes.as_slice()], 1));
+    let builder = ServiceBuilder::new();
+    inspector.set_topology(build_topology(
+        &config,
+        builder.registry(),
+        &[nodes.as_slice()],
+        1,
+    ));
 
     let mut dataset = Dataset::new();
     dataset.register::<Reading>().expect("register Reading");
@@ -261,6 +267,13 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     assert!(
         !body.contains("s3cret") && !body.contains("dsn"),
         "Postgres DSN leaked into /api/topology: {body}"
+    );
+    // The redaction checks above pass vacuously when no connector is asked, so
+    // with the two connectors compiled in, the allowlisted keys must render.
+    #[cfg(all(feature = "connector-nats", feature = "connector-postgresql"))]
+    assert!(
+        body.contains("authorizations.eu") && body.contains("public.settlements"),
+        "the allowlisted detail keys must render: {body}"
     );
 
     let topology: Topology = serde_json::from_str(&body).expect("topology decodes");
@@ -311,7 +324,7 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
 
     // ── /api/snapshot ────────────────────────────────────────────────────────
     let response = client
-        .get(format!("http://{addr}/api/snapshot?window_secs=60"))
+        .get(format!("http://{addr}/api/snapshot?window_ms=60000"))
         .send()
         .await
         .expect("GET /api/snapshot");

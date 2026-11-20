@@ -173,7 +173,7 @@ whose `session_end_ms` is the last event plus `gap_ms`:
 
 ```kdl,name=The block the processor declares
 window kind="session" gap_ms=10000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-    key_field "symbol"
+    key_fields "symbol"
 }
 ```
 
@@ -217,7 +217,7 @@ docker compose -f examples/windowing/docker-compose.yml up -d
 Runs the same on all three platforms. One compose file serves all three
 windowing modes. It brings up `nats:2.11-alpine` and `postgres:18-alpine` and
 runs `schema.sql` on first initialisation, creating one table per mode.
-`PostgresSink` never issues `CREATE TABLE`, and PostgreSQL only runs init
+The `postgresql` sink never issues `CREATE TABLE`, and PostgreSQL only runs init
 scripts against an empty data directory, so a volume whose init ran without
 `session_window_totals` in `schema.sql` fails with `table ... does not exist`.
 Recreate it with `down -v` then `up -d`, or apply the SQL by hand:

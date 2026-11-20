@@ -29,10 +29,10 @@ use arrow_array::builder::{
 use mysql_common::binlog::value::BinlogValue;
 use mysql_common::value::Value;
 
-use crate::connector::mariadb::config::MariadbFieldType;
 use crate::connector::mariadb::types::{Family, ResolvedColumn};
+use crate::connector::schema::FieldType;
 
-use MariadbFieldType as T;
+use FieldType as T;
 
 /// Microseconds in one day, the step from a civil day count to an Arrow
 /// timestamp.
@@ -729,6 +729,12 @@ impl ColumnBuilder {
             T::TimestampMicrosUtc => Kind::Timestamp(
                 TimestampMicrosecondBuilder::with_capacity(capacity).with_timezone("UTC"),
             ),
+            other => {
+                return Err(SaciError::configuration(format!(
+                    "field '{}': type \"{other}\" is not one this connector maps",
+                    spec.name
+                )));
+            }
         };
         Ok(Self {
             name: spec.name.clone(),
@@ -1004,7 +1010,7 @@ impl ColumnBuilder {
 // ----------------------------------------------------------------- conversion
 
 /// A cell of a kind the declared type cannot take.
-fn mismatch(name: &str, ty: MariadbFieldType, cell: &Cell<'_>) -> SaciError {
+fn mismatch(name: &str, ty: FieldType, cell: &Cell<'_>) -> SaciError {
     SaciError::generic(format!(
         "column '{name}': a {} value cannot fill a declared \"{}\"",
         cell.kind(),
@@ -1013,7 +1019,7 @@ fn mismatch(name: &str, ty: MariadbFieldType, cell: &Cell<'_>) -> SaciError {
 }
 
 /// A value outside the declared integer type.
-fn out_of_range(name: &str, value: impl std::fmt::Display, ty: MariadbFieldType) -> SaciError {
+fn out_of_range(name: &str, value: impl std::fmt::Display, ty: FieldType) -> SaciError {
     SaciError::generic(format!(
         "column '{name}': value {value} does not fit a declared \"{}\"",
         ty.as_str()
@@ -1021,7 +1027,7 @@ fn out_of_range(name: &str, value: impl std::fmt::Display, ty: MariadbFieldType)
 }
 
 /// A cell as the signed integer a declared signed type holds.
-fn signed(name: &str, ty: MariadbFieldType, cell: &Cell<'_>) -> Result<i64, SaciError> {
+fn signed(name: &str, ty: FieldType, cell: &Cell<'_>) -> Result<i64, SaciError> {
     match cell {
         Cell::Int(v) => Ok(*v),
         Cell::UInt(v) => i64::try_from(*v).map_err(|_| out_of_range(name, v, ty)),
@@ -1030,7 +1036,7 @@ fn signed(name: &str, ty: MariadbFieldType, cell: &Cell<'_>) -> Result<i64, Saci
 }
 
 /// A cell as the unsigned integer a declared unsigned type holds.
-fn unsigned(name: &str, ty: MariadbFieldType, cell: &Cell<'_>) -> Result<u64, SaciError> {
+fn unsigned(name: &str, ty: FieldType, cell: &Cell<'_>) -> Result<u64, SaciError> {
     match cell {
         Cell::UInt(v) => Ok(*v),
         Cell::Int(v) => u64::try_from(*v).map_err(|_| out_of_range(name, v, ty)),
@@ -1039,16 +1045,12 @@ fn unsigned(name: &str, ty: MariadbFieldType, cell: &Cell<'_>) -> Result<u64, Sa
 }
 
 /// `value` as the narrower signed type `N`.
-fn narrow<N: TryFrom<i64>>(name: &str, ty: MariadbFieldType, value: i64) -> Result<N, SaciError> {
+fn narrow<N: TryFrom<i64>>(name: &str, ty: FieldType, value: i64) -> Result<N, SaciError> {
     N::try_from(value).map_err(|_| out_of_range(name, value, ty))
 }
 
 /// `value` as the narrower unsigned type `N`.
-fn narrow_unsigned<N: TryFrom<u64>>(
-    name: &str,
-    ty: MariadbFieldType,
-    value: u64,
-) -> Result<N, SaciError> {
+fn narrow_unsigned<N: TryFrom<u64>>(name: &str, ty: FieldType, value: u64) -> Result<N, SaciError> {
     N::try_from(value).map_err(|_| out_of_range(name, value, ty))
 }
 
@@ -1070,7 +1072,7 @@ fn not_a_flag(name: &str, value: impl std::fmt::Display) -> SaciError {
 }
 
 /// A cell as the float a declared float type holds.
-fn float(name: &str, ty: MariadbFieldType, cell: &Cell<'_>) -> Result<f64, SaciError> {
+fn float(name: &str, ty: FieldType, cell: &Cell<'_>) -> Result<f64, SaciError> {
     match cell {
         Cell::Float(v) => Ok(*v),
         other => Err(mismatch(name, ty, other)),
@@ -1216,8 +1218,8 @@ mod tests {
     use mysql_common::proto::MyDeserialize;
 
     use super::*;
-    use crate::connector::mariadb::config::FieldSpec;
     use crate::connector::mariadb::types::{Access, CatalogColumn, validate_columns};
+    use crate::connector::schema::FieldSpec;
 
     /// A catalog column of `data_type` and `column_type`, with room for the
     /// optional numbers a type carries.
@@ -1236,7 +1238,7 @@ mod tests {
 
     /// `catalog` resolved against a field declared `ty` through the same check
     /// the readers run.
-    fn column_of(catalog: CatalogColumn, ty: MariadbFieldType, nullable: bool) -> ResolvedColumn {
+    fn column_of(catalog: CatalogColumn, ty: FieldType, nullable: bool) -> ResolvedColumn {
         let decimal = ty == T::Decimal128;
         let spec = FieldSpec {
             name: "c".to_string(),
@@ -1244,19 +1246,20 @@ mod tests {
             nullable,
             precision: decimal.then(|| catalog.numeric_precision.unwrap_or(10) as u8),
             scale: decimal.then(|| catalog.numeric_scale.unwrap_or(2) as i8),
-            mariadb_type: None,
+            item: None,
+            native_type: None,
         };
         validate_columns("Test", Access::Query, [&spec], &[catalog])
             .expect("the pair is legal")
             .remove(0)
     }
 
-    fn resolved(data_type: &str, column_type: &str, ty: MariadbFieldType) -> ResolvedColumn {
+    fn resolved(data_type: &str, column_type: &str, ty: FieldType) -> ResolvedColumn {
         column_of(catalog(data_type, column_type), ty, true)
     }
 
     /// A column with `datetime_precision` fraction digits.
-    fn temporal(data_type: &str, digits: u64, ty: MariadbFieldType) -> ResolvedColumn {
+    fn temporal(data_type: &str, digits: u64, ty: FieldType) -> ResolvedColumn {
         let mut column = catalog(data_type, data_type);
         column.datetime_precision = Some(digits);
         column_of(column, ty, true)
@@ -1718,11 +1721,12 @@ mod tests {
     fn a_signed_mediumint_read_unsigned_by_the_decoder_is_sign_extended() {
         let mut column = ResolvedColumn::synthetic(&FieldSpec {
             name: "m".to_string(),
-            ty: MariadbFieldType::Int32,
+            ty: FieldType::Int32,
             nullable: true,
             precision: None,
             scale: None,
-            mariadb_type: None,
+            item: None,
+            native_type: None,
         });
         column.family = Family::Integer(24);
         column.unsigned = false;
@@ -2267,7 +2271,8 @@ mod tests {
                 nullable: true,
                 precision: None,
                 scale: None,
-                mariadb_type: None,
+                item: None,
+                native_type: None,
             })
         };
 

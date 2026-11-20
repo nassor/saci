@@ -28,8 +28,8 @@ fn sink_with(path: &str, mode: &str, extra: &str) -> TursoSink {
          write_mode \"{mode}\"\n\
          {extra}\
          connection path=\"{}\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSinkConfig = common::config_from_kdl(&body);
@@ -43,8 +43,8 @@ fn concurrent_sink(path: &str) -> TursoSink {
          write_mode \"append\"\n\
          transaction \"concurrent\"\n\
          connection path=\"{}\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSinkConfig = common::config_from_kdl(&body);

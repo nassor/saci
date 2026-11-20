@@ -19,7 +19,7 @@ mode "standalone"
 node id=1 name="saci-clickhouse" data_dir="${SACI_DATA_DIR:-/tmp/saci-clickhouse}"
 
 // Re-drain every 2 s in interval mode.
-run_mode kind="interval" interval_ms=2000
+run "interval" every_ms=2000
 
 flow_control {
     min_rows 1024
@@ -30,7 +30,7 @@ flow_control {
 }
 
 workflow "analytics" {
-    source "ch_events" type="ClickhouseSource" component="Event" {
+    source "ch_events" connector="clickhouse" component="Event" {
         retry max_attempts=5 base_delay_ms=500 multiplier=2.0 max_delay_ms=10000 jitter=0.1
 
         config {
@@ -47,15 +47,15 @@ workflow "analytics" {
 
             mode kind="polling" table="events_in" cursor_column="id"
 
-            schema_fields "id" type="uint64" nullable=#false
-            schema_fields "device_id" type="utf8" nullable=#true
-            schema_fields "metric" type="float64" nullable=#true
+            field "id" type="uint64" nullable=#false
+            field "device_id" type="utf8" nullable=#true
+            field "metric" type="float64" nullable=#true
         }
     }
 
-    wasm "process_events" module="pipelines/analytics.wasm"
+    wasm "process_events" path="pipelines/analytics.wasm"
 
-    sink "ch_enriched" type="ClickhouseSink" component="EnrichedEvent" {
+    sink "ch_enriched" connector="clickhouse" component="EnrichedEvent" {
         retry max_attempts=5 base_delay_ms=500 multiplier=2.0 max_delay_ms=10000 jitter=0.1
 
         config {
@@ -73,9 +73,9 @@ workflow "analytics" {
                 compression "lz4"
             }
 
-            schema_fields "id" type="uint64" nullable=#false
-            schema_fields "device_id" type="utf8" nullable=#true
-            schema_fields "metric" type="float64" nullable=#true
+            field "id" type="uint64" nullable=#false
+            field "device_id" type="utf8" nullable=#true
+            field "metric" type="float64" nullable=#true
         }
     }
 
@@ -83,6 +83,6 @@ workflow "analytics" {
     link from="process_events" to="ch_enriched"
 }
 
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 observability log_format="pretty" log_level="info" sample_ratio=0.3 error_sample_ratio=1.0

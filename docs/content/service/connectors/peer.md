@@ -1,9 +1,9 @@
 +++
-title = "SACI"
-description = "One SACI service pushing batches to another: a sink that dials, a source that listens, and a handshake that names the service, workflow and node every batch came from."
+title = "peer"
+description = "The peer connector links one SACI service to another: a sink that dials, a source that listens, and a handshake that names the service, workflow and node every batch came from."
 template = "subpage.html"
 weight = 8
-aliases = ["/connectors/saci/"]
+aliases = ["/connectors/saci/", "/service/connectors/saci/"]
 [[extra.facts]]
 label = "Direction"
 value = "Source and sink"
@@ -73,33 +73,33 @@ which service, workflow and sink node produced every batch.
 
 - A free port for the source's `bind`. The listener is opened while the config is built, `validate`
   included, so a busy port fails before the service starts.
-- Another `saci-service` with a `saci` sink pointing at that port. Both halves are in the `server`
+- Another `saci-service` with a `peer` sink pointing at that port. Both halves are in the `server`
   feature, so no extra feature is needed on either side.
-- `run_mode kind="stream"` whenever a `saci` source is declared. The source blocks for the next
-  batch and never reaches EOF, and validation rejects it in any other run mode. A `saci` sink
+- `run "stream"` whenever a `peer` source is declared. The source blocks for the next
+  batch and never reaches EOF, and validation rejects it in any other run mode. A `peer` sink
   carries no such rule.
-- Matching `schema_fields` on the two nodes. The sink announces its schema and the source refuses a
+- Matching `field` lines on the two nodes. The sink announces its schema and the source refuses a
   peer that declares anything else, so a disagreement surfaces at the handshake.
 - The processor component the config names, at `pipelines/ticks.wasm`, for the `serve` step.
   [Build your own processor](@/service/processors/build/_index.md) is where that comes from;
   `validate --connectors-only` below runs without it.
 
-No `transformer` node and no `format` key. Both ends are SACI services that already hold
+No `codec` node and no `format` key. Both ends are SACI services that already hold
 `RecordBatch`es, so Arrow IPC is the wire format and there is nothing to choose.
 
 ## 1. Receive from a peer: the source node
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>a saci source needs run_mode kind="stream"</em></div>
+<div class="code-cap"><span>KDL</span><em>a peer source needs run "stream"</em></div>
 
 ```kdl
-source "ticks_in" type="saci" component="Tick" {
+source "ticks_in" connector="peer" component="Tick" {
     config {
         bind "0.0.0.0:9700"
         buffer 64
         max_frame_bytes 8388608
 
-        schema_fields "price" type="Float64" nullable=#false
+        field "price" type="float64" nullable=#false
     }
 }
 ```
@@ -110,7 +110,7 @@ source "ticks_in" type="saci" component="Tick" {
 many batches queue before the source pushes back on its peers through TCP flow control.
 `max_frame_bytes` caps one frame, and a peer that exceeds it loses its own session and nothing else.
 
-`schema_fields` is required, and it is what a peer's hello is checked against.
+`field` lines are required, and they are what a peer's hello is checked against.
 
 ## 2. Push to a peer: the sink node
 
@@ -118,12 +118,12 @@ many batches queue before the source pushes back on its peers through TCP flow c
 <div class="code-cap"><span>KDL</span><em>the sink resolves every address at build and dials on the first batch</em></div>
 
 ```kdl
-sink "ticks_out" type="saci" component="EnrichedTick" {
+sink "ticks_out" connector="peer" component="EnrichedTick" {
     config {
         connect "b.internal:9700" "b-standby.internal:9700"
         handshake_timeout_ms 5000
 
-        schema_fields "price" type="Float64" nullable=#false
+        field "price" type="float64" nullable=#false
     }
 }
 ```
@@ -136,7 +136,7 @@ peer's answer.
 
 ## 3. Validate and run
 
-`examples/configs/saci.kdl` declares both nodes and sets `run_mode kind="stream"`.
+`examples/configs/saci.kdl` declares both nodes and sets `run "stream"`.
 
 Runs the same on Linux, macOS and Windows (PowerShell):
 
@@ -256,7 +256,7 @@ Source:
 | `bind` | string | required | the address the listener accepts peer services on |
 | `buffer` | integer | `64` | batches queued before backpressure; at least 1 |
 | `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default; at least 1 |
-| `schema_fields` | list of fields | required | the schema a peer's hello must declare |
+| `field` | lines | required | the schema a peer's hello must declare |
 
 Sink:
 
@@ -264,9 +264,9 @@ Sink:
 |---|---|---|---|
 | `connect` | string or list of strings | required | the peers this sink dials, in order |
 | `handshake_timeout_ms` | integer | `5000` | how long to wait for a peer's answer; at least 1 |
-| `schema_fields` | list of fields | required | the schema announced to the peer |
+| `field` | lines | required | the schema announced to the peer |
 
-An unrecognised key inside `config` is a configuration error naming the key, and so is a value of the wrong type. `schema_fields` is read beside these keys on both halves.
+An unrecognised key inside `config` is a configuration error naming the key, and so is a value of the wrong type. `field` lines sit beside these keys on both halves.
 
 ## When it refuses to start
 
@@ -275,11 +275,11 @@ An unrecognised key inside `config` is a configuration error naming the key, and
 | ``PeerSource config: missing field `bind` `` | add `bind "host:port"` to the source's `config` |
 | ``PeerSink config: missing field `connect` `` | add `connect "host:port"` to the sink's `config` |
 | `peer: '{key}' must be at least 1` | give `buffer`, `max_frame_bytes` or `handshake_timeout_ms` a positive value |
-| `saci needs the node identity (service, workflow, node) the host binds to every connector it builds` | declare the node inside a `workflow`; the host binds this itself |
+| `peer needs the node identity (service, workflow, node) the host binds to every connector it builds` | declare the node inside a `workflow`; the host binds this itself |
 | `PeerSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
 | `PeerSink: cannot resolve 'connect' address '{connect}': {e}` | fix the host name or the port |
 | `PeerSink: 'connect' address '{connect}' resolved to no address` | the same, when the name resolves to nothing |
-| `source type 'saci' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"`, or drop the `saci` source |
+| `source connector 'peer' never reaches EOF; it requires standalone mode with run "stream"` | set `run "stream"`, or drop the `peer` source |
 
 ## Next
 

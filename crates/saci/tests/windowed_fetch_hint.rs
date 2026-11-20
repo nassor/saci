@@ -2,7 +2,7 @@
 //!
 //! `Source::request_batch_rows` carries the admission credit to the connector,
 //! and `KafkaSource`, `NatsSource` and `PostgresSource` act on it by
-//! overwriting their own `batch_size`/`batch_rows`. On a path to a windowed
+//! overwriting their own `batch_rows`. On a path to a windowed
 //! node that would let a throughput measurement choose the arrival boundaries
 //! themselves, which is where that node observes event time. So the runners
 //! withhold the hint there, exactly as they withhold the slice, and the
@@ -225,12 +225,13 @@ fn pinned_config(run_mode: RunMode) -> ServiceConfig {
             data_dir: std::path::PathBuf::from("/tmp/saci-window-hint-test"),
         },
         mode: ServiceMode::Standalone {
-            config: StandaloneConfig { run_mode },
+            config: StandaloneConfig { run: run_mode },
         },
         workflows: vec![WorkflowSpec {
             id: "hint".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),

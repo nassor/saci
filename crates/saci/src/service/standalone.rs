@@ -81,13 +81,13 @@
 //!
 //! Pacing applies to a drained iteration only. An iteration that spent its
 //! credit while the source was still live, or that left a carry-over slice, is
-//! backlogged and re-enters immediately. `interval_ms` is therefore the poll
+//! backlogged and re-enters immediately. `every_ms` is therefore the poll
 //! cadence of an idle or drained source, never a throughput cap: a backlog
 //! drains at full speed in credit-sized chunks, and only a pass that reached
 //! EOF on every source (or admitted nothing) waits out `Continuous`'s 100 ms
-//! or `Interval`'s `interval_ms`.
+//! or `Interval`'s `every_ms`.
 //!
-//! `RunMode::OneShot` engages no controller. A single pass must drain
+//! `RunMode::Once` engages no controller. A single pass must drain
 //! everything by definition, so admitting a credit-sized prefix and exiting
 //! would silently drop the rest of the source. `flow_control { enabled
 //! #false }` restores drain-to-EOF iterations and unconditional pacing in
@@ -209,7 +209,7 @@ pub struct WorkflowStats {
     /// are per pass while `source_batches_drained` and a source node's
     /// `batches` are per arrival. A pass is one whole drain again where no
     /// credit applies: `flow_control { enabled #false }` and
-    /// `RunMode::OneShot`, which builds no controller at all.
+    /// `RunMode::Once`, which builds no controller at all.
     /// The `stream` runner fills the same field once
     /// per chunk, of the single source that chunk came from.
     pub iterations: u64,
@@ -770,13 +770,13 @@ pub(crate) async fn run(
     // One controller per source node, resolved from the config's top-level
     // `flow_control` block and each source's own override.
     //
-    // `RunMode::OneShot` engages none: a single pass must drain every source
+    // `RunMode::Once` engages none: a single pass must drain every source
     // by definition, so admitting a credit-sized prefix and exiting would
     // silently drop the rest of the source. Every other batch mode gets one.
     // The workflow carries the resolved policy; `flow_plan` was bound above.
     let mut controllers: Vec<Option<FlowController>> = (0..n)
         .map(|i| {
-            (run_mode != RunMode::OneShot && kinds[i] == NodeRunKind::Source).then(|| {
+            (run_mode != RunMode::Once && kinds[i] == NodeRunKind::Source).then(|| {
                 let settings = flow_plan.for_source(&ids[i]);
                 let controller = FlowController::new(settings);
                 log_flow_start(&workflow_id, &ids[i], &settings, &controller);
@@ -1497,7 +1497,7 @@ pub(crate) async fn run(
             }
         }
 
-        let is_oneshot_final = run_mode == RunMode::OneShot;
+        let is_oneshot_final = run_mode == RunMode::Once;
         let cancelled_before_finish = cancel.is_cancelled();
         if is_oneshot_final || cancelled_before_finish {
             let finish = async {
@@ -1561,12 +1561,12 @@ pub(crate) async fn run(
         // Pacing is the idle poll cadence, not a throughput cap: an iteration
         // that spent its credit with the source still live, or that left a
         // carry-over slice, re-enters at once instead of waiting out
-        // `Continuous`'s 100 ms or `Interval`'s `interval_ms`. The loop head
+        // `Continuous`'s 100 ms or `Interval`'s `every_ms`. The loop head
         // re-checks cancellation, so skipping the wait costs no
         // responsiveness. It skips a *wait*, never the one-shot exit: a single
         // pass must leave this loop whatever it left behind.
         match &run_mode {
-            RunMode::OneShot => {
+            RunMode::Once => {
                 #[cfg(feature = "tracing")]
                 tracing::info!("one-shot mode: exiting after first iteration");
                 break;
@@ -1574,7 +1574,7 @@ pub(crate) async fn run(
 
             // A pending pause skips pacing for the same reason a backlog
             // does: the wait is idle cadence, and the loop head is where the
-            // runner parks. Without this an `interval_ms` of a minute would
+            // runner parks. Without this an `every_ms` of a minute would
             // leave a `pause` request reported as `pausing` for a minute.
             RunMode::Continuous | RunMode::Interval { .. } if backlogged || pause.is_paused() => {}
 
@@ -1589,8 +1589,8 @@ pub(crate) async fn run(
                 }
             }
 
-            RunMode::Interval { interval_ms } => {
-                let interval = tokio::time::Duration::from_millis(*interval_ms);
+            RunMode::Interval { every_ms } => {
+                let interval = tokio::time::Duration::from_millis(*every_ms);
                 let deadline = tokio::time::Instant::now() + interval;
 
                 loop {
@@ -1706,12 +1706,13 @@ mod tests {
                 data_dir: PathBuf::from("/tmp/saci-standalone-test"),
             },
             mode: ServiceMode::Standalone {
-                config: StandaloneConfig { run_mode },
+                config: StandaloneConfig { run: run_mode },
             },
             workflows: vec![crate::service::config::WorkflowSpec {
                 id: "w".to_string(),
                 name: None,
                 codecs: Vec::new(),
+                schemas: Vec::new(),
                 sources: Vec::new(),
                 wasm: Vec::new(),
                 plugin: Vec::new(),
@@ -1743,7 +1744,7 @@ mod tests {
             .source("in", "V", source)
             .sink("out", "V", sink)
             .link("in", "out")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 
@@ -1788,7 +1789,7 @@ mod tests {
             .processor("p", pipeline)
             .sink("out", "Order", sink)
             .link("p", "out")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 
@@ -1866,7 +1867,7 @@ mod tests {
             .sink("out_b", "V", sink_b)
             .link_branch("p", "out_a", "a")
             .link_branch("p", "out_b", "b")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
         (built, rx_a, rx_b)
@@ -1978,7 +1979,7 @@ mod tests {
             )
             .link("a", "p")
             .link("b", "p")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 
@@ -2043,7 +2044,7 @@ mod tests {
             )
             .link("s", "down")
             .link("up", "down")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 
@@ -2144,7 +2145,7 @@ mod tests {
             )
             .link("a", "p")
             .link("b", "p")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 
@@ -2715,7 +2716,7 @@ mod tests {
         );
     }
 
-    /// `RunMode::OneShot` engages no controller, and the reason is
+    /// `RunMode::Once` engages no controller, and the reason is
     /// load-bearing rather than an optimisation: a single pass must drain
     /// every source by definition, so a credit-sized prefix would exit having
     /// silently dropped the rest of the arrival. The default credit is 4 096
@@ -2730,7 +2731,7 @@ mod tests {
             .source("one-shot-src", "V", one_big_arrival(ROWS).await)
             .sink("one-shot-out", "V", sink)
             .link("one-shot-src", "one-shot-out")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 
@@ -3152,6 +3153,7 @@ mod tests {
             id: "dlqwf".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -3162,8 +3164,7 @@ mod tests {
             )),
         };
         let mut registry = Registry::new();
-        registry.register_sink(crate::connector::redb::RedbSinkFactory);
-        registry.register_source(crate::connector::redb::RedbSourceFactory);
+        registry.register(crate::connector::redb::RedbConnector);
         let registry = Arc::new(registry);
         let shared = Arc::new(DlqShared::new(
             &spec.id,
@@ -3189,7 +3190,7 @@ mod tests {
                 .source("dlq-src", "V", source)
                 .sink("dlq-out", "V", sink)
                 .link("dlq-src", "dlq-out")
-                .run_mode(RunMode::OneShot)
+                .run_mode(RunMode::Once)
                 .dlq(queue)
                 .build()
                 .unwrap();
@@ -3389,7 +3390,7 @@ mod tests {
             .source("src", "V", source)
             .sink("out", "V", sink)
             .link("src", "out")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 
@@ -3466,7 +3467,7 @@ mod tests {
             .source("src", "V", source)
             .sink("out", "V", sink)
             .link("src", "out")
-            .run_mode(RunMode::Interval { interval_ms: 5_000 })
+            .run_mode(RunMode::Interval { every_ms: 5_000 })
             .build()
             .unwrap();
 
@@ -3566,7 +3567,7 @@ mod tests {
             .source("src", "V", source)
             .sink("out", "V", sink)
             .link("src", "out")
-            .run_mode(RunMode::OneShot)
+            .run_mode(RunMode::Once)
             .build()
             .unwrap();
 

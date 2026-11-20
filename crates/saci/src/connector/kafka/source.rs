@@ -197,7 +197,7 @@ pub struct KafkaSource {
     /// allocation per schema, not per row.
     codec: Arc<dyn Codec>,
     /// Effective fetch size for the next collection window or
-    /// compacted-snapshot chunk. `batch_size` from config seeds this, but a
+    /// compacted-snapshot chunk. `batch_rows` from config seeds this, but a
     /// host that sends [`Source::request_batch_rows`] overwrites it before the
     /// first poll, not after some initial one: under the service's flow
     /// control the configured value never reaches the broker. It stays
@@ -428,7 +428,7 @@ impl KafkaSource {
         }
 
         let deadline = Instant::now() + Duration::from_millis(self.cfg.poll_timeout_ms);
-        while self.buffer.len() < self.cfg.batch_size {
+        while self.buffer.len() < self.cfg.batch_rows {
             match timeout_at(deadline, self.consumer.recv()).await {
                 Ok(Ok(message)) => self.buffer.push(Self::take_message(&message)),
                 Ok(Err(KafkaError::PartitionEOF(_))) => {}
@@ -465,7 +465,7 @@ impl KafkaSource {
         }
         let mut saw_unknown_topic = false;
         let deadline = Instant::now() + Duration::from_millis(self.cfg.poll_timeout_ms);
-        while self.buffer.len() < self.cfg.batch_size {
+        while self.buffer.len() < self.cfg.batch_rows {
             match timeout_at(deadline, self.consumer.recv()).await {
                 Ok(Ok(message)) => self.buffer.push(Self::take_message(&message)),
                 Ok(Err(KafkaError::PartitionEOF(partition))) => {
@@ -512,7 +512,7 @@ impl KafkaSource {
             .ok_or_else(|| SaciError::generic("KafkaSource: window decoded no rows"))
     }
 
-    /// Hand out the next `batch_size` chunk of the compacted snapshot,
+    /// Hand out the next `batch_rows` chunk of the compacted snapshot,
     /// reading the whole snapshot on the first call.
     ///
     /// `Ok(None)` once every survivor has been emitted, and on every call
@@ -525,7 +525,7 @@ impl KafkaSource {
         }
 
         let start = self.snapshot_cursor;
-        let end = self.snapshot.len().min(start + self.cfg.batch_size);
+        let end = self.snapshot.len().min(start + self.cfg.batch_rows);
         if start >= end {
             // Release the state as soon as the last chunk is out; every later
             // call takes this same branch and reports EOF again.
@@ -794,7 +794,7 @@ fn compacted_key_column(
     let Ok(index) = schema.index_of(key_field) else {
         return Err(SaciError::configuration(format!(
             "KafkaSource config: 'key_field' names '{key_field}', which is not one of the \
-             declared schema_fields {:?}",
+             declared fields {:?}",
             schema
                 .fields()
                 .iter()
@@ -912,15 +912,15 @@ impl Source for KafkaSource {
         Ok(Some(batch))
     }
 
-    /// A plain field write: sets `cfg.batch_size`, which every collection
+    /// A plain field write: sets `cfg.batch_rows`, which every collection
     /// window and compacted-snapshot chunk already reads by reference, so it
     /// takes effect on the very next call. No reconnect, no re-subscription.
-    /// The service sends the hint ahead of the first poll, so `batch_size`
+    /// The service sends the hint ahead of the first poll, so `batch_rows`
     /// in config is not a starting size; it is authoritative only where the
     /// host sends no hint, meaning flow control disabled for this source or a
     /// source feeding a windowed node.
     fn request_batch_rows(&mut self, rows: usize) {
-        self.cfg.batch_size = rows.max(1);
+        self.cfg.batch_rows = rows.max(1);
     }
 }
 

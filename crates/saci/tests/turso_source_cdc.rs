@@ -15,11 +15,11 @@ fn source(path: &str, retention: &str) -> TursoSource {
          batch_rows 1024\n\
          connection path=\"{}\"\n\
          mode kind=\"cdc\" table=\"orders\" cdc_table=\"turso_cdc\" retention=\"{retention}\"\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"__change_id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"__txn_id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"id\" type=\"int64\" nullable=#true\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"__change_id\" type=\"int64\" nullable=#false\n\
+         field \"__txn_id\" type=\"int64\" nullable=#false\n\
+         field \"id\" type=\"int64\" nullable=#true\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSourceConfig = common::config_from_kdl(&body);

@@ -16,12 +16,26 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use saci::connector::clickhouse::config::{
-    ClickhouseFieldType, ClickhouseSinkConfig, ClickhouseSourceConfig, CompressionConfig,
-    ConnectionConfig, DumpMode, FieldSpec, PollingMode, QueryMode, SourceMode, WriteMode,
+    ClickhouseSinkConfig, ClickhouseSourceConfig, CompressionConfig, ConnectionConfig, DumpMode,
+    PollingMode, QueryMode, SourceMode, WriteMode,
 };
 use saci::connector::clickhouse::{ClickhouseSink, ClickhouseSource};
+use saci::connector::{FieldSpec, FieldType};
 use saci::io::Sink;
 use saci::io::Source;
+
+/// A declared column with no decimal, item or native type.
+fn col(name: &str, ty: FieldType, nullable: bool) -> FieldSpec {
+    FieldSpec {
+        name: name.to_string(),
+        ty,
+        nullable,
+        precision: None,
+        scale: None,
+        item: None,
+        native_type: None,
+    }
+}
 
 #[tokio::test]
 async fn clickhouse_roundtrip_sink_and_source() {
@@ -56,27 +70,9 @@ async fn clickhouse_roundtrip_sink_and_source() {
     };
 
     let schema_fields = vec![
-        FieldSpec {
-            name: "id".to_string(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "name".to_string(),
-            ty: ClickhouseFieldType::Utf8,
-            nullable: true,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "score".to_string(),
-            ty: ClickhouseFieldType::Float64,
-            nullable: true,
-            precision: None,
-            scale: None,
-        },
+        col("id", FieldType::UInt64, false),
+        col("name", FieldType::Utf8, true),
+        col("score", FieldType::Float64, true),
     ];
 
     let schema = Arc::new(Schema::new(vec![
@@ -90,7 +86,7 @@ async fn clickhouse_roundtrip_sink_and_source() {
         name: "sink_roundtrip".to_string(),
         connection: conn_cfg.clone(),
         table: table.to_string(),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         write_mode: WriteMode::Append,
         chunk_rows: 1000,
         flush_rows: 2,
@@ -133,7 +129,7 @@ async fn clickhouse_roundtrip_sink_and_source() {
             initial_cursor: None,
             tiebreak_column: None,
         }),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         batch_rows: 2,
         max_batches_per_cycle: 0,
     };
@@ -156,7 +152,7 @@ async fn clickhouse_roundtrip_sink_and_source() {
         mode: SourceMode::Dump(DumpMode {
             table: table.to_string(),
         }),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         batch_rows: 2,
         max_batches_per_cycle: 0,
     };
@@ -175,7 +171,7 @@ async fn clickhouse_roundtrip_sink_and_source() {
         mode: SourceMode::Query(QueryMode {
             query: format!("SELECT id, name, score FROM {table} WHERE score > 80 ORDER BY id"),
         }),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         batch_rows: 10,
         max_batches_per_cycle: 0,
     };
@@ -233,96 +229,22 @@ async fn clickhouse_types_roundtrip() {
     };
 
     let schema_fields = vec![
+        col("c_i8", FieldType::Int8, false),
+        col("c_i16", FieldType::Int16, false),
+        col("c_i32", FieldType::Int32, false),
+        col("c_i64", FieldType::Int64, false),
+        col("c_u8", FieldType::UInt8, false),
+        col("c_u16", FieldType::UInt16, false),
+        col("c_u32", FieldType::UInt32, false),
+        col("c_u64", FieldType::UInt64, false),
+        col("c_f32", FieldType::Float32, false),
+        col("c_f64", FieldType::Float64, false),
+        col("c_str", FieldType::Utf8, true),
+        col("c_date", FieldType::Date32, true),
         FieldSpec {
-            name: "c_i8".into(),
-            ty: ClickhouseFieldType::Int8,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_i16".into(),
-            ty: ClickhouseFieldType::Int16,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_i32".into(),
-            ty: ClickhouseFieldType::Int32,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_i64".into(),
-            ty: ClickhouseFieldType::Int64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_u8".into(),
-            ty: ClickhouseFieldType::UInt8,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_u16".into(),
-            ty: ClickhouseFieldType::UInt16,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_u32".into(),
-            ty: ClickhouseFieldType::UInt32,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_u64".into(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_f32".into(),
-            ty: ClickhouseFieldType::Float32,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_f64".into(),
-            ty: ClickhouseFieldType::Float64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_str".into(),
-            ty: ClickhouseFieldType::Utf8,
-            nullable: true,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_date".into(),
-            ty: ClickhouseFieldType::Date32,
-            nullable: true,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "c_dec".into(),
-            ty: ClickhouseFieldType::Decimal128,
-            nullable: true,
             precision: Some(18),
             scale: Some(4),
+            ..col("c_dec", FieldType::Decimal128, true)
         },
     ];
 
@@ -370,7 +292,7 @@ async fn clickhouse_types_roundtrip() {
         name: "types_sink".into(),
         connection: conn_cfg.clone(),
         table: table.into(),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         write_mode: WriteMode::Append,
         chunk_rows: 1000,
         flush_rows: 10,
@@ -387,7 +309,7 @@ async fn clickhouse_types_roundtrip() {
         mode: SourceMode::Dump(DumpMode {
             table: table.into(),
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 10,
         max_batches_per_cycle: 0,
     };
@@ -465,27 +387,9 @@ async fn clickhouse_polling_with_tiebreak_and_initial_cursor() {
     };
 
     let schema_fields = vec![
-        FieldSpec {
-            name: "ts".into(),
-            ty: ClickhouseFieldType::Int64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "seq".into(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "val".into(),
-            ty: ClickhouseFieldType::Utf8,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
+        col("ts", FieldType::Int64, false),
+        col("seq", FieldType::UInt64, false),
+        col("val", FieldType::Utf8, false),
     ];
 
     let source_cfg = ClickhouseSourceConfig {
@@ -497,7 +401,7 @@ async fn clickhouse_polling_with_tiebreak_and_initial_cursor() {
             initial_cursor: Some("10".into()),
             tiebreak_column: Some("seq".into()),
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 10,
         max_batches_per_cycle: 0,
     };
@@ -561,20 +465,8 @@ async fn clickhouse_sink_buffering_and_truncate() {
     };
 
     let schema_fields = vec![
-        FieldSpec {
-            name: "id".into(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "val".into(),
-            ty: ClickhouseFieldType::Utf8,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
+        col("id", FieldType::UInt64, false),
+        col("val", FieldType::Utf8, false),
     ];
 
     let arrow_schema = Arc::new(Schema::new(vec![
@@ -586,7 +478,7 @@ async fn clickhouse_sink_buffering_and_truncate() {
         name: "truncate_sink".into(),
         connection: conn_cfg.clone(),
         table: table.into(),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         write_mode: WriteMode::Append,
         chunk_rows: 1000,
         flush_rows: 50,
@@ -616,7 +508,7 @@ async fn clickhouse_sink_buffering_and_truncate() {
         mode: SourceMode::Dump(DumpMode {
             table: table.into(),
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 10,
         max_batches_per_cycle: 0,
     };
@@ -670,13 +562,7 @@ async fn clickhouse_source_batch_size_and_limits() {
         settings: HashMap::new(),
     };
 
-    let schema_fields = vec![FieldSpec {
-        name: "id".into(),
-        ty: ClickhouseFieldType::UInt64,
-        nullable: false,
-        precision: None,
-        scale: None,
-    }];
+    let schema_fields = vec![col("id", FieldType::UInt64, false)];
 
     let source_cfg = ClickhouseSourceConfig {
         name: "limits_source".into(),
@@ -684,7 +570,7 @@ async fn clickhouse_source_batch_size_and_limits() {
         mode: SourceMode::Dump(DumpMode {
             table: table.into(),
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 10,
         max_batches_per_cycle: 2,
     };
@@ -737,20 +623,8 @@ async fn clickhouse_sink_chunks_a_write_larger_than_chunk_rows() {
     };
 
     let schema_fields = vec![
-        FieldSpec {
-            name: "id".into(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "val".into(),
-            ty: ClickhouseFieldType::Utf8,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
+        col("id", FieldType::UInt64, false),
+        col("val", FieldType::Utf8, false),
     ];
 
     let arrow_schema = Arc::new(Schema::new(vec![
@@ -764,7 +638,7 @@ async fn clickhouse_sink_chunks_a_write_larger_than_chunk_rows() {
         name: "chunked_sink".into(),
         connection: conn_cfg.clone(),
         table: table.into(),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         write_mode: WriteMode::Append,
         chunk_rows: 3,
         flush_rows: 0,
@@ -792,7 +666,7 @@ async fn clickhouse_sink_chunks_a_write_larger_than_chunk_rows() {
         mode: SourceMode::Dump(DumpMode {
             table: table.into(),
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 100,
         max_batches_per_cycle: 0,
     };
@@ -851,20 +725,8 @@ async fn clickhouse_polling_resumes_a_timestamp_cursor_across_batches() {
     };
 
     let schema_fields = vec![
-        FieldSpec {
-            name: "ts".into(),
-            ty: ClickhouseFieldType::TimestampMillis,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "id".into(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
+        col("ts", FieldType::TimestampMillis, false),
+        col("id", FieldType::UInt64, false),
     ];
 
     // `batch_rows 2` over three matching rows forces a second poll whose cursor
@@ -880,7 +742,7 @@ async fn clickhouse_polling_resumes_a_timestamp_cursor_across_batches() {
             initial_cursor: Some("2020-01-01 00:00:00".into()),
             tiebreak_column: None,
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 2,
         max_batches_per_cycle: 0,
     };
@@ -945,20 +807,8 @@ async fn clickhouse_polling_resumes_a_date_cursor_across_batches() {
     };
 
     let schema_fields = vec![
-        FieldSpec {
-            name: "d".into(),
-            ty: ClickhouseFieldType::Date32,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "id".into(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
+        col("d", FieldType::Date32, false),
+        col("id", FieldType::UInt64, false),
     ];
 
     // A `Date` cursor as a raw day count (`'18262'`) is a server-side parse
@@ -972,7 +822,7 @@ async fn clickhouse_polling_resumes_a_date_cursor_across_batches() {
             initial_cursor: Some("2020-01-01".into()),
             tiebreak_column: None,
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 1,
         max_batches_per_cycle: 0,
     };
@@ -1022,20 +872,8 @@ async fn clickhouse_date_column_round_trips() {
     };
 
     let schema_fields = vec![
-        FieldSpec {
-            name: "d".into(),
-            ty: ClickhouseFieldType::Date32,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
-        FieldSpec {
-            name: "id".into(),
-            ty: ClickhouseFieldType::UInt64,
-            nullable: false,
-            precision: None,
-            scale: None,
-        },
+        col("d", FieldType::Date32, false),
+        col("id", FieldType::UInt64, false),
     ];
 
     let arrow_schema = Arc::new(Schema::new(vec![
@@ -1047,7 +885,7 @@ async fn clickhouse_date_column_round_trips() {
         name: "date_sink".into(),
         connection: conn_cfg.clone(),
         table: table.into(),
-        schema_fields: schema_fields.clone(),
+        fields: schema_fields.clone(),
         write_mode: WriteMode::Append,
         chunk_rows: 1000,
         flush_rows: 0,
@@ -1077,7 +915,7 @@ async fn clickhouse_date_column_round_trips() {
         mode: SourceMode::Dump(DumpMode {
             table: table.into(),
         }),
-        schema_fields,
+        fields: schema_fields,
         batch_rows: 100,
         max_batches_per_cycle: 0,
     };
@@ -1156,21 +994,9 @@ fn retry_config(
             settings: HashMap::new(),
         },
         table: table.into(),
-        schema_fields: vec![
-            FieldSpec {
-                name: "id".into(),
-                ty: ClickhouseFieldType::UInt64,
-                nullable: false,
-                precision: None,
-                scale: None,
-            },
-            FieldSpec {
-                name: "val".into(),
-                ty: ClickhouseFieldType::Utf8,
-                nullable: false,
-                precision: None,
-                scale: None,
-            },
+        fields: vec![
+            col("id", FieldType::UInt64, false),
+            col("val", FieldType::Utf8, false),
         ],
         write_mode: WriteMode::Append,
         chunk_rows,

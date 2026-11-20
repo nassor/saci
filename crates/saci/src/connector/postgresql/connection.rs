@@ -5,7 +5,7 @@
 //! [`Sink`](crate::io::Sink) serialise all access through `&mut self`,
 //! so a second connection would sit idle.
 //!
-//! [`Connector`] is built synchronously, because `SourceFactory::build` is
+//! [`Connector`] is built synchronously, because the `Connector` trait's `source` is
 //! synchronous: it parses the DSN, reads the password file, and builds the TLS
 //! configuration, but opens no socket. [`Connector::connect_with_retry`] is the
 //! async half, called on the first `next_batch`/`write_batch` and again whenever
@@ -1180,7 +1180,7 @@ mod tests {
     }
 
     /// A built-in column keeps the attribute's own modifier, which is what the
-    /// sink compares a forced `pg_type` modifier against.
+    /// sink compares a forced `native_type` modifier against.
     #[test]
     fn a_built_in_column_keeps_its_attribute_modifier_and_needs_no_catalog() {
         let resolved = resolve_against_catalog(

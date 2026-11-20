@@ -21,17 +21,17 @@
 //! drops it at EOF.
 //!
 //! ```kdl
-//! transformer "orders-csv" name="Orders CSV" format="csv" {
-//!     options has_headers=#true
+//! codec "orders-csv" name="Orders CSV" format="csv" {
+//!     config has_headers=#true
 //! }
 //!
-//! sink "orders_out" type="RedbSink" transformer="orders-csv" component="Order" {
+//! sink "orders_out" connector="redb" codec="orders-csv" component="Order" {
 //!     config {
 //!         directory "/data/orders"
 //!         file "orders.redb"
 //!         key_prefix "orders/"
 //!         key_suffix ".csv"
-//!         schema_fields "id" type="Int64" nullable=#false
+//!         field "id" type="int64" nullable=#false
 //!     }
 //! }
 //! ```
@@ -45,6 +45,6 @@ pub mod sink;
 pub mod source;
 
 pub use config::{DurabilityMode, RedbSinkConfig, RedbSourceConfig};
-pub use factory::{RedbSinkFactory, RedbSourceFactory};
+pub use factory::RedbConnector;
 pub use sink::RedbSink;
 pub use source::RedbSource;

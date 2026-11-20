@@ -10,7 +10,7 @@ aliases = ["/service/self-healing/"]
 A connector can end up holding a handle that will never work again. A `tcp`
 sink whose collector went away fails every later write on that same dead
 socket. Retrying the write cannot help. `saci-service` builds a fresh
-connector from the same factory and the same `config` instead. It is on with
+instance from the same connector and the same `config` instead. It is on with
 no configuration, and a `heal` block paces it or switches it off.
 
 <div class="dgm animate-in">
@@ -20,7 +20,7 @@ no configuration, and a `heal` block paces it or switches it off.
             A workflow node on the left holds a connector instance that is failing. After
             three consecutive failures a control-plane box schedules a rebuild for a
             deadline one second away. At the head of the first call past that deadline the
-            broken instance is dropped and the node's factory builds a fresh one, which
+            broken instance is dropped and the node's connector builds a fresh one, which
             takes its place. The first operation that succeeds on the fresh instance marks
             the node healthy again; one that fails schedules the next attempt twice as far
             out.
@@ -43,7 +43,7 @@ no configuration, and a `heal` block paces it or switches it off.
         </g>
         <g class="anim anim-3">
             <rect class="blk blk-ctl" x="370" y="44" width="120" height="56" rx="8"/>
-            <text class="t-lbl t-ctl" x="382" y="68">factory</text>
+            <text class="t-lbl t-ctl" x="382" y="68">connector</text>
             <text class="t-sm" x="382" y="86">same config</text>
             <path class="arw arw-data" d="M490 72 H526" marker-end="url(#svc-hl-a)"/>
             <rect class="blk blk-data" x="530" y="44" width="130" height="56" rx="8"/>
@@ -54,7 +54,7 @@ no configuration, and a `heal` block paces it or switches it off.
         </g>
         <g class="anim anim-4">
             <path class="ln" d="M0 148 H654"/>
-            <text class="t-sm" x="0" y="168">The broken instance is dropped before the factory is called, so it releases whatever it held.</text>
+            <text class="t-sm" x="0" y="168">The broken instance is dropped before the connector builds the new one, so it releases whatever it held.</text>
             <text class="t-sm" x="0" y="192">A connector that recovers on its own, or that cannot be built twice, is never rebuilt.</text>
         </g>
         <defs>
@@ -77,7 +77,7 @@ no configuration, and a `heal` block paces it or switches it off.
 
 Each source and sink counts its consecutive failures. At `after_failures` the
 node schedules a rebuild for `base_delay_ms` from now, and the first call past
-that deadline drops the instance and asks the node's factory for another one
+that deadline drops the instance and asks the node's connector for another one
 with the same config. The first operation that then succeeds marks the node
 healthy; one that fails schedules the next attempt `multiplier` times further
 out, up to `max_delay_ms`. With the default `max_attempts` of `0` it never
@@ -99,14 +99,15 @@ A connector declares whether building it a second time is sound:
 
 | Connector | Rebuilt | Why |
 |---|---|---|
-| `tcp` source and sink, `kafka` source and sink, `nats` source and sink, `http` source and sink, `PostgresSource`, `TursoSource`, `FileSink` without `truncate` | yes | a fresh instance resumes from state outside the process: a committed consumer offset, an offset table, a replication slot, a request it simply issues again, or a file reopened for append |
-| `PostgresSink`, `TursoSink`, `S3Sink` | no | rows accepted but not yet flushed survive an outage inside the instance, and both re-establish their own connection; replacing them would discard those rows |
-| `FileSource`, `S3Source` | no | both read from their start, so a fresh instance would re-deliver everything already read |
-| `FileSink` with `truncate #true` | no | a fresh instance would replace the file and erase what this run already wrote |
-| `ChannelSource`, `ChannelSink` | no | a channel is one mpsc pair created once per process |
+| `tcp`, `udp`, `peer`, `kafka`, `nats`, `http` and `otlp-metrics` source and sink, `http-listen`, `postgresql`, `mariadb`, `turso` and `clickhouse` sources, the `redb` sink, the `file` sink without `truncate` | yes | a fresh instance resumes from state outside the process: a committed consumer offset, an offset table, a replication slot, a request it simply issues again, or a file reopened for append |
+| `postgresql`, `mariadb` and `clickhouse` sinks, `s3` sink | no | rows accepted but not yet flushed survive an outage inside the instance, and the instance re-establishes its own connection; replacing it would discard those rows |
+| `turso` sink | no | the connector does not declare that building it a second time is sound |
+| `file` source, `s3` source, `redb` source | no | each reads its input once from the start, so a fresh instance would re-deliver everything already read |
+| `file` sink with `truncate #true` | no | a fresh instance would replace the file and erase what this run already wrote |
+| `channel` source and sink | no | a channel is one mpsc pair created once per process |
 
 A connector from outside this repository is not rebuilt until it says so,
-because the factory trait's default answer is that a second build is
+because the `Connector` trait's default `rebuild` answer is that a second build is
 undeclared.
 
 ## 3. Turn it off, or pace it
@@ -135,19 +136,21 @@ To react faster on one node, or to leave that one node alone:
 
 ```kdl,name=Per node
 workflow "orders" {
-    sink "collector" type="tcp" component="Order" transformer="ipc" {
+    codec "ipc" format="arrow-ipc"
+
+    sink "collector" connector="tcp" component="Order" codec="ipc" {
         heal { after_failures 1; base_delay_ms 200 }
         config {
             connect "collector.internal:9500"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }
     }
 
-    sink "archive" type="tcp" component="Order" transformer="ipc" {
+    sink "archive" connector="tcp" component="Order" codec="ipc" {
         heal { enabled #false }
         config {
             connect "archive.internal:9500"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }
     }
 }
@@ -177,8 +180,8 @@ saci_connector_heal_failures_total{otel_scope_name="saci"} 2
 saci_connector_heal_failures_total{sink="collector",otel_scope_name="saci"} 2
 ```
 
-Failures climbing with no heals means the connector cannot come back: the
-factory is refusing, so the reason is in the log rather than the metric.
+Failures climbing with no heals means the connector cannot come back: it
+refuses to build again, so the reason is in the log rather than the metric.
 
 The log lines ride on the `saci::heal` target, enabled at `warn` whatever
 `log_level` says and never sampled. They always appear for the same reason
@@ -191,7 +194,7 @@ WARN saci::heal: connector healed workflow="orders" node="collector" role="sink"
 WARN saci::heal: connector recovered workflow="orders" node="collector" role="sink"
 ```
 
-`connector heal failed` carries the reason the factory gave, and
+`connector heal failed` carries the reason the connector gave, and
 `connector heal exhausted` appears once when a node with a `max_attempts`
 budget spends it and stops trying.
 
@@ -227,7 +230,7 @@ got 3`.
 | `heal: multiplier must be at least 1.0, got 0.5` | Use a value of 1.0 or above; below it the delay would shrink. |
 | `heal: jitter must be within 0.0..=1.0, got 3` | Use a fraction, not a percentage. |
 | `heal: max_delay_ms (10) must be at least base_delay_ms (100)` | Raise the ceiling, or lower the base. |
-| ``workflow 'w' sink 'out': heal is not available for type 'S3Sink': rows accepted but not yet uploaded live in the open object and survive a failed upload; a second build would discard them, and every upload already opens its own connection`` | Delete the node's `heal` block. The connector already recovers on its own, and replacing it would lose rows. |
+| ``workflow 'w' sink 'out': heal is not available for connector 's3': rows accepted but not yet uploaded live in the open object and survive a failed upload; a second build would discard them, and every upload already opens its own connection`` | Delete the node's `heal` block. The connector already recovers on its own, and replacing it would lose rows. |
 | ``mode "cluster" does not take a `heal` block: a cluster workflow declares no source or sink node, so there is no connector to rebuild`` | Delete the block; a cluster node ingests through claims, not connectors. |
 
 A node with no `heal` block of its own is never refused: a connector that

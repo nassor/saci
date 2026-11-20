@@ -21,7 +21,7 @@
 //
 // Start NATS and PostgreSQL (docker compose -f examples/windowing/docker-compose.yml up -d),
 // then run the service and the publisher:
-//   cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve \
+//   cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host,plugin-host -- serve \
 //     --config examples/windowing/tumbling/tumbling.kdl
 //   cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000
 //
@@ -36,7 +36,7 @@ node id=1 name="saci-windowing" data_dir="${SACI_DATA_DIR:-/tmp/saci-windowing}"
 // A core NATS subscription never reaches EOF, so the interval runner would
 // spin on a source that is never done. The stream runner drives live sources
 // item by item instead, pulling the two sources round-robin.
-run_mode kind="stream"
+run "stream"
 
 // No `flow_control` block: both sources here feed windowed processors, and
 // a stream-mode source on a path to a windowed node builds no controller at
@@ -44,17 +44,17 @@ run_mode kind="stream"
 // docs/content/service/operate/flow-control.md and the window block below.
 
 workflow "windowing" {
-    // One JSON object per message, decoded against schema_fields below.
-    transformer "ndjson_fmt" format="ndjson"
+    // One JSON object per message, decoded against the `field` lines below.
+    codec "ndjson_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- sources
     //
     // Two independent streams of the same Sale shape. Both feed both
     // processors: the fan-in merge is the whole point of the demo.
 
-    source "sales_a" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+    source "sales_a" connector="nats" component="Sale" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -64,15 +64,15 @@ workflow "windowing" {
 
             mode kind="core" subject="windowing.sales.a"
 
-            schema_fields "timestamp_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
+            field "timestamp_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
         }
     }
 
-    source "sales_b" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+    source "sales_b" connector="nats" component="Sale" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -82,9 +82,9 @@ workflow "windowing" {
 
             mode kind="core" subject="windowing.sales.b"
 
-            schema_fields "timestamp_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
+            field "timestamp_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
         }
     }
 
@@ -97,26 +97,26 @@ workflow "windowing" {
     // `config` as `window.*` keys, which the processor reads back through
     // get-config. One source of truth.
 
-    wasm "window_wasm" module="target/wasm32-wasip3/release/windowing_tumbling_wasm.wasm" {
+    wasm "window_wasm" path="target/wasm32-wasip3/release/windowing_tumbling_wasm.wasm" {
         window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-            key_field "symbol"
+            key_fields "symbol"
         }
     }
 
-    plugin "window_plugin" library="${SACI_PLUGIN_LIB:-target/release/libwindowing_tumbling_plugin.so}" {
+    plugin "window_plugin" path="${SACI_PLUGIN_LIB:-target/release/libwindowing_tumbling_plugin.so}" {
         window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-            key_field "symbol"
+            key_fields "symbol"
         }
     }
 
     // ----------------------------------------------------------------- sinks
     //
     // Each processor writes to its own table. The tables come from
-    // schema.sql, which compose runs on first initialisation; PostgresSink
+    // schema.sql, which compose runs on first initialisation; the `postgresql` sink
     // never issues CREATE TABLE. upsert on (window_id, symbol) keeps a
     // re-run or a late re-fire idempotent.
 
-    sink "wasm_totals" type="PostgresSink" component="WindowTotal" {
+    sink "wasm_totals" connector="postgresql" component="WindowTotal" {
         config {
             name "wasm-totals"
             table "public.wasm_window_totals"
@@ -129,14 +129,14 @@ workflow "windowing" {
                 sslmode "disable"
             }
 
-            schema_fields "window_id" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "count" type="int64" nullable=#false
-            schema_fields "sum" type="float64" nullable=#false
+            field "window_id" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "count" type="int64" nullable=#false
+            field "sum" type="float64" nullable=#false
         }
     }
 
-    sink "plugin_totals" type="PostgresSink" component="WindowTotal" {
+    sink "plugin_totals" connector="postgresql" component="WindowTotal" {
         config {
             name "plugin-totals"
             table "public.plugin_window_totals"
@@ -149,10 +149,10 @@ workflow "windowing" {
                 sslmode "disable"
             }
 
-            schema_fields "window_id" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "count" type="int64" nullable=#false
-            schema_fields "sum" type="float64" nullable=#false
+            field "window_id" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "count" type="int64" nullable=#false
+            field "sum" type="float64" nullable=#false
         }
     }
 

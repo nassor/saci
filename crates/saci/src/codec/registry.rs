@@ -13,7 +13,7 @@ pub trait CodecFactory: Send + Sync + 'static {
     /// The name that appears in config as `format="<name>"`.
     fn format_name(&self) -> &'static str;
 
-    /// Build a codec from its `options` table.
+    /// Build a codec from its `config` table.
     ///
     /// # Errors
     ///

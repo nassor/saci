@@ -30,9 +30,9 @@ use arrow_buffer::{IntervalMonthDayNano, NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, FieldRef};
 use tokio_postgres::types::{FromSql, Type};
 
-use crate::connector::postgresql::config::{FieldSpec, PgFieldType};
 use crate::connector::postgresql::numeric::{money_factor, numeric_text_to_i128, numeric_to_i128};
 use crate::connector::postgresql::types::{OID_JSONB, array_element_oid};
+use crate::connector::schema::{FieldSpec, FieldType};
 
 /// PostgreSQL OIDs this module dispatches on. The canonical table in
 /// [`crate::connector::postgresql::types`] carries the full set; these are the ones whose *decoder*
@@ -165,46 +165,46 @@ impl ColumnBuilder {
     /// element decoder from the same table.
     fn for_type(
         spec: &FieldSpec,
-        ty: PgFieldType,
+        ty: FieldType,
         capacity: usize,
         server_oid: u32,
     ) -> Result<Self, SaciError> {
         Ok(match ty {
-            PgFieldType::Boolean => ColumnBuilder::Boolean(BooleanBuilder::with_capacity(capacity)),
-            PgFieldType::Int16 => ColumnBuilder::Int16(Int16Builder::with_capacity(capacity)),
-            PgFieldType::Int32 => ColumnBuilder::Int32(Int32Builder::with_capacity(capacity)),
-            PgFieldType::Int64 if matches!(server_oid, OID_OID | OID_XID | OID_CID) => {
+            FieldType::Boolean => ColumnBuilder::Boolean(BooleanBuilder::with_capacity(capacity)),
+            FieldType::Int16 => ColumnBuilder::Int16(Int16Builder::with_capacity(capacity)),
+            FieldType::Int32 => ColumnBuilder::Int32(Int32Builder::with_capacity(capacity)),
+            FieldType::Int64 if matches!(server_oid, OID_OID | OID_XID | OID_CID) => {
                 ColumnBuilder::Oid(Int64Builder::with_capacity(capacity))
             }
-            PgFieldType::Int64 => ColumnBuilder::Int64(Int64Builder::with_capacity(capacity)),
-            PgFieldType::Float32 => ColumnBuilder::Float32(Float32Builder::with_capacity(capacity)),
-            PgFieldType::Float64 => ColumnBuilder::Float64(Float64Builder::with_capacity(capacity)),
+            FieldType::Int64 => ColumnBuilder::Int64(Int64Builder::with_capacity(capacity)),
+            FieldType::Float32 => ColumnBuilder::Float32(Float32Builder::with_capacity(capacity)),
+            FieldType::Float64 => ColumnBuilder::Float64(Float64Builder::with_capacity(capacity)),
             // 16 bytes per value is a starting guess for the data buffer; the
             // builder grows it as needed.
-            PgFieldType::Utf8 => {
+            FieldType::Utf8 => {
                 ColumnBuilder::Utf8(StringBuilder::with_capacity(capacity, capacity * 16))
             }
-            PgFieldType::Json => ColumnBuilder::Json(
+            FieldType::Json => ColumnBuilder::Json(
                 StringBuilder::with_capacity(capacity, capacity * 16),
                 server_oid == OID_JSONB,
             ),
-            PgFieldType::Binary => {
+            FieldType::Binary => {
                 ColumnBuilder::Binary(BinaryBuilder::with_capacity(capacity, capacity * 16))
             }
-            PgFieldType::Date32 => ColumnBuilder::Date32(Date32Builder::with_capacity(capacity)),
-            PgFieldType::Time64Micros => {
+            FieldType::Date32 => ColumnBuilder::Date32(Date32Builder::with_capacity(capacity)),
+            FieldType::Time64Micros => {
                 ColumnBuilder::Time64(Time64MicrosecondBuilder::with_capacity(capacity))
             }
-            PgFieldType::TimestampMicros => {
+            FieldType::TimestampMicros => {
                 ColumnBuilder::Timestamp(TimestampMicrosecondBuilder::with_capacity(capacity))
             }
-            PgFieldType::TimestampMicrosUtc => ColumnBuilder::Timestamp(
+            FieldType::TimestampMicrosUtc => ColumnBuilder::Timestamp(
                 TimestampMicrosecondBuilder::with_capacity(capacity).with_timezone("UTC"),
             ),
-            PgFieldType::Uuid => {
+            FieldType::Uuid => {
                 ColumnBuilder::Uuid(FixedSizeBinaryBuilder::with_capacity(capacity, 16))
             }
-            PgFieldType::Decimal128 => {
+            FieldType::Decimal128 => {
                 let (precision, scale) = spec.decimal_params()?;
                 let builder = Decimal128Builder::with_capacity(capacity)
                     .with_precision_and_scale(precision, scale)
@@ -223,17 +223,17 @@ impl ColumnBuilder {
                     ColumnBuilder::Decimal128(builder, scale)
                 }
             }
-            PgFieldType::IntervalMonthDayNano => {
+            FieldType::IntervalMonthDayNano => {
                 ColumnBuilder::Interval(IntervalMonthDayNanoBuilder::with_capacity(capacity))
             }
-            PgFieldType::List => {
+            FieldType::List => {
                 let item = spec.item.ok_or_else(|| {
                     SaciError::configuration(format!(
                         "field '{}': type \"list\" requires 'item'",
                         spec.name
                     ))
                 })?;
-                if item == PgFieldType::List {
+                if item == FieldType::List {
                     return Err(SaciError::configuration(format!(
                         "field '{}': 'item' must be a scalar type, not \"list\"",
                         spec.name
@@ -245,7 +245,7 @@ impl ColumnBuilder {
                 // `int8` nor a `numeric`.
                 let element_oid = array_element_oid(server_oid).unwrap_or(0);
                 let element = Self::for_type(spec, item, capacity, element_oid)?;
-                let data_type = spec.to_arrow_field()?.data_type().clone();
+                let data_type = spec.to_arrow()?.data_type().clone();
                 let DataType::List(field) = data_type else {
                     return Err(SaciError::configuration(format!(
                         "field '{}': type \"list\" must map to an Arrow List",
@@ -258,6 +258,12 @@ impl ColumnBuilder {
                     offsets: vec![0],
                     validity: Vec::with_capacity(capacity),
                 }))
+            }
+            other => {
+                return Err(SaciError::configuration(format!(
+                    "field '{}': type \"{other}\" is not one postgresql maps",
+                    spec.name
+                )));
             }
         })
     }
@@ -1255,49 +1261,49 @@ mod tests {
     };
 
     use super::*;
-    use crate::connector::postgresql::config::FieldSpec;
 
-    fn spec(ty: PgFieldType) -> FieldSpec {
+    fn spec(ty: FieldType) -> FieldSpec {
         FieldSpec {
             name: "c".to_string(),
             ty,
             nullable: true,
-            precision: matches!(ty, PgFieldType::Decimal128).then_some(18),
-            scale: matches!(ty, PgFieldType::Decimal128).then_some(4),
+            precision: matches!(ty, FieldType::Decimal128).then_some(18),
+            scale: matches!(ty, FieldType::Decimal128).then_some(4),
             item: None,
-            pg_type: None,
+            native_type: None,
         }
     }
 
     /// The PostgreSQL type OID a declared type is normally fed from. Only the
     /// `json`/`jsonb` split actually changes decoding.
-    fn oid(ty: PgFieldType) -> u32 {
+    fn oid(ty: FieldType) -> u32 {
         match ty {
-            PgFieldType::Boolean => Type::BOOL.oid(),
-            PgFieldType::Int16 => Type::INT2.oid(),
-            PgFieldType::Int32 => Type::INT4.oid(),
-            PgFieldType::Int64 => Type::INT8.oid(),
-            PgFieldType::Float32 => Type::FLOAT4.oid(),
-            PgFieldType::Float64 => Type::FLOAT8.oid(),
-            PgFieldType::Utf8 => Type::TEXT.oid(),
-            PgFieldType::Binary => Type::BYTEA.oid(),
-            PgFieldType::Date32 => Type::DATE.oid(),
-            PgFieldType::Time64Micros => Type::TIME.oid(),
-            PgFieldType::TimestampMicros => Type::TIMESTAMP.oid(),
-            PgFieldType::TimestampMicrosUtc => Type::TIMESTAMPTZ.oid(),
-            PgFieldType::Uuid => Type::UUID.oid(),
-            PgFieldType::Json => Type::JSON.oid(),
-            PgFieldType::Decimal128 => Type::NUMERIC.oid(),
-            PgFieldType::IntervalMonthDayNano => Type::INTERVAL.oid(),
-            PgFieldType::List => Type::TEXT_ARRAY.oid(),
+            FieldType::Boolean => Type::BOOL.oid(),
+            FieldType::Int16 => Type::INT2.oid(),
+            FieldType::Int32 => Type::INT4.oid(),
+            FieldType::Int64 => Type::INT8.oid(),
+            FieldType::Float32 => Type::FLOAT4.oid(),
+            FieldType::Float64 => Type::FLOAT8.oid(),
+            FieldType::Utf8 => Type::TEXT.oid(),
+            FieldType::Binary => Type::BYTEA.oid(),
+            FieldType::Date32 => Type::DATE.oid(),
+            FieldType::Time64Micros => Type::TIME.oid(),
+            FieldType::TimestampMicros => Type::TIMESTAMP.oid(),
+            FieldType::TimestampMicrosUtc => Type::TIMESTAMPTZ.oid(),
+            FieldType::Uuid => Type::UUID.oid(),
+            FieldType::Json => Type::JSON.oid(),
+            FieldType::Decimal128 => Type::NUMERIC.oid(),
+            FieldType::IntervalMonthDayNano => Type::INTERVAL.oid(),
+            FieldType::List => Type::TEXT_ARRAY.oid(),
+            other => panic!("not a postgresql type: {other}"),
         }
     }
 
-    fn builder_for(ty: PgFieldType, capacity: usize) -> ColumnBuilder {
+    fn builder_for(ty: FieldType, capacity: usize) -> ColumnBuilder {
         ColumnBuilder::new(&spec(ty), capacity, oid(ty)).expect("builder")
     }
 
-    fn build(ty: PgFieldType, values: &[Option<&[u8]>]) -> ArrayRef {
+    fn build(ty: FieldType, values: &[Option<&[u8]>]) -> ArrayRef {
         let mut builder = builder_for(ty, values.len());
         for value in values {
             builder.push("c", *value).expect("push");
@@ -1307,27 +1313,24 @@ mod tests {
 
     #[test]
     fn decodes_integers_and_floats() {
-        let array = build(PgFieldType::Int64, &[Some(&7i64.to_be_bytes()), None]);
+        let array = build(FieldType::Int64, &[Some(&7i64.to_be_bytes()), None]);
         let ints = array.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(ints.value(0), 7);
         assert!(ints.is_null(1));
 
-        let array = build(
-            PgFieldType::Float64,
-            &[Some(&2.5f64.to_bits().to_be_bytes())],
-        );
+        let array = build(FieldType::Float64, &[Some(&2.5f64.to_bits().to_be_bytes())]);
         let floats = array.as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(floats.value(0), 2.5);
     }
 
     #[test]
     fn decodes_booleans_and_rejects_other_bytes() {
-        let array = build(PgFieldType::Boolean, &[Some(&[1]), Some(&[0])]);
+        let array = build(FieldType::Boolean, &[Some(&[1]), Some(&[0])]);
         let bools = array.as_any().downcast_ref::<BooleanArray>().unwrap();
         assert!(bools.value(0));
         assert!(!bools.value(1));
 
-        let mut builder = builder_for(PgFieldType::Boolean, 1);
+        let mut builder = builder_for(FieldType::Boolean, 1);
         let err = builder.push("flag", Some(&[2])).unwrap_err();
         assert!(err.message().contains("flag"), "{}", err.message());
         assert!(
@@ -1339,10 +1342,7 @@ mod tests {
 
     #[test]
     fn timestamptz_zero_is_the_year_2000_in_arrow_epoch_micros() {
-        let array = build(
-            PgFieldType::TimestampMicrosUtc,
-            &[Some(&0i64.to_be_bytes())],
-        );
+        let array = build(FieldType::TimestampMicrosUtc, &[Some(&0i64.to_be_bytes())]);
         let stamps = array
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
@@ -1354,7 +1354,7 @@ mod tests {
     #[test]
     fn timestamp_infinity_sentinels_are_rejected() {
         for sentinel in [i64::MIN, i64::MAX] {
-            let mut builder = builder_for(PgFieldType::TimestampMicros, 1);
+            let mut builder = builder_for(FieldType::TimestampMicros, 1);
             let err = builder
                 .push("created_at", Some(&sentinel.to_be_bytes()))
                 .unwrap_err();
@@ -1365,7 +1365,7 @@ mod tests {
 
     #[test]
     fn date_zero_is_the_year_2000_in_arrow_epoch_days() {
-        let array = build(PgFieldType::Date32, &[Some(&0i32.to_be_bytes())]);
+        let array = build(FieldType::Date32, &[Some(&0i32.to_be_bytes())]);
         let dates = array.as_any().downcast_ref::<Date32Array>().unwrap();
         assert_eq!(dates.value(0), DATE_EPOCH_OFFSET_DAYS);
     }
@@ -1373,7 +1373,7 @@ mod tests {
     #[test]
     fn date_infinity_sentinels_are_rejected() {
         for sentinel in [i32::MIN, i32::MAX] {
-            let mut builder = builder_for(PgFieldType::Date32, 1);
+            let mut builder = builder_for(FieldType::Date32, 1);
             let err = builder
                 .push("day", Some(&sentinel.to_be_bytes()))
                 .unwrap_err();
@@ -1385,7 +1385,7 @@ mod tests {
     #[test]
     fn time_is_microseconds_since_midnight_unchanged() {
         let array = build(
-            PgFieldType::Time64Micros,
+            FieldType::Time64Micros,
             &[Some(&3_600_000_000i64.to_be_bytes())],
         );
         let times = array
@@ -1398,14 +1398,14 @@ mod tests {
     #[test]
     fn uuid_must_be_sixteen_bytes() {
         let bytes = [7u8; 16];
-        let array = build(PgFieldType::Uuid, &[Some(&bytes)]);
+        let array = build(FieldType::Uuid, &[Some(&bytes)]);
         let uuids = array
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(uuids.value(0), &bytes);
 
-        let mut builder = builder_for(PgFieldType::Uuid, 1);
+        let mut builder = builder_for(FieldType::Uuid, 1);
         let err = builder.push("uid", Some(&[0u8; 15])).unwrap_err();
         assert!(err.message().contains("uid"), "{}", err.message());
         assert!(err.message().contains("expected 16"), "{}", err.message());
@@ -1413,7 +1413,7 @@ mod tests {
 
     #[test]
     fn invalid_utf8_in_text_is_rejected() {
-        let mut builder = builder_for(PgFieldType::Utf8, 1);
+        let mut builder = builder_for(FieldType::Utf8, 1);
         let err = builder.push("label", Some(&[0xff, 0xfe])).unwrap_err();
         assert!(err.message().contains("label"), "{}", err.message());
         assert!(err.message().contains("UTF-8"), "{}", err.message());
@@ -1422,14 +1422,13 @@ mod tests {
     #[test]
     fn json_and_jsonb_both_yield_the_document_text() {
         let json = br#"{"a":1}"#;
-        let array = build(PgFieldType::Json, &[Some(json)]);
+        let array = build(FieldType::Json, &[Some(json)]);
         let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(strings.value(0), r#"{"a":1}"#);
 
         let mut jsonb = vec![1u8];
         jsonb.extend_from_slice(json);
-        let mut builder =
-            ColumnBuilder::new(&spec(PgFieldType::Json), 1, Type::JSONB.oid()).unwrap();
+        let mut builder = ColumnBuilder::new(&spec(FieldType::Json), 1, Type::JSONB.oid()).unwrap();
         builder.push("doc", Some(&jsonb)).unwrap();
         let array = builder.finish();
         let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
@@ -1437,8 +1436,7 @@ mod tests {
 
         // A jsonb version byte the decoder does not know is an error, not a
         // document that silently keeps its header.
-        let mut builder =
-            ColumnBuilder::new(&spec(PgFieldType::Json), 1, Type::JSONB.oid()).unwrap();
+        let mut builder = ColumnBuilder::new(&spec(FieldType::Json), 1, Type::JSONB.oid()).unwrap();
         let mut future = vec![2u8];
         future.extend_from_slice(json);
         let err = builder.push("doc", Some(&future)).unwrap_err();
@@ -1452,7 +1450,7 @@ mod tests {
 
     #[test]
     fn bytea_is_carried_verbatim() {
-        let array = build(PgFieldType::Binary, &[Some(&[0u8, 1, 2, 255])]);
+        let array = build(FieldType::Binary, &[Some(&[0u8, 1, 2, 255])]);
         let blobs = array.as_any().downcast_ref::<BinaryArray>().unwrap();
         assert_eq!(blobs.value(0), &[0u8, 1, 2, 255]);
     }
@@ -1461,7 +1459,7 @@ mod tests {
     fn numeric_reaches_the_declared_scale() {
         let mut raw = bytes::BytesMut::new();
         crate::connector::postgresql::numeric::i128_to_numeric(123_456, 4, &mut raw);
-        let array = build(PgFieldType::Decimal128, &[Some(&raw)]);
+        let array = build(FieldType::Decimal128, &[Some(&raw)]);
         let decimals = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
         assert_eq!(decimals.value(0), 123_456);
         assert_eq!(decimals.precision(), 18);
@@ -1470,7 +1468,7 @@ mod tests {
 
     #[test]
     fn reserved_column_helpers_reject_the_wrong_builder() {
-        let mut builder = builder_for(PgFieldType::Int64, 1);
+        let mut builder = builder_for(FieldType::Int64, 1);
         assert!(builder.push_str("__op", "I").is_err());
         builder.push_i64("__lsn", 5).unwrap();
         let array = builder.finish();
@@ -1493,29 +1491,29 @@ mod tests {
     // it sent.
 
     /// Decode one canonical-text value into a one-row array.
-    fn from_text(ty: PgFieldType, text: &str) -> Result<ArrayRef, SaciError> {
+    fn from_text(ty: FieldType, text: &str) -> Result<ArrayRef, SaciError> {
         let mut builder = builder_for(ty, 1);
         builder.push_text("c", Some(text.as_bytes()))?;
         Ok(builder.finish())
     }
 
-    fn text_of(ty: PgFieldType, text: &str, server_oid: u32) -> Result<ArrayRef, SaciError> {
+    fn text_of(ty: FieldType, text: &str, server_oid: u32) -> Result<ArrayRef, SaciError> {
         let mut builder = ColumnBuilder::new(&spec(ty), 1, server_oid)?;
         builder.push_text("c", Some(text.as_bytes()))?;
         Ok(builder.finish())
     }
 
-    fn list_spec(item: PgFieldType) -> FieldSpec {
+    fn list_spec(item: FieldType) -> FieldSpec {
         FieldSpec {
             item: Some(item),
-            precision: matches!(item, PgFieldType::Decimal128).then_some(18),
-            scale: matches!(item, PgFieldType::Decimal128).then_some(4),
-            ..spec(PgFieldType::List)
+            precision: matches!(item, FieldType::Decimal128).then_some(18),
+            scale: matches!(item, FieldType::Decimal128).then_some(4),
+            ..spec(FieldType::List)
         }
     }
 
     /// Decode one array literal into its single row's `ListArray`.
-    fn list_from_text(item: PgFieldType, text: &str) -> Result<ListArray, SaciError> {
+    fn list_from_text(item: FieldType, text: &str) -> Result<ListArray, SaciError> {
         let field = list_spec(item);
         let mut builder = ColumnBuilder::new(&field, 1, Type::TEXT_ARRAY.oid())?;
         builder.push_text("c", Some(text.as_bytes()))?;
@@ -1530,7 +1528,7 @@ mod tests {
     #[test]
     fn bool_text_is_the_single_letter_form() {
         for (text, expected) in [("t", true), ("f", false)] {
-            let array = from_text(PgFieldType::Boolean, text).expect(text);
+            let array = from_text(FieldType::Boolean, text).expect(text);
             let values = array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
@@ -1539,13 +1537,13 @@ mod tests {
         }
         // The input syntax PostgreSQL accepts is not what it renders.
         for text in ["true", "false", "yes", "1", ""] {
-            from_text(PgFieldType::Boolean, text).expect_err(text);
+            from_text(FieldType::Boolean, text).expect_err(text);
         }
     }
 
     #[test]
     fn integer_text_round_trips_at_the_extremes() {
-        let array = from_text(PgFieldType::Int64, "-9223372036854775808").expect("i64::MIN");
+        let array = from_text(FieldType::Int64, "-9223372036854775808").expect("i64::MIN");
         assert_eq!(
             array
                 .as_any()
@@ -1554,7 +1552,7 @@ mod tests {
                 .value(0),
             i64::MIN
         );
-        from_text(PgFieldType::Int32, "12.5").expect_err("not an integer");
+        from_text(FieldType::Int32, "12.5").expect_err("not an integer");
     }
 
     fn f32_at(array: &ArrayRef) -> f32 {
@@ -1594,12 +1592,9 @@ mod tests {
             ("Infinity", f32::INFINITY),
             ("-Infinity", f32::NEG_INFINITY),
         ] {
-            let decoded = from_text(PgFieldType::Float32, text)
+            let decoded = from_text(FieldType::Float32, text)
                 .unwrap_or_else(|e| panic!("{text}: {}", e.message()));
-            let wire = build(
-                PgFieldType::Float32,
-                &[Some(&binary.to_bits().to_be_bytes())],
-            );
+            let wire = build(FieldType::Float32, &[Some(&binary.to_bits().to_be_bytes())]);
             assert_eq!(
                 f32_at(&decoded).to_bits(),
                 f32_at(&wire).to_bits(),
@@ -1610,7 +1605,7 @@ mod tests {
         // only NaN-ness -- and the text half must stay a value rather than
         // becoming the refusal `NaN` is for `decimal128`.
         assert!(
-            f32_at(&from_text(PgFieldType::Float32, "NaN").expect("NaN")).is_nan(),
+            f32_at(&from_text(FieldType::Float32, "NaN").expect("NaN")).is_nan(),
             "float4 'NaN'"
         );
     }
@@ -1629,12 +1624,9 @@ mod tests {
             ("Infinity", f64::INFINITY),
             ("-Infinity", f64::NEG_INFINITY),
         ] {
-            let decoded = from_text(PgFieldType::Float64, text)
+            let decoded = from_text(FieldType::Float64, text)
                 .unwrap_or_else(|e| panic!("{text}: {}", e.message()));
-            let wire = build(
-                PgFieldType::Float64,
-                &[Some(&binary.to_bits().to_be_bytes())],
-            );
+            let wire = build(FieldType::Float64, &[Some(&binary.to_bits().to_be_bytes())]);
             assert_eq!(
                 f64_at(&decoded).to_bits(),
                 f64_at(&wire).to_bits(),
@@ -1642,14 +1634,14 @@ mod tests {
             );
         }
         assert!(
-            f64_at(&from_text(PgFieldType::Float64, "NaN").expect("NaN")).is_nan(),
+            f64_at(&from_text(FieldType::Float64, "NaN").expect("NaN")).is_nan(),
             "float8 'NaN'"
         );
     }
 
     #[test]
     fn an_oid_column_widens_its_unsigned_text() {
-        let array = text_of(PgFieldType::Int64, "4294967295", OID_OID).expect("u32::MAX");
+        let array = text_of(FieldType::Int64, "4294967295", OID_OID).expect("u32::MAX");
         assert_eq!(
             array
                 .as_any()
@@ -1663,7 +1655,7 @@ mod tests {
     #[test]
     fn numeric_text_reaches_the_declared_scale_and_refuses_extra_digits() {
         // The fixture spec declares scale 4.
-        let array = from_text(PgFieldType::Decimal128, "123.456").expect("in scale");
+        let array = from_text(FieldType::Decimal128, "123.456").expect("in scale");
         assert_eq!(
             array
                 .as_any()
@@ -1672,10 +1664,10 @@ mod tests {
                 .value(0),
             1_234_560
         );
-        let err = from_text(PgFieldType::Decimal128, "1.23456").expect_err("five digits");
+        let err = from_text(FieldType::Decimal128, "1.23456").expect_err("five digits");
         assert!(err.message().contains("fractional"), "{}", err.message());
         for text in ["NaN", "Infinity", "-Infinity"] {
-            let err = from_text(PgFieldType::Decimal128, text).expect_err(text);
+            let err = from_text(FieldType::Decimal128, text).expect_err(text);
             assert!(err.message().contains("utf8"), "{}", err.message());
         }
     }
@@ -1691,7 +1683,7 @@ mod tests {
             ("-$92,233,720,368,547,758.08", -922_337_203_685_477_580_800),
             ("$0.00", 0),
         ] {
-            let array = text_of(PgFieldType::Decimal128, text, OID_MONEY).expect(text);
+            let array = text_of(FieldType::Decimal128, text, OID_MONEY).expect(text);
             let values = array
                 .as_any()
                 .downcast_ref::<Decimal128Array>()
@@ -1703,7 +1695,7 @@ mod tests {
 
         // At the natural scale the wire value passes through unscaled, and
         // both wires agree.
-        let mut money = spec(PgFieldType::Decimal128);
+        let mut money = spec(FieldType::Decimal128);
         money.precision = Some(19);
         money.scale = Some(2);
         let mut builder = ColumnBuilder::new(&money, 2, OID_MONEY).expect("builder");
@@ -1736,7 +1728,7 @@ mod tests {
 
     #[test]
     fn temporal_text_decodes_and_names_what_arrow_cannot_hold() {
-        let array = from_text(PgFieldType::Date32, "2024-01-02").expect("date");
+        let array = from_text(FieldType::Date32, "2024-01-02").expect("date");
         assert_eq!(
             array
                 .as_any()
@@ -1746,7 +1738,7 @@ mod tests {
             19_724
         );
         let array =
-            from_text(PgFieldType::TimestampMicros, "2024-01-02 03:04:05.123456").expect("ts");
+            from_text(FieldType::TimestampMicros, "2024-01-02 03:04:05.123456").expect("ts");
         assert_eq!(
             array
                 .as_any()
@@ -1757,7 +1749,7 @@ mod tests {
         );
         // `timezone = 'UTC'` makes every timestamptz render with `+00`.
         let array = from_text(
-            PgFieldType::TimestampMicrosUtc,
+            FieldType::TimestampMicrosUtc,
             "2024-01-02 01:04:05.123456+00",
         )
         .expect("tstz");
@@ -1772,10 +1764,10 @@ mod tests {
 
         // The BC era and the infinities have no Arrow representation.
         for (ty, text) in [
-            (PgFieldType::Date32, "0001-01-01 BC"),
-            (PgFieldType::TimestampMicros, "4713-01-01 00:00:00 BC"),
-            (PgFieldType::Date32, "infinity"),
-            (PgFieldType::TimestampMicros, "-infinity"),
+            (FieldType::Date32, "0001-01-01 BC"),
+            (FieldType::TimestampMicros, "4713-01-01 00:00:00 BC"),
+            (FieldType::Date32, "infinity"),
+            (FieldType::TimestampMicros, "-infinity"),
         ] {
             let err = from_text(ty, text).expect_err(text);
             assert!(err.message().contains("utf8"), "{text}: {}", err.message());
@@ -1811,8 +1803,8 @@ mod tests {
             ("1000-01-01 00:00:00", -31_556_908_800_000_000),
         ] {
             for (ty, offset) in [
-                (PgFieldType::TimestampMicros, ""),
-                (PgFieldType::TimestampMicrosUtc, "+00"),
+                (FieldType::TimestampMicros, ""),
+                (FieldType::TimestampMicrosUtc, "+00"),
             ] {
                 let text = format!("{rendered}{offset}");
                 let binary = build(ty, &[Some(&since_pg_epoch.to_be_bytes())]);
@@ -1824,26 +1816,22 @@ mod tests {
 
     #[test]
     fn date_text_agrees_with_the_binary_wire_at_the_widest_year_postgres_renders() {
-        let binary = build(
-            PgFieldType::Date32,
-            &[Some(&2_145_031_948i32.to_be_bytes())],
-        );
-        let decoded = from_text(PgFieldType::Date32, "5874897-12-31").expect("the last date");
+        let binary = build(FieldType::Date32, &[Some(&2_145_031_948i32.to_be_bytes())]);
+        let decoded = from_text(FieldType::Date32, "5874897-12-31").expect("the last date");
         assert_eq!(days_of(&decoded), days_of(&binary));
         assert_eq!(days_of(&decoded), 2_145_042_905);
     }
 
     #[test]
     fn timestamp_text_reaches_the_first_year_of_the_calendar() {
-        let array =
-            from_text(PgFieldType::TimestampMicros, "0001-01-01 00:00:00").expect("year one");
+        let array = from_text(FieldType::TimestampMicros, "0001-01-01 00:00:00").expect("year one");
         assert_eq!(micros_of(&array), -62_135_596_800_000_000);
     }
 
     #[test]
     fn timestamp_text_pads_a_fraction_shorter_than_six_digits() {
-        let array = from_text(PgFieldType::TimestampMicros, "2024-01-02 03:04:05.123")
-            .expect("milliseconds");
+        let array =
+            from_text(FieldType::TimestampMicros, "2024-01-02 03:04:05.123").expect("milliseconds");
         assert_eq!(micros_of(&array), 1_704_164_645_123_000);
     }
 
@@ -1853,14 +1841,14 @@ mod tests {
             "2024-01-02 01:04:05.123456+00",
             "2024-01-02 01:04:05.123456+00:00",
         ] {
-            let array = from_text(PgFieldType::TimestampMicrosUtc, text).expect(text);
+            let array = from_text(FieldType::TimestampMicrosUtc, text).expect(text);
             assert_eq!(micros_of(&array), 1_704_157_445_123_456, "{text}");
         }
     }
 
     #[test]
     fn timestamptz_text_refuses_an_offset_the_pinned_timezone_cannot_produce() {
-        let err = from_text(PgFieldType::TimestampMicrosUtc, "2024-01-02 01:04:05+02")
+        let err = from_text(FieldType::TimestampMicrosUtc, "2024-01-02 01:04:05+02")
             .expect_err("a non-UTC offset");
         assert!(err.message().contains("column 'c'"), "{}", err.message());
         assert!(err.message().contains("+02"), "{}", err.message());
@@ -1876,7 +1864,7 @@ mod tests {
             ("24:00:00", 86_400_000_000),
             ("01:02:03.5", 3_723_500_000),
         ] {
-            let array = from_text(PgFieldType::Time64Micros, text).expect(text);
+            let array = from_text(FieldType::Time64Micros, text).expect(text);
             assert_eq!(
                 array
                     .as_any()
@@ -1887,7 +1875,7 @@ mod tests {
                 "{text}"
             );
         }
-        from_text(PgFieldType::Time64Micros, "04:05").expect_err("no seconds field");
+        from_text(FieldType::Time64Micros, "04:05").expect_err("no seconds field");
     }
 
     #[test]
@@ -1911,7 +1899,7 @@ mod tests {
             ("1 mon", 1, 0, 0),
             ("-1 days", 0, -1, 0),
         ] {
-            let array = from_text(PgFieldType::IntervalMonthDayNano, text).expect(text);
+            let array = from_text(FieldType::IntervalMonthDayNano, text).expect(text);
             let values = array
                 .as_any()
                 .downcast_ref::<arrow_array::IntervalMonthDayNanoArray>()
@@ -1923,12 +1911,12 @@ mod tests {
                 "{text}"
             );
         }
-        from_text(PgFieldType::IntervalMonthDayNano, "3 fortnights").expect_err("unknown unit");
+        from_text(FieldType::IntervalMonthDayNano, "3 fortnights").expect_err("unknown unit");
     }
 
     #[test]
     fn an_interval_whose_time_component_overflows_nanoseconds_is_refused() {
-        let mut builder = builder_for(PgFieldType::IntervalMonthDayNano, 1);
+        let mut builder = builder_for(FieldType::IntervalMonthDayNano, 1);
         // 16 bytes: micros, days, months. i64::MAX microseconds is about
         // 292 471 years, far past what nanoseconds can hold.
         let mut raw = Vec::new();
@@ -1942,7 +1930,7 @@ mod tests {
 
     #[test]
     fn bytea_text_is_hex_behind_a_prefix_that_survives_an_empty_value() {
-        let array = from_text(PgFieldType::Binary, "\\x00ff").expect("hex");
+        let array = from_text(FieldType::Binary, "\\x00ff").expect("hex");
         assert_eq!(
             array
                 .as_any()
@@ -1952,7 +1940,7 @@ mod tests {
             &[0x00, 0xff]
         );
         // An empty bytea renders as the prefix alone, not as an empty string.
-        let array = from_text(PgFieldType::Binary, "\\x").expect("empty");
+        let array = from_text(FieldType::Binary, "\\x").expect("empty");
         assert!(
             array
                 .as_any()
@@ -1961,9 +1949,9 @@ mod tests {
                 .value(0)
                 .is_empty()
         );
-        from_text(PgFieldType::Binary, "00ff").expect_err("no prefix");
-        from_text(PgFieldType::Binary, "\\x0f0").expect_err("odd digits");
-        from_text(PgFieldType::Binary, "\\xzz").expect_err("not hex");
+        from_text(FieldType::Binary, "00ff").expect_err("no prefix");
+        from_text(FieldType::Binary, "\\x0f0").expect_err("odd digits");
+        from_text(FieldType::Binary, "\\xzz").expect_err("not hex");
     }
 
     #[test]
@@ -1976,7 +1964,7 @@ mod tests {
             "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
             "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11",
         ] {
-            let array = from_text(PgFieldType::Uuid, text).expect(text);
+            let array = from_text(FieldType::Uuid, text).expect(text);
             assert_eq!(
                 array
                     .as_any()
@@ -1987,14 +1975,14 @@ mod tests {
                 "{text}"
             );
         }
-        from_text(PgFieldType::Uuid, "a0eebc99").expect_err("too short");
+        from_text(FieldType::Uuid, "a0eebc99").expect_err("too short");
     }
 
     #[test]
     fn an_empty_string_is_a_value_not_a_null() {
         // A zero-length varbit, hstore or tsvector all render as an empty
         // string, which must not be mistaken for absence.
-        let array = from_text(PgFieldType::Utf8, "").expect("empty string");
+        let array = from_text(FieldType::Utf8, "").expect("empty string");
         let values = array.as_any().downcast_ref::<StringArray>().expect("utf8");
         assert!(!values.is_null(0));
         assert_eq!(values.value(0), "");
@@ -2003,7 +1991,7 @@ mod tests {
     #[test]
     fn an_array_literal_splits_on_its_own_quoting_rules() {
         let array = list_from_text(
-            PgFieldType::Utf8,
+            FieldType::Utf8,
             r#"{a,"b,c","with \"quote\"","back\\slash"}"#,
         )
         .expect("quoted elements");
@@ -2018,7 +2006,7 @@ mod tests {
 
     #[test]
     fn a_bare_null_element_is_the_sql_null_and_a_quoted_one_is_the_string() {
-        let array = list_from_text(PgFieldType::Utf8, r#"{"NULL",text,NULL}"#).expect("nulls");
+        let array = list_from_text(FieldType::Utf8, r#"{"NULL",text,NULL}"#).expect("nulls");
         let values = array.value(0);
         let values = values.as_any().downcast_ref::<StringArray>().expect("utf8");
         assert_eq!(values.value(0), "NULL");
@@ -2028,10 +2016,10 @@ mod tests {
 
     #[test]
     fn an_empty_array_and_an_empty_string_element_are_different() {
-        let empty = list_from_text(PgFieldType::Utf8, "{}").expect("empty array");
+        let empty = list_from_text(FieldType::Utf8, "{}").expect("empty array");
         assert_eq!(empty.value(0).len(), 0);
 
-        let one = list_from_text(PgFieldType::Utf8, r#"{""}"#).expect("one empty string");
+        let one = list_from_text(FieldType::Utf8, r#"{""}"#).expect("one empty string");
         let values = one.value(0);
         let values = values.as_any().downcast_ref::<StringArray>().expect("utf8");
         assert_eq!(values.len(), 1);
@@ -2041,7 +2029,7 @@ mod tests {
 
     #[test]
     fn a_typed_array_literal_decodes_its_elements() {
-        let array = list_from_text(PgFieldType::Int32, "{1,2,-2147483648}").expect("ints");
+        let array = list_from_text(FieldType::Int32, "{1,2,-2147483648}").expect("ints");
         let values = array.value(0);
         let values = values
             .as_any()
@@ -2053,7 +2041,7 @@ mod tests {
     #[test]
     fn a_multi_dimensional_array_literal_is_refused_by_name() {
         for text in ["{{1,2},{3,4}}", "[1:2][1:2]={{1,2},{3,4}}"] {
-            let err = list_from_text(PgFieldType::Int32, text).expect_err(text);
+            let err = list_from_text(FieldType::Int32, text).expect_err(text);
             assert!(
                 err.message().contains("one-dimensional"),
                 "{text}: {}",
@@ -2064,7 +2052,7 @@ mod tests {
 
     #[test]
     fn a_non_default_lower_bound_prefix_is_accepted() {
-        let array = list_from_text(PgFieldType::Utf8, "[2:3]={x,y}").expect("lower bound");
+        let array = list_from_text(FieldType::Utf8, "[2:3]={x,y}").expect("lower bound");
         let values = array.value(0);
         let values = values.as_any().downcast_ref::<StringArray>().expect("utf8");
         assert_eq!(values.len(), 2);
@@ -2078,7 +2066,7 @@ mod tests {
         raw.extend_from_slice(&2i32.to_be_bytes());
         raw.extend_from_slice(&0i32.to_be_bytes());
         raw.extend_from_slice(&23i32.to_be_bytes());
-        let field = list_spec(PgFieldType::Int32);
+        let field = list_spec(FieldType::Int32);
         let mut builder = ColumnBuilder::new(&field, 1, Type::INT4_ARRAY.oid()).expect("builder");
         let err = builder.push("c", Some(&raw)).expect_err("two dimensions");
         assert!(
@@ -2090,7 +2078,7 @@ mod tests {
 
     #[test]
     fn a_null_list_row_holds_no_elements() {
-        let field = list_spec(PgFieldType::Int32);
+        let field = list_spec(FieldType::Int32);
         let mut builder = ColumnBuilder::new(&field, 2, Type::INT4_ARRAY.oid()).expect("builder");
         builder.push_text("c", Some(b"{7}")).expect("one element");
         builder.push_text("c", None).expect("null row");
@@ -2116,7 +2104,7 @@ mod tests {
         raw.extend_from_slice(&1i32.to_be_bytes());
         let header = raw.len();
 
-        let field = list_spec(PgFieldType::Int32);
+        let field = list_spec(FieldType::Int32);
         let mut builder = ColumnBuilder::new(&field, 1, Type::INT4_ARRAY.oid()).expect("builder");
         raw.extend_from_slice(&(-2i32).to_be_bytes());
         let err = builder.push("c", Some(&raw)).expect_err("-2 is not NULL");

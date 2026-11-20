@@ -14,14 +14,14 @@ value = "yes"
 label = "Per-message"
 value = "One message per batch"
 [[extra.facts]]
-label = "Needs schema_fields"
+label = "Needs field lines"
 value = "Optional reading a file, required writing and on messages"
 [[extra.facts]]
 label = "In the server build"
 value = "yes"
 +++
 Columnar files that describe themselves. The footer carries every column, its type and the row count
-per row group, so a source reads its schema out of the file. Declaring `schema_fields` instead
+per row group, so a source reads its schema out of the file. Declaring `field` lines instead
 narrows the read to those columns.
 
 <div class="dgm animate-in">
@@ -42,9 +42,9 @@ narrows the read to those columns.
             <rect class="blk blk-ctl" x="258" y="26" width="144" height="80" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="26" width="144" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="38" width="144" height="8"/>
-            <text class="t-lbl" x="270" y="41">transformer</text>
+            <text class="t-lbl" x="270" y="41">codec</text>
             <text class="t-sm t-ctl" x="270" y="62">format="parquet"</text>
-            <text class="t-sm" x="270" y="80">no options</text>
+            <text class="t-sm" x="270" y="80">no config</text>
             <text class="t-sm" x="270" y="96">snappy, fixed</text>
             <path class="arw arw-data" d="M254 86 H150" marker-end="url(#pq-a)"/>
             <text class="t-sm t-mid" x="202" y="104">encode</text>
@@ -56,8 +56,8 @@ narrows the read to those columns.
             <rect class="hd hd-data" x="514" y="34" width="146" height="20" rx="8"/>
             <rect class="hd hd-data" x="514" y="46" width="146" height="8"/>
             <text class="t-lbl" x="526" y="49">rows</text>
-            <text class="t-sm" x="526" y="70">id    Int64</text>
-            <text class="t-sm" x="526" y="86">price Float64</text>
+            <text class="t-sm" x="526" y="70">id    int64</text>
+            <text class="t-sm" x="526" y="86">price float64</text>
         </g>
         <defs>
             <marker id="pq-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -75,10 +75,10 @@ narrows the read to those columns.
 ## 1. Declare it
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>no options, so the node is one line</em></div>
+<div class="code-cap"><span>KDL</span><em>no config, so the node is one line</em></div>
 
 ```kdl
-transformer "pq" format="parquet"
+codec "pq" format="parquet"
 ```
 
 </div>
@@ -89,16 +89,16 @@ transformer "pq" format="parquet"
 <div class="code-cap"><span>KDL</span><em>one declared codec serves both ends</em></div>
 
 ```kdl
-source "orders_in" type="FileSource" component="Order" transformer="pq" {
+source "orders_in" connector="file" component="Order" codec="pq" {
     config path="/data/orders.parquet"
 }
 
-sink "orders_out" type="FileSink" component="EnrichedOrder" transformer="pq" {
+sink "orders_out" connector="file" component="EnrichedOrder" codec="pq" {
     config path="/data/enriched.parquet" {
         truncate #true
 
-        schema_fields "id" type="Int64" nullable=#false
-        schema_fields "revenue" type="Float64" nullable=#false
+        field "id" type="int64" nullable=#false
+        field "revenue" type="float64" nullable=#false
     }
 }
 ```
@@ -112,7 +112,7 @@ the same way: see [Sources and sinks](@/service/connectors/_index.md).
 ## 3. Give it a schema
 
 A source may declare none, and then the file's own schema governs: the footer carries it. Declare
-`schema_fields` and it becomes a projection instead, pushed into the reader so only those column
+`field` lines and it becomes a projection instead, pushed into the reader so only those column
 chunks are read at all. A declared column the file does not carry is a configuration error naming
 both the column and the file's columns.
 
@@ -123,7 +123,7 @@ it the same way.
 
 ## Every option
 
-None. The `options` table is accepted and no key is read from it.
+None. Any key in the `config` table is refused: `parquet: unknown option '{key}'`.
 
 ## How it behaves
 
@@ -146,7 +146,7 @@ batch the window decoded.
 | Message | What to change |
 |---|---|
 | `parquet: declared column 'X' is not in the file (file columns: ...)` | name a column the file carries, or drop the declaration to read every column |
-| `FileSink config requires a 'schema_fields' list` | declare `schema_fields` on the sink writing this format |
+| `FileSink config requires at least one 'field' entry` | declare `field` lines on the sink writing this format |
 
 Some errors wait for a payload rather than the config check:
 `parquet: payload's declared column 'X' is missing (payload columns: ...)` means a producer wrote

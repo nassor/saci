@@ -33,7 +33,7 @@ in the service's own process. Nothing sandboxes the call, and no deadline bounds
             <rect class="hd hd-bnd" x="200" y="48" width="210" height="8"/>
             <text class="t-lbl t-bnd" x="212" y="51">settle</text>
             <text class="t-sm" x="212" y="74">plugin node, in process</text>
-            <text class="t-sm" x="212" y="94">library=&quot;libsettle.so&quot;</text>
+            <text class="t-sm" x="212" y="94">path=&quot;libsettle.so&quot;</text>
         </g>
         <g class="anim anim-3">
             <path class="arw arw-data" d="M410 74 H480" marker-end="url(#pl-d)"/>
@@ -64,7 +64,7 @@ in the service's own process. Nothing sandboxes the call, and no deadline bounds
     </div>
     <figcaption class="dgm-cap">
         A <code>link</code> treats a <code>plugin</code> node exactly like a <code>wasm</code>
-        node. The key is <code>library</code> rather than <code>module</code>, and everything
+        node. The key is <code>path</code> for both, and everything
         downstream of the node is written the same way.
     </figcaption>
 </div>
@@ -92,13 +92,13 @@ around a call.
 
 ## 2. Declare a plugin node
 
-A `plugin` node takes an id as its leading argument and a `library` naming the shared library.
-A relative `library` resolves against the directory `saci-service` runs in, and an absolute path
+A `plugin` node takes an id as its leading argument and a `path` naming the shared library.
+A relative `path` resolves against the directory `saci-service` runs in, and an absolute path
 is used as it stands.
 
 ```kdl,name=A plugin node in a service config
 workflow "counter" {
-    plugin "process_counter" library="${SACI_PLUGIN_LIB:-target/debug/libsaci_plugin_smoketest.so}" {
+    plugin "process_counter" path="${SACI_PLUGIN_LIB:-target/debug/libsaci_plugin_smoketest.so}" {
         // Optional. Hex digest of the library file's bytes, with an optional
         // `sha3-256:` prefix; a mismatch refuses the load.
         // sha3_256="sha3-256:abc123..."
@@ -176,7 +176,7 @@ The run reads `examples/configs/fixtures/counter_input.csv`, runs the plugin onc
 |---|---|---|---|
 | `id` | string | required | the node's leading argument, unique across the workflow |
 | `name` | string | the id | display name the dashboard shows instead of the id |
-| `library` | path | required | the shared library this node loads |
+| `path` | path | required | the shared library this node loads |
 | `sha3_256` | string | none | expected SHA3-256 of the library file's bytes, with an optional `sha3-256:` prefix |
 | `config` | block | empty | key-value strings the plugin reads for itself |
 | `window` | block | none | event-time geometry, covered in [Windowing](@/service/processors/windowing/_index.md) |
@@ -194,7 +194,7 @@ plugin decides which ones it reads.
 
 | Message | What to change |
 |---|---|
-| `plugin library '/srv/saci/target/debug/libsaci_plugin_smoketest.so' does not exist` | Build the library, or correct `library`. A relative path is read from the directory the service runs in, and the message shows it resolved to an absolute one. |
+| `plugin library '/srv/saci/target/debug/libsaci_plugin_smoketest.so' does not exist` | Build the library, or correct `path`. A relative path is read from the directory the service runs in, and the message shows it resolved to an absolute one. |
 | ``cannot load plugin library `target/debug/libsaci_plugin_smoketest.so`: ...`` | The file exists but the system refused to load it. A library built for another platform or another architecture fails here. |
 | ``plugin library `libsettle.so` does not export `saci_abi_version`: ...`` | The library is not a SACI plugin, or its two entry points are not exported under those exact names. |
 | ``plugin library `libsettle.so`: plugin ABI version 1.3 is incompatible with host ABI version 1.2`` | The major must match and the plugin's minor must be no greater than the host's. Rebuild the plugin against the ABI this binary carries, or run a binary that matches it. |

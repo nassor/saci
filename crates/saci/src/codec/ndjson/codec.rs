@@ -125,9 +125,9 @@ impl Codec for NdjsonCodec {
 
 /// Factory for [`NdjsonCodec`].
 ///
-/// `options`:
+/// `config`:
 /// - `infer_max` (integer, optional, default `1024`): records inspected when
-///   no schema is declared, written `options infer_max=4096`.
+///   no schema is declared, written `config infer_max=4096`.
 pub struct NdjsonCodecFactory;
 
 impl CodecFactory for NdjsonCodecFactory {

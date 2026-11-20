@@ -208,7 +208,7 @@
     Those two rules add up to at-least-once delivery. A claim, its holder and its
     expiry are one raft log entry, so every node reads the same claim state.
     <code>RedbSharedStore</code> grants each claim a 90&nbsp;s lease of its own. A
-    <code>saci-service</code> cluster config overrides that with
+    <code>saci-service</code> <code>cluster</code> block overrides that with
     <code>lease_ttl_ms</code>, which defaults to 30&nbsp;s.
     A running node proposes an expiry sweep every 30&nbsp;s, which returns an
     expired range to pending for another node to claim.
@@ -632,11 +632,11 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
 </p>
 
 <p>
-    Membership is explicit. <code>bootstrap #true</code> on one node calls
+    Membership is explicit. <code>cluster { bootstrap #true }</code> on one node calls
     <code>initialize</code> with the configured <code>peer</code> set and then writes
     <code>bootstrap.lock</code>. The file records that this cluster was deliberately
     created, and stops a later start from doing it twice. Every other node starts with
-    <code>bootstrap #false</code> and is caught up by the leader.
+    <code>cluster { bootstrap #false }</code> and is caught up by the leader.
 </p>
 
 <p>

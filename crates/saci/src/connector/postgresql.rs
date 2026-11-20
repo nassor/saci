@@ -4,12 +4,12 @@
 //! [`Sink`]: crate::io::Sink
 //!
 //! Both halves are declarative: the Arrow schema is written in the service
-//! configuration, not introspected, because [`SourceFactory::build`] is
+//! configuration, not introspected, because [`Connector::source`] is
 //! synchronous and cannot open a connection. The declared schema is checked
 //! against the live catalog on the first query and a column the server cannot
 //! fill is a loud error rather than a silent coercion.
 //!
-//! [`SourceFactory::build`]: crate::connector::factory::SourceFactory::build
+//! [`Connector::source`]: crate::connector::Connector::source
 //!
 //! # Source modes
 //!
@@ -109,7 +109,7 @@
 //! finishes with one `INSERT … SELECT`, inside the same single transaction.
 //! An `append` with no such column keeps copying straight into the target.
 //!
-//! Narrowing is range-checked, never truncated. `pg_type="int2"` on a declared
+//! Narrowing is range-checked, never truncated. `native_type="int2"` on a declared
 //! `int64` column checks every value and names the column, the row and the
 //! value that does not fit; `float64` into `float4` is a load-time refusal,
 //! because that is a precision loss rather than a range check.
@@ -126,32 +126,32 @@
 //! # Configuration
 //!
 //! ```kdl
-//! source "pg_orders" type="PostgresSource" component="OrderChange" {
+//! source "pg_orders" connector="postgresql" component="OrderChange" {
 //!     config name="pg_orders" batch_rows=8192 {
 //!         connection dsn="${SACI_PG_DSN}" application_name="saci-pg_orders" \
 //!             connect_timeout_ms=5000 statement_timeout_ms=30000 sslmode="require"
 //!         mode kind="cdc_logical" slot="saci_orders_slot" \
 //!             publication="saci_orders_pub" table="public.orders"
-//!         schema_fields "__op" type="utf8" nullable=#false
-//!         schema_fields "id" type="int64" nullable=#false
-//!         schema_fields "payload" type="utf8" pg_type="jsonb"
-//!         schema_fields "tags" type="list" item="utf8"
+//!         field "__op" type="utf8" nullable=#false
+//!         field "id" type="int64" nullable=#false
+//!         field "payload" type="utf8" native_type="jsonb"
+//!         field "tags" type="list" item="utf8"
 //!     }
 //! }
 //!
-//! sink "pg_enriched" type="PostgresSink" component="OrderChange" {
+//! sink "pg_enriched" connector="postgresql" component="OrderChange" {
 //!     config name="pg_enriched" table="public.enriched_orders" \
 //!         write_mode="upsert" conflict_columns="id" {
 //!         connection dsn="${SACI_PG_DSN}" sslmode="require"
-//!         schema_fields "id" type="int64" nullable=#false
-//!         schema_fields "total" type="decimal128" precision=18 scale=4 \
-//!             pg_type="numeric(18,4)"
+//!         field "id" type="int64" nullable=#false
+//!         field "total" type="decimal128" precision=18 scale=4 \
+//!             native_type="numeric(18,4)"
 //!     }
 //! }
 //! ```
 //!
 //! The `source` node's declared id is what the service logs; the `name` inside
-//! its `config` is what the connector sees, because the factory is handed only
+//! its `config` is what the connector sees, because the connector is handed only
 //! the `config` sub-table. Keep them equal for readable output.
 //!
 //! `${VAR}` and `${VAR:-default}` are substituted by the service before the
@@ -183,12 +183,11 @@ mod offsets;
 mod types;
 mod values;
 
-pub use factory::{PostgresSinkFactory, PostgresSourceFactory};
+pub use factory::PostgresConnector;
 pub use sink::PostgresSink;
 pub use source::PostgresSource;
 
 pub use config::{
-    ConnectionConfig, CursorMode, FieldSpec, LogicalMode, NotifyConfig, PgFieldType,
-    PostgresSinkConfig, PostgresSourceConfig, ReconnectConfig, Retention, SourceMode,
-    SslModeConfig, WriteMode,
+    ConnectionConfig, CursorMode, LogicalMode, NotifyConfig, PostgresSinkConfig,
+    PostgresSourceConfig, ReconnectConfig, Retention, SourceMode, SslModeConfig, WriteMode,
 };

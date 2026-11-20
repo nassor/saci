@@ -154,10 +154,10 @@ mod live {
             channel => Channel,
             file => File,
             http => Http,
-            http_push => HttpPush,
+            http_listen => HttpPush,
             tcp => Tcp,
             udp => Udp,
-            saci => Saci,
+            peer => Saci,
             kafka => Kafka,
             nats => Nats,
             postgresql => Postgresql,
@@ -166,7 +166,7 @@ mod live {
             s3 => S3,
             turso => Turso,
             redb => Redb,
-            opentelemetry => OpenTelemetry,
+            otlp_metrics => OpenTelemetry,
         ],
         processors: [native => Native, wasm => Wasm, plugin => Plugin],
         formats: [
@@ -266,26 +266,24 @@ fn every_slice_has_a_test() {
     );
 }
 
-/// The registered factories `ServiceBuilder::new` wires up must match
+/// The registered connectors `ServiceBuilder::new` wires up must match
 /// this file's own [`CONNECTORS`]/[`FORMATS`] dimension lists exactly.
 ///
-/// The two connector dimensions are not the same list: `HttpPushSource`
-/// registers a source and no sink, so the source names are [`CONNECTORS`]
-/// through `Connector::source_type` and the sink names are the same array
-/// through `Connector::sink_type`, which answers `None` for that one entry.
+/// Every [`CONNECTORS`] entry names one registered connector through
+/// `Connector::name`; `http-listen` serves a source and no sink, which
+/// `Connector::has_sink` records and the sink-enumerating lists filter on.
 ///
 /// Without this test, registering one more connector or codec
 /// format compiles and runs clean: the matrix simply never builds a case for
 /// it. This test builds the real registry the way [`run_case`] does and
-/// compares its shape against the matrix's own lists, so a factory
+/// compares its shape against the matrix's own lists, so a connector
 /// registered outside them fails here instead of silently losing coverage.
 ///
 /// [`Registry`] and [`CodecRegistry`] both enumerate what they hold:
-/// `Registry::source_names`, `Registry::sink_names` and
-/// [`CodecRegistry::names`] each answer with a sorted list of
-/// registered keys, so all three dimensions are compared as name sets. A count
-/// would pass a connector renamed or swapped for another, which is exactly the
-/// coverage this test exists to pin.
+/// `Registry::names` and [`CodecRegistry::names`] each answer with a sorted
+/// list of registered keys, so both dimensions are compared as name sets. A
+/// count would pass a connector renamed or swapped for another, which is
+/// exactly the coverage this test exists to pin.
 ///
 /// Docker-free and not `#[ignore]`d: it inspects the registry alone, with no
 /// config, container, or running service involved.
@@ -298,37 +296,16 @@ fn dimensions_cover_the_registry() {
     let builder = ServiceBuilder::new();
     let registry = builder.registry();
 
-    let source_names = registry.source_names();
-    let sink_names = registry.sink_names();
-    let mut expected_sources: Vec<&str> = CONNECTORS
-        .iter()
-        .copied()
-        .map(Connector::source_type)
-        .collect();
-    expected_sources.sort_unstable();
-    let mut expected_sinks: Vec<&str> = CONNECTORS
-        .iter()
-        .copied()
-        .filter_map(Connector::sink_type)
-        .collect();
-    expected_sinks.sort_unstable();
+    let connector_names = registry.names();
+    let mut expected_connectors: Vec<&str> =
+        CONNECTORS.iter().copied().map(Connector::name).collect();
+    expected_connectors.sort_unstable();
     assert_eq!(
-        source_names, expected_sources,
-        "ServiceBuilder::new registered source factories {source_names:?} but \
-         common/matrix.rs's CONNECTORS names {expected_sources:?}; every entry counts here, \
-         the sink-less http-push included, which is why this expectation and the sink one \
-         below are not the same list; a source connector was registered outside that array \
-         (or one listed there no longer registers under that name); update CONNECTORS and \
-         Connector::source_type to match",
-    );
-    assert_eq!(
-        sink_names, expected_sinks,
-        "ServiceBuilder::new registered sink factories {sink_names:?} but \
-         common/matrix.rs's CONNECTORS names {expected_sinks:?} with a sink half; the sink \
-         dimension is CONNECTORS through Connector::sink_type, because HttpPushSource \
-         registers a source and no sink, so a sink connector was registered outside that \
-         array (or sink_type now answers for the wrong entries); update CONNECTORS or \
-         sink_type to match",
+        connector_names, expected_connectors,
+        "ServiceBuilder::new registered connectors {connector_names:?} but \
+         common/matrix.rs's CONNECTORS names {expected_connectors:?}; a connector was \
+         registered outside that array (or one listed there no longer registers under that \
+         name); update CONNECTORS and Connector::name to match",
     );
 
     let mut expected_formats: Vec<&str> = FORMATS
@@ -406,7 +383,7 @@ fn message_shape_agrees_with_the_message_surface() {
             .get(format)
             .expect("a format the registry lists resolves to its factory")
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .unwrap_or_else(|e| panic!("codec '{format}' builds from empty options: {e}"));
+            .unwrap_or_else(|e| panic!("codec '{format}' builds from empty config: {e}"));
 
         let decodes = match codec.open_message_decoder(batch.schema()) {
             Ok(_) => true,

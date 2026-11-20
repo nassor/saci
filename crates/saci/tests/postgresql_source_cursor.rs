@@ -51,8 +51,8 @@ fn ids(batches: &[RecordBatch]) -> Vec<i64> {
 }
 
 const PRICES_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"label\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"label\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -212,8 +212,8 @@ async fn a_tiebreak_column_keeps_a_non_unique_cursor_lossless() {
         .expect("fixture");
 
     let fields = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"updated_at\" type=\"timestamp_micros_utc\" nullable=#false
+field \"id\" type=\"int64\" nullable=#false
+field \"updated_at\" type=\"timestamp_micros_utc\" nullable=#false
 ";
 
     let with_tiebreak = source(
@@ -317,8 +317,8 @@ async fn cdc_trigger_with_delete_acked_prunes_the_outbox() {
         "name \"outbox\"\nbatch_rows 10\n\n\
          mode kind=\"cdc_trigger\" table=\"outbox\" cursor_column=\"seq\" \
          retention=\"delete_acked\"\n\n\
-         schema_fields \"seq\" type=\"int64\" nullable=#false\n\
-         schema_fields \"payload\" type=\"utf8\"\n",
+         field \"seq\" type=\"int64\" nullable=#false\n\
+         field \"payload\" type=\"utf8\"\n",
     );
 
     let batches = drain(&mut source).await;
@@ -392,8 +392,8 @@ async fn a_declared_type_the_column_cannot_fill_is_a_loud_error() {
         &pg.dsn(),
         "name \"prices\"\n\n\
          mode kind=\"polling\" table=\"prices\" cursor_column=\"id\"\n\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"label\" type=\"int32\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"label\" type=\"int32\"\n",
     );
     let err = source
         .next_batch()
@@ -458,11 +458,11 @@ async fn a_text_wire_column_carries_its_output_functions_rendering() {
         .expect("fixture");
 
     let fields = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"ip\" type=\"utf8\" pg_type=\"inet\" nullable=#true
-schema_fields \"flag\" type=\"utf8\" pg_type=\"bool\" nullable=#true
-schema_fields \"pad\" type=\"utf8\" pg_type=\"bpchar\" nullable=#true
-schema_fields \"ips\" type=\"list\" item=\"utf8\" pg_type=\"inet[]\" nullable=#true
+field \"id\" type=\"int64\" nullable=#false
+field \"ip\" type=\"utf8\" native_type=\"inet\" nullable=#true
+field \"flag\" type=\"utf8\" native_type=\"bool\" nullable=#true
+field \"pad\" type=\"utf8\" native_type=\"bpchar\" nullable=#true
+field \"ips\" type=\"list\" item=\"utf8\" native_type=\"inet[]\" nullable=#true
 ";
     let mut source = source(
         &pg.dsn(),

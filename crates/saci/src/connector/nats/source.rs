@@ -146,7 +146,7 @@ enum Started {
 /// NATS drops a message published with no subscriber, so without that prime
 /// the first message on a second fan-in subject is lost.
 pub struct NatsSource {
-    /// Effective fetch size for the next collected window. `batch_size` from
+    /// Effective fetch size for the next collected window. `batch_rows` from
     /// config seeds this, but a host that sends
     /// [`Source::request_batch_rows`] overwrites it before the first poll, not
     /// after some initial one: under the service's flow control the
@@ -479,7 +479,7 @@ impl NatsSource {
 /// whatever a cancelled call left in it.
 ///
 /// A live source blocks on its first message with no deadline, then keeps taking
-/// messages until `batch_size` or one `poll_timeout_ms` window; a message a
+/// messages until `batch_rows` or one `poll_timeout_ms` window; a message a
 /// cancelled call already took satisfies that blocking phase. A `stop_at_end`
 /// source bounds every receive by that window: core NATS has no end-of-stream
 /// signal, so "the window elapsed with nothing on it" is the only EOF a
@@ -497,7 +497,7 @@ async fn collect_core(
     }
 
     let deadline = Instant::now() + Duration::from_millis(cfg.poll_timeout_ms);
-    while buffer.len() < cfg.batch_size {
+    while buffer.len() < cfg.batch_rows {
         match timeout_at(deadline, subscribers.next()).await {
             Ok(Some(message)) => buffer.push(received_core(message)),
             // Every subscription ended, which the held client makes impossible
@@ -605,11 +605,11 @@ async fn collect_jetstream(
     loop {
         {
             // What this window still has room for, so a window resumed after a
-            // cancel asks for the rest of `batch_size` rather than for another
+            // cancel asks for the rest of `batch_rows` rather than for another
             // whole one. Never zero: a request for no messages is not a
             // request, and the `stop_at_end` path above already returned a
             // full carried window.
-            let room = cfg.batch_size.saturating_sub(buffer.len()).max(1);
+            let room = cfg.batch_rows.saturating_sub(buffer.len()).max(1);
             let batch = if cfg.stop_at_end {
                 let mut builder = consumer.fetch().max_messages(room).expires(window.expires);
                 if window.max_bytes > 0 {
@@ -753,14 +753,14 @@ impl Source for NatsSource {
         self.last_pending
     }
 
-    /// A plain field write: sets `cfg.batch_size`, which `collect` reads
+    /// A plain field write: sets `cfg.batch_rows`, which `collect` reads
     /// fresh off `self.cfg` on every call, so it takes effect on the very
     /// next `next_batch`. No reconnect, no re-subscription. The service
-    /// sends the hint ahead of the first poll, so `batch_size` in config is
+    /// sends the hint ahead of the first poll, so `batch_rows` in config is
     /// not a starting size; it is authoritative only where the host sends no
     /// hint, meaning flow control disabled for this source or a source
     /// feeding a windowed node.
     fn request_batch_rows(&mut self, rows: usize) {
-        self.cfg.batch_size = rows.max(1);
+        self.cfg.batch_rows = rows.max(1);
     }
 }

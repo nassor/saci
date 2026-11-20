@@ -7,7 +7,7 @@
 //! stream, which consumes its connection and so opens a second one beside the
 //! catalog and offset connection.
 //!
-//! [`Connector`] is built synchronously, because `SourceFactory::build` is
+//! [`Connector`] is built synchronously, because the `Connector` trait's `source` is
 //! synchronous: it parses the DSN, reads the password file and the CA bundle,
 //! and builds the TLS options, but opens no socket. [`Connector::connect`] is
 //! the async half, called on the first `next_batch` or `write_batch` and again

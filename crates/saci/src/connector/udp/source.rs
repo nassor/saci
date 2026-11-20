@@ -2,7 +2,7 @@
 //!
 //! Binds a datagram socket and yields one [`RecordBatch`] per received
 //! datagram. It never reaches EOF: `next_batch` blocks until the next datagram
-//! arrives, so only the stream runner (`run_mode kind="stream"`) can drive it.
+//! arrives, so only the stream runner (`run "stream"`) can drive it.
 //! The batch loop's
 //! [`read_all`](crate::io::read_all) would
 //! block forever, and the service config validator rejects that combination.
@@ -11,7 +11,7 @@
 //!
 //! One datagram carries exactly one payload, with no length prefix: the
 //! datagram boundary is the frame. What the payload bytes mean is the
-//! [`Codec`] the host resolved from the source's `transformer` key.
+//! [`Codec`] the host resolved from the source's `codec` key.
 //!
 //! A zero-length datagram is a liveness probe. The source answers it with a
 //! zero-length datagram to its sender and never decodes it, which is what lets

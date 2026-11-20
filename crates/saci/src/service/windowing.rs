@@ -45,7 +45,7 @@
 //! - The runner never sends it
 //!   [`request_batch_rows`](crate::io::Source::request_batch_rows). That
 //!   hint steers the connector's own fetch size, and `KafkaSource` and
-//!   `NatsSource` overwrite `batch_size` with it while `PostgresSource`
+//!   `NatsSource` overwrite `batch_rows` with it while `PostgresSource`
 //!   overwrites `batch_rows`, so honouring it would move the arrival
 //!   boundaries themselves. That is the same measurement one layer earlier.
 //!   Such a connector keeps its declared fetch size, a number the operator
@@ -73,7 +73,7 @@
 //! [`FlowController`](super::flow::FlowController) in that mode: no samples,
 //! no epoch experiment, and no `saci_flow_*` series, including
 //! `saci_flow_backoff_total`. Its arrival size is whatever the connector's
-//! declared `batch_size`/`batch_rows` produces, and
+//! declared `batch_rows` produces, and
 //! the stream runner names each such source in one
 //! startup line. A controller kept anyway would publish a target nothing
 //! applies, which is the one question those series exist to answer.

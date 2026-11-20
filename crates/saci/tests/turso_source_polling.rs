@@ -13,8 +13,8 @@ fn source(path: &str, batch_rows: usize) -> TursoSource {
          batch_rows {batch_rows}\n\
          connection path=\"{}\"\n\
          mode kind=\"polling\" table=\"orders\" cursor_column=\"id\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSourceConfig = common::config_from_kdl(&body);

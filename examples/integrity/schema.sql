@@ -5,7 +5,7 @@
 -- directory. `wal_level = logical` comes from the compose `command`.
 --
 -- Columns match the `AuditRow` the publisher inserts and the `audit`
--- workflow's `schema_fields`, field for field, in order: audit_id, order_id,
+-- workflow's `field` lines, field for field, in order: audit_id, order_id,
 -- status, revision, changed_ms. One row is one revision of one order, so a
 -- single order_id appears several times with distinct audit_ids.
 
@@ -17,7 +17,7 @@ CREATE TABLE public.order_audit (
     changed_ms BIGINT NOT NULL
 );
 
--- `PostgresSource` with mode kind="cdc_logical" creates its replication slot
+-- The `postgresql` source with mode kind="cdc_logical" creates its replication slot
 -- (`slot_autocreate`) but never a publication, so this one has to exist before
 -- the audit service opens the slot. The name is what
 -- examples/integrity/integrity_audit.kdl's `publication` key must say.
@@ -25,7 +25,7 @@ CREATE PUBLICATION saci_integrity_pub FOR TABLE public.order_audit;
 
 -- REQUIRED, not a nicety. Without it an UPDATE's old tuple and a DELETE carry
 -- only replica-identity columns, so every non-key field would have to be
--- declared nullable in the audit workflow's `schema_fields`. The example
+-- declared nullable in the audit workflow's `field` lines. The example
 -- updates rows as well as inserting them, which is what makes op = "U" reach
 -- the sink.
 ALTER TABLE public.order_audit REPLICA IDENTITY FULL;

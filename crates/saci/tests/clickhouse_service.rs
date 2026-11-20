@@ -102,10 +102,10 @@ mode "standalone"
 
 node id=1 name="saci-clickhouse-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "clickhouse-service-test" {{
-    source "orders_in" type="ClickhouseSource" component="{COMPONENT}" {{
+    source "orders_in" connector="clickhouse" component="{COMPONENT}" {{
         config {{
             name "orders_in"
             batch_rows 40
@@ -114,15 +114,15 @@ workflow "clickhouse-service-test" {{
 
             mode kind="polling" table="orders_in" cursor_column="id"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="ClickhouseSink" component="{COMPONENT}" {{
+    sink "orders_out" connector="clickhouse" component="{COMPONENT}" {{
         config {{
             name "orders_out"
             table "orders_out"
@@ -130,9 +130,9 @@ workflow "clickhouse-service-test" {{
 
             connection url="{url}" database="default"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -140,7 +140,7 @@ workflow "clickhouse-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

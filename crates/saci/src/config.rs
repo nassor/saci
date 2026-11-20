@@ -10,7 +10,7 @@
 //! use saci::config::from_kdl_str;
 //!
 //! let value = from_kdl_str(r#"
-//!     source "csv_orders" type="FileSource" {
+//!     source "csv_orders" connector="file" {
 //!         config path="orders.csv" format="csv"
 //!     }
 //! "#).unwrap();
@@ -598,10 +598,10 @@ mod tests {
 
     #[test]
     fn a_leading_argument_on_a_table_node_becomes_the_id_key() {
-        let value = parse("source \"csv_orders\" type=\"FileSource\"\n");
+        let value = parse("source \"csv_orders\" connector=\"file\"\n");
         assert_eq!(
             value["source"],
-            serde_json::json!({ "id": "csv_orders", "type": "FileSource" })
+            serde_json::json!({ "id": "csv_orders", "connector": "file" })
         );
     }
 
@@ -609,7 +609,7 @@ mod tests {
     fn children_nest_as_tables_under_their_node_name() {
         let value = parse(
             r#"
-source "csv_orders" type="FileSource" {
+source "csv_orders" connector="file" {
     config path="orders.csv" format="csv" {
         format_options has_headers=#true
     }
@@ -620,7 +620,7 @@ source "csv_orders" type="FileSource" {
             value["source"],
             serde_json::json!({
                 "id": "csv_orders",
-                "type": "FileSource",
+                "connector": "file",
                 "config": {
                     "path": "orders.csv",
                     "format": "csv",
@@ -634,15 +634,15 @@ source "csv_orders" type="FileSource" {
     fn same_named_siblings_collapse_into_an_array_in_document_order() {
         let value = parse(
             r#"
-schema_fields "id" type="Int64" nullable=#false
-schema_fields "amount" type="Float64"
+field "id" type="int64" nullable=#false
+field "amount" type="float64"
 "#,
         );
         assert_eq!(
-            value["schema_fields"],
+            value["field"],
             serde_json::json!([
-                { "id": "id", "type": "Int64", "nullable": false },
-                { "id": "amount", "type": "Float64" },
+                { "id": "id", "type": "int64", "nullable": false },
+                { "id": "amount", "type": "float64" },
             ])
         );
     }
@@ -699,7 +699,7 @@ schema_fields "amount" type="Float64"
     #[test]
     fn two_leading_arguments_on_a_table_node_are_an_error() {
         assert_eq!(
-            error("source \"a\" \"b\" type=\"FileSource\"\n"),
+            error("source \"a\" \"b\" connector=\"file\"\n"),
             "parsing KDL: 1:1: node \"source\": a node with properties or children takes at most \
              one leading argument, found 2"
         );
@@ -759,7 +759,7 @@ schema_fields "amount" type="Float64"
 
     #[test]
     fn a_slashdash_elides_the_node_it_precedes() {
-        let value = parse("/-source \"gone\" type=\"FileSource\"\nsink \"kept\"\n");
+        let value = parse("/-source \"gone\" connector=\"file\"\nsink \"kept\"\n");
         assert!(value.get("source").is_none());
         assert_eq!(value["sink"], "kept");
     }

@@ -1,4 +1,4 @@
-//! The PostgreSQL source and sink factories.
+//! The PostgreSQL [`Connector`].
 //!
 //! Both deserialise the whole `config` sub-table with serde rather than reading
 //! [`ConfigValue`] keys by hand: the connector's configuration is dozens of fields
@@ -12,7 +12,7 @@
 
 use serde::Deserialize;
 
-use crate::connector::{ConfigValue, ConnectorContext, SinkFactory, SourceFactory};
+use crate::connector::{ConfigValue, Connector, ConnectorContext, Rebuild, Role};
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
 
@@ -20,19 +20,26 @@ use crate::connector::postgresql::{
     PostgresSink, PostgresSinkConfig, PostgresSource, PostgresSourceConfig,
 };
 
-/// Factory for [`PostgresSource`].
+/// Connector for PostgreSQL, named `postgresql`: builds [`PostgresSource`] and
+/// [`PostgresSink`].
 ///
-/// The `config` table is [`PostgresSourceConfig`]: a `name`, a `connection`
-/// table, a `mode` table tagged by `kind` (`polling`, `cdc_trigger` or
-/// `cdc_logical`), and a `schema_fields` array declaring the Arrow schema.
-pub struct PostgresSourceFactory;
+/// A `source` node's `config` table is [`PostgresSourceConfig`]: a `name`, a
+/// `connection` table, a `mode` table tagged by `kind` (`polling`,
+/// `cdc_trigger` or `cdc_logical`), and `field` entries declaring the Arrow
+/// schema.
+///
+/// A `sink` node's `config` table is [`PostgresSinkConfig`]: a `name`, a
+/// `connection` table, the target `table`, `field` entries, and the
+/// `write_mode` (`append`, `upsert` or `ignore_conflicts`) with its conflict
+/// columns.
+pub struct PostgresConnector;
 
-impl SourceFactory for PostgresSourceFactory {
-    fn type_name(&self) -> &'static str {
-        "PostgresSource"
+impl Connector for PostgresConnector {
+    fn name(&self) -> &'static str {
+        "postgresql"
     }
 
-    fn build(
+    fn source(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -44,27 +51,7 @@ impl SourceFactory for PostgresSourceFactory {
         Ok(Box::new(PostgresSource::new(cfg)?))
     }
 
-    /// The cursor lives in the offset table and a logical slot advances only
-    /// on ack, both server side, so a fresh reader resumes where the last
-    /// committed read left off.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
-    }
-}
-
-/// Factory for [`PostgresSink`].
-///
-/// The `config` table is [`PostgresSinkConfig`]: a `name`, a `connection`
-/// table, the target `table`, a `schema_fields` array, and the `write_mode`
-/// (`append`, `upsert` or `ignore_conflicts`) with its conflict columns.
-pub struct PostgresSinkFactory;
-
-impl SinkFactory for PostgresSinkFactory {
-    fn type_name(&self) -> &'static str {
-        "PostgresSink"
-    }
-
-    fn build(
+    fn sink(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -74,22 +61,35 @@ impl SinkFactory for PostgresSinkFactory {
         Ok(Box::new(PostgresSink::new(cfg)?))
     }
 
-    /// Rows accepted but not yet flushed stay buffered across an outage and
-    /// `connection.reconnect` re-establishes the session itself, so a second
-    /// build would discard rows this one can still write.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Err(
-            "rows accepted but not yet flushed stay buffered across an outage and \
-             connection.reconnect re-establishes the session itself; a second build \
-             would discard them",
-        )
+    /// A source keeps its cursor in the offset table and a logical slot
+    /// advances only on ack, both server side, so a fresh reader resumes where
+    /// the last committed read left off. A sink keeps rows it has accepted but
+    /// not yet flushed buffered across an outage and `connection.reconnect`
+    /// re-establishes the session itself, so a second build would discard rows
+    /// the first can still write.
+    fn rebuild(&self, role: Role, _config: &ConfigValue) -> Rebuild {
+        match role {
+            Role::Source => Rebuild::Yes,
+            Role::Sink => Rebuild::No(
+                "rows accepted but not yet flushed stay buffered across an outage and \
+                 connection.reconnect re-establishes the session itself; a second build \
+                 would discard them",
+            ),
+        }
+    }
+
+    fn detail_keys(&self, role: Role) -> &'static [&'static str] {
+        match role {
+            Role::Source => &["mode.kind", "mode.table"],
+            Role::Sink => &["table", "write_mode"],
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::from_kdl_str;
+    use crate::config::from_kdl_str;
 
     const SOURCE: &str = r#"
 name "pg_orders"
@@ -99,7 +99,7 @@ connection dsn="postgres://user:pw@db:5432/app" sslmode="disable"
 
 mode kind="polling" table="public.orders" cursor_column="id"
 
-schema_fields "id" type="int64" nullable=#false
+field "id" type="int64" nullable=#false
 "#;
 
     const SINK: &str = r#"
@@ -110,34 +110,47 @@ conflict_columns "id"
 
 connection dsn="postgres://user:pw@db:5432/app" sslmode="disable"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "total" type="float64"
+field "id" type="int64" nullable=#false
+field "total" type="float64"
 "#;
 
     fn value(text: &str) -> ConfigValue {
         from_kdl_str(text).expect("parse")
     }
 
-    // PostgreSQL carries its own wire format, so neither factory reads a
+    // PostgreSQL carries its own wire format, so neither role reads a
     // codec and every build below is handed none.
 
     #[test]
-    fn the_source_factory_builds_from_its_config_table() {
-        let source = PostgresSourceFactory
-            .build(&value(SOURCE), &ConnectorContext::new(None))
+    fn the_connector_is_named_postgresql_and_serves_both_roles() {
+        assert_eq!(PostgresConnector.name(), "postgresql");
+        assert_eq!(PostgresConnector.roles(), &[Role::Source, Role::Sink]);
+        assert!(!PostgresConnector.live(&value(SOURCE)));
+        assert_eq!(
+            PostgresConnector.detail_keys(Role::Source),
+            &["mode.kind", "mode.table"]
+        );
+        assert_eq!(
+            PostgresConnector.detail_keys(Role::Sink),
+            &["table", "write_mode"]
+        );
+    }
+
+    #[test]
+    fn the_source_builds_from_its_config_table() {
+        let source = PostgresConnector
+            .source(&value(SOURCE), &ConnectorContext::new(None))
             .expect("source built");
-        assert_eq!(PostgresSourceFactory.type_name(), "PostgresSource");
         let schema = source.schema();
         assert_eq!(schema.fields().len(), 1);
         assert_eq!(schema.field(0).name(), "id");
     }
 
     #[test]
-    fn the_sink_factory_builds_from_its_config_table() {
-        let sink = PostgresSinkFactory
-            .build(&value(SINK), &ConnectorContext::new(None))
+    fn the_sink_builds_from_its_config_table() {
+        let sink = PostgresConnector
+            .sink(&value(SINK), &ConnectorContext::new(None))
             .expect("sink built");
-        assert_eq!(PostgresSinkFactory.type_name(), "PostgresSink");
         let schema = sink.schema();
         assert_eq!(schema.fields().len(), 2);
         assert_eq!(schema.field(1).name(), "total");
@@ -146,7 +159,7 @@ schema_fields "total" type="float64"
     #[test]
     fn a_misspelled_key_is_a_configuration_error_naming_it() {
         // `Box<dyn Source>` is not `Debug`, so the rejection is destructured.
-        let Err(err) = PostgresSourceFactory.build(
+        let Err(err) = PostgresConnector.source(
             &value(&SOURCE.replace("batch_rows", "batch_row")),
             &ConnectorContext::new(None),
         ) else {
@@ -158,7 +171,7 @@ schema_fields "total" type="float64"
 
     #[test]
     fn a_failed_validation_reaches_the_caller() {
-        let Err(err) = PostgresSinkFactory.build(
+        let Err(err) = PostgresConnector.sink(
             &value(&SINK.replace("conflict_columns \"id\"\n", "")),
             &ConnectorContext::new(None),
         ) else {
@@ -170,5 +183,17 @@ schema_fields "total" type="float64"
             "{}",
             err.message()
         );
+    }
+
+    #[test]
+    fn the_source_may_be_rebuilt_and_the_sink_may_not() {
+        assert_eq!(
+            PostgresConnector.rebuild(Role::Source, &value(SOURCE)),
+            Rebuild::Yes
+        );
+        let Rebuild::No(reason) = PostgresConnector.rebuild(Role::Sink, &value(SINK)) else {
+            panic!("a sink holds buffered rows");
+        };
+        assert!(reason.contains("buffered"), "{reason}");
     }
 }

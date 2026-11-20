@@ -10,16 +10,16 @@
 //! `ChannelSource` in another meet on one `mpsc` pair, so a sink's producer
 //! finishing (dropping the sink) is what signals the paired source's EOF.
 //!
-//! Their factories take `name` (the channel to resolve through the
+//! The [`ChannelConnector`] takes `name` (the channel to resolve through the
 //! registered [`crate::connector::ChannelBridge`]), `buffer` (mpsc capacity,
-//! default 8, at least 1) and a `schema_fields` array.
+//! default 8, at least 1) and `field` entries.
 
 pub mod factory;
 pub mod registry;
 pub mod sink;
 pub mod source;
 
-pub use factory::{ChannelSinkFactory, ChannelSourceFactory};
+pub use factory::ChannelConnector;
 pub use registry::ChannelRegistry;
 pub use sink::ChannelSink;
 pub use source::ChannelSource;

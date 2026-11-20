@@ -171,12 +171,13 @@ fn config_with(run_mode: RunMode, flow: FlowControlConfig) -> ServiceConfig {
             data_dir: std::path::PathBuf::from("/tmp/saci-flow-test"),
         },
         mode: ServiceMode::Standalone {
-            config: StandaloneConfig { run_mode },
+            config: StandaloneConfig { run: run_mode },
         },
         workflows: vec![WorkflowSpec {
             id: "flow".to_string(),
             name: None,
             codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -329,7 +330,7 @@ async fn flow_control_delivers_every_row_exactly_once_in_order_while_adapting_up
     );
 }
 
-/// `interval_ms` is the idle poll cadence, not a throughput cap: an iteration
+/// `every_ms` is the idle poll cadence, not a throughput cap: an iteration
 /// that left work pending re-enters at once.
 #[tokio::test]
 async fn a_backlogged_interval_iteration_does_not_wait_out_the_poll_interval() {
@@ -343,9 +344,7 @@ async fn a_backlogged_interval_iteration_does_not_wait_out_the_poll_interval() {
     // One minute between polls: only a drained iteration may pay it.
     let service = finish(
         service,
-        RunMode::Interval {
-            interval_ms: 60_000,
-        },
+        RunMode::Interval { every_ms: 60_000 },
         quick_flow(256),
     );
 
@@ -381,9 +380,7 @@ async fn a_re_chunked_source_batch_is_one_arrival_carrying_all_its_rows() {
     // itself.
     let service = finish(
         service,
-        RunMode::Interval {
-            interval_ms: 60_000,
-        },
+        RunMode::Interval { every_ms: 60_000 },
         FlowControlConfig {
             rows: Some(PIN),
             ..FlowControlConfig::default()
@@ -435,9 +432,7 @@ async fn a_disabled_flow_control_run_drains_a_finite_source_in_one_iteration() {
     let (service, mut rx) = service_with(source, Arc::clone(&schema), Duration::from_millis(1));
     let service = finish(
         service,
-        RunMode::Interval {
-            interval_ms: 60_000,
-        },
+        RunMode::Interval { every_ms: 60_000 },
         FlowControlConfig {
             enabled: Some(false),
             ..FlowControlConfig::default()

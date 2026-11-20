@@ -1,13 +1,13 @@
-//! The whole standalone service path over NATS: config file, factories, source
+//! The whole standalone service path over NATS: config file, connector, source
 //! drain, pipeline run, sink drain.
 //!
 //! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this is
 //! the end to end proof that a `connector-nats` build moves rows from one
 //! JetStream stream through a pipeline into another via the registered
-//! `NatsSourceFactory`/`NatsSinkFactory`, not just via the connector's own
+//! `NatsConnector`, not just via the connector's own
 //! direct API (already covered by the NATS connector's own tests, `crates/saci/tests/nats_roundtrip.rs`).
 //!
-//! Soft-skips without Docker. The `is_live_source` test needs no daemon.
+//! Soft-skips without Docker. The `Connector::live` test needs no daemon.
 
 #![cfg(all(
     feature = "connector-http",
@@ -123,12 +123,12 @@ mode "standalone"
 
 node id=1 name="saci-nats-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "nats-service-test" {{
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="NatsSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="nats" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             stop_at_end #{stop_at_end}
             poll_timeout_ms 2000
@@ -143,15 +143,15 @@ workflow "nats-service-test" {{
                 fetch_expires_ms 2000
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="NatsSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="nats" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             connection {{
                 servers "{url}"
@@ -162,9 +162,9 @@ workflow "nats-service-test" {{
                 subject "{out_subject}"
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
@@ -172,7 +172,7 @@ workflow "nats-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -268,7 +268,7 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
                 fetch_expires_ms: 2_000,
                 ..JetstreamSourceMode::default()
             })),
-            batch_size: 1000,
+            batch_rows: 1000,
             poll_timeout_ms: 2_000,
             stop_at_end: true,
         },
@@ -301,10 +301,15 @@ fn the_pipeline_declares_the_component_the_config_names() {
     assert!(declared.contains(&COMPONENT), "declared: {declared:?}");
 }
 
-/// `is_live_source` must know `NatsSource`, or a `one_shot` config with a live
-/// consumer would be accepted and then block forever. No daemon needed.
+/// [`Connector::live`](saci::connector::Connector::live) must know the `nats`
+/// connector, or a `one_shot` config with a live consumer would be accepted
+/// and then block forever. The config check asks the builtin registry, so no
+/// daemon is needed.
 #[test]
 fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
+    use saci::connector::Connector;
+    use saci::connector::nats::NatsConnector;
+
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
 
@@ -319,40 +324,45 @@ fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
     let err = ServiceConfig::from_kdl(&live).expect_err("a live source cannot run one_shot");
     assert_eq!(err.category(), "configuration");
     assert!(err.message().contains("never reaches EOF"), "got: {err}");
-    assert!(err.message().contains("NatsSource"), "got: {err}");
+    assert!(err.message().contains("connector 'nats'"), "got: {err}");
 
     let bounded = live.replace("stop_at_end #false", "stop_at_end #true");
-    ServiceConfig::from_kdl(&bounded).expect("stop_at_end makes the source drivable by one_shot");
+    let config = ServiceConfig::from_kdl(&bounded)
+        .expect("stop_at_end makes the source drivable by one_shot");
+    assert!(
+        !NatsConnector.live(&config.workflows[0].sources[0].config),
+        "stop_at_end makes the source drivable by one_shot"
+    );
 }
 
 /// The shipped `examples/configs/nats.kdl` must parse and its two IO tables
-/// must be accepted by the factories.
+/// must be accepted by the connector.
 ///
 /// Gated on `wasm` because the example declares a `wasm` node, which the
-/// config parser only knows about with that feature on. The factories are
+/// config parser only knows about with that feature on. The connector is
 /// driven directly rather than through `ServiceBuilder::build`, which would also
-/// try to load the module the example points at. No daemon needed: both
-/// factories open no connection.
+/// try to load the module the example points at. No daemon needed: the
+/// connector opens no connection.
 #[cfg(feature = "wasm-host")]
 #[test]
 fn the_shipped_example_config_loads_and_its_io_tables_are_accepted() {
-    use saci::connector::nats::{NatsSinkFactory, NatsSourceFactory};
+    use saci::connector::Connector;
+    use saci::connector::nats::NatsConnector;
     use saci::service::ConnectorContext;
-    use saci::service::{SinkFactory, SourceFactory};
 
     let config = ServiceConfig::load("../../examples/configs/nats.kdl")
         .expect("the shipped example must load");
     assert_eq!(config.workflows[0].sources.len(), 1);
     assert_eq!(config.workflows[0].sinks.len(), 1);
-    assert_eq!(config.workflows[0].sources[0].type_name, "NatsSource");
-    assert_eq!(config.workflows[0].sinks[0].type_name, "NatsSink");
+    assert_eq!(config.workflows[0].sources[0].connector, "nats");
+    assert_eq!(config.workflows[0].sinks[0].connector, "nats");
 
     let ctx = ConnectorContext::new(Some(Arc::new(NdjsonCodec::default())));
-    let source = NatsSourceFactory
-        .build(&config.workflows[0].sources[0].config, &ctx)
+    let source = NatsConnector
+        .source(&config.workflows[0].sources[0].config, &ctx)
         .expect("the example source table must be accepted");
-    let sink = NatsSinkFactory
-        .build(&config.workflows[0].sinks[0].config, &ctx)
+    let sink = NatsConnector
+        .sink(&config.workflows[0].sinks[0].config, &ctx)
         .expect("the example sink table must be accepted");
     assert_eq!(source.schema().fields().len(), 3);
     assert_eq!(sink.schema().fields().len(), 3);
@@ -412,7 +422,7 @@ mode "standalone"
 
 node id=1 name="saci-nats-dlq" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "nats-dlq-test" {{
     dlq "nats" {{
@@ -438,9 +448,9 @@ workflow "nats-dlq-test" {{
         }}
     }}
 
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="NatsSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="nats" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             stop_at_end #true
             poll_timeout_ms 2000
@@ -455,29 +465,29 @@ workflow "nats-dlq-test" {{
                 fetch_expires_ms 2000
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="ndjson_fmt" {{
         retry {{ max_attempts 1 }}
         heal {{ enabled #false }}
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     link from="orders_in" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

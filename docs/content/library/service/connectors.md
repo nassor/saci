@@ -7,10 +7,10 @@ weight = 1
 # Writing a connector
 
 A connector is reached either by calling its constructor in Rust and handing the
-result to `Pipeline::source` or `Pipeline::sink`, or by naming its `type` string in the service
-config and letting the factory build it. The second path needs the connector's
-feature on `saci`, because `ServiceBuilder::new()` only installs
-what is compiled in, and it registers a `connector-*` feature's factories only when `service` is
+result to `Pipeline::source` or `Pipeline::sink`, or by naming it in the `connector` property of a
+source or sink node in the service config and letting its `Connector` build it. The second path
+needs the connector's feature on `saci`, because `ServiceBuilder::new()` only registers
+what is compiled in, and it registers a `connector-*` feature's connector only when `service` is
 also on.
 
 ```toml,name=One dependency, one feature per connector
@@ -32,19 +32,22 @@ the graph. The config keys each node accepts, and the errors they raise, are on
 A connector is a module in `crates/saci/src/connector/<name>.rs` (with `connector/<name>/` for
 its submodules), declared in `crates/saci/src/connector.rs` under
 `#[cfg(feature = "connector-<name>")]`, and enabled by a `connector-<name>` entry in the
-`[features]` table of `crates/saci/Cargo.toml`. Its factories register in
+`[features]` table of `crates/saci/Cargo.toml`. Its `Connector` registers in
 `service/factories.rs`.
 
 A connector outside the repository is a crate that depends on `saci` with `connector-api`
-for `SourceFactory` and `SinkFactory`, and on nothing else of SACI. Both traits build through
-`fn build(&self, config: &ConfigValue, ctx: &ConnectorContext)`, where `ctx.codec(what)`
-resolves the node's codec against the codec registry so no connector
-owns a list of formats. A custom binary then chains `register_source` or
-`register_sink` onto `ServiceBuilder::new()`, or passes them to
-`saci::service::cli::main_with`. Registering a `type_name`
-that is already taken replaces the earlier factory.
+for the `Connector` trait, and on nothing else of SACI. One trait serves both roles:
+`name()` is the value of the `connector` property, `roles()` lists the nodes it serves, and
+`source()` and `sink()` each build through `(&self, config: &ConfigValue, ctx: &ConnectorContext)`,
+where `ctx.codec(what)` resolves the node's codec against the codec registry so no connector
+owns a list of formats. `rebuild()`, `live()` and `detail_keys()` declare what the host may
+do with it. A custom binary then chains `connector(c)` onto `ServiceBuilder::new()`, or passes
+it to `saci::service::cli::main_with`. Registering a `name()`
+that is already taken replaces the earlier connector. A node naming an unregistered connector
+fails with `no connector named '{name}' is registered`, and a node whose role the connector
+lacks fails with `connector '{name}' has no source` (or `has no sink`).
 
-[Embedding saci-service](@/library/service/_index.md) has the factory and the
+[Embedding saci-service](@/library/service/_index.md) has the connector and the
 builder call side by side.
 
 ## The built-in constructors

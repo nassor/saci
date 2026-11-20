@@ -2,8 +2,8 @@
 //!
 //! `rows_served_over_http_come_back_out_of_the_http_sink` drives an
 //! `HttpSource` GET into a workflow whose `HttpSink` posts the result, under
-//! `one_shot`. The source reaches EOF after its one GET, which is what lets
-//! `one_shot` drive it, and the sink's captured body decodes back to the rows
+//! `run "once"`. The source reaches EOF after its one GET, which is what lets
+//! `run "once"` drive it, and the sink's captured body decodes back to the rows
 //! that were served.
 //!
 //! The `listen` module drives an `HttpListenSource` under `stream`: three POSTed
@@ -159,34 +159,34 @@ mode "standalone"
 
 node id=1 name="saci-http-connector" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "http-connector-test" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="HttpSource" component="{COMPONENT}" transformer="csv_fmt" {{
+    source "orders_in" connector="http" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             url "{source_url}"
             timeout_ms 5000
             headers {{
                 accept "text/csv"
             }}
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="csv_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -194,7 +194,7 @@ workflow "http-connector-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -239,7 +239,7 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
     assert_eq!(column(&batches[0], "total"), vec![10, 20, 30, 40]);
 }
 
-/// The listening half under `run_mode kind="stream"`.
+/// The listening half under `run "stream"`.
 ///
 /// `HttpListenSource` never reaches EOF, so the stream runner is the only one
 /// that may drive it, and one POSTed document is one item. The format is
@@ -289,31 +289,31 @@ mode "standalone"
 
 node id=1 name="saci-http-push" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "http-push-test" {{
-    transformer "json_fmt" format="ndjson"
+    codec "json_fmt" format="ndjson"
 
-    source "orders_in" type="HttpPushSource" component="{COMPONENT}" transformer="json_fmt" {{
+    source "orders_in" connector="http-listen" component="{COMPONENT}" codec="json_fmt" {{
         config {{
             bind "{bind}"
             path "/orders"
             methods "POST"
             buffer 8
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "relay" name="Relay"
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="json_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="json_fmt" {{
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -321,7 +321,7 @@ workflow "http-push-test" {{
     link from="relay" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

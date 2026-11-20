@@ -15,7 +15,7 @@
 //! response's validators so an unchanged resource answers `304`.
 //! `mode kind="lines"` and `mode kind="events"` instead read a body that never
 //! ends, newline-delimited or `text/event-stream`, one batch per window of
-//! frames; both are live sources for `run_mode kind="stream"`.
+//! frames; both are live sources for `run "stream"`.
 //!
 //! [`HttpSink`] writes: one request per batch, where the body is a
 //! self-contained document the codec writes, a csv with its header row,
@@ -38,16 +38,16 @@
 //! `accept-encoding` is how a source asks for that not to happen.
 //!
 //! The byte format comes from a [`Codec`](crate::codec::Codec),
-//! resolved by the host from the `transformer` key naming a declared
-//! `transformer` node, so csv, ndjson, parquet and avro are one connector
+//! resolved by the host from the `codec` key naming a declared
+//! `codec` node, so csv, ndjson, parquet and avro are one connector
 //! rather than four.
 //!
 //! ```kdl
-//! transformer "orders_csv" name="Orders CSV" format="csv" {
-//!     options has_headers=#true
+//! codec "orders_csv" name="Orders CSV" format="csv" {
+//!     config has_headers=#true
 //! }
 //!
-//! source "orders_in" type="HttpSource" transformer="orders_csv" component="Order" {
+//! source "orders_in" connector="http" codec="orders_csv" component="Order" {
 //!     config {
 //!         url "https://data.internal/orders.csv"
 //!         http_version "2"
@@ -55,16 +55,16 @@
 //!         headers {
 //!             authorization "Bearer ${ORDERS_TOKEN}"
 //!         }
-//!         schema_fields "id" type="Int64" nullable=#false
+//!         field "id" type="int64" nullable=#false
 //!     }
 //! }
 //!
-//! sink "orders_out" type="HttpSink" transformer="orders_csv" component="Order" {
+//! sink "orders_out" connector="http" codec="orders_csv" component="Order" {
 //!     config {
 //!         url "https://sink.internal/orders"
 //!         method "POST"
 //!         content_encoding "zstd"
-//!         schema_fields "id" type="Int64" nullable=#false
+//!         field "id" type="int64" nullable=#false
 //!     }
 //! }
 //! ```
@@ -83,10 +83,10 @@ pub mod source;
 mod tls;
 
 pub use client::HttpVersion;
-pub use factory::{HttpListenSourceFactory, HttpSinkFactory, HttpSourceFactory};
+pub use factory::{HttpConnector, HttpListenConnector};
 pub use listen::{HttpListenConfig, HttpListenSource, ServerTls};
 pub use sink::{ContentEncoding, HttpSink, HttpSinkConfig};
 pub use source::{
-    BatchWindow, HttpClientConfig, HttpSource, HttpSourceConfig, Pagination, ReadMode, SchemaFrom,
+    BatchWindow, HttpClientConfig, HttpSource, HttpSourceConfig, Pagination, ReadMode,
 };
 pub use tls::TlsFiles;

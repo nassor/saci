@@ -25,12 +25,12 @@ node id=1 name="saci-kafka" data_dir="${SACI_DATA_DIR:-/tmp/saci-kafka}"
 // stop_at_end makes the source report EOF once every assigned partition is
 // drained, so the interval runner can drive it without the stream runner. A
 // live consumer (stop_at_end #false) never reaches EOF and instead needs
-// run_mode kind="stream" with exactly one declared source.
-run_mode kind="interval" interval_ms=2000
+// `run "stream"` with exactly one declared source.
+run "interval" every_ms=2000
 
 // Adaptive flow control: batch mode carries no per-item latency contract, so
 // target_latency_ms stays 0 (the interval default) and the search chases
-// throughput alone. Kafka's own poll batches admit up to batch_size (1000)
+// throughput alone. Kafka's own poll batches admit up to batch_rows (1000)
 // rows at a time across two topics, so the ceiling is raised past the 65536
 // default to let one admitted chunk match several full consumer polls.
 flow_control {
@@ -43,22 +43,22 @@ flow_control {
 // One workflow declares the whole DAG: the byte format each end speaks, the
 // source, the processor, the sink, and the explicit links between them.
 workflow "orders" {
-    // The transformer that decodes/encodes each message. "ndjson" is one JSON
-    // object per message, decoded against schema_fields below; "arrow-ipc" is
-    // one whole RecordBatch per message. Both need their transformer-*
+    // The codec that decodes/encodes each message. "ndjson" is one JSON
+    // object per message, decoded against the `field` lines below; "arrow-ipc"
+    // is one whole RecordBatch per message. Both need their codec-*
     // feature compiled in.
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- source
 
     // The processor's `describe()` supplies the component list, so `component`
     // on this source and the sink below must name components it declares.
-    source "kafka_orders" type="KafkaSource" component="Order" transformer="ndjson_fmt" {
+    source "kafka_orders" connector="kafka" component="Order" codec="ndjson_fmt" {
         config {
             brokers "${KAFKA_BROKERS:-localhost:9092}"
             topic "orders-raw"
             group_id "saci-orders"
-            batch_size 1000
+            batch_rows 1000
             poll_timeout_ms 1000
             auto_offset_reset "earliest"
             // Commits the previous batch's offsets at the start of the next poll,
@@ -80,23 +80,23 @@ workflow "orders" {
             // connector sets. There is no second way to set the same thing.
             // properties "session.timeout.ms"="45000"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
-            schema_fields "total" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "status" type="utf8" nullable=#true
+            field "total" type="float64" nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "process_orders" module="pipelines/orders.wasm"
+    wasm "process_orders" path="pipelines/orders.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // A different component than the source's: the processor declares both,
-    // reads Order and writes EnrichedOrder. A sink's schema_fields must match
+    // reads Order and writes EnrichedOrder. A sink's `field` lines must match
     // the component's RecordBatch field for field, in order.
 
-    sink "kafka_enriched" type="KafkaSink" component="EnrichedOrder" transformer="ndjson_fmt" {
+    sink "kafka_enriched" connector="kafka" component="EnrichedOrder" codec="ndjson_fmt" {
         config {
             brokers "${KAFKA_BROKERS:-localhost:9092}"
             topic "orders-enriched"
@@ -108,9 +108,9 @@ workflow "orders" {
 
             provision create=#true partitions=3 replication_factor=1
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
-            schema_fields "total" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "status" type="utf8" nullable=#true
+            field "total" type="float64" nullable=#true
         }
     }
 
@@ -122,8 +122,8 @@ workflow "orders" {
 // one-shot snapshot rather than a live consumer, mirrored to a topic that
 // keeps deletes as tombstones instead of dropping them.
 workflow "customers" {
-    // Its own transformer node; workflows do not share declared ids.
-    transformer "customers_json" format="ndjson"
+    // Its own codec node; workflows do not share declared ids.
+    codec "customers_json" format="ndjson"
 
     // ---------------------------------------------------------------- source
 
@@ -132,13 +132,13 @@ workflow "customers" {
     // reduced to the newest value per key, tombstones (a null payload)
     // deleting a key instead of producing a row for it. The source reaches
     // EOF once that pass completes and stays at EOF after, so it needs no
-    // run_mode kind="stream" either, the same as stop_at_end above.
-    source "kafka_customers" type="KafkaSource" component="Customer" transformer="customers_json" {
+    // `run "stream"` either, the same as stop_at_end above.
+    source "kafka_customers" connector="kafka" component="Customer" codec="customers_json" {
         config {
             brokers "${KAFKA_BROKERS:-localhost:9092}"
             topic "customers-changelog"
             group_id "saci-customers-snapshot"
-            batch_size 1000
+            batch_rows 1000
             poll_timeout_ms 1000
 
             compacted #true
@@ -149,22 +149,22 @@ workflow "customers" {
 
             provision create=#true partitions=3 replication_factor=1
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8" nullable=#true
-            schema_fields "tier" type="utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8" nullable=#true
+            field "tier" type="utf8" nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "mirror_customers" module="pipelines/customers.wasm"
+    wasm "mirror_customers" path="pipelines/customers.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // Same component as the source's: this processor mirrors rows rather
     // than reshaping them.
 
-    sink "kafka_customers_mirror" type="KafkaSink" component="Customer" transformer="customers_json" {
+    sink "kafka_customers_mirror" connector="kafka" component="Customer" codec="customers_json" {
         config {
             brokers "${KAFKA_BROKERS:-localhost:9092}"
             topic "customers-mirror"
@@ -178,9 +178,9 @@ workflow "customers" {
 
             provision create=#true partitions=3 replication_factor=1
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8" nullable=#true
-            schema_fields "tier" type="utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8" nullable=#true
+            field "tier" type="utf8" nullable=#true
         }
     }
 
@@ -189,7 +189,7 @@ workflow "customers" {
 }
 
 // HTTP control plane. /metrics carries the connector's counters.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a moderate
 // 10% grade: two workflows redraining every 2 s produce enough per-item spans

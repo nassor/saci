@@ -10,10 +10,10 @@
 //!
 //! node id=1 data_dir="/var/lib/saci"
 //!
-//! run_mode kind="interval" interval_ms=5000
+//! run "interval" every_ms=5000
 //!
 //! workflow "etl" name="ETL" {
-//!     wasm "transform" module="pipelines/transform.wasm" {
+//!     wasm "transform" path="pipelines/transform.wasm" {
 //!         config batch_size="1000"
 //!     }
 //! }
@@ -24,10 +24,11 @@
 //! connected by explicit `link from="..." to="..."` declarations. See
 //! [`WorkflowSpec`].
 //!
-//! Cluster mode instead sets `mode "cluster"`, `bootstrap` on the first node,
-//! and one `peer` node (`id`, `addr`) per cluster member, and takes no
-//! `store` block: cluster state is the raft-replicated `cluster-app.redb`
-//! under `node.data_dir`. A cluster-mode workflow declares exactly one
+//! Cluster mode instead sets `mode "cluster"` and a `cluster { }` block: one
+//! `peer` node (`id`, `addr`) per cluster member, `bootstrap` on the first
+//! node, and the timing keys. It takes no `run` node and no `store` block:
+//! cluster state is the raft-replicated `cluster-app.redb` under
+//! `node.data_dir`. A cluster-mode workflow declares exactly one
 //! `wasm` or `plugin` node and no source, sink or link: the distributed
 //! runner ingests through `PartitionSource` and drives one runtime per node.
 //!
@@ -58,6 +59,7 @@ use super::flow::FlowSettings;
 use super::heal::HealSettings;
 
 use crate::config::{ConfigMap, ConfigValue};
+use crate::connector::{parse_fields, schema_of};
 
 /// Default opaque per-instance config: an empty table.
 ///
@@ -176,6 +178,7 @@ where
 
 /// Identity and storage configuration for a single service node.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     /// Raft node ID: unique in the cluster and stable across restarts.
     ///
@@ -202,8 +205,22 @@ impl NodeConfig {
 }
 
 /// How the standalone service drives pipeline execution.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+///
+/// Written as the `run` node: its argument is the kind, and `interval` takes
+/// one property.
+///
+/// ```kdl
+/// run "continuous"
+/// run "once"
+/// run "interval" every_ms=5000
+/// run "stream"
+/// ```
+///
+/// The KDL parser stores a node's leading argument under `id`, so
+/// `run "stream"` reaches the deserializer as the bare string and
+/// `run "interval" every_ms=5000` as a table holding `id` and `every_ms`.
+/// Both shapes are read here, and `Serialize` writes them back the same way.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum RunMode {
     /// Run continuously, re-entering the pipeline as the source produces work.
     ///
@@ -213,8 +230,8 @@ pub enum RunMode {
     #[default]
     Continuous,
     /// Run the pipeline exactly once, then exit.
-    OneShot,
-    /// Re-run the pipeline every `interval_ms` milliseconds while its sources
+    Once,
+    /// Re-run the pipeline every `every_ms` milliseconds while its sources
     /// are drained.
     Interval {
         /// Milliseconds between successive pipeline runs.
@@ -223,7 +240,7 @@ pub enum RunMode {
         /// spent its flow-control credit with the source still live, or that
         /// left a carry-over slice, re-enters immediately and this wait is
         /// skipped. Only a pass that drained every source pays it.
-        interval_ms: u64,
+        every_ms: u64,
     },
     /// Process each source batch as it arrives, in flow-control-sized chunks
     /// (streaming).
@@ -237,16 +254,91 @@ pub enum RunMode {
     Stream,
 }
 
+impl<'de> Deserialize<'de> for RunMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        const KINDS: &str = r#""once", "continuous", "interval" or "stream""#;
+
+        let (kind, mut properties) = match ConfigValue::deserialize(deserializer)? {
+            ConfigValue::String(kind) => (kind, ConfigMap::new()),
+            ConfigValue::Object(mut table) => match table.remove("id") {
+                Some(ConfigValue::String(kind)) => (kind, table),
+                _ => return Err(D::Error::custom(format!("run needs a kind: {KINDS}"))),
+            },
+            _ => return Err(D::Error::custom(format!("run needs a kind: {KINDS}"))),
+        };
+        let every_ms = properties.remove("every_ms");
+        if let Some(key) = properties.keys().next() {
+            return Err(D::Error::custom(format!(
+                "run \"{kind}\": unknown key '{key}'"
+            )));
+        }
+        match kind.as_str() {
+            "continuous" | "once" | "stream" => {
+                if every_ms.is_some() {
+                    return Err(D::Error::custom(format!(
+                        "run \"{kind}\" takes no every_ms; only \"interval\" does"
+                    )));
+                }
+                Ok(match kind.as_str() {
+                    "continuous" => Self::Continuous,
+                    "once" => Self::Once,
+                    _ => Self::Stream,
+                })
+            }
+            "interval" => {
+                let every_ms =
+                    every_ms.ok_or_else(|| D::Error::custom(r#"run "interval" needs every_ms"#))?;
+                let every_ms = every_ms.as_u64().ok_or_else(|| {
+                    D::Error::custom(format!(
+                        "run \"interval\": every_ms must be a non-negative integer, got {every_ms}"
+                    ))
+                })?;
+                Ok(Self::Interval { every_ms })
+            }
+            other => Err(D::Error::custom(format!(
+                "unknown run kind '{other}' (expected {KINDS})"
+            ))),
+        }
+    }
+}
+
+impl Serialize for RunMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+
+        match self {
+            Self::Continuous => serializer.serialize_str("continuous"),
+            Self::Once => serializer.serialize_str("once"),
+            Self::Stream => serializer.serialize_str("stream"),
+            Self::Interval { every_ms } => {
+                let mut table = serializer.serialize_map(Some(2))?;
+                table.serialize_entry("id", "interval")?;
+                table.serialize_entry("every_ms", every_ms)?;
+                table.end()
+            }
+        }
+    }
+}
+
 /// Configuration for standalone (single-node) mode.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct StandaloneConfig {
-    /// Determines how the service drives pipeline runs.
+    /// Determines how the service drives pipeline runs: the `run` node.
     #[serde(default)]
-    pub run_mode: RunMode,
+    pub run: RunMode,
 }
 
 /// A peer in the Raft cluster.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PeerSpec {
     /// Raft node ID of this peer.
     pub id: u64,
@@ -267,8 +359,9 @@ fn default_lease_ttl() -> u64 {
     30_000
 }
 
-/// Configuration for cluster (multi-node Raft) mode.
+/// Configuration for cluster (multi-node Raft) mode: the `cluster { }` block.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
     /// All peers in the cluster, including this node. One `peer` node each.
     #[serde(rename = "peer", deserialize_with = "one_or_many")]
@@ -303,27 +396,35 @@ pub struct ClusterConfig {
 
 /// Which runtime mode the service runs in.
 ///
-/// The `mode` tag sits at the top of the document:
+/// The document spells it as the `mode` node plus the block that belongs to
+/// it:
 ///
 /// ```kdl
 /// mode "standalone"
-/// // or
-/// mode "cluster"
-/// // plus one `peer` node per cluster member
+/// run "interval" every_ms=5000
 /// ```
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+///
+/// ```kdl
+/// mode "cluster"
+/// cluster {
+///     bootstrap #true
+///     peer id=1 addr="127.0.0.1:9000"
+///     peer id=2 addr="127.0.0.2:9000"
+/// }
+/// ```
+///
+/// `mode "standalone"` takes an optional `run` node and no `cluster` block;
+/// `mode "cluster"` requires the `cluster` block and takes no `run` node.
+#[derive(Debug, Clone)]
 pub enum ServiceMode {
     /// Single-node operation. No consensus required.
     Standalone {
-        /// Standalone-specific options flattened into the top-level document.
-        #[serde(flatten, default)]
+        /// Standalone-specific options: the `run` node.
         config: StandaloneConfig,
     },
     /// Multi-node Raft cluster.
     Cluster {
-        /// Cluster-specific options flattened into the top-level document.
-        #[serde(flatten)]
+        /// Cluster-specific options: the `cluster { }` block.
         config: ClusterConfig,
     },
 }
@@ -396,15 +497,15 @@ impl<'de> Deserialize<'de> for StoreConfig {
 ///
 /// The geometry lives on the node itself, tagged by `kind`, because a KDL
 /// property table is a flat map and the spec's own `kind` tag is one key of
-/// it. Key fields are child nodes: a KDL property cannot repeat, and a child
+/// it. `key_fields` is a child node: a KDL property cannot repeat, and a child
 /// with one argument is a scalar while one with several is an array, which is
 /// exactly the one-or-many shape a key list needs.
 ///
 /// ```kdl
-/// wasm "windowed" module="pipelines/windowed.wasm" {
+/// wasm "windowed" path="pipelines/windowed.wasm" {
 ///     window kind="tumbling" size_ms=30000 offset_ms=0
 ///            time_field="timestamp_ms" allowed_lateness_ms=5000 {
-///         key_field "category"
+///         key_fields "category"
 ///     }
 /// }
 /// ```
@@ -435,7 +536,6 @@ pub struct WindowConfig {
     /// types.
     pub time_field: String,
     /// Grouping key columns; empty for a global window.
-    #[serde(rename = "key_field")]
     pub key_fields: Vec<String>,
     /// How many milliseconds past the watermark a late row is still accepted
     /// by the processor's windowing logic. Defaults to 0.
@@ -526,7 +626,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(
-                    "a window node: kind, geometry, time_field, optional key_field(s) and \
+                    "a window node: kind, geometry, time_field, optional key_fields and \
                      allowed_lateness_ms",
                 )
             }
@@ -543,7 +643,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
                     "gap_ms",
                     "time_field",
                     "allowed_lateness_ms",
-                    "key_field",
+                    "key_fields",
                 ];
                 let mut kind: Option<String> = None;
                 let mut size_ms: Option<i64> = None;
@@ -563,7 +663,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
                         "gap_ms" => gap_ms = Some(map.next_value()?),
                         "time_field" => time_field = Some(map.next_value()?),
                         "allowed_lateness_ms" => allowed_lateness_ms = Some(map.next_value()?),
-                        "key_field" => {
+                        "key_fields" => {
                             #[derive(Deserialize)]
                             #[serde(untagged)]
                             enum OneOrMany {
@@ -655,17 +755,17 @@ impl<'de> Deserialize<'de> for WindowConfig {
 ///
 /// ```kdl
 /// workflow "w" {
-///     wasm "transform" module="pipelines/transform.wasm" sha3_256="abc123..." {
+///     wasm "transform" path="pipelines/transform.wasm" sha3_256="abc123..." {
 ///         config batch_size="1000"
 ///     }
 /// }
 /// ```
 ///
-/// `module` is optional: a node declared with no `module` key is a processor
+/// `path` is optional: a node declared with no `path` key is a processor
 /// whose runtime is supplied programmatically through
 /// [`ServiceBuilder::runtime`](crate::service::builder::ServiceBuilder::runtime),
 /// looked up by this node's `id`. Building a workflow where such a node has
-/// neither a `module` nor a matching registered runtime is a build-time
+/// neither a `path` nor a matching registered runtime is a build-time
 /// error.
 ///
 /// Unknown keys are rejected: a key the service cannot honour is a
@@ -681,7 +781,7 @@ pub struct WasmSpec {
     /// Path to the `.wasm` component file (relative or absolute). Absent for
     /// a node whose runtime is supplied through `runtime`.
     #[serde(default)]
-    pub module: Option<String>,
+    pub path: Option<String>,
     /// Optional expected SHA3-256 hex digest of the module bytes. Validation
     /// fails at load time if the digest does not match. The value may carry
     /// an optional `sha3-256:` prefix.
@@ -703,16 +803,15 @@ pub struct WasmSpec {
 ///
 /// ```kdl
 /// workflow "w" {
-///     plugin "audit" library="pipelines/libtransform.so" sha3_256="abc123..." {
+///     plugin "audit" path="pipelines/libtransform.so" sha3_256="abc123..." {
 ///         config batch_size="1000"
 ///     }
 /// }
 /// ```
 ///
-/// The key is `library`, not `module`, because the artifact is a shared
-/// library the host loads with `dlopen`. It is optional for the same reason
-/// [`WasmSpec::module`] is: a node with no `library` relies on a runtime
-/// registered under this node's `id` through
+/// `path` names the shared library the host loads with `dlopen`. It is
+/// optional for the same reason [`WasmSpec::path`] is: a node with no `path`
+/// relies on a runtime registered under this node's `id` through
 /// [`ServiceBuilder::runtime`](crate::service::builder::ServiceBuilder::runtime).
 ///
 /// Unknown keys are rejected: a key the service cannot honour is a
@@ -728,7 +827,7 @@ pub struct PluginSpec {
     /// Path to the shared library file (relative or absolute). Absent for a
     /// node whose runtime is supplied through `runtime`.
     #[serde(default)]
-    pub library: Option<String>,
+    pub path: Option<String>,
     /// Optional expected SHA3-256 hex digest of the library file bytes.
     /// Validation fails at load time if the digest does not match. The value
     /// may carry an optional `sha3-256:` prefix.
@@ -746,13 +845,13 @@ pub struct PluginSpec {
     pub window: Option<WindowConfig>,
 }
 
-/// A declared byte-format instance: a name a source or sink's `transformer`
+/// A declared byte-format instance: a name a source or sink's `codec`
 /// key can reference.
 ///
 /// ```kdl
 /// workflow "w" {
-///     transformer "orders-json" name="Orders NDJSON" format="ndjson" {
-///         options infer_max=1000
+///     codec "orders-json" name="Orders NDJSON" format="ndjson" {
+///         config infer_max=1000
 ///     }
 /// }
 /// ```
@@ -768,7 +867,7 @@ pub struct CodecSpec {
     pub format: String,
     /// Handed to that format's factory. Empty table when absent.
     #[serde(default = "default_config")]
-    pub options: ConfigValue,
+    pub config: ConfigValue,
 }
 
 /// Retry policy for a source or sink node.
@@ -865,7 +964,7 @@ impl RetryConfig {
 /// }
 ///
 /// workflow "w" {
-///     sink "collector" type="tcp" component="Order" {
+///     sink "collector" connector="tcp" component="Order" {
 ///         heal { after_failures 1 }
 ///     }
 /// }
@@ -881,7 +980,7 @@ impl RetryConfig {
 /// | `jitter` | ratio | 0.1 | fraction of the delay randomised, in `0.0..=1.0` |
 /// | `max_attempts` | attempts | 0 | rebuilds before the node gives up; `0` never gives up |
 ///
-/// A connector answers [`SourceFactory::rebuildable`](crate::connector::SourceFactory::rebuildable)
+/// A connector answers [`Connector::rebuild`](crate::connector::Connector::rebuild)
 /// for its own config, and one that cannot be rebuilt is never healed. A
 /// node declaring its own `heal` block on such a connector is a load-time
 /// error rather than a block that quietly does nothing.
@@ -1119,7 +1218,7 @@ impl<'de> Deserialize<'de> for DlqConfig {
 /// }
 ///
 /// workflow "w" {
-///     source "orders" type="nats" component="Order" {
+///     source "orders" connector="nats" component="Order" {
 ///         flow_control { rows 4096 }
 ///     }
 /// }
@@ -1432,12 +1531,13 @@ pub struct SourceSpec {
     /// Optional display name. The dashboard shows the id when this is absent.
     #[serde(default)]
     pub name: Option<String>,
-    /// Factory lookup key.
-    #[serde(rename = "type")]
-    pub type_name: String,
-    /// Id of the `transformer` node that decodes this source's bytes. Absent
+    /// Name of the connector that builds this source, the `connector`
+    /// property of the node.
+    #[serde(rename = "connector")]
+    pub connector: String,
+    /// Id of the `codec` node that decodes this source's bytes. Absent
     /// for a connector that produces `RecordBatch`es directly.
-    #[serde(default, rename = "transformer")]
+    #[serde(default)]
     pub codec: Option<String>,
     /// Name of the component this source writes into. Checked against the
     /// runtime's `declared_components()` at load time.
@@ -1471,12 +1571,13 @@ pub struct SinkSpec {
     /// Optional display name. The dashboard shows the id when this is absent.
     #[serde(default)]
     pub name: Option<String>,
-    /// Factory lookup key.
-    #[serde(rename = "type")]
-    pub type_name: String,
-    /// Id of the `transformer` node that encodes this sink's bytes. Absent
+    /// Name of the connector that builds this sink, the `connector` property
+    /// of the node.
+    #[serde(rename = "connector")]
+    pub connector: String,
+    /// Id of the `codec` node that encodes this sink's bytes. Absent
     /// for a connector that consumes `RecordBatch`es directly.
-    #[serde(default, rename = "transformer")]
+    #[serde(default)]
     pub codec: Option<String>,
     /// Name of the component this sink reads from. Checked against the
     /// runtime's `declared_components()` at load time.
@@ -1500,8 +1601,9 @@ pub struct SinkSpec {
 /// An explicit directed edge between two declared node ids.
 ///
 /// `from` and `to` name a `source`, `wasm`, `plugin` or `sink` id, never a
-/// `transformer` id, which is not a graph node.
+/// `codec` id, which is not a graph node.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LinkSpec {
     /// The upstream node id.
     pub from: String,
@@ -1513,6 +1615,28 @@ pub struct LinkSpec {
     /// legacy multicast.
     #[serde(default)]
     pub branch: Option<String>,
+}
+
+/// A schema declared once for the workflow: a list of `field` entries a
+/// source or sink adopts when its `component` matches this schema's `id` and
+/// its own `config` declares no `field` of its own.
+///
+/// ```kdl
+/// schema "orders" {
+///     field "id" type="int64" nullable=#false
+///     field "total" type="decimal128" precision=12 scale=2
+/// }
+/// ```
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaSpec {
+    /// The component name this schema describes, from the node's leading
+    /// argument. Unique within the workflow.
+    pub id: String,
+    /// The `field` entries, one entry or a list of them, in the shape a
+    /// connector's `config` carries them (see
+    /// [`parse_fields`](crate::connector::parse_fields)).
+    pub field: ConfigValue,
 }
 
 /// Which of the three graph roles a declared node plays.
@@ -1548,9 +1672,13 @@ pub struct WorkflowSpec {
     /// Optional display name. The dashboard shows the id when this is absent.
     #[serde(default)]
     pub name: Option<String>,
-    /// Declared byte formats, one `transformer` node each.
-    #[serde(rename = "transformer", default, deserialize_with = "one_or_many")]
+    /// Declared byte formats, one `codec` node each.
+    #[serde(rename = "codec", default, deserialize_with = "one_or_many")]
     pub codecs: Vec<CodecSpec>,
+    /// Declared schemas, one `schema` node each, adopted by the sources and
+    /// sinks whose `component` names one and that declare no `field` themselves.
+    #[serde(rename = "schema", default, deserialize_with = "one_or_many")]
+    pub schemas: Vec<SchemaSpec>,
     /// Data sources feeding the workflow. One `source` node each.
     #[serde(rename = "source", default, deserialize_with = "one_or_many")]
     pub sources: Vec<SourceSpec>,
@@ -1616,7 +1744,7 @@ impl WorkflowSpec {
     fn declared_ids(&self) -> Vec<(&str, &'static str)> {
         let mut out = Vec::new();
         for t in &self.codecs {
-            out.push((t.id.as_str(), "transformer"));
+            out.push((t.id.as_str(), "codec"));
         }
         for (id, kind) in self.nodes() {
             let label = match kind {
@@ -1741,15 +1869,14 @@ impl WorkflowSpec {
             seen.insert(id, kind);
         }
 
-        // 4. Every source.codec / sink.codec names a declared codec id (the
-        //    `transformer` node in KDL).
+        // 4. Every source `codec` / sink `codec` names a declared codec id.
         let codec_ids: HashSet<&str> = self.codecs.iter().map(|t| t.id.as_str()).collect();
         for s in &self.sources {
             if let Some(t) = &s.codec
                 && !codec_ids.contains(t.as_str())
             {
                 return Err(SaciError::configuration(format!(
-                    "workflow '{wf}': source '{}' names transformer '{t}', \
+                    "workflow '{wf}': source '{}' names codec '{t}', \
                      which is not declared",
                     s.id
                 )));
@@ -1760,7 +1887,7 @@ impl WorkflowSpec {
                 && !codec_ids.contains(t.as_str())
             {
                 return Err(SaciError::configuration(format!(
-                    "workflow '{wf}': sink '{}' names transformer '{t}', which is not declared",
+                    "workflow '{wf}': sink '{}' names codec '{t}', which is not declared",
                     s.id
                 )));
             }
@@ -1885,11 +2012,11 @@ impl WorkflowSpec {
             }
         }
 
-        // 11. `run_mode kind="stream"`: at least one source in the whole
+        // 11. `run "stream"`: at least one source in the whole
         //     workflow.
         let stream_mode = matches!(
             mode,
-            ServiceMode::Standalone { config } if config.run_mode == RunMode::Stream
+            ServiceMode::Standalone { config } if config.run == RunMode::Stream
         );
         if stream_mode && self.sources.is_empty() {
             return Err(SaciError::configuration(format!(
@@ -1898,12 +2025,21 @@ impl WorkflowSpec {
             )));
         }
 
-        // 13. Outside stream mode, no source is live.
-        if !stream_mode && let Some(live) = self.sources.iter().find(|s| is_live_source(s)) {
+        // 13. Outside stream mode, no source is live. Asked of the connectors
+        //     this crate ships: a config is validated before any builder
+        //     registers a connector of its own, and the builder asks its own
+        //     registry again when it builds the workflow.
+        if !stream_mode
+            && let Some(live) = self.sources.iter().find(|s| {
+                super::factories::builtin_registry()
+                    .connector(&s.connector)
+                    .is_some_and(|connector| connector.live(&s.config))
+            })
+        {
             return Err(SaciError::configuration(format!(
-                "source type '{}' never reaches EOF; it requires standalone mode \
-                 with run_mode kind=\"stream\"",
-                live.type_name
+                "source connector '{}' never reaches EOF; it requires standalone mode \
+                 with run \"stream\"",
+                live.connector
             )));
         }
 
@@ -1991,6 +2127,35 @@ impl WorkflowSpec {
             )));
         }
 
+        // 19. Schema ids are unique within the workflow, and each declares at
+        //     least one `field` that parses.
+        let mut schema_ids: HashSet<&str> = HashSet::new();
+        for schema in &self.schemas {
+            if !schema_ids.insert(schema.id.as_str()) {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{wf}': schema '{}' is declared twice",
+                    schema.id
+                )));
+            }
+            let mut table = ConfigMap::new();
+            table.insert("field".to_string(), schema.field.clone());
+            let table = ConfigValue::Object(table);
+            let fields = parse_fields(&table, &format!("workflow '{wf}': schema '{}'", schema.id))?;
+            if fields.is_empty() {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{wf}': schema '{}' declares no field",
+                    schema.id
+                )));
+            }
+            schema_of(&fields).map_err(|e| {
+                SaciError::configuration(format!(
+                    "workflow '{wf}': schema '{}': {}",
+                    schema.id,
+                    e.message()
+                ))
+            })?;
+        }
+
         Ok(())
     }
 }
@@ -2028,15 +2193,20 @@ fn default_http_control() -> bool {
     true
 }
 
+fn default_http_enabled() -> bool {
+    true
+}
+
 /// HTTP control-plane configuration.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// Socket address to bind the HTTP server on.
     #[serde(default = "default_http_bind")]
     pub bind: String,
-    /// Disable the HTTP control plane entirely.
-    #[serde(default)]
-    pub disabled: bool,
+    /// Serve the HTTP control plane. `enabled=#false` turns it off entirely.
+    #[serde(default = "default_http_enabled")]
+    pub enabled: bool,
     /// Mount the workflow lifecycle endpoints (`/api/workflows*`).
     ///
     /// On by default, for the same reason `observability.inspector.enabled`
@@ -2054,7 +2224,7 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             bind: default_http_bind(),
-            disabled: false,
+            enabled: default_http_enabled(),
             control: default_http_control(),
         }
     }
@@ -2081,6 +2251,7 @@ fn default_sample_ratio() -> f64 {
 
 /// Observability (logging) configuration.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Log output format.
     #[serde(default)]
@@ -2155,39 +2326,127 @@ impl ObservabilityConfig {
 /// # }
 /// ```
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(try_from = "RawServiceConfig", into = "RawServiceConfig")]
 pub struct ServiceConfig {
     /// Node identity and storage.
     pub node: NodeConfig,
-    /// Runtime mode (standalone or cluster), flattened into the document.
-    #[serde(flatten)]
+    /// Runtime mode: the `mode` node with the `run` node (standalone) or the
+    /// `cluster` block (cluster) that belongs to it.
     pub mode: ServiceMode,
     /// Persistent store declaration; `None` keeps the in-process/redb
     /// backends as today.
-    #[serde(default)]
     pub store: Option<StoreConfig>,
     /// The workflows this process runs. One or more `workflow` blocks; a
     /// single block deserializes as a one-element list.
-    #[serde(rename = "workflow", deserialize_with = "one_or_many")]
     pub workflows: Vec<WorkflowSpec>,
     /// HTTP control-plane options.
-    #[serde(default)]
     pub http: HttpConfig,
     /// Logging / observability options.
-    #[serde(default)]
     pub observability: ObservabilityConfig,
     /// Adaptive flow control for every source. An omitted block is the
     /// enabled defaults.
-    #[serde(default)]
     pub flow_control: FlowControlConfig,
     /// Connector self-healing for every source and sink. An omitted block is
     /// the enabled defaults.
-    #[serde(default)]
     pub heal: HealConfig,
     /// Names usable as `${name}` placeholders anywhere in this file. A
     /// declared name wins over a same-named process env var, so the file is
     /// self-contained.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables: HashMap<String, String>,
+}
+
+/// The document's top-level keys exactly as KDL spells them.
+///
+/// [`ServiceConfig`] reads and writes through this mirror, so a misspelled
+/// top-level key is an error (`deny_unknown_fields`) and `mode`, `run` and
+/// `cluster` fold into the single [`ServiceMode`] enum.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServiceConfig {
+    node: NodeConfig,
+    mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<RunMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster: Option<ClusterConfig>,
+    #[serde(default)]
+    store: Option<StoreConfig>,
+    #[serde(rename = "workflow", deserialize_with = "one_or_many")]
+    workflows: Vec<WorkflowSpec>,
+    #[serde(default)]
+    http: HttpConfig,
+    #[serde(default)]
+    observability: ObservabilityConfig,
+    #[serde(default)]
+    flow_control: FlowControlConfig,
+    #[serde(default)]
+    heal: HealConfig,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    variables: HashMap<String, String>,
+}
+
+impl TryFrom<RawServiceConfig> for ServiceConfig {
+    type Error = String;
+
+    fn try_from(raw: RawServiceConfig) -> Result<Self, Self::Error> {
+        let mode = match raw.mode.as_str() {
+            "standalone" => {
+                if raw.cluster.is_some() {
+                    return Err(r#"mode "standalone" takes no cluster block"#.to_string());
+                }
+                ServiceMode::Standalone {
+                    config: StandaloneConfig {
+                        run: raw.run.unwrap_or_default(),
+                    },
+                }
+            }
+            "cluster" => {
+                if raw.run.is_some() {
+                    return Err(r#"mode "cluster" takes no run node"#.to_string());
+                }
+                let Some(config) = raw.cluster else {
+                    return Err(r#"mode "cluster" requires a cluster block"#.to_string());
+                };
+                ServiceMode::Cluster { config }
+            }
+            _ => return Err(r#"mode must be "standalone" or "cluster""#.to_string()),
+        };
+        Ok(Self {
+            node: raw.node,
+            mode,
+            store: raw.store,
+            workflows: raw.workflows,
+            http: raw.http,
+            observability: raw.observability,
+            flow_control: raw.flow_control,
+            heal: raw.heal,
+            variables: raw.variables,
+        })
+    }
+}
+
+impl From<ServiceConfig> for RawServiceConfig {
+    fn from(config: ServiceConfig) -> Self {
+        let (mode, run, cluster) = match config.mode {
+            ServiceMode::Standalone { config: standalone } => {
+                ("standalone", Some(standalone.run), None)
+            }
+            ServiceMode::Cluster { config: cluster } => ("cluster", None, Some(cluster)),
+        };
+        Self {
+            node: config.node,
+            mode: mode.to_string(),
+            run,
+            cluster,
+            store: config.store,
+            workflows: config.workflows,
+            http: config.http,
+            observability: config.observability,
+            flow_control: config.flow_control,
+            heal: config.heal,
+            variables: config.variables,
+        }
+    }
 }
 
 /// Pull the `variables` node out of an unsubstituted parse. Returns an empty
@@ -2350,32 +2609,32 @@ impl ServiceConfig {
             }
         }
 
-        // Channel names pair exactly one ChannelSink with one ChannelSource.
+        // Channel names pair exactly one channel sink with one channel source.
         // A dangling half hangs: a source whose registry-held sender never
         // drops, or a sink whose registry-held receiver is never drained.
         let mut channels: HashMap<&str, (Option<&str>, Option<&str>)> = HashMap::new();
         for wf in &self.workflows {
             for s in &wf.sources {
-                if s.type_name == "ChannelSource"
+                if s.connector == "channel"
                     && let Some(name) = s.config.get("name").and_then(ConfigValue::as_str)
                 {
                     let entry = channels.entry(name).or_default();
                     if entry.0.is_some() {
                         return Err(SaciError::configuration(format!(
-                            "channel '{name}': more than one ChannelSource declared"
+                            "channel '{name}': more than one channel source declared"
                         )));
                     }
                     entry.0 = Some(s.id.as_str());
                 }
             }
             for s in &wf.sinks {
-                if s.type_name == "ChannelSink"
+                if s.connector == "channel"
                     && let Some(name) = s.config.get("name").and_then(ConfigValue::as_str)
                 {
                     let entry = channels.entry(name).or_default();
                     if entry.1.is_some() {
                         return Err(SaciError::configuration(format!(
-                            "channel '{name}': more than one ChannelSink declared"
+                            "channel '{name}': more than one channel sink declared"
                         )));
                     }
                     entry.1 = Some(s.id.as_str());
@@ -2386,12 +2645,12 @@ impl ServiceConfig {
             match (source, sink) {
                 (Some(_), None) => {
                     return Err(SaciError::configuration(format!(
-                        "channel '{name}': declares a ChannelSource but no ChannelSink"
+                        "channel '{name}': declares a channel source but no channel sink"
                     )));
                 }
                 (None, Some(_)) => {
                     return Err(SaciError::configuration(format!(
-                        "channel '{name}': declares a ChannelSink but no ChannelSource"
+                        "channel '{name}': declares a channel sink but no channel source"
                     )));
                 }
                 (Some(_), Some(_)) => {}
@@ -2401,7 +2660,7 @@ impl ServiceConfig {
 
         // The HTTP bind address is validated before the store, so a config
         // with both problems reports the listener first.
-        if !self.http.disabled {
+        if self.http.enabled {
             SocketAddr::from_str(&self.http.bind).map_err(|e| {
                 SaciError::configuration(format!(
                     "http.bind '{}' is not a valid socket address: {e}",
@@ -2512,60 +2771,6 @@ impl FromStr for ServiceConfig {
     }
 }
 
-/// A source that never reports EOF, so only the stream runner may drive it.
-///
-/// A `tcp`, `udp` or `saci` source waits for its next frame, datagram or
-/// session forever, and an `HttpPushSource` waits for its next request the
-/// same way. An `HttpSource` is live in its two streaming read modes,
-/// `mode kind="lines"` and `mode kind="events"`, where the body has no end;
-/// its default `mode kind="document"` reads one document and reaches EOF. A
-/// compacted `KafkaSource` is one-shot regardless of `stop_at_end`: it always
-/// reaches EOF once its snapshot is read.
-///
-/// An `OpenTelemetryMetricsSource` is live in its push mode, a listener with no
-/// last request, and in a pull mode that repeats; a pull mode with `stop_at_end`
-/// reads one body and reaches EOF.
-fn is_live_source(spec: &SourceSpec) -> bool {
-    let config_flag = |key: &str| {
-        spec.config
-            .get(key)
-            .and_then(ConfigValue::as_bool)
-            .unwrap_or(false)
-    };
-    // The keys of a `mode` block, which the shorthand keys at the top level
-    // stand in for when no block is declared.
-    let mode_flag = |key: &str| {
-        spec.config
-            .get("mode")
-            .and_then(|mode| mode.get(key))
-            .and_then(ConfigValue::as_bool)
-            .unwrap_or(false)
-    };
-    match spec.type_name.as_str() {
-        "tcp" | "udp" | "saci" => true,
-        "HttpPushSource" => true,
-        "HttpSource" => matches!(
-            spec.config
-                .get("mode")
-                .and_then(|mode| mode.get("kind"))
-                .and_then(ConfigValue::as_str),
-            Some("lines" | "events")
-        ),
-        "OpenTelemetryMetricsSource" => {
-            !matches!(
-                spec.config
-                    .get("mode")
-                    .and_then(|mode| mode.get("kind"))
-                    .and_then(ConfigValue::as_str),
-                Some("pull")
-            ) || !mode_flag("stop_at_end")
-        }
-        "KafkaSource" => !(config_flag("stop_at_end") || config_flag("compacted")),
-        "NatsSource" => !config_flag("stop_at_end"),
-        _ => false,
-    }
-}
-
 #[cfg(all(test, feature = "service"))]
 mod tests {
     use super::*;
@@ -2591,8 +2796,8 @@ mod tests {
     /// which of `wasm`/`plugin` are compiled in.
     const TRIVIAL_WORKFLOW: &str = r#"
 workflow "w" {
-    source "in" type="NoopSource" component="X"
-    sink "out" type="NoopSink" component="X"
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X"
     link from="in" to="out"
 }
 "#;
@@ -2612,12 +2817,14 @@ node id=1 data_dir="/tmp/saci-test"
         format!(
             r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci-cluster"
 
-peer id=1 addr="127.0.0.1:9000"
-peer id=2 addr="127.0.0.2:9000"
+cluster {{
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+    peer id=2 addr="127.0.0.2:9000"
+}}
 {TRIVIAL_WORKFLOW}
 "#
         )
@@ -2634,19 +2841,20 @@ peer id=2 addr="127.0.0.2:9000"
             },
             mode: ServiceMode::Standalone {
                 config: StandaloneConfig {
-                    run_mode: RunMode::Interval { interval_ms: 5_000 },
+                    run: RunMode::Interval { every_ms: 5_000 },
                 },
             },
             workflows: vec![WorkflowSpec {
                 id: "payments".to_string(),
                 name: None,
                 codecs: Vec::new(),
+                schemas: Vec::new(),
                 sources: vec![SourceSpec {
                     heal: None,
                     flow_control: None,
                     id: "kafka_in".to_string(),
                     name: None,
-                    type_name: "MongoSource".to_string(),
+                    connector: "mongodb".to_string(),
                     codec: None,
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
@@ -2658,7 +2866,7 @@ peer id=2 addr="127.0.0.2:9000"
                     heal: None,
                     id: "pg_out".to_string(),
                     name: None,
-                    type_name: "PostgresSink".to_string(),
+                    connector: "postgresql".to_string(),
                     codec: None,
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
@@ -2670,7 +2878,7 @@ peer id=2 addr="127.0.0.2:9000"
             store: None,
             http: HttpConfig {
                 bind: "0.0.0.0:8080".to_string(),
-                disabled: false,
+                enabled: true,
                 control: true,
             },
             observability: ObservabilityConfig {
@@ -2686,11 +2894,9 @@ peer id=2 addr="127.0.0.2:9000"
     }
 
     // The canonical config literal must deserialise into the same shape
-    // `full_config()` builds by hand. Serialization is not exercised: nothing
-    // writes a config file, and `#[serde(flatten)]` plus internally tagged
-    // enums make the `Serialize` direction meaningless here. This config is
-    // never `.validate()`d: the source and sink are deliberately unlinked, to
-    // pin down the parse shape without also asserting the graph rules.
+    // `full_config()` builds by hand. This config is never `.validate()`d:
+    // the source and sink are deliberately unlinked, to pin down the parse
+    // shape without also asserting the graph rules.
     #[test]
     fn test_full_standalone_config_deserialises() {
         let raw = r#"
@@ -2698,15 +2904,15 @@ mode "standalone"
 
 node id=1 name="node-1" data_dir="/tmp/saci"
 
-run_mode kind="interval" interval_ms=5000
+run "interval" every_ms=5000
 
 workflow "payments" {
-    source "kafka_in" type="MongoSource" component="orders"
+    source "kafka_in" connector="mongo" component="orders"
 
-    sink "pg_out" type="PostgresSink" component="orders"
+    sink "pg_out" connector="postgresql" component="orders"
 }
 
-http bind="0.0.0.0:8080" disabled=#false
+http bind="0.0.0.0:8080" enabled=#true
 
 observability log_format="json" log_level="debug"
 "#;
@@ -2726,12 +2932,12 @@ observability log_format="json" log_level="debug"
         assert_eq!(restored.workflows[0].sinks.len(), 1);
         assert_eq!(restored.workflows[0].sinks[0].component, "orders");
         assert_eq!(restored.http.bind, "0.0.0.0:8080");
-        assert!(!restored.http.disabled);
+        assert!(restored.http.enabled);
         assert_eq!(restored.observability.log_level, "debug");
         assert_eq!(restored.observability.log_format, LogFormat::Json);
         match restored.mode {
             ServiceMode::Standalone { config } => {
-                assert_eq!(config.run_mode, RunMode::Interval { interval_ms: 5_000 });
+                assert_eq!(config.run, RunMode::Interval { every_ms: 5_000 });
             }
             _ => panic!("expected standalone"),
         }
@@ -2751,7 +2957,7 @@ observability log_format="json" log_level="debug"
         assert_eq!(cfg.workflows[0].sources.len(), 1);
         assert_eq!(cfg.workflows[0].sinks.len(), 1);
         assert_eq!(cfg.http.bind, "0.0.0.0:8080");
-        assert!(!cfg.http.disabled);
+        assert!(cfg.http.enabled);
         assert_eq!(cfg.observability.log_level, "error");
         assert_eq!(cfg.observability.log_format, LogFormat::Pretty);
         cfg.validate().expect("trivial source-to-sink workflow");
@@ -2945,7 +3151,9 @@ mode "cluster"
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {{
+    peer id=1 addr="127.0.0.1:9000"
+}}
 {TRIVIAL_WORKFLOW}
 "#
         );
@@ -2991,8 +3199,10 @@ mode "cluster"
 
 node id=99 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
-peer id=2 addr="127.0.0.2:9000"
+cluster {{
+    peer id=1 addr="127.0.0.1:9000"
+    peer id=2 addr="127.0.0.2:9000"
+}}
 {TRIVIAL_WORKFLOW}
 "#
         );
@@ -3011,18 +3221,20 @@ peer id=2 addr="127.0.0.2:9000"
     fn test_cluster_with_store_block_rejected() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 store "redb" {
     path "/tmp/saci-state.redb"
 }
 
 workflow "w" {
-    wasm "p" module="p.wasm"
+    wasm "p" path="p.wasm"
 }
 "#;
         let cfg = parse(raw).expect("parse should succeed");
@@ -3043,18 +3255,20 @@ workflow "w" {
     fn test_cluster_with_flow_control_block_rejected() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 flow_control {
     start_rows 8192
 }
 
 workflow "w" {
-    wasm "p" module="p.wasm"
+    wasm "p" path="p.wasm"
 }
 "#;
         let cfg = parse(raw).expect("parse should succeed");
@@ -3077,18 +3291,20 @@ workflow "w" {
     fn test_cluster_flow_control_refusal_outranks_its_value_checks() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 flow_control {
     growth_factor 0.5
 }
 
 workflow "w" {
-    wasm "p" module="p.wasm"
+    wasm "p" path="p.wasm"
 }
 "#;
         let cfg = parse(raw).expect("parse should succeed");
@@ -3112,14 +3328,16 @@ workflow "w" {
     fn test_cluster_without_store_validates() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 workflow "w" {
-    wasm "p" module="p.wasm"
+    wasm "p" path="p.wasm"
 }
 "#;
         let cfg = parse(raw).expect("parse should succeed");
@@ -3134,12 +3352,14 @@ workflow "w" {
         let raw = format!(
             r#"
 mode "cluster"
-lease_ttl_ms 1000
-election_timeout_ms 1000
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {{
+    lease_ttl_ms 1000
+    election_timeout_ms 1000
+    peer id=1 addr="127.0.0.1:9000"
+}}
 {TRIVIAL_WORKFLOW}
 "#
         );
@@ -3189,14 +3409,150 @@ peer id=1 addr="127.0.0.1:9000"
         );
     }
 
+    /// Read a document's `run` node as a [`RunMode`], the way
+    /// `ServiceConfig` reads it.
+    fn parse_run(raw: &str) -> Result<RunMode, String> {
+        let value = crate::config::from_kdl_str(raw).map_err(|e| e.to_string())?;
+        let run = value.get("run").expect("document has a run node").clone();
+        RunMode::deserialize(run).map_err(|e| e.to_string())
+    }
+
     #[test]
     fn test_run_mode_interval_round_trip() {
-        let raw = r#"
-kind "interval"
-interval_ms 3000
+        let restored = parse_run(r#"run "interval" every_ms=3000"#).expect("deserialize");
+        assert_eq!(restored, RunMode::Interval { every_ms: 3_000 });
+
+        let written = serde_json::to_value(&restored).expect("serialize");
+        assert_eq!(
+            written,
+            serde_json::json!({ "id": "interval", "every_ms": 3000 })
+        );
+        assert_eq!(RunMode::deserialize(written).expect("read back"), restored);
+    }
+
+    #[test]
+    fn test_run_mode_kinds_serialize_as_their_bare_name() {
+        for (mode, name) in [
+            (RunMode::Continuous, "continuous"),
+            (RunMode::Once, "once"),
+            (RunMode::Stream, "stream"),
+        ] {
+            let written = serde_json::to_value(&mode).expect("serialize");
+            assert_eq!(written, serde_json::json!(name));
+            assert_eq!(RunMode::deserialize(written).expect("read back"), mode);
+        }
+    }
+
+    #[test]
+    fn test_run_mode_interval_without_every_ms_is_an_error() {
+        let err = parse_run(r#"run "interval""#).expect_err("interval needs a period");
+        assert!(
+            err.contains("every_ms"),
+            "error should name every_ms: {err}"
+        );
+
+        let doc = format!("{}\nrun \"interval\"\n", minimal_standalone_kdl());
+        let err = parse(&doc).expect_err("the same refusal through the whole document");
+        assert!(
+            err.contains("every_ms"),
+            "error should name every_ms: {err}"
+        );
+    }
+
+    #[test]
+    fn test_run_mode_refuses_what_it_does_not_take() {
+        let err = parse_run(r#"run "stream" every_ms=5"#).expect_err("stream has no period");
+        assert!(err.contains("every_ms"), "{err}");
+
+        let err = parse_run(r#"run "once" speed=1"#).expect_err("unknown key");
+        assert!(err.contains("speed"), "{err}");
+
+        let err = parse_run(r#"run "weekly""#).expect_err("unknown kind");
+        assert!(err.contains("weekly"), "{err}");
+
+        let err = parse_run(r#"run "interval" every_ms="soon""#).expect_err("not a number");
+        assert!(err.contains("every_ms"), "{err}");
+    }
+
+    #[test]
+    fn test_run_node_selects_the_standalone_run_mode() {
+        let with =
+            |run: &str| parse(&format!("{}\n{run}\n", minimal_standalone_kdl())).expect("parse");
+        for (text, expected) in [
+            (r#"run "once""#, RunMode::Once),
+            (r#"run "continuous""#, RunMode::Continuous),
+            (
+                r#"run "interval" every_ms=250"#,
+                RunMode::Interval { every_ms: 250 },
+            ),
+            (r#"run "stream""#, RunMode::Stream),
+        ] {
+            match with(text).mode {
+                ServiceMode::Standalone { config } => assert_eq!(config.run, expected, "{text}"),
+                _ => panic!("expected standalone"),
+            }
+        }
+        match parse(&minimal_standalone_kdl()).expect("parse").mode {
+            ServiceMode::Standalone { config } => assert_eq!(config.run, RunMode::Continuous),
+            _ => panic!("expected standalone"),
+        }
+    }
+
+    #[test]
+    fn test_a_misspelled_top_level_key_is_an_error_naming_it() {
+        let doc = format!("{}\nhtpp bind=\"127.0.0.1:1\"\n", minimal_standalone_kdl());
+        let err = parse(&doc).expect_err("an unknown top-level node");
+        assert!(err.contains("htpp"), "error should name the key: {err}");
+    }
+
+    #[test]
+    fn test_standalone_mode_with_a_cluster_block_is_an_error() {
+        let doc = format!(
+            "{}\ncluster {{\n    peer id=1 addr=\"127.0.0.1:9000\"\n}}\n",
+            minimal_standalone_kdl()
+        );
+        let err = parse(&doc).expect_err("standalone takes no cluster block");
+        assert!(
+            err.contains(r#"mode "standalone" takes no cluster block"#),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_cluster_mode_takes_a_cluster_block_and_no_run_node() {
+        let base = r#"
+mode "cluster"
+node id=1 data_dir="/tmp/saci"
 "#;
-        let restored: RunMode = parse_as(raw).expect("deserialize");
-        assert_eq!(restored, RunMode::Interval { interval_ms: 3_000 });
+        let err = parse(&format!("{base}\n{TRIVIAL_WORKFLOW}")).expect_err("no cluster block");
+        assert!(err.contains("requires a cluster block"), "{err}");
+
+        let doc = format!(
+            "{base}\nrun \"once\"\ncluster {{\n    peer id=1 addr=\"127.0.0.1:9000\"\n}}\n{TRIVIAL_WORKFLOW}"
+        );
+        let err = parse(&doc).expect_err("cluster takes no run node");
+        assert!(err.contains("takes no run node"), "{err}");
+    }
+
+    #[test]
+    fn test_a_mode_other_than_standalone_or_cluster_is_an_error() {
+        let doc = minimal_standalone_kdl().replace("standalone", "solo");
+        let err = parse(&doc).expect_err("unknown mode");
+        assert!(
+            err.contains(r#"mode must be "standalone" or "cluster""#),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_a_misspelled_cluster_key_is_an_error_naming_it() {
+        let doc = format!(
+            "mode \"cluster\"\nnode id=1 data_dir=\"/tmp/saci\"\ncluster {{\n    \
+             bootstrap #true\n    quorum 3\n    peer id=1 addr=\"127.0.0.1:9000\"\n}}\n\
+             {TRIVIAL_WORKFLOW}"
+        );
+        let err = parse(&doc).expect_err("an unknown cluster key");
+        assert!(err.contains("quorum"), "error should name the key: {err}");
     }
 
     #[test]
@@ -3207,13 +3563,85 @@ mode "standalone"
 
 node id=1 data_dir="/tmp/saci"
 
-http bind="not-a-socket-addr" disabled=#true
+http bind="not-a-socket-addr" enabled=#false
 {TRIVIAL_WORKFLOW}
 "#
         );
         let cfg = parse(&raw).expect("parse");
+        assert!(!cfg.http.enabled);
         cfg.validate()
-            .expect("disabled http should not validate bind");
+            .expect("a disabled http plane should not validate bind");
+    }
+
+    #[test]
+    fn test_http_disabled_key_is_refused() {
+        let raw = format!(
+            "{}\nhttp bind=\"127.0.0.1:8080\" disabled=#true\n",
+            minimal_standalone_kdl()
+        );
+        let err = parse(&raw).expect_err("`disabled` was replaced by `enabled`");
+        assert!(err.contains("disabled"), "{err}");
+    }
+
+    #[test]
+    fn test_codec_node_and_codec_key_use_the_codec_vocabulary() {
+        let raw = r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci"
+workflow "w" {
+    codec "json" format="ndjson" {
+        config infer_max=10
+    }
+    source "in" connector="noop" component="X" codec="json"
+    sink "out" connector="noop" component="X"
+    link from="in" to="out"
+}
+"#;
+        let cfg = parse(raw).expect("parse");
+        let workflow = &cfg.workflows[0];
+        assert_eq!(workflow.codecs.len(), 1);
+        assert_eq!(workflow.codecs[0].id, "json");
+        assert_eq!(workflow.codecs[0].format, "ndjson");
+        assert_eq!(workflow.codecs[0].config["infer_max"], 10);
+        assert_eq!(workflow.sources[0].codec.as_deref(), Some("json"));
+        assert_eq!(workflow.sinks[0].codec, None);
+
+        for (old, key) in [
+            (r#"transformer "json" format="ndjson""#, "transformer"),
+            (
+                r#"codec "json" format="ndjson" { options infer_max=10 }"#,
+                "options",
+            ),
+        ] {
+            let doc = format!(
+                "mode \"standalone\"\nnode id=1 data_dir=\"/tmp/saci\"\nworkflow \"w\" {{\n{old}\n}}\n"
+            );
+            let err = parse(&doc).expect_err(old);
+            assert!(err.contains(key), "{old}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_processor_nodes_locate_their_artifact_with_path() {
+        let doc = |nodes: &str| {
+            format!(
+                "mode \"standalone\"\nnode id=1 data_dir=\"/tmp/saci\"\nworkflow \"w\" {{\n{nodes}\n}}\n"
+            )
+        };
+        let cfg = parse(&doc(
+            "wasm \"a\" path=\"a.wasm\"\nplugin \"b\" path=\"libb.so\"",
+        ))
+        .expect("parse");
+        assert_eq!(cfg.workflows[0].wasm[0].path.as_deref(), Some("a.wasm"));
+        assert_eq!(cfg.workflows[0].plugin[0].path.as_deref(), Some("libb.so"));
+
+        for (old, key) in [
+            (r#"wasm "a" module="a.wasm""#, "module"),
+            (r#"plugin "b" library="libb.so""#, "library"),
+        ] {
+            let err = parse(&doc(old)).expect_err(old);
+            assert!(err.contains(key), "{old}: {err}");
+        }
     }
 
     #[test]
@@ -3223,12 +3651,14 @@ mode "cluster"
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
-peer id=2 addr="127.0.0.2:9000"
+cluster {
+    peer id=1 addr="127.0.0.1:9000"
+    peer id=2 addr="127.0.0.2:9000"
+}
 
 workflow "w" {
-    source "kafka_in" type="MongoSource" component="orders"
-    sink "out" type="NoopSink" component="orders"
+    source "kafka_in" connector="mongo" component="orders"
+    sink "out" connector="noop" component="orders"
     link from="kafka_in" to="out"
 }
 "#;
@@ -3248,8 +3678,7 @@ workflow "w" {
 
     #[test]
     fn test_run_mode_stream_parses() {
-        let restored: RunMode = parse_as("kind \"stream\"\n").expect("deserialize");
-        assert_eq!(restored, RunMode::Stream);
+        assert_eq!(parse_run(r#"run "stream""#), Ok(RunMode::Stream));
     }
 
     fn stream_kdl(sources: &str, sinks: &str, links: &str) -> String {
@@ -3259,7 +3688,7 @@ mode "standalone"
 
 node id=1 data_dir="/tmp/saci"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "w" {{
 {sources}
@@ -3273,13 +3702,13 @@ workflow "w" {{
     #[test]
     fn test_stream_mode_with_one_source_validates() {
         let raw = stream_kdl(
-            r#"source "ticks" type="tcp" component="Tick""#,
-            r#"sink "out" type="NoopSink" component="Tick""#,
+            r#"source "ticks" connector="tcp" component="Tick""#,
+            r#"sink "out" connector="noop" component="Tick""#,
             r#"link from="ticks" to="out""#,
         );
         let cfg = parse(&raw).expect("parse");
         match &cfg.mode {
-            ServiceMode::Standalone { config } => assert_eq!(config.run_mode, RunMode::Stream),
+            ServiceMode::Standalone { config } => assert_eq!(config.run, RunMode::Stream),
             _ => panic!("expected standalone"),
         }
         cfg.validate().expect("one source + stream mode is valid");
@@ -3295,10 +3724,10 @@ mode "standalone"
 
 node id=1 data_dir="/tmp/saci"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "w" {
-    wasm "p" module="p.wasm"
+    wasm "p" path="p.wasm"
 }
 "#;
         let cfg = parse(raw).expect("parse");
@@ -3317,10 +3746,10 @@ workflow "w" {
         // them round-robin, one batch per item.
         let raw = stream_kdl(
             r#"
-source "a" type="tcp" component="Tick"
-source "b" type="tcp" component="Tick"
+source "a" connector="tcp" component="Tick"
+source "b" connector="tcp" component="Tick"
 "#,
-            r#"sink "out" type="NoopSink" component="Tick""#,
+            r#"sink "out" connector="noop" component="Tick""#,
             r#"
 link from="a" to="out"
 link from="b" to="out"
@@ -3331,8 +3760,13 @@ link from="b" to="out"
     }
 
     #[test]
+    #[cfg(all(
+        feature = "connector-tcp",
+        feature = "connector-udp",
+        feature = "connector-peer"
+    ))]
     fn test_live_sources_rejected_outside_stream_mode() {
-        for type_name in ["tcp", "udp", "saci"] {
+        for type_name in ["tcp", "udp", "peer"] {
             let raw = format!(
                 r#"
 mode "standalone"
@@ -3340,8 +3774,8 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {{
-    source "ticks" type="{type_name}" component="Tick"
-    sink "out" type="NoopSink" component="Tick"
+    source "ticks" connector="{type_name}" component="Tick"
+    sink "out" connector="noop" component="Tick"
     link from="ticks" to="out"
 }}
 "#
@@ -3354,6 +3788,7 @@ workflow "w" {{
     }
 
     #[test]
+    #[cfg(feature = "connector-kafka")]
     fn test_kafka_source_rejected_outside_stream_mode_unless_stop_at_end() {
         let raw = r#"
 mode "standalone"
@@ -3361,8 +3796,8 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    source "orders_in" type="KafkaSource" component="Order"
-    sink "out" type="NoopSink" component="Order"
+    source "orders_in" connector="kafka" component="Order"
+    sink "out" connector="noop" component="Order"
     link from="orders_in" to="out"
 }
 "#;
@@ -3377,10 +3812,10 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    source "orders_in" type="KafkaSource" component="Order" {
+    source "orders_in" connector="kafka" component="Order" {
         config stop_at_end=#true
     }
-    sink "out" type="NoopSink" component="Order"
+    sink "out" connector="noop" component="Order"
     link from="orders_in" to="out"
 }
 "#;
@@ -3390,6 +3825,7 @@ workflow "w" {
     }
 
     #[test]
+    #[cfg(feature = "connector-kafka")]
     fn test_kafka_source_compacted_is_accepted_outside_stream_mode_without_stop_at_end() {
         // A compacted KafkaSource is one-shot regardless of stop_at_end: it
         // always reaches EOF once its snapshot is read, so it needs no
@@ -3400,13 +3836,13 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    source "orders_in" type="KafkaSource" component="Order" {
+    source "orders_in" connector="kafka" component="Order" {
         config {
             compacted #true
             key_field "id"
         }
     }
-    sink "out" type="NoopSink" component="Order"
+    sink "out" connector="noop" component="Order"
     link from="orders_in" to="out"
 }
 "#;
@@ -3416,6 +3852,7 @@ workflow "w" {
     }
 
     #[test]
+    #[cfg(feature = "connector-http")]
     fn test_http_source_streaming_mode_rejected_outside_stream_mode() {
         // `mode kind="events"` reads a `text/event-stream` body that has no
         // end, so the source never reaches EOF and only the stream runner may
@@ -3425,18 +3862,18 @@ mode "standalone"
 
 node id=1 data_dir="/tmp/saci"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "w" {
-    transformer "json" format="ndjson"
-    source "feed" type="HttpSource" component="Order" transformer="json" {
+    codec "json" format="ndjson"
+    source "feed" connector="http" component="Order" codec="json" {
         config {
             url "http://127.0.0.1:9/events"
             mode kind="events"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }
     }
-    sink "out" type="NoopSink" component="Order"
+    sink "out" connector="noop" component="Order"
     link from="feed" to="out"
 }
 "#;
@@ -3447,6 +3884,7 @@ workflow "w" {
     }
 
     #[test]
+    #[cfg(feature = "connector-http")]
     fn test_http_source_document_mode_is_accepted_outside_stream_mode() {
         // The default read mode fetches one document and reaches EOF, so it
         // runs under any run mode, whether `mode kind="document"` is spelled
@@ -3458,17 +3896,17 @@ mode "standalone"
 
 node id=1 data_dir="/tmp/saci"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "w" {{
-    transformer "json" format="ndjson"
-    source "feed" type="HttpSource" component="Order" transformer="json" {{
+    codec "json" format="ndjson"
+    source "feed" connector="http" component="Order" codec="json" {{
         config {{
             url "http://127.0.0.1:9/orders"
             {mode}
         }}
     }}
-    sink "out" type="NoopSink" component="Order"
+    sink "out" connector="noop" component="Order"
     link from="feed" to="out"
 }}
 "#
@@ -3480,6 +3918,7 @@ workflow "w" {{
     }
 
     #[test]
+    #[cfg(feature = "connector-http")]
     fn test_http_push_source_rejected_outside_stream_mode() {
         // The push source listens for requests forever, like `tcp` and `udp`.
         let raw = r#"
@@ -3487,17 +3926,17 @@ mode "standalone"
 
 node id=1 data_dir="/tmp/saci"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "w" {
-    transformer "json" format="ndjson"
-    source "hook" type="HttpPushSource" component="Order" transformer="json" {
+    codec "json" format="ndjson"
+    source "hook" connector="http-listen" component="Order" codec="json" {
         config {
             bind "127.0.0.1:0"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }
     }
-    sink "out" type="NoopSink" component="Order"
+    sink "out" connector="noop" component="Order"
     link from="hook" to="out"
 }
 "#;
@@ -3549,7 +3988,7 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    wasm "p" module="pipeline.wasm" watch=#true
+    wasm "p" path="pipeline.wasm" watch=#true
 }
 "#;
         let err = parse(raw).expect_err("watch was never implemented; it must not parse");
@@ -3574,11 +4013,12 @@ workflow "w" {
                 id: "w".to_string(),
                 name: None,
                 codecs: Vec::new(),
+                schemas: Vec::new(),
                 sources: Vec::new(),
                 wasm: vec![WasmSpec {
                     id: "p".to_string(),
                     name: None,
-                    module: Some("pipeline.wasm".to_string()),
+                    path: Some("pipeline.wasm".to_string()),
                     sha3_256: None,
                     config: HashMap::new(),
                     window: None,
@@ -3615,7 +4055,7 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    wasm "transform" module="transform.wasm"
+    wasm "transform" path="transform.wasm"
 }
 "#;
         let cfg = parse(raw).expect("a wasm node must parse whether or not the host is built in");
@@ -3643,7 +4083,7 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    plugin "audit" library="libaudit.so"
+    plugin "audit" path="libaudit.so"
 }
 "#;
         let cfg = parse(raw).expect("a plugin node must parse whether or not the host is built in");
@@ -3689,7 +4129,7 @@ workflow "w" {
     fn test_window_block_without_the_engine_parses_and_names_the_feature() {
         let raw = workflow_kdl(
             r#"
-wasm "aggregate" module="aggregate.wasm" {
+wasm "aggregate" path="aggregate.wasm" {
     window kind="tumbling" size_ms=30000 time_field="timestamp_ms"
 }
 "#,
@@ -3713,7 +4153,7 @@ wasm "aggregate" module="aggregate.wasm" {
     fn test_plugin_window_block_without_the_engine_names_the_feature() {
         let raw = workflow_kdl(
             r#"
-plugin "aggregate" library="libaggregate.so" {
+plugin "aggregate" path="libaggregate.so" {
     window kind="session" gap_ms=10000 time_field="timestamp_ms"
 }
 "#,
@@ -3748,8 +4188,8 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    wasm "transform" module="transform.wasm"
-    plugin "audit" library="libaudit.so"
+    wasm "transform" path="transform.wasm"
+    plugin "audit" path="libaudit.so"
     link from="transform" to="audit"
 }
 "#;
@@ -3776,7 +4216,7 @@ workflow "w" {
     fn test_a_window_block_is_admitted_by_a_windowing_build() {
         let raw = workflow_kdl(
             r#"
-wasm "aggregate" module="aggregate.wasm" {
+wasm "aggregate" path="aggregate.wasm" {
     window kind="tumbling" size_ms=30000 time_field="timestamp_ms"
 }
 "#,
@@ -3795,10 +4235,10 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    wasm "validate" module="validate.wasm" {
+    wasm "validate" path="validate.wasm" {
         config min_amount="0.50"
     }
-    wasm "settle" module="settle.wasm" {
+    wasm "settle" path="settle.wasm" {
         config fee_bps="290"
     }
     link from="validate" to="settle"
@@ -3808,7 +4248,7 @@ workflow "w" {
         assert_eq!(cfg.workflows[0].wasm.len(), 2);
         assert_eq!(cfg.workflows[0].wasm[0].id, "validate");
         assert_eq!(
-            cfg.workflows[0].wasm[0].module.as_deref(),
+            cfg.workflows[0].wasm[0].path.as_deref(),
             Some("validate.wasm")
         );
         assert_eq!(
@@ -3850,8 +4290,8 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    wasm "validate" module="validate.wasm"
-    wasm "settle" module="settle.wasm" watch=#true
+    wasm "validate" path="validate.wasm"
+    wasm "settle" path="settle.wasm" watch=#true
 }
 "#;
         let err = parse(raw).expect_err("watch was never implemented; it must not parse");
@@ -3867,7 +4307,7 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    plugin "audit" library="pipelines/libtransform.so" sha3_256="sha3-256:abc123" {
+    plugin "audit" path="pipelines/libtransform.so" sha3_256="sha3-256:abc123" {
         config "smoketest.multiplier"="10"
     }
 }
@@ -3878,7 +4318,7 @@ workflow "w" {
             .first()
             .expect("the plugin node should parse");
         assert_eq!(spec.id, "audit");
-        assert_eq!(spec.library.as_deref(), Some("pipelines/libtransform.so"));
+        assert_eq!(spec.path.as_deref(), Some("pipelines/libtransform.so"));
         assert_eq!(spec.sha3_256.as_deref(), Some("sha3-256:abc123"));
         assert_eq!(
             spec.config.get("smoketest.multiplier").map(String::as_str),
@@ -3897,7 +4337,7 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    plugin "p" library="libtransform.so" module="libtransform.so"
+    plugin "p" path="libtransform.so" module="libtransform.so"
 }
 "#;
         let err = parse(raw).expect_err("a key the loader cannot honour must not parse");
@@ -3913,7 +4353,7 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    plugin "p" library="libtransform.so"
+    plugin "p" path="libtransform.so"
 }
 "#;
         let cfg = parse(raw).expect("parse");
@@ -3933,7 +4373,7 @@ workflow "w" {
 
     #[cfg(feature = "plugin-host")]
     #[test]
-    fn test_plugin_with_no_library_relies_on_a_registered_native_runtime() {
+    fn test_plugin_with_no_path_relies_on_a_registered_native_runtime() {
         let raw = r#"
 mode "standalone"
 
@@ -3945,7 +4385,7 @@ workflow "w" {
 "#;
         let cfg = parse(raw).expect("parse");
         let spec = &cfg.workflows[0].plugin[0];
-        assert!(spec.library.is_none());
+        assert!(spec.path.is_none());
         cfg.validate()
             .expect("an artifact-less processor entry point is structurally valid");
     }
@@ -3966,7 +4406,7 @@ workflow "w" {
     /// implementation details no config file depends on.
     #[test]
     fn test_unknown_workflow_key_is_rejected_and_names_it() {
-        let raw = workflow_kdl(r#"    wasmm "transform" module="transform.wasm""#);
+        let raw = workflow_kdl(r#"    wasmm "transform" path="transform.wasm""#);
         let err = parse(&raw).expect_err("a misspelled node kind must not parse");
         assert!(
             err.contains("wasmm"),
@@ -3983,7 +4423,7 @@ workflow "w" {
     #[test]
     fn test_unknown_source_key_is_rejected_and_names_it() {
         let raw =
-            workflow_kdl(r#"    source "in" type="FileSource" component="orders" truncat=#true"#);
+            workflow_kdl(r#"    source "in" connector="file" component="orders" truncat=#true"#);
         let err = parse(&raw).expect_err("a key no source can honour must not parse");
         assert!(
             err.contains("truncat"),
@@ -3999,8 +4439,8 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "w" {
-    source "kafka_in" type="MongoSource" component="orders"
-    sink "out" type="NoopSink" component="orders"
+    source "kafka_in" connector="mongo" component="orders"
+    sink "out" connector="noop" component="orders"
     link from="kafka_in" to="out"
 }
 "#;
@@ -4036,8 +4476,8 @@ workflow "w" {{
     fn rule_id_charset_is_enforced() {
         let err = workflow_err(
             r#"
-source "bad/id" type="NoopSource" component="X"
-sink "out" type="NoopSink" component="X"
+source "bad/id" connector="noop" component="X"
+sink "out" connector="noop" component="X"
 link from="bad/id" to="out"
 "#,
         );
@@ -4049,8 +4489,8 @@ link from="bad/id" to="out"
     fn rule_duplicate_id_across_kinds_is_rejected() {
         let err = workflow_err(
             r#"
-source "shared" type="NoopSource" component="X"
-sink "shared" type="NoopSink" component="X"
+source "shared" connector="noop" component="X"
+sink "shared" connector="noop" component="X"
 link from="shared" to="shared"
 "#,
         );
@@ -4061,20 +4501,20 @@ link from="shared" to="shared"
     fn rule_source_codec_must_be_declared() {
         let err = workflow_err(
             r#"
-source "in" type="NoopSource" transformer="missing" component="X"
-sink "out" type="NoopSink" component="X"
+source "in" connector="noop" codec="missing" component="X"
+sink "out" connector="noop" component="X"
 link from="in" to="out"
 "#,
         );
-        assert!(err.contains("names transformer 'missing'"), "got: {err}");
+        assert!(err.contains("names codec 'missing'"), "got: {err}");
     }
 
     #[test]
     fn rule_link_to_undeclared_node_is_rejected() {
         let err = workflow_err(
             r#"
-source "in" type="NoopSource" component="X"
-sink "out" type="NoopSink" component="X"
+source "in" connector="noop" component="X"
+sink "out" connector="noop" component="X"
 link from="in" to="ghost"
 "#,
         );
@@ -4085,7 +4525,7 @@ link from="in" to="ghost"
     fn rule_self_link_is_rejected() {
         let err = workflow_err(
             r#"
-source "in" type="NoopSource" component="X"
+source "in" connector="noop" component="X"
 link from="in" to="in"
 "#,
         );
@@ -4096,8 +4536,8 @@ link from="in" to="in"
     fn rule_duplicate_link_is_rejected() {
         let err = workflow_err(
             r#"
-source "in" type="NoopSource" component="X"
-sink "out" type="NoopSink" component="X"
+source "in" connector="noop" component="X"
+sink "out" connector="noop" component="X"
 link from="in" to="out"
 link from="in" to="out"
 "#,
@@ -4109,8 +4549,8 @@ link from="in" to="out"
     fn rule_link_into_a_source_is_rejected() {
         let err = workflow_err(
             r#"
-source "a" type="NoopSource" component="X"
-source "b" type="NoopSource" component="X"
+source "a" connector="noop" component="X"
+source "b" connector="noop" component="X"
 link from="a" to="b"
 "#,
         );
@@ -4121,9 +4561,9 @@ link from="a" to="b"
     fn rule_link_out_of_a_sink_is_rejected() {
         let err = workflow_err(
             r#"
-source "in" type="NoopSource" component="X"
-sink "a" type="NoopSink" component="X"
-sink "b" type="NoopSink" component="X"
+source "in" connector="noop" component="X"
+sink "a" connector="noop" component="X"
+sink "b" connector="noop" component="X"
 link from="in" to="a"
 link from="a" to="b"
 "#,
@@ -4137,8 +4577,8 @@ link from="a" to="b"
         {
             let err = workflow_err(
                 r#"
-wasm "p1" module="p1.wasm"
-wasm "p2" module="p2.wasm"
+wasm "p1" path="p1.wasm"
+wasm "p2" path="p2.wasm"
 link from="p1" to="p2"
 link from="p2" to="p1"
 "#,
@@ -4149,7 +4589,7 @@ link from="p2" to="p1"
 
     #[test]
     fn rule_source_with_no_outbound_link_is_rejected() {
-        let err = workflow_err(r#"source "in" type="NoopSource" component="X""#);
+        let err = workflow_err(r#"source "in" connector="noop" component="X""#);
         assert!(
             err.contains("source 'in' has no outbound link"),
             "got: {err}"
@@ -4158,7 +4598,7 @@ link from="p2" to="p1"
 
     #[test]
     fn rule_sink_with_no_inbound_link_is_rejected() {
-        let err = workflow_err(r#"sink "out" type="NoopSink" component="X""#);
+        let err = workflow_err(r#"sink "out" connector="noop" component="X""#);
         assert!(err.contains("sink 'out' has no inbound link"), "got: {err}");
     }
 
@@ -4167,9 +4607,9 @@ link from="p2" to="p1"
     fn rule_branch_charset_is_enforced() {
         let err = workflow_err(
             r#"
-wasm "p" module="p.wasm"
-sink "a" type="NoopSink" component="X"
-sink "b" type="NoopSink" component="X"
+wasm "p" path="p.wasm"
+sink "a" connector="noop" component="X"
+sink "b" connector="noop" component="X"
 link from="p" to="a" branch="bad/branch"
 link from="p" to="b" branch="high"
 "#,
@@ -4183,8 +4623,8 @@ link from="p" to="b" branch="high"
     fn rule_branch_on_a_source_link_is_rejected() {
         let err = workflow_err(
             r#"
-source "in" type="NoopSource" component="X"
-sink "out" type="NoopSink" component="X"
+source "in" connector="noop" component="X"
+sink "out" connector="noop" component="X"
 link from="in" to="out" branch="high"
 "#,
         );
@@ -4196,9 +4636,9 @@ link from="in" to="out" branch="high"
     fn rule_node_mixes_labelled_and_unlabelled_links_is_rejected() {
         let err = workflow_err(
             r#"
-wasm "p" module="p.wasm"
-sink "a" type="NoopSink" component="X"
-sink "b" type="NoopSink" component="X"
+wasm "p" path="p.wasm"
+sink "a" connector="noop" component="X"
+sink "b" connector="noop" component="X"
 link from="p" to="a" branch="high"
 link from="p" to="b"
 "#,
@@ -4211,15 +4651,202 @@ link from="p" to="b"
     fn rule_two_labelled_links_validate() {
         let cfg = parse(&workflow_kdl(
             r#"
-wasm "p" module="p.wasm"
-sink "a" type="NoopSink" component="X"
-sink "b" type="NoopSink" component="X"
+wasm "p" path="p.wasm"
+sink "a" connector="noop" component="X"
+sink "b" connector="noop" component="X"
 link from="p" to="a" branch="high"
 link from="p" to="b" branch="low"
 "#,
         ))
         .expect("parse should succeed");
         cfg.validate().expect("two labelled links are valid");
+    }
+
+    // ── Workflow schemas: `schema "id" { field .. }` ─────────────────────────
+
+    /// Two nodes wired source to sink on the `orders` component, for the
+    /// tests that only care about the `schema` nodes beside them.
+    const ORDERS_LINK: &str = r#"
+source "in" connector="noop" component="orders"
+sink "out" connector="noop" component="orders"
+link from="in" to="out"
+"#;
+
+    #[test]
+    fn test_schema_nodes_parse_one_field_and_many() {
+        let cfg = parse(&workflow_kdl(&format!(
+            r#"
+schema "orders" {{
+    field "id" type="int64"
+}}
+schema "totals" {{
+    field "id" type="int64"
+    field "total" type="decimal128" precision=12 scale=2
+}}
+{ORDERS_LINK}"#
+        )))
+        .expect("schema nodes parse");
+        cfg.validate().expect("two distinct schemas are valid");
+
+        let ids: Vec<&str> = cfg.workflows[0]
+            .schemas
+            .iter()
+            .map(|schema| schema.id.as_str())
+            .collect();
+        assert_eq!(ids, ["orders", "totals"]);
+    }
+
+    #[test]
+    fn rule_a_schema_id_declared_twice_is_rejected() {
+        let err = workflow_err(&format!(
+            r#"
+schema "orders" {{
+    field "id" type="int64"
+}}
+schema "orders" {{
+    field "id" type="utf8"
+}}
+{ORDERS_LINK}"#
+        ));
+        assert!(
+            err.contains("schema 'orders' is declared twice"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rule_a_schema_field_with_a_mixed_case_type_is_rejected_naming_it() {
+        let err = workflow_err(&format!(
+            r#"
+schema "orders" {{
+    field "x" type="Int64"
+}}
+{ORDERS_LINK}"#
+        ));
+        assert!(err.contains("Int64"), "got: {err}");
+        assert!(err.contains("schema 'orders'"), "got: {err}");
+    }
+
+    #[test]
+    fn rule_a_schema_field_that_is_no_arrow_type_is_rejected() {
+        let err = workflow_err(&format!(
+            r#"
+schema "orders" {{
+    field "total" type="decimal128"
+}}
+{ORDERS_LINK}"#
+        ));
+        assert!(err.contains("schema 'orders'"), "got: {err}");
+        assert!(err.contains("'precision'"), "got: {err}");
+    }
+
+    /// A `file` to `file` workflow on the `orders` component: its
+    /// `schema "orders"` holds `schema_lines`, and the `config` of the source
+    /// and of the sink hold `source_lines` and `sink_lines`.
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    fn file_workflow_kdl(
+        dir: &std::path::Path,
+        schema_lines: &str,
+        source_lines: &str,
+        sink_lines: &str,
+    ) -> String {
+        let path = |name: &str| dir.join(name).to_string_lossy().replace('\\', "/");
+        format!(
+            r#"
+mode "standalone"
+
+node id=1 name="svc" data_dir="{data}"
+
+run "once"
+
+workflow "w" {{
+    codec "rows" format="ndjson"
+    schema "orders" {{
+        {schema_lines}
+    }}
+    source "in" connector="file" codec="rows" component="orders" {{
+        config path="{input}" {{
+            {source_lines}
+        }}
+    }}
+    sink "out" connector="file" codec="rows" component="orders" {{
+        config path="{output}" {{
+            {sink_lines}
+        }}
+    }}
+    link from="in" to="out"
+}}
+"#,
+            data = path("data"),
+            input = path("in.ndjson"),
+            output = path("out.ndjson"),
+        )
+    }
+
+    /// A source and a sink that declare no `field` of their own read the
+    /// workflow's `schema` for their component.
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[test]
+    fn test_a_workflow_schema_is_the_schema_of_a_source_and_sink_that_declare_none() {
+        use crate::io::{Sink, Source};
+        use crate::service::{BuiltNodeKind, ServiceBuilder};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("in.ndjson"), "{\"id\":1}\n").expect("fixture");
+        let kdl = file_workflow_kdl(dir.path(), r#"field "id" type="int64""#, "", "");
+        let config = ServiceConfig::from_kdl(&kdl).expect("config loads");
+
+        let workflow = ServiceBuilder::new()
+            .build(&config)
+            .expect("workflow builds")
+            .remove(0);
+
+        let BuiltNodeKind::Source(source) = &workflow.nodes[0].kind else {
+            panic!("the source is declared first");
+        };
+        let BuiltNodeKind::Sink(sink) = &workflow.nodes[1].kind else {
+            panic!("the sink follows it");
+        };
+        for schema in [source.schema(), sink.schema()] {
+            assert_eq!(schema.fields().len(), 1);
+            assert_eq!(schema.field(0).name(), "id");
+            assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Int64);
+        }
+    }
+
+    /// A node that declares its own `field` lines keeps them: the workflow
+    /// schema says `utf8` for `id`, the nodes say a non-null `int64` and a
+    /// second column, and the built schemas are the nodes' own.
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[test]
+    fn test_a_node_that_declares_its_own_fields_keeps_them() {
+        use crate::io::{Sink, Source};
+        use crate::service::{BuiltNodeKind, ServiceBuilder};
+
+        let own = "field \"id\" type=\"int64\" nullable=#false\nfield \"note\" type=\"utf8\"";
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("in.ndjson"), "{\"id\":1,\"note\":\"a\"}\n")
+            .expect("fixture");
+        let kdl = file_workflow_kdl(dir.path(), r#"field "id" type="utf8""#, own, own);
+        let config = ServiceConfig::from_kdl(&kdl).expect("config loads");
+
+        let workflow = ServiceBuilder::new()
+            .build(&config)
+            .expect("workflow builds")
+            .remove(0);
+
+        let BuiltNodeKind::Source(source) = &workflow.nodes[0].kind else {
+            panic!("the source is declared first");
+        };
+        let BuiltNodeKind::Sink(sink) = &workflow.nodes[1].kind else {
+            panic!("the sink follows it");
+        };
+        for schema in [source.schema(), sink.schema()] {
+            assert_eq!(schema.fields().len(), 2);
+            assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Int64);
+            assert!(!schema.field(0).is_nullable());
+            assert_eq!(schema.field(1).name(), "note");
+        }
     }
 
     // ── Cross-workflow rules: ServiceConfig::validate ────────────────────────
@@ -4232,14 +4859,14 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "a" {
-    source "in_a" type="NoopSource" component="X"
-    sink "out_a" type="NoopSink" component="X"
+    source "in_a" connector="noop" component="X"
+    sink "out_a" connector="noop" component="X"
     link from="in_a" to="out_a"
 }
 
 workflow "b" {
-    source "in_b" type="NoopSource" component="Y"
-    sink "out_b" type="NoopSink" component="Y"
+    source "in_b" connector="noop" component="Y"
+    sink "out_b" connector="noop" component="Y"
     link from="in_b" to="out_b"
 }
 "#;
@@ -4259,14 +4886,14 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "a" {
-    source "shared" type="NoopSource" component="X"
-    sink "out_a" type="NoopSink" component="X"
+    source "shared" connector="noop" component="X"
+    sink "out_a" connector="noop" component="X"
     link from="shared" to="out_a"
 }
 
 workflow "b" {
-    source "shared" type="NoopSource" component="Y"
-    sink "out_b" type="NoopSink" component="Y"
+    source "shared" connector="noop" component="Y"
+    sink "out_b" connector="noop" component="Y"
     link from="shared" to="out_b"
 }
 "#;
@@ -4285,14 +4912,14 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "dup" {
-    source "in_a" type="NoopSource" component="X"
-    sink "out_a" type="NoopSink" component="X"
+    source "in_a" connector="noop" component="X"
+    sink "out_a" connector="noop" component="X"
     link from="in_a" to="out_a"
 }
 
 workflow "dup" {
-    source "in_b" type="NoopSource" component="Y"
-    sink "out_b" type="NoopSink" component="Y"
+    source "in_b" connector="noop" component="Y"
+    sink "out_b" connector="noop" component="Y"
     link from="in_b" to="out_b"
 }
 "#;
@@ -4309,18 +4936,20 @@ workflow "dup" {
     fn rule_cluster_mode_requires_exactly_one_workflow() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 workflow "a" {
-    wasm "p1" module="p1.wasm"
+    wasm "p1" path="p1.wasm"
 }
 
 workflow "b" {
-    wasm "p2" module="p2.wasm"
+    wasm "p2" path="p2.wasm"
 }
 "#;
         let cfg = parse(raw).expect("parse should succeed");
@@ -4335,15 +4964,15 @@ workflow "b" {
     fn rule_channel_source_with_no_paired_sink_is_rejected() {
         let err = workflow_err(
             r#"
-source "in" type="ChannelSource" component="X" {
+source "in" connector="channel" component="X" {
     config name="orphan"
 }
-sink "out" type="NoopSink" component="X"
+sink "out" connector="noop" component="X"
 link from="in" to="out"
 "#,
         );
         assert!(
-            err.contains("channel 'orphan': declares a ChannelSource but no ChannelSink"),
+            err.contains("channel 'orphan': declares a channel source but no channel sink"),
             "got: {err}"
         );
     }
@@ -4352,15 +4981,15 @@ link from="in" to="out"
     fn rule_channel_sink_with_no_paired_source_is_rejected() {
         let err = workflow_err(
             r#"
-source "in" type="NoopSource" component="X"
-sink "out" type="ChannelSink" component="X" {
+source "in" connector="noop" component="X"
+sink "out" connector="channel" component="X" {
     config name="orphan"
 }
 link from="in" to="out"
 "#,
         );
         assert!(
-            err.contains("channel 'orphan': declares a ChannelSink but no ChannelSource"),
+            err.contains("channel 'orphan': declares a channel sink but no channel source"),
             "got: {err}"
         );
     }
@@ -4369,20 +4998,20 @@ link from="in" to="out"
     fn rule_duplicate_channel_source_name_is_rejected() {
         let err = workflow_err(
             r#"
-source "in1" type="ChannelSource" component="X" {
+source "in1" connector="channel" component="X" {
     config name="dup"
 }
-source "in2" type="ChannelSource" component="X" {
+source "in2" connector="channel" component="X" {
     config name="dup"
 }
-sink "out1" type="NoopSink" component="X"
-sink "out2" type="NoopSink" component="X"
+sink "out1" connector="noop" component="X"
+sink "out2" connector="noop" component="X"
 link from="in1" to="out1"
 link from="in2" to="out2"
 "#,
         );
         assert!(
-            err.contains("channel 'dup': more than one ChannelSource declared"),
+            err.contains("channel 'dup': more than one channel source declared"),
             "got: {err}"
         );
     }
@@ -4391,12 +5020,12 @@ link from="in2" to="out2"
     fn rule_duplicate_channel_sink_name_is_rejected() {
         let err = workflow_err(
             r#"
-source "in1" type="NoopSource" component="X"
-source "in2" type="NoopSource" component="X"
-sink "out1" type="ChannelSink" component="X" {
+source "in1" connector="noop" component="X"
+source "in2" connector="noop" component="X"
+sink "out1" connector="channel" component="X" {
     config name="dup"
 }
-sink "out2" type="ChannelSink" component="X" {
+sink "out2" connector="channel" component="X" {
     config name="dup"
 }
 link from="in1" to="out1"
@@ -4404,7 +5033,7 @@ link from="in2" to="out2"
 "#,
         );
         assert!(
-            err.contains("channel 'dup': more than one ChannelSink declared"),
+            err.contains("channel 'dup': more than one channel sink declared"),
             "got: {err}"
         );
     }
@@ -4417,18 +5046,18 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci"
 
 workflow "producer" {
-    source "in" type="NoopSource" component="X"
-    sink "bridge_out" type="ChannelSink" component="X" {
+    source "in" connector="noop" component="X"
+    sink "bridge_out" connector="channel" component="X" {
         config name="bridge"
     }
     link from="in" to="bridge_out"
 }
 
 workflow "consumer" {
-    source "bridge_in" type="ChannelSource" component="X" {
+    source "bridge_in" connector="channel" component="X" {
         config name="bridge"
     }
-    sink "out" type="NoopSink" component="X"
+    sink "out" connector="noop" component="X"
     link from="bridge_in" to="out"
 }
 "#;
@@ -4448,9 +5077,9 @@ workflow "consumer" {
     fn mixed_source_and_processor_fan_in_is_valid() {
         let cfg = parse(&workflow_kdl(
             r#"
-source "s" type="NoopSource" component="X"
-wasm "up" module="up.wasm"
-wasm "down" module="down.wasm"
+source "s" connector="noop" component="X"
+wasm "up" path="up.wasm"
+wasm "down" path="down.wasm"
 link from="s" to="down"
 link from="up" to="down"
 "#,
@@ -4464,10 +5093,10 @@ link from="up" to="down"
     fn window_block_parses_with_one_and_many_key_fields() {
         let raw = workflow_kdl(
             r#"
-wasm "p" module="p.wasm" {
+wasm "p" path="p.wasm" {
     window kind="tumbling" size_ms=30000 offset_ms=500 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-        key_field "category"
-        key_field "region"
+        key_fields "category"
+        key_fields "region"
     }
 }
 "#,
@@ -4486,13 +5115,13 @@ wasm "p" module="p.wasm" {
         assert_eq!(window.allowed_lateness_ms, 5_000);
         cfg.validate().expect("a sane window block validates");
 
-        // A single key_field child is a scalar, not an array: the one-or-many
+        // A single key_fields child is a scalar, not an array: the one-or-many
         // deserializer must accept both shapes.
         let raw = workflow_kdl(
             r#"
-wasm "p" module="p.wasm" {
+wasm "p" path="p.wasm" {
     window kind="session" gap_ms=10000 time_field="ts" {
-        key_field "category"
+        key_fields "category"
     }
 }
 "#,
@@ -4511,7 +5140,7 @@ wasm "p" module="p.wasm" {
     fn window_unknown_key_is_rejected() {
         let raw = workflow_kdl(
             r#"
-wasm "p" module="p.wasm" {
+wasm "p" path="p.wasm" {
     window kind="tumbling" size_ms=1000 time_field="ts" bogus=1
 }
 "#,
@@ -4524,7 +5153,7 @@ wasm "p" module="p.wasm" {
     fn window_unknown_kind_is_rejected() {
         let raw = workflow_kdl(
             r#"
-wasm "p" module="p.wasm" {
+wasm "p" path="p.wasm" {
     window kind="hourly" size_ms=1000 time_field="ts"
 }
 "#,
@@ -4537,7 +5166,7 @@ wasm "p" module="p.wasm" {
     fn window_missing_time_field_is_rejected() {
         let raw = workflow_kdl(
             r#"
-wasm "p" module="p.wasm" {
+wasm "p" path="p.wasm" {
     window kind="tumbling" size_ms=1000
 }
 "#,
@@ -4550,7 +5179,7 @@ wasm "p" module="p.wasm" {
     fn window_geometry_key_wrong_for_kind_is_rejected() {
         let raw = workflow_kdl(
             r#"
-wasm "p" module="p.wasm" {
+wasm "p" path="p.wasm" {
     window kind="session" gap_ms=1000 size_ms=500 time_field="ts"
 }
 "#,
@@ -4563,7 +5192,7 @@ wasm "p" module="p.wasm" {
     fn window_invalid_geometry_is_rejected_at_validate() {
         let raw = workflow_kdl(
             r#"
-wasm "p" module="p.wasm" {
+wasm "p" path="p.wasm" {
     window kind="sliding" size_ms=1000 slide_ms=2000 time_field="ts"
 }
 "#,
@@ -4589,10 +5218,10 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci-test"
 
 workflow "w" {{
-    source "in" type="NoopSource" component="X" {{
+    source "in" connector="noop" component="X" {{
         {retry}
     }}
-    sink "out" type="NoopSink" component="X"
+    sink "out" connector="noop" component="X"
     link from="in" to="out"
 }}
 "#
@@ -4707,7 +5336,7 @@ workflow "w" {{
     // ── flow_control block ───────────────────────────────────────────────────
 
     /// The trivial workflow with `global` at the top level and `local` inside
-    /// the source node, in `run_mode`.
+    /// the source node, in the run mode `run_mode` spells.
     fn flow_kdl_mode(run_mode: &str, global: &str, local: &str) -> String {
         format!(
             r#"
@@ -4719,10 +5348,10 @@ node id=1 data_dir="/tmp/saci-test"
 {global}
 
 workflow "w" {{
-    source "in" type="NoopSource" component="X" {{
+    source "in" connector="noop" component="X" {{
         {local}
     }}
-    sink "out" type="NoopSink" component="X"
+    sink "out" connector="noop" component="X"
     link from="in" to="out"
 }}
 "#
@@ -4765,15 +5394,15 @@ workflow "w" {{
 
     #[test]
     fn stream_mode_carries_a_latency_objective_and_batch_mode_does_not() {
-        let stream = parse(&flow_kdl_mode(r#"run_mode kind="stream""#, "", ""))
-            .expect("parse should succeed");
+        let stream =
+            parse(&flow_kdl_mode(r#"run "stream""#, "", "")).expect("parse should succeed");
         assert_eq!(
             resolved(&stream).target_latency_ms,
             250,
             "a stream workflow's contract is per-item latency"
         );
 
-        for mode in ["", r#"run_mode kind="interval" interval_ms=5000"#] {
+        for mode in ["", r#"run "interval" every_ms=5000"#] {
             let batch = parse(&flow_kdl_mode(mode, "", "")).expect("parse should succeed");
             assert_eq!(
                 resolved(&batch).target_latency_ms,
@@ -4790,7 +5419,7 @@ workflow "w" {{
         assert_eq!(resolved(&batch).target_latency_ms, 90);
 
         let stream = parse(&flow_kdl_mode(
-            r#"run_mode kind="stream""#,
+            r#"run "stream""#,
             "flow_control { target_latency_ms 0 }",
             "",
         ))
@@ -5141,14 +5770,16 @@ workflow "w" {{
     fn window_block_is_rejected_in_cluster_mode() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 workflow "w" {
-    wasm "p" module="p.wasm" {
+    wasm "p" path="p.wasm" {
         window kind="tumbling" size_ms=1000 time_field="ts"
     }
 }
@@ -5172,12 +5803,12 @@ variables {
 }
 
 workflow "w" {
-    wasm "p" module="${mod_dir}/p.wasm"
+    wasm "p" path="${mod_dir}/p.wasm"
 }
 "#;
 
     #[test]
-    fn declared_variables_substitute_into_wasm_module_paths() {
+    fn declared_variables_substitute_into_wasm_paths() {
         let cfg = ServiceConfig::from_kdl(VARIABLES_WORKFLOW).expect("load");
         assert_eq!(
             cfg.variables.get("mod_dir").map(String::as_str),
@@ -5185,7 +5816,7 @@ workflow "w" {
         );
         #[cfg(feature = "wasm-host")]
         assert_eq!(
-            cfg.workflows[0].wasm[0].module.as_deref(),
+            cfg.workflows[0].wasm[0].path.as_deref(),
             Some("/tmp/saci-modules/p.wasm")
         );
     }
@@ -5204,7 +5835,7 @@ variables {{
 }}
 
 workflow "w" {{
-    wasm "p" module="${{{name}}}/p.wasm"
+    wasm "p" path="${{{name}}}/p.wasm"
 }}
 "#,
             name = "SACI_TEST_LOAD_SHADOW"
@@ -5218,7 +5849,7 @@ workflow "w" {{
         );
         #[cfg(feature = "wasm-host")]
         assert_eq!(
-            cfg.workflows[0].wasm[0].module.as_deref(),
+            cfg.workflows[0].wasm[0].path.as_deref(),
             Some("/from-file/p.wasm")
         );
         unsafe { std::env::remove_var("SACI_TEST_LOAD_SHADOW") };
@@ -5232,7 +5863,7 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci-test"
 
 workflow "w" {
-    wasm "p" module="${SACI_TEST_UNDECLARED_NOPE}/p.wasm"
+    wasm "p" path="${SACI_TEST_UNDECLARED_NOPE}/p.wasm"
 }
 "#;
         let err = ServiceConfig::from_kdl(raw).expect_err("undeclared variable");
@@ -5258,8 +5889,8 @@ node id=1 data_dir="/tmp/saci-test"
 {global}
 
 workflow "w" {{
-    source "in" type="NoopSource" component="X"
-    sink "out" type="NoopSink" component="X" {{
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X" {{
         {local}
     }}
     link from="in" to="out"
@@ -5398,16 +6029,18 @@ workflow "w" {{
     fn a_cluster_config_with_a_heal_block_is_rejected() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci-test"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 heal { after_failures 2 }
 
 workflow "w" {
-    wasm "p" module="p.wasm"
+    wasm "p" path="p.wasm"
 }
 "#;
         let cfg = parse(raw).expect("parse should succeed");
@@ -5427,8 +6060,8 @@ mode "standalone"
 node id=1 data_dir="/tmp/saci-test"
 
 workflow "orders" {{
-    source "in" type="NoopSource" component="X"
-    sink "out" type="NoopSink" component="X"
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X"
     link from="in" to="out"
     {block}
 }}
@@ -5497,14 +6130,16 @@ workflow "orders" {{
     fn a_cluster_config_with_a_dlq_block_is_rejected() {
         let raw = r#"
 mode "cluster"
-bootstrap #true
 
 node id=1 data_dir="/tmp/saci-test"
 
-peer id=1 addr="127.0.0.1:9000"
+cluster {
+    bootstrap #true
+    peer id=1 addr="127.0.0.1:9000"
+}
 
 workflow "w" {
-    wasm "p" module="p.wasm"
+    wasm "p" path="p.wasm"
     dlq "redb"
 }
 "#;

@@ -9,13 +9,13 @@
 //! # The canonical schema
 //!
 //! [`metrics_schema`] is the ten-column schema a source emits when its config
-//! declares no `schema_fields`. One row is one OTLP data point, so a metric
+//! declares no `field` entries. One row is one OTLP data point, so a metric
 //! with three data points is three rows and the metric's own name, unit and
 //! description repeat on each. [`mod@column`] names the columns.
 //!
 //! # A declared schema
 //!
-//! A source whose config declares `schema_fields` emits exactly that schema
+//! A source whose config declares `field` entries emits exactly that schema
 //! instead. Each declared column is filled from the canonical column of the
 //! same name where one exists, and from the data point's attribute of that
 //! name otherwise, which is the shape a sink's own attribute encoding writes.

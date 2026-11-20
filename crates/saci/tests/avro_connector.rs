@@ -56,31 +56,31 @@ mode "standalone"
 
 node id=1 name="saci-avro-connector" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "avro-connector-test" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
-    transformer "avro_fmt" format="avro" {{
-        options compression="deflate"
+    codec "avro_fmt" format="avro" {{
+        config compression="deflate"
     }}
 
-    source "orders_in" type="FileSource" component="{COMPONENT}" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="FileSink" component="{COMPONENT}" transformer="avro_fmt" {{
+    sink "orders_out" connector="file" component="{COMPONENT}" codec="avro_fmt" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -88,7 +88,7 @@ workflow "avro-connector-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#

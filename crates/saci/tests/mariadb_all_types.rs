@@ -46,9 +46,9 @@ const fn hexcol(name: &'static str, sql: &'static str, kdl: &'static str) -> Col
 }
 
 fn fields(cols: &[Col]) -> String {
-    let mut out = String::from("schema_fields \"id\" type=\"int64\" nullable=#false\n");
+    let mut out = String::from("field \"id\" type=\"int64\" nullable=#false\n");
     for c in cols {
-        out.push_str(&format!("schema_fields \"{}\" {}\n", c.name, c.kdl));
+        out.push_str(&format!("field \"{}\" {}\n", c.name, c.kdl));
     }
     out
 }

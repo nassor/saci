@@ -10,14 +10,14 @@ One run covers four source kinds (Kafka, a file, an in-process channel, NATS Jet
 
 ## Two services
 
-`run_mode` belongs to a whole config, and the two halves need opposite modes.
+`run` belongs to a whole config, and the two halves need opposite modes.
 
-A Kafka consumer, a JetStream consumer and a `ChannelSource` never report EOF, so only the stream runner can drive them. Every PostgreSQL read mode, `cdc_logical` included, reports EOF once it has caught up. In stream mode that EOF retires the source for good; the interval runner treats it as the end of one drain cycle and reads again.
+A Kafka consumer, a JetStream consumer and a `channel` source never report EOF, so only the stream runner can drive them. Every PostgreSQL read mode, `cdc_logical` included, reports EOF once it has caught up. In stream mode that EOF retires the source for good; the interval runner treats it as the end of one drain cycle and reads again.
 
-| Config | `run_mode` | Workflows | Control plane |
-|--------|-----------|-----------|---------------|
-| `integrity.kdl` | `stream` | `ingest`, `settle` | `127.0.0.1:8088` |
-| `integrity_audit.kdl` | `interval`, 1000 ms | `audit` | `127.0.0.1:8089` |
+| Config | `run` | Workflows | Control plane |
+|--------|-------|-----------|---------------|
+| `integrity.kdl` | `"stream"` | `ingest`, `settle` | `127.0.0.1:8088` |
+| `integrity_audit.kdl` | `"interval" every_ms=1000` | `audit` | `127.0.0.1:8089` |
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ Use three terminals for steps 3 to 5, and keep the order.
 3. Start the publisher and verifier, **before** either service:
 
    ```text
-   cargo run -p saci --features service,transformer-arrow-ipc,transformer-csv,transformer-ndjson,transformer-parquet --example integrity_check
+   cargo run -p saci --features service,codec-arrow-ipc,codec-csv,codec-ndjson,codec-parquet --example integrity_check
    ```
 
    It resets its shared state, then prints `start both services now` followed by the two `serve` commands, and waits for both control planes.
@@ -102,15 +102,15 @@ Get-Content examples/integrity/schema.sql | docker compose -f examples/integrity
 
 | Workflow | Node | What it does |
 |----------|------|--------------|
-| `ingest` | `catalog_file` | `FileSource` over `catalog.csv`, read once as csv, then EOF |
-| `ingest` | `orders_kafka` | `KafkaSource` on `integrity.orders`, ndjson, one message per batch |
+| `ingest` | `catalog_file` | `file` source over `catalog.csv`, read once as csv, then EOF |
+| `ingest` | `orders_kafka` | `kafka` source on `integrity.orders`, ndjson, one message per batch |
 | `ingest` | `classify` | wasm: joins orders with the accumulated catalog, derives `line_total`, `taxable`, `branch` and a checksum, routes the batch |
 | `ingest` | `express_http`, `standard_http` | branch `express` posts ndjson, branch `standard` posts csv with a header row |
-| `ingest` | `settle_bridge` | branch `all`: `ChannelSink` on channel `classified` |
-| `settle` | `bridge_in`, `payments_nats` | `ChannelSource` on `classified`, and a JetStream durable consumer on `integrity.payments` |
+| `ingest` | `settle_bridge` | branch `all`: `channel` sink on channel `classified` |
+| `settle` | `bridge_in`, `payments_nats` | `channel` source on `classified`, and a JetStream durable consumer on `integrity.payments` |
 | `settle` | `aggregate` | wasm, windowed: merges both streams into 10 s tumbling windows keyed by `region` |
 | `settle` | `window_http` | closed windows, arrow-ipc |
-| `audit` | `audit_cdc` | `PostgresSource`, `cdc_logical` over `public.order_audit` |
+| `audit` | `audit_cdc` | `postgresql` source, `cdc_logical` over `public.order_audit` |
 | `audit` | `verify_audit` | wasm, stateless: one verdict per change, `__op` renamed to `op` |
 | `audit` | `audit_http` | verdicts, parquet |
 
@@ -130,7 +130,7 @@ The two `ClassifiedOrder` sinks together must cover every published order, with 
 ## How the config behaves
 
 - Catalog first. `catalog_file` is declared first so its single arrival is the first item the stream runner processes. `classify` keeps the catalog in its checkpoint state, and a sku it has not seen classifies as `taxable=false`, which the verifier does not expect. The guarantee is one arrival deep, which is why the catalog is one small file.
-- One message, one batch. `classify` routes per batch and reads the first row's priority. The config sets `batch_size 1` next to `flow_control { enabled #false }`; without the second key, the runner's admission credit overwrites `batch_size` before every poll.
+- One message, one batch. `classify` routes per batch and reads the first row's priority. The config sets `batch_rows 1` next to `flow_control { enabled #false }`; without the second key, the runner's admission credit overwrites `batch_rows` before every poll.
 - Windows close on the watermark. A window closes when the watermark reaches its end. `allowed_lateness_ms` (2000) only decides which arriving rows are too late to merge, as in `examples/windowing/`.
 - A re-fire is added, a retry is not. A group can fire again after a late but in-budget row, and the second emission carries a delta, so a consumer adds the emissions for a `(window_id, region)` pair. Every sink node is wrapped in `RetryingSink`, so a refused POST is re-sent byte for byte. The verifier counts a request body it has already seen once. It does not deduplicate on `checksum`, because two genuine re-fires with an identical delta would collapse into one.
 - Event time is simulated. Both streams take event time from one monotonic clock that advances `--ts-step-ms` per published item. About 2.03 items are published per order, so event time runs at `rate * 2.03 * ts_step_ms` ms per wall second. A `ClassifiedOrder` crosses Kafka, `ingest` and the channel, while a `Payment` comes straight from NATS, and the watermark follows the maximum of both. Keep that product near or below 1000 so an order has the full 2000 ms budget. The defaults (`--rate 40`, `--ts-step-ms 10`) give about 813. Raise the rate only by lowering the step.
@@ -206,7 +206,7 @@ An unrecognised flag is an error.
 | `integrity.kdl` | the `ingest` and `settle` workflows, stream mode, port 8088 |
 | `integrity_audit.kdl` | the `audit` workflow, interval mode, port 8089 |
 | `integrity_check.rs` | the `saci` example: publisher, receiver, verifier and lifecycle driver |
-| `catalog.csv` | the eight-sku catalog the `FileSource` reads |
+| `catalog.csv` | the eight-sku catalog the `file` source reads |
 | `schema.sql` | `public.order_audit`, its replica identity and the publication |
 | `docker-compose.yml` | Kafka, NATS with JetStream, PostgreSQL with `wal_level=logical` |
 | `wasm/classify/` | `integrity-classify-wasm`: join, derive and route |

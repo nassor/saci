@@ -120,8 +120,8 @@ pub use cluster::{ClusterStats, run_cluster};
 pub use config::{
     ClusterConfig, CodecSpec, DlqBlock, DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig,
     HttpConfig, LinkSpec, LogFormat, NodeConfig, ObservabilityConfig, PeerSpec, PluginSpec,
-    RetryConfig, RunMode, ServiceConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig,
-    StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
+    RetryConfig, RunMode, SchemaSpec, ServiceConfig, ServiceMode, SinkSpec, SourceSpec,
+    StandaloneConfig, StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
 };
 #[cfg(feature = "service")]
 pub use dlq::{DeadLetterQueue, DlqError, DlqRegistry, DlqShared, ReplayFilter};
@@ -153,7 +153,7 @@ pub use plugin_loader::load_plugin_runtime;
 #[cfg(feature = "service")]
 pub use redb_state::{RedbStateClient, SourceCursorMeta};
 #[cfg(feature = "service")]
-pub use registry::{Codec, CodecFactory, CodecRegistry, Registry, SinkFactory, SourceFactory};
+pub use registry::{Codec, CodecFactory, CodecRegistry, Connector, Rebuild, Registry, Role};
 #[cfg(feature = "service")]
 pub use serve::{ServeExit, ServeOptions, serve};
 #[cfg(feature = "service")]

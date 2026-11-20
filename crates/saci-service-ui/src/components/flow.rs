@@ -25,8 +25,8 @@
 //! the same rule the graph's boxes follow. A node that has recorded nothing
 //! shows an em dash rather than a zero, because "not sampled" and "measured
 //! zero" are different facts, and `saci_sink_pending_rows` is absent entirely
-//! for a connector that reports none. `ChannelSink`, `PostgresSink` and
-//! `S3Sink` report one; `FileSink`, `HttpSink`, Kafka, NATS and TCP do not.
+//! for a connector that reports none. The `channel`, `postgresql` and
+//! `s3` sinks report one; `file`, `http`, Kafka, NATS and TCP do not.
 
 use crate::wire::{
     FlowDecision, FlowDecisionKind, PointAt, SINK_ATTR, SOURCE_ATTR, Snapshot, TopoNode,
