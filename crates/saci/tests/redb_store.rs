@@ -12,7 +12,7 @@ use saci::SaciResult;
 use saci::distributed::checkpoint::CheckpointStore;
 use saci::distributed::consensus::store::RedbSharedStore;
 use saci::distributed::partition::{MAX_LOG_ENTRY_BYTES, PartitionSource};
-use saci::service::redb_state::{RedbStateClient, SourceCursorMeta};
+use saci::service::{RedbStateClient, SourceCursorMeta};
 use tempfile::TempDir;
 use uuid::Uuid;
 

@@ -23,8 +23,8 @@ use arrow_schema::{DataType, Field, Schema};
 use saci::component::Component;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::plugin_host::NativePluginRuntime;
+use saci::service::BuiltWorkflow;
 use saci::service::RunMode;
-use saci::service::builder::BuiltWorkflow;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

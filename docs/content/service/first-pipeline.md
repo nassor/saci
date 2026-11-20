@@ -249,7 +249,7 @@ once per second:
 `/status` carries the workflow counters:
 
 ```json
-{"node_id":1,"node_name":"first-pipeline","mode":"standalone","uptime_seconds":7,"build":{"version":"0.1.0"},"cluster":null,"standalone":[{"workflow_id":"orders","iterations":1,"rows_processed":5,"source_batches_drained":1,"sink_batches_written":1,"iteration_errors":0,"total_busy_micros":0,"max_item_micros":0}]}
+{"node_id":1,"node_name":"first-pipeline","mode":"standalone","uptime_seconds":7,"build":{"version":"0.1.0"},"standalone":[{"workflow_id":"orders","iterations":1,"rows_processed":5,"source_batches_drained":1,"sink_batches_written":1,"iteration_errors":0,"total_busy_micros":0,"max_item_micros":0}]}
 ```
 
 `/ready` returns `{"status":"ready"}`, and `/metrics` serves the Prometheus

@@ -11,9 +11,9 @@
 //!
 //! | Piece | Installed by |
 //! |---|---|
-//! | [`InspectorLayer`] | [`init_logging`](crate::service::logging::init_logging), as one more layer on the existing registry |
+//! | [`InspectorLayer`] | [`init_logging`](crate::service::init_logging), as one more layer on the existing registry |
 //! | [`InMemoryMetricExporter`] | `saci-service serve`, as a second `PeriodicReader` on the shared `SdkMeterProvider` |
-//! | [`Topology`] | [`ServiceBuilder::build`](crate::service::builder::ServiceBuilder::build), once, through [`Inspector::set_topology`] |
+//! | [`Topology`] | [`ServiceBuilder::build`](crate::service::ServiceBuilder::build), once, through [`Inspector::set_topology`] |
 //! | [`FlowDecision`] | the standalone and stream runners, through [`Inspector::record_flow_decision`], on each pass a source's admission target moved |
 //!
 //! Unlike the `crate::metrics::Instruments` set, this type is **not** process-global:

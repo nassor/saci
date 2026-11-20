@@ -24,8 +24,8 @@ use saci::codec::csv::CsvCodec;
 use saci::component::Component;
 use saci::connector::file::{FileSource, FileSourceConfig};
 use saci::io::Source;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 use tokio_util::sync::CancellationToken;
 
 #[path = "common/smoketest.rs"]

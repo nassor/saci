@@ -13,8 +13,8 @@
 
 use tokio_util::sync::CancellationToken;
 
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 /// A quoted KDL string reads backslashes as escapes, so a Windows path has to
 /// go in with forward slashes.

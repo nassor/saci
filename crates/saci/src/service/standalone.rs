@@ -210,7 +210,7 @@ pub struct WorkflowStats {
     /// `batches` are per arrival. A pass is one whole drain again where no
     /// credit applies: `flow_control { enabled #false }` and
     /// `RunMode::OneShot`, which builds no controller at all.
-    /// [`stream`](super::stream) fills the same field once
+    /// The `stream` runner fills the same field once
     /// per chunk, of the single source that chunk came from.
     pub iterations: u64,
     /// Total number of source drain calls that returned at least one row.

@@ -19,10 +19,10 @@
 //! registry, compiling any WASM module and checking its WIT world through
 //! wasmtime instantiation, then validates every declared `link` end to end:
 //! matching components and field-for-field identical Arrow schemas
-//! ([`validate_workflow_graph`](crate::service::validation::validate_workflow_graph)).
+//! ([`validate_workflow_graph`](crate::service::validate_workflow_graph)).
 //!
 //! The schema-fingerprint gate
-//! ([`validate_schema_fingerprint`](crate::service::validation::validate_schema_fingerprint))
+//! ([`validate_schema_fingerprint`](crate::service::validate_schema_fingerprint))
 //! is not run here. It compares the workflow against persisted state in
 //! `node.data_dir`, which exists only once the cluster runner has opened it, so
 //! `saci-service serve` applies it at cluster startup.
@@ -30,7 +30,7 @@
 //! ## `--connectors-only`
 //!
 //! Runs Gate 1, then builds every source, sink and codec
-//! ([`ServiceBuilder::build_connectors_only`](crate::service::builder::ServiceBuilder::build_connectors_only))
+//! ([`ServiceBuilder::build_connectors_only`](crate::service::ServiceBuilder::build_connectors_only))
 //! instead of Gate 2: every connector config still gets checked against its
 //! `deny_unknown_fields` struct, but a processor node's module or library is
 //! never touched, so a config naming a build artifact that does not exist on
@@ -44,7 +44,7 @@
 //! separates them.
 //!
 //! A name in
-//! [`BUILTIN_CONNECTOR_FEATURES`](crate::service::factories::BUILTIN_CONNECTOR_FEATURES)
+//! [`BUILTIN_CONNECTOR_FEATURES`](crate::service::BUILTIN_CONNECTOR_FEATURES)
 //! is a connector this crate ships whose feature is compiled out. It is
 //! unusable by this binary whatever happens at serve time, so it is an error
 //! in every mode, named with the feature to rebuild with, and `--strict`

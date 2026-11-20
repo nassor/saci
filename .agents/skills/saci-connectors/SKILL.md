@@ -41,7 +41,8 @@ KDL spelling of a codec declaration);
 `saci::codec` once per workflow build and hands the result to the factory inside a
 `ConnectorContext`, which a connector reads with `codec(what)`, so no connector resolves a format
 itself. The same context carries the channel registry through `channels()`. The `service` feature
-owns the `Registry` and `register_builtin_factories`, extended through `register_source`,
+owns the `Registry`; `ServiceBuilder::new()` fills it through `register_builtin_factories`
+(`pub(crate)`), and the chain extends it through `register_source`,
 `register_sink`, and `ServiceBuilder::codec(factory)` (`Registry::register_codec`). A connector
 that holds a whole document passes it to `Codec::open_reader` as `ReadInput::Memory`; one that
 spools a large document to disk passes `ReadInput::File`.
@@ -502,7 +503,7 @@ its hand parser and refuses a key outside the role's list as `http: unknown key 
   `connector-mariadb`, `connector-nats`, `connector-otlp`, `connector-peer`, `connector-postgresql`,
   `connector-redb`, `connector-s3`, `connector-tcp`, `connector-turso`, `connector-udp`:
   one per connector module. Each compiles `saci::connector::<name>` with that module's optional
-  dependencies and registers its factories in `register_builtin_factories` only when `service` is
+  dependencies and registers its factories in `ServiceBuilder::new()` only when `service` is
   also on. `connector-channel`, `connector-file`, `connector-http`,
   `connector-tcp`, `connector-udp`, `connector-peer` and `connector-redb` are in `connectors` and `server`: an
   in-process channel, local disk, an
@@ -606,8 +607,8 @@ into a nextest archive and lists the groups (the second segment of each test nam
 and `ci` profiles both exclude `live::`, and `matrix` selects only it, with `fail-fast = false`,
 a 10 minute termination and every slice's report printed on a pass as well.
 
-A rejected case asserts both the refusal and where it lands: `build` (`ServiceConfig::load` or
-`ServiceBuilder::build_all` returns an error containing a predicted fragment) or `run` (the
+A rejected case asserts both the refusal and where it lands: `build` (`ServiceConfig::load`, `ServiceConfig::from_kdl` or
+`ServiceBuilder::build` returns an error containing a predicted fragment) or `run` (the
 service builds but the runner reports a non-fatal error and no row reaches the sink). There is
 deliberately no third site for a clean run that delivers nothing: that is what a silent bug looks
 like, so such a combination gets fixed rather than recorded. A build refusal touches no live

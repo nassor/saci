@@ -222,7 +222,7 @@ workflow "plain" {
 
     fn config() -> ServiceConfig {
         serde::Deserialize::deserialize(
-            crate::service::config::from_kdl_str(FIXTURE).expect("fixture parses"),
+            crate::config::from_kdl_str(FIXTURE).expect("fixture parses"),
         )
         .expect("fixture deserializes")
     }

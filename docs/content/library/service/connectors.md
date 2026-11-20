@@ -9,7 +9,7 @@ weight = 1
 A connector is reached either by calling its constructor in Rust and handing the
 result to `Pipeline::source` or `Pipeline::sink`, or by naming its `type` string in the service
 config and letting the factory build it. The second path needs the connector's
-feature on `saci`, because `register_builtin_factories` only installs
+feature on `saci`, because `ServiceBuilder::new()` only installs
 what is compiled in, and it registers a `connector-*` feature's factories only when `service` is
 also on.
 
@@ -40,7 +40,7 @@ for `SourceFactory` and `SinkFactory`, and on nothing else of SACI. Both traits 
 `fn build(&self, config: &ConfigValue, ctx: &ConnectorContext)`, where `ctx.codec(what)`
 resolves the node's codec against the codec registry so no connector
 owns a list of formats. A custom binary then chains `register_source` or
-`register_sink` onto `register_builtin_factories`, or passes them to
+`register_sink` onto `ServiceBuilder::new()`, or passes them to
 `saci::service::cli::main_with`. Registering a `type_name`
 that is already taken replaces the earlier factory.
 

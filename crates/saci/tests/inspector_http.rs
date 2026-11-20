@@ -36,8 +36,8 @@ use saci::inspector::{Inspector, InspectorConfig};
 use saci::inspector_wire::{Snapshot, Topology};
 use saci::prelude::*;
 use saci::service::BuiltWorkflow;
-use saci::service::config::ServiceConfig;
-use saci::service::http::{ServiceModeLabel, ServiceState};
+use saci::service::ServiceConfig;
+use saci::service::{ServiceModeLabel, ServiceState};
 use saci::service::{build_router, build_topology};
 
 /// Two sources and one sink, with a password in one and a DSN in the other.
@@ -162,7 +162,7 @@ async fn serve(state: ServiceState) -> (String, CancellationToken) {
 #[tokio::test(flavor = "multi_thread")]
 async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     let config: ServiceConfig = serde::Deserialize::deserialize(
-        saci::service::config::from_kdl_str(FIXTURE).expect("fixture parses"),
+        saci::connector::from_kdl_str(FIXTURE).expect("fixture parses"),
     )
     .expect("fixture deserializes");
 

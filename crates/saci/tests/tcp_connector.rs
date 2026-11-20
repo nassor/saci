@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 use saci::codec::Codec;
 use saci::codec::arrow_ipc::ArrowIpcCodec;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Tick";
 

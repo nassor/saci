@@ -6,9 +6,9 @@ weight = 4
 +++
 # What the loader validates
 
-`ServiceBuilder::build_all` is the gate. It parses the document, constructs every
+`ServiceBuilder::build` is the gate. It parses the document, constructs every
 declared node in topological order, and checks the graph end to end before it
-returns a `BuiltService`. A binary that assembles the service itself gets every
+returns a `BuiltWorkflow` per workflow. A binary that assembles the service itself gets every
 refusal below as an `Err` from that one call.
 
 ## The load-time graph rules
@@ -121,7 +121,7 @@ about your component is touched until gate 2.
             <text class="t-lbl t-ctl" x="12" y="243">3 &nbsp;validate_workflow_graph</text>
             <text class="t-sm" x="12" y="264">every link end to end: the components at its two</text>
             <text class="t-sm" x="12" y="278">ends must match and their Arrow fields be identical.</text>
-            <text class="t-sm" x="12" y="292">Runs inside ServiceBuilder::build_all, before it returns</text>
+            <text class="t-sm" x="12" y="292">Runs inside ServiceBuilder::build, before it returns</text>
             <text class="t-lbl t-ctl" x="448" y="243">rejects</text>
             <text class="t-sm" x="448" y="264">sink 'orders_out' reads</text>
             <text class="t-sm" x="448" y="278">'Order', which the</text>
@@ -179,7 +179,7 @@ That constructor calls the plugin's `describe` once, so a manifest error, an ABI
 version mismatch or a schema fingerprint disagreement still surfaces here rather
 than at the first batch.
 
-Gate 3 is `validate_workflow_graph`, which `build_all` runs on every link before
+Gate 3 is `validate_workflow_graph`, which `build` runs on every link before
 it returns. Gate 4 is `validate_schema_fingerprint(runtime, persisted)`, in
 cluster mode only, after raft settles. It compares
 `runtime.template_dataset().schemas().fingerprint()` against the `u32` recorded

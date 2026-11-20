@@ -104,7 +104,7 @@ type CachedProgram = (Vec<u8>, SaciPipelinePre<HostState>);
 /// so processors past their deadline are interrupted cleanly; the task stops
 /// when the last clone drops. Create one with [`WasmEngine::new`] at service
 /// startup and share it, through
-/// [`ServiceBuilder::wasm_engine`](crate::service::builder::ServiceBuilder::wasm_engine)
+/// [`ServiceBuilder::wasm_engine`](crate::service::ServiceBuilder::wasm_engine)
 /// when several builders are assembled in one process.
 #[derive(Clone)]
 pub struct WasmEngine {

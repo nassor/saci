@@ -22,8 +22,8 @@ use saci::codec::avro::AvroCodec;
 use saci::connector::file::{FileSource, FileSourceConfig};
 use saci::io::Source;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 

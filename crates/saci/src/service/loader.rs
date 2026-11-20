@@ -85,8 +85,8 @@ impl ModuleResolver for LocalModuleResolver {
 /// ```no_run
 /// # #[cfg(all(feature = "service", feature = "wasm-host"))]
 /// # {
-/// use saci::service::config::WasmSpec;
-/// use saci::service::loader::{LocalModuleResolver, PipelineRuntimeLoader};
+/// use saci::service::WasmSpec;
+/// use saci::service::{LocalModuleResolver, PipelineRuntimeLoader};
 /// use saci::wasm_host::WasmEngine;
 ///
 /// let engine = WasmEngine::new().unwrap();

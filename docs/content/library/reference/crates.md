@@ -272,4 +272,4 @@ Add `windows` for windowed aggregation, or use `plugin` for a native plugin.
 | Cast helper | `cast_batch` | `saci::io` | `engine` |
 | Factory contract | `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` | `saci::connector` | `connector-api` |
 | Codec contract | `Codec`, `BatchReader`, `BatchWriter`, `MessageDecoder` | `saci::codec` | `codec-api` |
-| Config registration | `Registry`, `register_builtin_factories` | `saci::service` | `service` |
+| Config registration | `Registry`, `ServiceBuilder`, `BuiltWorkflow`, `RunOptions`, `serve` | `saci::service` | `service` |

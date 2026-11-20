@@ -167,7 +167,7 @@ pub const BUILTIN_CODEC_FEATURES: &[(&str, &str)] = &[
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::factories::builtin_feature;
+/// use saci::service::builtin_feature;
 ///
 /// assert_eq!(builtin_feature("PostgresSource"), Some("connector-postgresql"));
 /// assert_eq!(builtin_feature("MongoSource"), None);
@@ -189,7 +189,7 @@ pub fn builtin_feature(type_name: &str) -> Option<&'static str> {
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::factories::builtin_codec_feature;
+/// use saci::service::builtin_codec_feature;
 ///
 /// assert_eq!(builtin_codec_feature("csv"), Some("codec-csv"));
 /// assert_eq!(builtin_codec_feature("protobuf"), None);

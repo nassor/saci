@@ -69,7 +69,7 @@ programs. Compiling, linking (`wasmtime_wasi::p3::add_to_linker` + `SaciPipeline
 pre-instantiating a component is synchronous and costs about 1.7 s of one fast core for the 4 MB
 smoketest, so `WasmEngine::program` does it once per distinct set of bytes and every later load of
 the same module is a `memcmp` plus an `Arc` clone, about 0.1 ms. The engine is shareable:
-`ServiceBuilder::with_wasm_engine` hands one engine to several builders, and the ticker stops with
+`ServiceBuilder::wasm_engine` hands one engine to several builders, and the ticker stops with
 the last clone rather than outliving it. Its `Config` uses wasmtime's pooling instance allocator,
 because the WIT contract puts a fresh `Store` and a fresh instantiation on every batch by default: the pool
 recycles pre-reserved slots instead of asking the OS for a linear memory per call, and
@@ -77,7 +77,7 @@ recycles pre-reserved slots instead of asking the OS for a linear memory per cal
 The `POOL_*` constants in `engine.rs` size it for 128 concurrent processor calls; exceeding that
 is a `PoolConcurrencyLimitError` at instantiate, not a queue, and each engine reserves 1 TiB of
 address space, which bounds how many engines one process can hold. `WasmPipelineRuntime` implements
-`saci::runtime::PipelineRuntime`: it drives `instantiate_async` and `describe` through
+`saci::runtime::PipelineRuntime` through its `run_batch(data, prior) -> RuntimeOutput`: it drives `instantiate_async` and `describe` through
 `pollster::block_on`, serializes the dataset to Arrow IPC, drives Component Model Async
 `call_run_batch` inside `store.run_concurrent` via `pollster::block_on` on `spawn_blocking` (keeping
 CPU-bound guest compute off Tokio's worker pool so the epoch ticker cannot starve), and reads the
@@ -106,9 +106,15 @@ processor's `host-io::log` lines in the trace. Processor code reaches `tracing` 
 `host-io::log` import, so field content is untrusted: values are truncated at `MAX_FIELD_BYTES`
 (512), records capped at `MAX_FIELDS` (32), and `("truncated","true")` appended when either bites.
 
-A `wasm` node with no `module` takes its runtime from `with_runtime(id, ..)`, and
+A `wasm` node with no `module` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
 `build_processor_node` **removes** that injected runtime from the builder, so `rebuild_blocker`
 reports such a workflow as `restartable: false`.
+
+A host that loads a component from code calls `WasmEngine::new()` (`SaciResult`, needs a tokio
+runtime for the epoch ticker) and
+`WasmPipelineRuntime::from_bytes(engine, name, bytes, config, timeout: Duration)`; the call limit
+is `timeout.as_millis().div_ceil(100).max(1)` epoch ticks of 100 ms. `PipelineRuntimeLoader` holds
+one engine and a resolver, defaults to 10 s and takes `with_timeout(Duration)`.
 
 ## Building a processor
 
@@ -177,7 +183,7 @@ must match arrow-rs's buffer lengths slot for slot.
 
 The wasm host/processor boundary's instrument is `cargo xtask bench wasm_roundtrip`
 (`crates/saci/benches/wasm_roundtrip.rs`), which reports store lifecycle, host IPC encode,
-host IPC decode and the full `run_on_with_state` round trip as separate groups, since a change
+host IPC decode and the full `run_batch` round trip as separate groups, since a change
 there routinely moves cost between phases while leaving the total flat.
 
 ## Quick Start and xtask commands
@@ -235,7 +241,7 @@ in-memory store fixture and needs no daemon.
 
 Update this file in the same change that: changes the WIT package or its exports; changes
 `#[processor]`, `#[plugin]`, `#[derive(Component)]`, `#[transform]`, `#[fold]` or `saci::sdk`; changes
-`WasmEngine`, `WasmPipelineRuntime`, `HostState`, the pooling constants or the `host-io` imports;
+`WasmEngine`, `WasmPipelineRuntime`, `PipelineRuntimeLoader`, `PipelineRuntime::run_batch`, `HostState`, the pooling constants or the `host-io` imports;
 changes the smoketest fixture or its build; changes the conformance corpus generator or
 `packages/arrow-ipc-conformance/`; adds or removes a processor example; changes
 `rebuild_blocker`'s `restartable` rule for a `wasm` node with no `module` (also check skill

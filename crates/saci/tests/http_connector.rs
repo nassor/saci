@@ -34,8 +34,8 @@ use tokio_util::sync::CancellationToken;
 use saci::codec::Codec;
 use saci::codec::csv::CsvCodec;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 const CSV_BODY: &[u8] = b"id,total\n1,10\n2,20\n3,30\n4,40\n";
@@ -256,10 +256,10 @@ mod listen {
 
     use saci::codec::Codec;
     use saci::codec::ndjson::NdjsonCodec;
-    use saci::service::builder::ServiceBuilder;
-    use saci::service::config::ServiceConfig;
+    use saci::service::ServiceBuilder;
+    use saci::service::ServiceConfig;
+    use saci::service::WorkflowStats;
     use saci::service::install_ring_provider;
-    use saci::service::standalone::WorkflowStats;
 
     use super::{COMPONENT, build_pipeline, column, config_path_text, schema, serve};
 

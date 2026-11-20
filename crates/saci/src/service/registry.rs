@@ -14,7 +14,7 @@
 //! ```rust
 //! # #[cfg(feature = "service")]
 //! # {
-//! use saci::service::registry::Registry;
+//! use saci::service::Registry;
 //!
 //! let mut registry = Registry::new();
 //! // register_source / register_sink / register_codec go here
@@ -40,7 +40,7 @@ pub use crate::connector::{SinkFactory, SourceFactory};
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::registry::Registry;
+/// use saci::service::Registry;
 ///
 /// let registry = Registry::new();
 /// assert_eq!(registry.source_count(), 0);

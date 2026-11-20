@@ -8,8 +8,8 @@
 
 use arrow_schema::{DataType, TimeUnit};
 use saci::pipeline::Pipeline;
-use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
-use saci::service::config::ServiceConfig;
+use saci::service::ServiceConfig;
+use saci::service::{BuiltNodeKind, ServiceBuilder};
 
 /// Parse `body` as a service config.
 fn load(body: &str) -> Result<ServiceConfig, saci::error::SaciError> {
@@ -200,9 +200,9 @@ fn a_cross_field_violation_fails_the_build() {
 #[cfg(feature = "wasm-host")]
 #[test]
 fn the_shipped_example_config_loads_and_its_io_tables_are_accepted() {
+    use saci::connector::postgresql::{PostgresSinkFactory, PostgresSourceFactory};
     use saci::service::ConnectorContext;
-    use saci::service::factories::{PostgresSinkFactory, PostgresSourceFactory};
-    use saci::service::registry::{SinkFactory, SourceFactory};
+    use saci::service::{SinkFactory, SourceFactory};
 
     // SAFETY: single-threaded test setup.
     unsafe {

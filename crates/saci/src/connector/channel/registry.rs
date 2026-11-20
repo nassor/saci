@@ -41,7 +41,7 @@ struct Entry {
 /// automatically); the channel factories reach it through
 /// [`ConnectorContext::channels`](crate::connector::ConnectorContext::channels).
 ///
-/// [`ServiceBuilder::channels`]: crate::service::builder::ServiceBuilder::channels
+/// [`ServiceBuilder::channels`]: crate::service::ServiceBuilder::channels
 #[derive(Default)]
 pub struct ChannelRegistry {
     entries: Mutex<HashMap<String, Entry>>,

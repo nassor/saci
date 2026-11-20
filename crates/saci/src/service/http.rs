@@ -22,9 +22,9 @@
 //! # {
 //! use std::sync::{Arc, atomic::{AtomicBool, AtomicU64}};
 //! use std::time::Instant;
-//! use saci::service::http::{ServiceState, ServiceModeLabel, build_router, serve_http,
-//!                            spawn_watchdog};
-//! use saci::service::config::HttpConfig;
+//! use saci::service::{ServiceState, ServiceModeLabel, build_router, serve_http,
+//!                     spawn_watchdog};
+//! use saci::service::HttpConfig;
 //! use tokio_util::sync::CancellationToken;
 //!
 //! #[tokio::main]

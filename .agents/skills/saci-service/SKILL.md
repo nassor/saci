@@ -15,7 +15,9 @@ description: Use when changing, operating, testing or documenting the saci-servi
 - The `saci-service` binary: `src/bin/saci-service/main.rs` holds the optional mimalloc
   `#[global_allocator]` and `fn main() -> ExitCode { saci::service::cli::main() }`. The CLI lives in
   the library: `src/service/cli.rs` (the `Cli` parser, `main`, `main_with`) and
-  `src/service/cli/commands/{serve,validate,status,cluster}.rs`. `main_with(|builder| ...)` hands
+  `src/service/cli/commands/{serve,validate,status,cluster}.rs`. `cli/commands/serve.rs` loads the
+  config, checks capabilities, applies the flag overrides and hands off to `saci::service::serve`.
+  `main_with(|builder| ...)` hands
   the `ServiceBuilder` that `serve` and `validate` use to the caller after the built-in factories
   are registered, so a custom server registers its own `SourceFactory`/`SinkFactory` there.
   `required-features = ["service"]` on the `[[bin]]` keeps a build without `service` from
@@ -65,7 +67,7 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
   `connector-mariadb`, `connector-nats`, `connector-otlp`, `connector-peer`, `connector-postgresql`, `connector-redb`,
   `connector-s3`, `connector-tcp`, `connector-turso`, `connector-udp`:
   one per connector module `connector::<name>`. Each implies `connector-api`. Its factories
-  register in `register_builtin_factories` only when `service` is also on; without `service` the
+  register in `ServiceBuilder::new()` only when `service` is also on; without `service` the
   feature is a library module.
   TLS is always compiled into `connector-postgresql`, `connector-mariadb` and
   `connector-clickhouse`; there is no `tls` feature.
@@ -98,8 +100,10 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
   dashboard. Implies `tracing` and `metrics`, and pulls `dep:tracing-subscriber` and
   `dep:opentelemetry_sdk`. `service` implies it. Not under `service/`,
   so a library embedder can capture without the axum control plane.
-- `wasm-host`: wasmtime host, `saci::wasm_host`. `WasmEngine`, `WasmPipelineRuntime`, the
-  `bindgen!` host bindings.
+- `wasm-host`: wasmtime host, `saci::wasm_host`. `WasmEngine` (`WasmEngine::new() -> SaciResult`),
+  `WasmPipelineRuntime` (`from_bytes(engine, name, bytes, config, timeout: Duration)`), the
+  `bindgen!` host bindings. `PipelineRuntimeLoader::with_timeout(Duration)` sets the call limit
+  for config-loaded nodes (default 10 s); a timeout becomes epoch ticks of 100 ms, rounded up.
 - `plugin-host`: native plugin host, `saci::plugin_host`. `NativePluginRuntime` dlopens a shared
   library exporting the `saci::plugin_abi` C ABI (`crates/saci/include/saci_plugin.h`), validates
   its manifest, and runs each batch through its `run_batch` slot.
@@ -155,7 +159,7 @@ itself and applied into each node's own redb file.
 - `CheckpointStore`: persists Arrow IPC snapshots for crash recovery
 - `DistributedRunner` and `RunnerConfig`: holds a `Box<dyn PipelineRuntime>` template. Per claimed
   batch it calls `world_factory()` for a fresh `Dataset`, loads the window accumulator and the
-  runtime's opaque state blob, calls `runtime.run_on_with_state(&mut partition_data, prior)`, then
+  runtime's opaque state blob, calls `runtime.run_batch(&mut partition_data, prior)` and takes `.state` of the `RuntimeOutput`, then
   checkpoints and acks. The template's own data, sources, and sinks are never used.
 - `CheckpointStrategy`: `EveryStage`, `EveryNStages`, `None`
 - `MAX_LOG_ENTRY_BYTES` (1 MiB, `partition.rs`): caps the Arrow IPC payload of a registered master
@@ -247,18 +251,27 @@ Key types:
   geometry, and a window block cluster mode cannot honour, are defects in the file either way.
   The check that a window's time field is carried by every component delivered to the node is
   a builder-time gate in `src/service/validation.rs`.
-- `ServiceBuilder` and `BuiltService`: assembles one `BuiltNode` per declared node, in topological
-  order, from config plus registered factories. A `BuiltNode` holds its declared id/name/type_name,
-  its component (`None` for a processor), a `BuiltNodeKind::{Source,Processor,Sink}` and its
-  `downstream` indices into `BuiltService::nodes`. A `wasm`/`plugin` node with no `module`/`library`
-  gets its runtime from `with_runtime(id, ..)`, keyed by that node's declared id. With
-  `with_inspector(...)` the build also publishes the `Topology` into that inspector, because the
-  builder is the only place that knows every node's concrete kind and detail.
-- `ServiceFactory` and `rebuild_blocker` (`src/service/builder.rs`): `build_all` consumes the
+- `ServiceBuilder`, `BuiltWorkflow` and `BuiltNode`: `ServiceBuilder::new()` registers every
+  compiled-in connector and codec plus the channel registry (`register_builtin_factories`,
+  `pub(crate)`); `ServiceBuilder::empty()` registers nothing. The chain is `register_source`,
+  `register_sink`, `codec`, `runtime(id, impl PipelineRuntime + 'static)`, `wasm_engine`,
+  `inspector`, `dlq_registry` and `channels`. `build(&config)` assembles one `BuiltWorkflow` per
+  declared workflow, one `BuiltNode` per declared node, in topological order, from config plus
+  registered factories. A `BuiltNode` holds its declared id/name/type_name, its component (`None`
+  for a processor), a `BuiltNodeKind::{Source,Processor,Sink}` and its `downstream` indices into
+  `BuiltWorkflow::nodes`. `BuiltNode` and `BuiltWorkflow` are `#[non_exhaustive]`: their fields
+  stay readable, and construction goes through `build` or `BuiltWorkflow::builder`. A
+  `wasm`/`plugin` node with no `module`/`library` gets its runtime from `runtime(id, ..)`, keyed by
+  that node's declared id. With `inspector(...)` the build also publishes the `Topology` into that
+  inspector, because the builder is the only place that knows every node's concrete kind and
+  detail.
+- `WorkflowFactory` and `rebuild_blocker` (`src/service/builder.rs`): `build` consumes the
   builder, so nothing it produced can be built twice. `into_factory(&config)` keeps both halves
-  instead, and `build_all` is now that plus one `ServiceFactory::build` per declared workflow plus
-  one `publish_topology`, unchanged in behaviour and signature. The lifecycle plane keeps the
-  factory, because `start` and `restart` rebuild one workflow at a time.
+  instead, and `build` is `into_factory` plus one `WorkflowFactory::build` per declared workflow
+  plus one `publish_topology`. The factory computes `run` (from `config.mode`, `Continuous` in
+  cluster mode), `flow` (`FlowPlan::from_config`) and `batch_resume` (from `config.store`) once
+  and copies them into each workflow it builds. The lifecycle plane keeps the factory, because
+  `start` and `restart` rebuild one workflow at a time.
   `rebuild_blocker(&WorkflowSpec)` names the two shapes that cannot be built twice, both proven by
   the code: a `wasm` node with no `module` or a `plugin` node with no `library`, whose injected
   runtime `build_processor_node` **removes** from the builder; and a `ChannelSource` or
@@ -266,8 +279,18 @@ Key types:
   workflow reports `restartable: false` and 409s on `start`, `stop` and `restart`. `stop` is
   included, because stopping something unstartable is a one-way door. `pause`/`resume`
   stay available.
+- `BuiltWorkflow::builder(id)` and `BuiltWorkflowBuilder`: hand assembly with no config file.
+  `name`, `source(id, component, impl Source)`, `processor(id, impl PipelineRuntime)`,
+  `sink(id, component, impl Sink)`, `window(processor_id, WindowConfig)`, `link`,
+  `link_branch(from, to, branch)`, `run_mode` (default `RunMode::Continuous`), `flow` (default:
+  batch defaults, or `FlowPlan::stream_default()` once the run mode is `Stream`), `batch_resume`
+  (default off), `inspector`, `dlq`, `build`. Nodes keep declaration order; `build` resolves link
+  ids to indices and returns `SaciError::configuration` for an unknown id, a duplicate id, or a
+  link whose target was declared before its origin. It does not run `validate_workflow_graph`,
+  and a node added this way has `type_name` `"native"` (processor) or `"custom"` (source, sink),
+  no retry or heal wrapper and an empty `Registry`.
 - `Registry` plus `saci::connector::{SourceFactory, SinkFactory}`, re-exported from
-  `saci::service::registry`: the whole extension surface. `source_names` and `sink_names`
+  `saci::service`: the whole extension surface. `source_names` and `sink_names`
   enumerate what actually registered, the counterpart of `CodecRegistry::names`.
 - `BUILTIN_CONNECTOR_FEATURES` and `builtin_feature` (`src/service/factories.rs`): the eighteen
   connector type names this crate carries, each paired with the feature that compiles it in
@@ -347,15 +370,25 @@ Key types:
   channel `name` is reported separately as a `Topology::bridges` entry (`BridgeEdge`), outside
   either workflow's `edges`.
 - `validate_workflow_graph(workflow_id, &[BuiltNode])` (`src/service/validation.rs`): the load-time
-  schema-agreement gate `ServiceBuilder::build_all` runs on every link (matching components and
+  schema-agreement gate `ServiceBuilder::build` runs on every link (matching components and
   field-for-field identical Arrow schemas at both ends), and `validate_schema_fingerprint`: a
   cluster node refuses to start when the runtime's Arrow schema fingerprint differs from the one
   its persisted checkpoints were written with.
-- `run_standalone`, `run_stream` and `run_cluster`: runner entry points. `run_standalone` and
-  `run_stream` walk `BuiltService::nodes` directly: each pass fans one admitted chunk of a
-  source's batch out to its `downstream` nodes, runs every processor in topological order, and
-  stages/writes every sink. `run_stream` requires at least one source node and pulls them
-  round-robin, one chunk per item; see the `FlowController` bullet below for what sizes a chunk.
+- `BuiltWorkflow::run`, `RunOptions` and `run_cluster`: runner entry points. `run(self, options:
+  impl Into<RunOptions>) -> SaciResult<WorkflowStats>` dispatches on the workflow's own run mode:
+  `RunMode::Stream` to the stream runner, everything else to the standalone runner
+  (`standalone::run` and `stream::run` are `pub(crate)` and read `flow`, `batch_resume` and the
+  run mode off the workflow, so neither takes a `ServiceConfig`). `RunOptions::new(control)` takes
+  `impl Into<RunControl>`; `.live_stats(Arc<RwLock<WorkflowStats>>)` is the handle `/status`
+  reads, `.state(Arc<RedbStateClient>)` the store processor state and source cursors persist to.
+  `From<CancellationToken>` and `From<RunControl>` convert, so an uncontrolled run is
+  `workflow.run(cancel)`. Both runners walk `BuiltWorkflow::nodes` directly: each pass fans one
+  admitted chunk of a source's batch out to its `downstream` nodes, runs every processor in
+  topological order, and stages/writes every sink. A stream workflow requires at least one source
+  node and pulls them round-robin, one chunk per item; see the `FlowController` bullet below for
+  what sizes a chunk. `WorkflowStats` and `NodeStats { id: Arc<str>, kind: &'static str, .. }` are
+  the result and the per-node counters; the vector of node stats is cloned into a live handle
+  only when the throttled publish fires, and into the result at each exit.
   `run_cluster` validates `node.data_dir`, whose only four files are `bootstrap.lock`,
   `raft-log.redb`, `cluster-app.redb` and `node-id`, starts the `ArrowRaftDriver`, binds its
   peer listener through `spawn_tcp_server` (eagerly, so a taken address fails at startup rather
@@ -367,12 +400,25 @@ Key types:
   first reports a leader, which is what makes a follower's own restart pass
   `validate_data_dir`. Shutdown aborts the listener, signals the driver and awaits its task,
   because that task is what closes both redb files.
+- `serve`, `ServeOptions` and `ServeExit` (`src/service/serve.rs`, re-exported from
+  `saci::service`): `serve(config, builder, options) -> SaciResult<ServeExit>` is the whole startup
+  the `serve` subcommand runs after it has loaded and checked the config: logging and the meter
+  provider, the store, the dead letter queue registry, every workflow build, the HTTP control plane,
+  the runners and the two-stage shutdown. It installs the process-wide tracing subscriber and meter
+  provider, so it runs at most once per process. `ServeOptions { config_path: Option<PathBuf>,
+  announce: bool, shutdown: Option<CancellationToken> }`: `config_path` is where the raw config
+  bytes are stored beside the redb state (`None` stores nothing), `announce` prints the three
+  stdout lines, `shutdown` stops the service as SIGINT and SIGTERM do. `ServeExit::Clean` or
+  `ShutdownBudgetExceeded`. `cli/commands/serve.rs` loads, checks capabilities, applies the flag
+  overrides, calls `serve` and maps `ShutdownBudgetExceeded` to `std::process::exit(1)`.
+  `ServiceConfig::load(path)` reads a file and calls `ServiceConfig::from_kdl(text)`, which holds
+  variable substitution, parsing and `validate`; `ServiceConfig` implements `FromStr` through it.
 - `RunControl`, `PauseGate`, `PauseHandle`, `LifecycleRegistry`, `WorkflowCommand` and
   `run_supervised` (`src/service/lifecycle.rs`, `service` feature): per-workflow start / stop /
-  pause / resume / restart, standalone only. `run_standalone` and `run_stream` take
-  `control: impl Into<RunControl>` instead of a bare `CancellationToken`, and
-  `From<CancellationToken>` yields a gate that never parks, so an uncontrolled call site is
-  unchanged and allocates nothing. There are two pause points, both between passes so staged
+  pause / resume / restart, standalone only. `BuiltWorkflow::run` takes
+  `options: impl Into<RunOptions>`, whose `control` is a `RunControl`: the cancellation token plus the pause gate.
+  `From<CancellationToken>` yields a gate that never parks and allocates nothing, which is what an
+  uncontrolled run passes. There are two pause points, both between passes so staged
   batches, carry-over slices, flow controllers and window trackers all survive a park: the head of
   `standalone.rs`'s loop, just before its cancellation drain, and the head of `stream.rs`'s. Both
   pacing arms also skip their wait while a pause is pending, so an `interval_ms` of a
@@ -380,11 +426,12 @@ Key types:
   opposite ends of both `watch` channels, so dropping either closes exactly one: a dropped
   supervisor releases a parked runner rather than stranding it, and a finished runner ends the
   supervisor's wait for an acknowledgement.
-  `run_supervised` replaces the direct `run_standalone` call in `serve.rs`: with `control` `None`
-  it is exactly one `run_standalone`, and with `Some` it builds, runs, parks, drains and rebuilds
-  the workflow in response to commands, sharing one `&RefCell<ServiceFactory>` across every
+  `run_supervised(initial, &WorkflowSpec, cancel, live_stats, state, &RefCell<WorkflowFactory>,
+  control)` is what `serve` (`src/service/serve.rs`) runs for each workflow: with `control` `None`
+  it is exactly one `BuiltWorkflow::run`, and with `Some` it builds, runs, parks, drains and rebuilds
+  the workflow in response to commands, sharing one `&RefCell<WorkflowFactory>` across every
   supervisor (all polled by the one `join_all` on one task, and the borrow never spans an await).
-  A completed runner still returns, so a one-shot service exits as it always did; a failed one
+  A completed runner returns, so a one-shot service exits when its workflow does; a failed one
   parks only when it is controlled **and** restartable. `LifecycleRegistry::command` applies the
   transition table and waits up to `LIFECYCLE_ACK_BUDGET` (5 s) for the published state to reach
   the verb's target; `command_all` is that per workflow, concurrently, because ten workflows in
@@ -394,13 +441,11 @@ Key types:
 - `FlowController`, `FlowSettings`, `FlowPlan`, `FlowControlConfig` and `FlowAdjustment`
   (`src/service/flow.rs`, `src/service/config.rs`; all nine flow types re-exported from
   `saci::service`, along with `FlowOutcome`, `FlowSample`, `FlowMove` and `FlowCause`):
-  per-source adaptive admission control `run_standalone` and `run_stream` apply before every
-  pass. `run_stream`
-  takes a `flow: &FlowPlan` parameter; `run_standalone` resolves its own plan from the
-  `&ServiceConfig` it already takes, and passes it on to `run_stream` when `run_mode
-  kind="stream"` dispatches there. A direct `run_stream` call has no config to resolve and no
-  run mode to read off a `BuiltService`, so it names the policy: `FlowPlan::stream_default()`,
-  not `FlowPlan::default()`, which is the batch policy and carries no latency objective.
+  per-source adaptive admission control `BuiltWorkflow::run` applies before every
+  pass. The workflow carries its `FlowPlan`: the factory computes it with `FlowPlan::from_config`,
+  and `BuiltWorkflow::builder(..).flow(..)` sets it for a hand-built one. A hand-built stream
+  workflow with no plan gets `FlowPlan::stream_default()`, not `FlowPlan::default()`, which is the
+  batch policy and carries no latency objective.
   Adjustment decisions land at the close of an adjustment epoch (`adjust_interval_ms`, 60000 ms
   default), never per pass: each epoch runs an A/B experiment between the incumbent size and
   one candidate a step away (`growth_factor`, 2.0), alternating arms pass by pass; the winner
@@ -460,9 +505,9 @@ Key types:
   its output. Such a connector keeps its configured `batch_size`/`batch_rows`, no boundary is
   ever drawn inside an arrival, and `max_chunk_bytes` does not bound it. A source feeding both
   a windowed and a non-windowed node counts as windowed: both see the same `RecordBatch`. In
-  `stream` those two suppressions leave the credit deciding nothing, so `run_stream` builds
+  `stream` those two suppressions leave the credit deciding nothing, so the stream runner builds
   **no controller** at all for such a source (`controllers[i] = None`, `RunMode::OneShot`'s
-  shape in `run_standalone`): no samples, no epoch experiment, no `saci_flow_*` series, and one
+  shape in the standalone runner): no samples, no epoch experiment, no `saci_flow_*` series, and one
   `tracing::info!` startup line naming it. The batch runners keep theirs, because `remaining
   == 0` still ends the drain there, so the credit decides how many whole arrivals one pass
   merges in `continuous`/`interval` and its gauges stay meaningful; `flow_control { rows N }`
@@ -560,7 +605,7 @@ Key types:
   Both halves are built in `DeadLetterQueue::build`, the source one built and dropped again, so
   a key either half refuses is a load-time error rather than something the first replay finds.
   Log lines ride `sampling::DLQ_TARGET` (`saci::dlq`) at `warn`. `DlqRegistry::from_config` is
-  the shared half `serve.rs` builds before the workflows and `ServiceBuilder::with_dlq_registry`
+  the shared half `serve` (`src/service/serve.rs`) builds before the workflows and `ServiceBuilder::dlq_registry`
   hands to every build, so the control plane and the runner read one summary. A library embedder
   with no registry gets a private `DlqShared`. See
   `docs/content/service/operate/dead-letter-queue.md`.
@@ -568,7 +613,7 @@ Key types:
   `/api/*` and `/ui` when `observability.inspector.enabled` is set, plus `GET /api/workflows`,
   `GET /api/workflows/{id}`, `POST /api/workflows/{id}/{start,stop,pause,resume,restart}` and
   `POST /api/service/{start,stop,pause,resume,restart}` (`src/service/lifecycle_api.rs`) when
-  `ServiceState::lifecycle` is `Some`, which `serve.rs` sets in standalone mode under
+  `ServiceState::lifecycle` is `Some`, which `serve` sets in standalone mode under
   `http { control #true }` (the default). Every one of those groups is
   **merged** rather than gated inside a handler, so a disabled inspector or a service with no
   lifecycle registry 404s instead of answering 403. A per-workflow `POST` answers `200` once the
@@ -580,7 +625,7 @@ Key types:
   `/api/service/` is a separate path rather than a reserved id, because `pause` is a legal
   declared workflow id. `/status`'s standalone entries carry `state` when the registry is present.
 - Dead letter routes (`src/service/dlq_api.rs`): `GET /api/dlq` and
-  `GET /api/workflows/{id}/dlq` merged when `ServiceState::dlq` is `Some`, which `serve.rs` sets
+  `GET /api/workflows/{id}/dlq` merged when `ServiceState::dlq` is `Some`, which `serve` sets
   from a non-empty `DlqRegistry`; `POST /api/workflows/{id}/dlq/{replay,purge}` merged only
   alongside the lifecycle registry, because a replay runs inside a live runner. `replay` takes an
   optional `DlqReplayRequest` body (`sink`, `reason`), and an absent body is `{}`. A `POST`
@@ -637,15 +682,15 @@ registered at serve time, so it stays `WARNING:` plus the `NOTE:` line and exit 
 is what promotes it to exit 1. `--connectors-only` follows the same split.
 
 `serve`'s shutdown is two stages sharing one deadline, `SHUTDOWN_BUDGET` (30 s), taken the moment
-either the signal or a runner exit fires (`src/service/cli/commands/serve.rs`). The runner future
+either the signal or a runner exit fires (`src/service/serve.rs`). The runner future
 is `pin!`ed rather than moved into the signal `select!`, so the signal arm goes on awaiting it
 under `timeout_at(deadline, ..)`: `wait_for_signal` has already cancelled the root token every
 runner polls, so that await is what runs each runner's own drain, `flush_and_finish_all` plus
 `log_flow_finish`. Dropping it, which a bare `select!` arm does, abandons both. The task drain
 (`ShutdownCoordinator`) then gets whatever is left of the deadline for the HTTP and watchdog
-handles. Overrunning at either stage is `tracing::error!` plus `std::process::exit(1)`, so the
+handles. Overrunning at either stage is `tracing::error!` plus `Ok(ServeExit::ShutdownBudgetExceeded)` from `serve`, which the CLI turns into `std::process::exit(1)`, so the
 clean-stop line is never printed for a stop that was not a drain. That line,
-`saci-service stopped cleanly`, is a `println!`, not a `tracing::info!`, because three docs pages
+`saci-service stopped cleanly`, is a `println!` gated on `ServeOptions::announce`, not a `tracing::info!`, because three docs pages
 call it the proof a stop was a drain and the default `log_level="error"` would swallow an event;
 it pairs with the `saci-service listening on <addr>` banner, a `println!` for the same reason.
 
@@ -962,7 +1007,10 @@ store, so it needs no Docker and no running service. Lib unit tests that assert 
 
 Update this file in the same change that: adds, removes or re-implies a `saci` host feature (`service`, `server`, `wasm-host`, `plugin-host`, `distributed*`, `inspector`, `metrics`);
 adds or renames a config block or key (`ServiceConfig`, `WorkflowSpec`, `StoreConfig`,
-`FlowControlConfig`, `HealConfig`, `DlqBlock`, `ObservabilityConfig`, the cluster header); changes a runner, the
+`FlowControlConfig`, `HealConfig`, `DlqBlock`, `ObservabilityConfig`, the cluster header); changes the
+service's Rust API (`ServiceBuilder`'s chain, `BuiltWorkflow`, `BuiltWorkflowBuilder`, `RunOptions`,
+`WorkflowStats`, `serve`, `ServeOptions`, `ServeExit`, `ServiceConfig::from_kdl`, `PipelineRuntime::run_batch`);
+changes `serve.rs` or a runner, the
 lifecycle transition table, flow control's search or guards, the healing state machine, the dead
 letter queue's store table, envelope or replay triggers, or a
 control-plane route or status code; adds, removes or re-attributes a metric series; changes a span

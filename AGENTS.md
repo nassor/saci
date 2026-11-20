@@ -323,7 +323,8 @@ host and a Raft cluster node, but excludes `conformance`, the corpus generator's
 `crates/saci/tests/feature_bundles.rs` holds both bundles to those rules.
 
 A custom server is a binary depending on `saci` with the features it wants and a `main` that
-calls `saci::service::cli::main()`, or `main_with` to register its own factories.
+calls `saci::service::cli::main()`, or `main_with` to register its own factories. A binary that
+owns its startup calls `saci::service::serve(config, builder, ServeOptions { .. })`.
 
 ### Columnar engine (the `saci` crate root)
 
@@ -359,7 +360,7 @@ calls `saci::service::cli::main()`, or `main_with` to register its own factories
   runs every pipeline once, walking a dependency DAG built from `PipelineConfig`
   (`after`, `after_data`, `priority`, `pause_when`). Reachable from
   library code only: a `ServiceConfig` declares `workflow` nodes, and the runners walk
-  `BuiltService::nodes` themselves, so the config-driven binary never builds one.
+  `BuiltWorkflow::nodes` themselves, so the config-driven binary never builds one.
 
 #### Dataset API
 
@@ -408,7 +409,8 @@ sources, or sinks, and returns the per-call `RunStats`, which is
 how the processor SDK fills the WIT `run-metrics` record.
 
 **`PipelineRuntime`** (`src/runtime.rs`, `engine` feature) is the host-side seam a swappable
-backend implements: `name`, `run_on`, `run_on_with_state`, `declared_components`,
+backend implements: `name`, `run_batch(data, prior) -> SaciResult<RuntimeOutput { state, routes }>`,
+`declared_components`,
 `descriptor_info`, `template_dataset`. `descriptor_info() -> RuntimeDescriptorInfo { name, version,
 stateful, schema_fingerprint }` has a default empty body and is the one generic way a host holding
 `Box<dyn PipelineRuntime>` can read what an out-of-process runtime says about **itself**:
@@ -418,7 +420,7 @@ beyond `name()`. `RuntimeDescriptorInfo::name` is not `name()`: the latter is wh
 passed at construction, and what that is differs per runtime kind. A config-loaded `wasm` node gets
 its own declared node id (`ServiceBuilder` calls `loader.load(&spec.id, &spec)`, forwarded into
 `WasmPipelineRuntime::from_bytes`), a `plugin` node gets the plugin manifest's name, and a
-`with_runtime` native pipeline gets the pipeline's own name.
+`ServiceBuilder::runtime` native pipeline gets the pipeline's own name.
 
 #### System & SystemMeta (`src/system.rs`)
 
@@ -541,7 +543,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   skill `rust-performance`'s triage workflow, validated with
   `cargo xtask bench <name>` before/after. The wasm host/processor boundary's instrument is
   `cargo xtask bench wasm_roundtrip` (`crates/saci/benches/wasm_roundtrip.rs`), which
-  reports store lifecycle, host IPC encode, host IPC decode and the full `run_on_with_state`
+  reports store lifecycle, host IPC encode, host IPC decode and the full `run_batch`
   round trip as separate groups, since a change there routinely moves cost between phases while
   leaving the total flat.
 - `arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide. It is the host to processor wire format and the

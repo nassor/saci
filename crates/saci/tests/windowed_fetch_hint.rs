@@ -24,12 +24,12 @@ use tokio_util::sync::CancellationToken;
 use saci::error::SaciError;
 use saci::io::Source;
 use saci::runtime::{PipelineRuntime, RuntimeOutput};
-use saci::service::builder::BuiltWorkflow;
-use saci::service::config::{
+use saci::service::BuiltWorkflow;
+use saci::service::FlowPlan;
+use saci::service::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WindowConfig, WorkflowSpec,
 };
-use saci::service::flow::FlowPlan;
 use saci::window::WindowSpec;
 use saci::{Dataset, SaciResult};
 

@@ -26,8 +26,8 @@ use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
 use saci::connector::channel::{ChannelSink, ChannelSource};
+use saci::service::BuiltWorkflow;
 use saci::service::RunMode;
-use saci::service::builder::BuiltWorkflow;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use saci::{Pipeline, SaciError};
 

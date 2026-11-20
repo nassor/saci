@@ -74,7 +74,7 @@ variables.
 | `validate` | Check the config and exit without moving anything. A declared `type` that is a connector this binary was built without fails, naming the feature to rebuild with. `--strict` also turns a warning about a type no crate here provides into a failure. `--connectors-only` builds every source, sink and codec instead of loading the processor and checking the graph, so a config whose processor artifact is missing still validates. |
 | `status --addr URL` | One summary line from `/status`. `--full` prints the whole JSON document. |
 | `cluster init` | Pre-flight only: confirms `mode "cluster"` and `bootstrap #true`, then tells you to run `serve`. It starts nothing. |
-| `cluster status --addr URL` | The `cluster` field of `/status`. |
+| `cluster status --addr URL` | Reads `/status` and prints `node ID  mode=cluster` for a cluster node. |
 | `cluster join --leader URL`, `cluster leave` | Membership is manual. Both print the procedure, editing the `peer` nodes on every node and restarting, and exit 0. Every `cluster` subcommand needs `--features service-cluster`; without it the command exits 1. |
 
 Start with `validate`: it is the one command that touches nothing.

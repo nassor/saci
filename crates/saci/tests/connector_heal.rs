@@ -25,9 +25,9 @@ use tokio_util::sync::CancellationToken;
 use saci::connector::{ConfigValue, ConnectorContext};
 use saci::error::SaciError;
 use saci::io::Source;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::registry::SourceFactory;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
+use saci::service::SourceFactory;
 
 const COMPONENT: &str = "Tick";
 

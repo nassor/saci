@@ -57,12 +57,7 @@ use crate::retry::RetryMode;
 use super::flow::FlowSettings;
 use super::heal::HealSettings;
 
-/// The configuration language, re-exported so an embedder that reads
-/// [`SourceSpec::config`] or writes a factory names one path.
-pub use crate::config::{
-    ConfigMap, ConfigValue, from_kdl_str, from_kdl_str_with_vars, substitute_env_vars,
-    substitute_vars,
-};
+use crate::config::{ConfigMap, ConfigValue};
 
 /// Default opaque per-instance config: an empty table.
 ///
@@ -1161,8 +1156,7 @@ impl<'de> Deserialize<'de> for DlqConfig {
 /// A source on a path to a windowed node is bounded but never sliced: the
 /// credit stops the runner pulling the next arrival, and the arrival in hand
 /// is one whole pass, so `max_chunk_bytes` does not bound it. Bound the
-/// arrival at the connector instead. See
-/// [`windowing`](super::windowing) for why.
+/// arrival at the connector instead.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlowControlConfig {
@@ -2156,7 +2150,7 @@ impl ObservabilityConfig {
 /// ```no_run
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::config::ServiceConfig;
+/// use saci::service::ServiceConfig;
 /// let cfg = ServiceConfig::load("saci.kdl").unwrap();
 /// # }
 /// ```

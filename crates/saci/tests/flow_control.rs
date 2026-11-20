@@ -33,13 +33,13 @@ use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::error::SaciError;
 use saci::io::Source;
 use saci::runtime::{PipelineRuntime, RuntimeOutput};
-use saci::service::builder::{BuiltWorkflow, BuiltWorkflowBuilder};
-use saci::service::config::{
+use saci::service::FlowPlan;
+use saci::service::WorkflowStats;
+use saci::service::{BuiltWorkflow, BuiltWorkflowBuilder};
+use saci::service::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WorkflowSpec,
 };
-use saci::service::flow::FlowPlan;
-use saci::service::standalone::WorkflowStats;
 use saci::{Dataset, SaciResult};
 
 const COMP: &str = "values";
@@ -771,7 +771,7 @@ mod windowed {
     use super::*;
 
     use arrow_array::{Array, Float64Array, StringArray};
-    use saci::service::config::WindowConfig;
+    use saci::service::WindowConfig;
     use saci::window::{WindowSpec, tumbling_id};
     use saci::windows::WatermarkState;
 

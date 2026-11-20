@@ -31,8 +31,9 @@ reference. `ServiceBuilder` resolves that node's `format` against the `CodecRegi
 `saci::codec` once per workflow build and hands the result to the factory inside a
 `ConnectorContext`, which a connector reads with `ConnectorContext::codec(what)`. No connector
 resolves a format itself, and none resolves one implicitly: the declared node's own `format` key is
-what the registry resolves. The `service` feature owns the `Registry` and
-`register_builtin_factories`, extended through `register_source`, `register_sink`, and
+what the registry resolves. The `service` feature owns the `Registry`; `ServiceBuilder::new()`
+fills it through `register_builtin_factories` (`pub(crate)`), and the chain extends it through
+`register_source`, `register_sink`, and
 `ServiceBuilder::codec(factory)` (`Registry::register_codec`). `Registry::codecs()` returns the
 `CodecRegistry`, `Registry::codec_count()` its size; `CodecRegistry` has `len`, `is_empty` and
 `names`.

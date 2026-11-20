@@ -54,7 +54,7 @@ use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use saci::codec::{ConfigMap, ConfigValue, unsupported};
 use saci::error::SaciError;
-use saci::service::builder::ServiceBuilder;
+use saci::service::ServiceBuilder;
 
 #[path = "common/matrix.rs"]
 mod matrix;
@@ -290,7 +290,7 @@ fn every_slice_has_a_test() {
 /// Docker-free and not `#[ignore]`d: it inspects the registry alone, with no
 /// config, container, or running service involved.
 ///
-/// [`Registry`]: saci::service::registry::Registry
+/// [`Registry`]: saci::service::Registry
 /// [`CodecRegistry`]: saci::codec::CodecRegistry
 /// [`CodecRegistry::names`]: saci::codec::CodecRegistry::names
 #[test]

@@ -10,12 +10,12 @@
 //!
 //! - `service`: standalone-only control plane. HTTP API, KDL config, logging,
 //!   Prometheus, the `saci-service` binary, and the core
-//!   [`config::ServiceConfig`] schema, which is the same schema in every
+//!   [`ServiceConfig`] schema, which is the same schema in every
 //!   build: it can describe a cluster config, a `wasm` node or a `plugin`
 //!   node whichever hosts are compiled in, and
-//!   [`validation::validate_build_capabilities`] is what refuses one this
+//!   [`validate_build_capabilities`] is what refuses one this
 //!   binary cannot run, naming the feature that would.
-//! - `service-cluster`: adds the cluster runner ([`cluster::run_cluster`]) and
+//! - `service-cluster`: adds the cluster runner ([`run_cluster`]) and
 //!   enables `distributed-raft`, compiling in the openraft node, its redb log
 //!   store, the replicated application state machine, and the TCP transport.
 //!   Cluster state lives under `node.data_dir`, so it needs no other store.
@@ -23,13 +23,13 @@
 //! ## Quick start
 //!
 //! 1. Build your [`Pipeline`](crate::Pipeline) or another `PipelineRuntime`.
-//! 2. Create a [`builder::ServiceBuilder`] (`new` registers every compiled-in connector and codec) and call `runtime(...)`.
-//! 3. Load a [`config::ServiceConfig`] from KDL.
-//! 4. Call [`builder::ServiceBuilder::build`] to get one [`builder::BuiltWorkflow`] per
+//! 2. Create a [`ServiceBuilder`] (`new` registers every compiled-in connector and codec) and call `runtime(...)`.
+//! 3. Load a [`ServiceConfig`] from KDL.
+//! 4. Call [`ServiceBuilder::build`] to get one [`BuiltWorkflow`] per
 //!    declared workflow.
 
 #[cfg(feature = "service")]
-pub mod builder;
+mod builder;
 #[cfg(feature = "service")]
 pub mod cli;
 
@@ -52,66 +52,67 @@ pub fn install_ring_provider() {
     });
 }
 #[cfg(feature = "service-cluster")]
-pub mod cluster;
+mod cluster;
 #[cfg(feature = "service")]
-pub mod config;
+mod config;
 #[cfg(all(
     feature = "service",
     any(feature = "wasm-host", feature = "plugin-host")
 ))]
 pub(crate) mod digest;
 #[cfg(feature = "service")]
-pub mod dlq;
+mod dlq;
 #[cfg(feature = "service")]
-pub mod dlq_api;
+mod dlq_api;
 #[cfg(feature = "service")]
-pub mod factories;
+mod factories;
 #[cfg(feature = "service")]
-pub mod flow;
+mod flow;
 #[cfg(feature = "service")]
-pub mod heal;
+mod heal;
 #[cfg(feature = "service")]
-pub mod http;
+mod http;
 #[cfg(feature = "service")]
-pub mod inspector_api;
+mod inspector_api;
 #[cfg(feature = "service")]
-pub mod lifecycle;
+mod lifecycle;
 #[cfg(feature = "service")]
-pub mod lifecycle_api;
+mod lifecycle_api;
 #[cfg(all(feature = "service", feature = "wasm-host"))]
-pub mod loader;
+mod loader;
 #[cfg(feature = "service")]
-pub mod logging;
+mod logging;
 #[cfg(all(feature = "service", feature = "plugin-host"))]
-pub mod plugin_loader;
+mod plugin_loader;
 #[cfg(feature = "service")]
-pub mod redb_state;
+mod redb_state;
 #[cfg(feature = "service")]
-pub mod registry;
+mod registry;
 #[cfg(feature = "service")]
-pub mod sampling;
+mod sampling;
 #[cfg(feature = "service")]
 mod serve;
 #[cfg(feature = "service")]
-pub mod shutdown;
+mod shutdown;
 #[cfg(feature = "service")]
-pub mod span_metrics;
+mod span_metrics;
 #[cfg(feature = "service")]
-pub mod standalone;
+mod standalone;
 #[cfg(feature = "service")]
-pub mod stream;
+mod stream;
 #[cfg(feature = "service")]
-pub mod topology;
+mod topology;
 #[cfg(feature = "service")]
-pub mod validation;
+mod validation;
 #[cfg(all(feature = "service", feature = "windows"))]
-pub mod windowing;
+mod windowing;
 
 #[cfg(feature = "service")]
 pub use crate::connector::{ChannelBridge, ConnectorContext};
 #[cfg(feature = "service")]
 pub use builder::{
-    BuiltNode, BuiltNodeKind, BuiltWorkflow, BuiltWorkflowBuilder, RunOptions, ServiceBuilder,
+    BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow, BuiltWorkflowBuilder, RunOptions,
+    ServiceBuilder, WorkflowFactory, rebuild_blocker,
 };
 #[cfg(feature = "service-cluster")]
 pub use cluster::{ClusterStats, run_cluster};
@@ -119,11 +120,16 @@ pub use cluster::{ClusterStats, run_cluster};
 pub use config::{
     ClusterConfig, CodecSpec, DlqBlock, DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig,
     HttpConfig, LinkSpec, LogFormat, NodeConfig, ObservabilityConfig, PeerSpec, PluginSpec,
-    RunMode, ServiceConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig, WasmSpec,
-    WorkflowSpec,
+    RetryConfig, RunMode, ServiceConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig,
+    StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
 };
 #[cfg(feature = "service")]
 pub use dlq::{DeadLetterQueue, DlqError, DlqRegistry, DlqShared, ReplayFilter};
+#[cfg(feature = "service")]
+pub use factories::{
+    BUILTIN_CODEC_FEATURES, BUILTIN_CONNECTOR_FEATURES, builtin_codec_feature, builtin_feature,
+    missing_cluster_host_error,
+};
 #[cfg(feature = "service")]
 pub use flow::{
     FlowAdjustment, FlowCause, FlowController, FlowMove, FlowOutcome, FlowPlan, FlowSample,
@@ -155,8 +161,10 @@ pub use shutdown::ShutdownCoordinator;
 #[cfg(feature = "service")]
 pub use span_metrics::SpanMetricsLayer;
 #[cfg(feature = "service")]
-pub use standalone::WorkflowStats;
+pub use standalone::{NodeStats, WorkflowStats};
 #[cfg(feature = "service")]
 pub use topology::build_topology;
 #[cfg(feature = "service")]
-pub use validation::{validate_build_capabilities, validate_workflow_graph};
+pub use validation::{
+    validate_build_capabilities, validate_schema_fingerprint, validate_workflow_graph,
+};

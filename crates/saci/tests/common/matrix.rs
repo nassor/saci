@@ -315,9 +315,9 @@ use saci::io::Sink;
 use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::RunOptions;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::standalone::WorkflowStats;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
+use saci::service::WorkflowStats;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
 

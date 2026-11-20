@@ -21,9 +21,9 @@ use saci::connector::channel::{ChannelSink, ChannelSource};
 use tokio_util::sync::CancellationToken;
 
 use saci::prelude::*;
+use saci::service::BuiltWorkflow;
 use saci::service::RunMode;
-use saci::service::builder::BuiltWorkflow;
-use saci::service::config::WindowConfig;
+use saci::service::WindowConfig;
 use saci::windows::{WindowFunction, WindowResults, WindowWatermark, WindowedSystem};
 
 /// A trade event: one price at one instant, in milliseconds since the epoch.

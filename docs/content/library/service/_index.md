@@ -6,9 +6,9 @@ sort_by = "weight"
 weight = 12
 +++
 The service is a library before it is a binary: `saci::service` with the `service` feature on.
-`ServiceBuilder` turns a `ServiceConfig` into one `BuiltService` per declared workflow, and a
-runner drives it. Everything the stock binary does, your own `main` can do with two more calls:
-your factories and your runtimes.
+`ServiceBuilder` turns a `ServiceConfig` into one `BuiltWorkflow` per declared workflow, and
+`BuiltWorkflow::run` drives it. Everything the stock binary does, your own `main` can do with two
+more calls: your factories and your runtimes.
 
 For a server that only adds factories, skip the assembly below. A binary crate whose `main` is
 `saci::service::cli::main_with(|builder| builder.register_source(MyFactory))` runs the stock
@@ -20,8 +20,8 @@ For a server that only adds factories, skip the assembly below. A binary crate w
         <desc id="emb-desc">
             ServiceConfig::load reads the KDL file. ServiceBuilder takes it, together with the
             source, sink and codec factories you register and any runtime you hand it
-            through with_runtime or with_wasm_engine, and build_all returns one BuiltService per
-            declared workflow. Each BuiltService is passed to run_standalone, which owns the
+            through runtime or wasm_engine, and build returns one BuiltWorkflow per
+            declared workflow. Each BuiltWorkflow is driven by run, which owns the
             drain loop until its cancellation token fires.
         </desc>
         <g class="anim anim-1">
@@ -31,25 +31,25 @@ For a server that only adds factories, skip the assembly below. A binary crate w
         </g>
         <g class="anim anim-2">
             <text class="t-sm t-ctl" x="176" y="22">register_source, register_sink, codec</text>
-            <text class="t-sm t-ctl" x="176" y="40">with_wasm_engine, with_runtime</text>
+            <text class="t-sm t-ctl" x="176" y="40">wasm_engine, runtime</text>
             <path class="arw arw-ctl" d="M266 48 V64" marker-end="url(#emb-c)"/>
             <path class="arw arw-ctl" d="M140 98 H170" marker-end="url(#emb-c)"/>
             <rect class="blk blk-ctl" x="176" y="70" width="180" height="56" rx="8"/>
             <rect class="hd hd-ctl" x="176" y="70" width="180" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="176" y="82" width="180" height="8"/>
             <text class="t-lbl" x="188" y="85">ServiceBuilder</text>
-            <text class="t-sm" x="188" y="112">build_all(&amp;config)</text>
+            <text class="t-sm" x="188" y="112">build(&amp;config)</text>
         </g>
         <g class="anim anim-3">
             <path class="arw arw-data" d="M356 98 H380" marker-end="url(#emb-d)"/>
             <rect class="blk blk-data" x="386" y="70" width="130" height="56" rx="8"/>
-            <text class="t-lbl" x="398" y="92">BuiltService</text>
+            <text class="t-lbl" x="398" y="92">BuiltWorkflow</text>
             <text class="t-sm" x="398" y="110">one per workflow</text>
         </g>
         <g class="anim anim-4">
             <path class="arw arw-data" d="M516 98 H530" marker-end="url(#emb-d)"/>
             <rect class="blk blk-data" x="536" y="70" width="124" height="56" rx="8"/>
-            <text class="t-lbl" x="548" y="92">run_standalone</text>
+            <text class="t-lbl" x="548" y="92">run(cancel)</text>
             <text class="t-sm" x="548" y="110">until cancelled</text>
         </g>
         <defs>
@@ -71,7 +71,7 @@ For a server that only adds factories, skip the assembly below. A binary crate w
 ## Your own sources, sinks, codecs, and runtime
 
 A `type` string in the config is a key into a registry of factories. To add your
-own, implement one trait and register it before `build_all()`. The factory receives
+own, implement one trait and register it before `build()`. The factory receives
 that node's `config` plus a `ConnectorContext` carrying the codec the host
 resolved, and returns a boxed `Source` or `Sink`.
 
@@ -104,48 +104,51 @@ impl SinkFactory for ClickHouseSinkFactory {
 }
 ```
 
-Then assemble the service yourself. `register_builtin_factories` adds the
+Then assemble the service yourself. `ServiceBuilder::new()` registers the
 connectors and codecs whose features are on, plus a default
 `ChannelRegistry` bridge when `connector-channel` is one of them, and nothing
-else. `register_source`, `register_sink` and `codec` chain your
-own on, where registering the same name twice replaces the earlier factory.
+else; `ServiceBuilder::empty()` registers nothing. `register_source`,
+`register_sink` and `codec` chain your own on, where registering the same name
+twice replaces the earlier factory.
 
 ```rust,name=Assembling the service yourself
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::{ServiceBuilder, run_standalone};
+use saci::service::{ServiceBuilder, ServiceConfig};
 use tokio_util::sync::CancellationToken;
 
 let config = ServiceConfig::load("service.kdl")?;
 
-// `build_all()` constructs every declared node and validates every link end to
-// end before it returns, one `BuiltService` per declared workflow.
-let mut built = register_builtin_factories(ServiceBuilder::new())
+// `build()` constructs every declared node and validates every link end to
+// end before it returns, one `BuiltWorkflow` per declared workflow.
+let mut built = ServiceBuilder::new()
     .register_source(MongoSourceFactory)
     .register_sink(ClickHouseSinkFactory)
     .codec(ProtobufCodecFactory)
-    .build_all(&config)?;
+    .build(&config)?;
 
-// Each workflow gets its own runner. `None` opts out of publishing live stats
-// to /status.
-let stats =
-    run_standalone(built.remove(0), &config, CancellationToken::new(), None, None).await?;
+// A bare CancellationToken runs the workflow with no pause gate, no live stats
+// and no store.
+let stats = built.remove(0).run(CancellationToken::new()).await?;
 ```
 
+`ServiceConfig::load` reads a KDL file. `ServiceConfig::from_kdl` parses KDL text you
+already hold, with the same variable substitution and validation, and `ServiceConfig`
+implements `FromStr` through it.
+
 For a native Rust processor, declare its `wasm` node with no `module` and hand
-the builder a runtime keyed by that node's id. Any `Box<dyn PipelineRuntime>`
-works, and a `Pipeline` is one.
+the builder a runtime keyed by that node's id. Any `PipelineRuntime` works, and a
+`Pipeline` is one: its `run_batch` restores and captures the state declared with
+`Pipeline::state` and delivers the `sdk::RouteDecision` a system leaves behind.
 
 ```rust,name=Handing the builder a native runtime
 let built = ServiceBuilder::new()
-    .with_runtime("enrich", Box::new(my_pipeline))
+    .runtime("enrich", my_pipeline)
     .register_sink(ClickHouseSinkFactory)
-    .build_all(&config)?;
+    .build(&config)?;
 ```
 
 A node naming a `module` or a `library` loads that artifact and never looks at
-`with_runtime`. A node naming neither takes the runtime registered under its own
-id, and `build_all()` errors naming the node when nothing is registered for it.
+`runtime`. A node naming neither takes the runtime registered under its own
+id, and `build()` errors naming the node when nothing is registered for it.
 
 The stock binary stops at the first type it cannot resolve, so rerun `validate`
 after each registration:
@@ -158,20 +161,22 @@ NOTE: 1 unknown type(s) above are not in the built-in registry. They may be
 user-defined types registered at serve time. Use --strict to treat these as errors.
 ```
 
-In your own binary `build_all()` is the check: it constructs every declared
+In your own binary `build()` is the check: it constructs every declared
 node, so an unregistered `type` is an error there rather than a warning.
 
 ## What a runtime says about itself
 
-A host holding a `Box<dyn PipelineRuntime>` has seven methods: `name()`,
-`run_on()`, `run_on_with_state()`, `run_on_with_state_and_routes()`,
-`template_dataset()`, `declared_components()` and `descriptor_info()`. The two
-state-carrying calls are what thread a processor's checkpoint blob and its
-[branch routes](@/service/processors/branching.md) through a pass.
+A host holding a `PipelineRuntime` has five methods: `name()`, `run_batch()`,
+`template_dataset()`, `declared_components()` and `descriptor_info()`.
+`run_batch(data, prior)` is the one call that runs a pass. `prior` is the state blob the
+runtime returned last time, or `None` on the first call, and the call returns a
+`RuntimeOutput { state, routes }`: the next blob and the optional
+[branch routes](@/service/processors/branching.md). A runtime that keeps its state in the
+dataset ignores `prior` and returns `RuntimeOutput::default()`.
 
 `name()` is whatever the host handed the runtime at load: the node id for a
 `wasm` node, the plugin's own manifest name for a `plugin`, and the pipeline's
-name for a runtime registered through `with_runtime`. `descriptor_info()` is the
+name for a runtime registered through `runtime`. `descriptor_info()` is the
 identity the runtime declares for itself: `name`, `version`, `stateful` and
 `schema_fingerprint`, where `name` is a component's `describe()` name or a
 plugin's manifest name. [The dashboard](@/service/operate/dashboard.md) prints those four
@@ -180,12 +185,13 @@ the one you built.
 
 ## Hosting a component or a plugin from code
 
-`with_runtime` covers a runtime you built in Rust. A `.wasm` file or a shared
+`runtime` covers a runtime you built in Rust. A `.wasm` file or a shared
 library is loaded through its own constructor and handed over the same way.
 
 ```rust,name=Loading a component and a plugin yourself
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 use saci::plugin_host::NativePluginRuntime;
 use saci::service::ServiceBuilder;
 use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
@@ -199,7 +205,7 @@ let component = WasmPipelineRuntime::from_bytes(
     "enrich",                       // the runtime's name
     &std::fs::read("enrich.wasm")?, // the component bytes
     HashMap::from([("rate".to_string(), "0.2".to_string())]),
-    100,                            // epoch_deadline_ticks: 100 ticks of 100 ms
+    Duration::from_secs(10),        // the longest one call may run
 )?;
 
 let plugin = NativePluginRuntime::open(
@@ -208,17 +214,20 @@ let plugin = NativePluginRuntime::open(
 )?;
 
 let built = ServiceBuilder::new()
-    .with_wasm_engine(engine)
-    .with_runtime("enrich", Box::new(component))
-    .with_runtime("settle", Box::new(plugin))
-    .build_all(&config)?;
+    .wasm_engine(engine)
+    .runtime("enrich", component)
+    .runtime("settle", plugin)
+    .build(&config)?;
 ```
 
-`WasmEngine::new` returns `wasmtime::Result<WasmEngine>` and spawns the epoch
+`WasmEngine::new` returns `SaciResult<WasmEngine>` and spawns the epoch
 ticker, a tokio task that fires every 100 ms, so it panics when called outside a
-tokio runtime. The ticker stops with the last clone of the engine.
+tokio runtime. The ticker stops with the last clone of the engine. The `timeout` that
+`from_bytes` takes becomes an epoch deadline of that many 100 ms ticks, rounded up;
+`PipelineRuntimeLoader::with_timeout` sets the same limit for config-loaded nodes and
+defaults to 10 seconds.
 
-`ServiceBuilder::with_wasm_engine` hands one engine to several builders, so the
+`ServiceBuilder::wasm_engine` hands one engine to several builders, so the
 compile cost is paid once for a set of bytes however many workflows load it.
 `NativePluginRuntime::open` checks the ABI version, parses the manifest and
 recomputes the schema fingerprint from the decoded component schemas, all
@@ -229,39 +238,120 @@ processor](@/library/processor-host.md) is what happens around each call.
 
 ## Running a workflow from code
 
-`run_standalone` takes the config it was built from, so it resolves its own run
-mode and its own flow-control policy, and dispatches to `run_stream` when
-`run_mode kind="stream"` asks for it.
+`BuiltWorkflow::run` drives one workflow until its run mode finishes it or its options
+cancel it. The workflow carries its run mode, its flow-control policy and whether batch
+runs resume from the store, all fixed when it was built, so `run` takes nothing but its
+options. A `stream` run mode runs the stream runner and every other mode runs the
+standalone runner.
 
-```rust,name=The two runner entry points
-run_standalone(
-    built: BuiltService,
-    config: &ServiceConfig,
-    control: impl Into<RunControl>,
-    live_stats: Option<Arc<RwLock<StandaloneStats>>>,
-    state: Option<Arc<RedbStateClient>>,
-) -> Result<StandaloneStats, SaciError>
+```rust,name=Running a built workflow
+impl BuiltWorkflow {
+    pub async fn run(self, options: impl Into<RunOptions>) -> SaciResult<WorkflowStats>;
+}
 
-run_stream(
-    built: BuiltService,
-    control: impl Into<RunControl>,
-    live_stats: Option<Arc<RwLock<StandaloneStats>>>,
-    state: Option<Arc<RedbStateClient>>,
-    flow: &FlowPlan,
-) -> Result<StandaloneStats, SaciError>
+let options = RunOptions::new(cancel)
+    .live_stats(live.clone())
+    .state(store.clone());
+let stats = workflow.run(options).await?;
 ```
 
-A direct `run_stream` call has no config to resolve and no run mode to read off a
-`BuiltService`, so it names the policy itself: pass `FlowPlan::stream_default()`.
-`FlowPlan::default()` is the batch policy and carries no latency objective.
-`run_stream` also requires at least one source node and returns a configuration
-error when none is declared. [How flow control
-decides](@/library/flow-control.md) is what the plan drives.
+`RunOptions` is what the runner reads besides the workflow. A `CancellationToken` or a
+`RunControl` converts into one, so an uncontrolled run is `workflow.run(cancel)`.
 
-`control` is the cancellation token plus the pause gate the runner parks on
-between passes. A bare `CancellationToken` converts into one whose gate never
-parks, which is what the assembly example higher up this page passes.
+`RunOptions::new(control)` <small>`control: impl Into<RunControl>`</small>
+:   the cancellation token plus the pause gate the runner parks on between passes. A bare
+    `CancellationToken` converts into a gate that never parks.
 
-`live_stats` is the handle `/status` reads; `None` opts out of publishing.
-`state` is the `RedbStateClient` over the `store "redb"` file, and `None` keeps
-source cursors and processor priors in loop memory for the life of the process.
+`.live_stats(stats)` <small>`Arc<RwLock<WorkflowStats>>`</small>
+:   the handle `/status` reads; leaving it unset opts out of publishing.
+
+`.state(client)` <small>`Arc<RedbStateClient>`</small>
+:   the client over the `store "redb"` file. Without it source cursors and processor
+    priors stay in loop memory for the life of the process.
+
+A stream workflow requires at least one source node, and `run` returns a configuration
+error when none is declared. [How flow control decides](@/library/flow-control.md) is
+what the workflow's `FlowPlan` drives.
+
+## Assembling a workflow by hand
+
+`BuiltWorkflow::builder` builds a workflow without a config file: a native pipeline
+between a channel source and sink in a test, or a graph your program computes. Declare
+nodes in flow order and link them.
+
+```rust,name=A workflow without a config
+use saci::service::{BuiltWorkflow, RunMode};
+
+let workflow = BuiltWorkflow::builder("orders")
+    .source("in", "Order", source)
+    .processor("enrich", my_pipeline)
+    .sink("out", "Order", sink)
+    .link("in", "enrich")
+    .link("enrich", "out")
+    .run_mode(RunMode::Stream)
+    .build()?;
+
+let stats = workflow.run(cancel).await?;
+```
+
+`source`, `processor` and `sink` take a node id and, for a source or sink, the component
+it carries. `link_branch(from, to, branch)` links on a named branch,
+`window(processor_id, window)` attaches a `window` declaration, `name` sets the display
+name, `inspector` records flow-control decisions into an inspector and `dlq` gives the
+workflow a dead letter queue.
+
+`run_mode` defaults to `RunMode::Continuous`. `flow` sets the `FlowPlan`; without one a
+stream workflow gets `FlowPlan::stream_default()` and every other run mode the batch
+policy, which carries no latency objective. `batch_resume` defaults to off.
+
+`build()` returns a configuration error for a duplicate node id, a link or window naming
+an undeclared node, a window on a node that is not a processor, a link from a node to itself, and a link whose target was declared before its origin. It does not run
+`validate_workflow_graph`, and a source or sink added this way is not wrapped in a retry
+or heal wrapper.
+
+## Serving from code
+
+`serve` is what `saci-service serve` runs once it has parsed its flags: it initialises
+logging and the meter provider, opens the store, builds every workflow, binds the HTTP
+control plane and runs the workflows until a shutdown signal arrives. The builder you pass
+carries your factories and runtimes; `serve` adds the dead letter queue registry and the
+inspector to it.
+
+```rust,name=Your own serve
+use saci::service::{ServeExit, ServeOptions, ServiceBuilder, ServiceConfig, serve};
+
+let config = ServiceConfig::load("service.kdl")?;
+let builder = ServiceBuilder::new().register_sink(ClickHouseSinkFactory);
+
+let exit = serve(
+    config,
+    builder,
+    ServeOptions {
+        config_path: Some("service.kdl".into()),
+        announce: true,
+        ..ServeOptions::default()
+    },
+)
+.await?;
+
+if exit == ServeExit::ShutdownBudgetExceeded {
+    std::process::exit(1);
+}
+```
+
+`config_path` <small>`Option<PathBuf>`</small>
+:   the config file; with a `store` block its raw bytes are stored beside the redb state.
+    `None` stores nothing.
+
+`announce` <small>`bool`</small>
+:   print the three stdout lines `serve` owns: the listening line, the dashboard or
+    endpoints line and `saci-service stopped cleanly`.
+
+`shutdown` <small>`Option<CancellationToken>`</small>
+:   stops the service when cancelled, as SIGINT and SIGTERM do. `None` leaves the signals
+    as the only way to stop it.
+
+`ServeExit::Clean` means every runner, the HTTP server and the watchdog drained inside the
+30 second shutdown budget. `ServeExit::ShutdownBudgetExceeded` means the budget ran out.
+`serve` installs the process-wide tracing subscriber and meter provider, so it runs at
+most once per process.

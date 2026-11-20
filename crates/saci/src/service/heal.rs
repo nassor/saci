@@ -460,8 +460,10 @@ impl Healer {
 /// A [`Source`] that is replaced with a fresh instance from its factory when
 /// its polls keep failing.
 ///
-/// See the [module docs](self) for the state machine and what a rebuild is
-/// allowed to cost.
+/// After [`HealSettings::after_failures`] consecutive failures the wrapper
+/// drops the instance and builds another from the same config. Only a
+/// connector that reports itself rebuildable is wrapped, so the loss a
+/// rebuild can cause is bounded by what that connector already documents.
 pub struct HealingSource {
     inner: Option<Box<dyn Source>>,
     healer: Healer,

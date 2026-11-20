@@ -124,6 +124,20 @@
   `with_timeout(Duration)`.
 - `service`: the `/status` body loses its `cluster` field; `ClusterProbe`,
   `ClusterProbeSnapshot`, `ClusterStatusBody` and `MemberEntry` are removed.
+- `service`: `BuiltWorkflow::run(options)` is the one way to run a workflow; it carries its run
+  mode, flow plan and resume flag from the config it was built from. `RunOptions::new(control)`
+  takes `live_stats` and `state`, and a `CancellationToken` or `RunControl` converts into it.
+  `run_standalone` and `run_stream` are no longer public; `run_supervised` takes the factory
+  only. `BuiltWorkflow::builder(id)` assembles a workflow by hand (`source`, `processor`,
+  `sink`, `link`, `link_branch`, `run_mode`, `flow`, ...); `BuiltWorkflow` and `BuiltNode` are
+  `#[non_exhaustive]`. `NodeStats::id` is `Arc<str>` and `kind` is `&'static str`.
+- `service`: every module except `cli` is private; `saci::service::Item` is the one path.
+
+### Added
+
+- `service::serve(config, builder, ServeOptions)` runs the full service (stores, HTTP plane,
+  runners, shutdown budget) from library code and returns a `ServeExit`; the `saci-service
+  serve` command calls it.
 
 ### Changed
 
@@ -139,6 +153,8 @@
 - `connector-tcp`: the source reads frames through a buffered reader into one reused buffer, and
   the sink buffers writes and flushes once per batch; the channel source compares schemas by
   pointer first.
+- `service`: the standalone and stream runners copy per-node stats only when they publish them,
+  and weigh a carried batch only for a source under flow control.
 
 ## 0.2.0 - 2026-11-19
 

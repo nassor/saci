@@ -423,7 +423,7 @@ pub async fn write_all(
             <rect class="blk blk-ctl" x="336" y="192" width="318" height="92" rx="8"/>
             <rect class="hd hd-ctl" x="336" y="192" width="318" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="336" y="204" width="318" height="8"/>
-            <text class="t-lbl t-ctl" x="348" y="206">run_standalone</text>
+            <text class="t-lbl t-ctl" x="348" y="206">BuiltWorkflow::run</text>
             <text class="t-sm" x="348" y="228">only on the OneShot exit or on</text>
             <text class="t-sm" x="348" y="242">cancellation. Continuous and</text>
             <text class="t-sm" x="348" y="256">Interval keep the sink open and</text>
@@ -509,7 +509,7 @@ pipeline.run().await?;</code></pre>
         end of <b>every</b> call. With a <code>FileSink</code> that makes it a one-shot
         API: the second call fails with <em>FileSink: write_batch called after finish</em>. For a
         long-running loop, drive the drains yourself. That is what
-        <code>run_standalone</code> does, deferring <code>finish()</code> to the final
+        <code>BuiltWorkflow::run</code> does, deferring <code>finish()</code> to the final
         iteration.
     </p>
 </div>
@@ -698,7 +698,7 @@ while let Some(batch) = src.next_batch().await? {
         </tr>
         <tr>
             <td><strong>Config registration</strong></td>
-            <td colspan="2"><code>Registry</code>, <code>register_builtin_factories</code></td>
+            <td colspan="2"><code>Registry</code>, <code>ServiceBuilder</code></td>
             <td><code>saci::service</code></td>
         </tr>
     </tbody>

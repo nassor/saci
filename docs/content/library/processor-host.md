@@ -82,8 +82,9 @@ that overlap use different instances, an instance is dropped after a trap or a
 travels only through `checkpoint` and `prior`. The service builder never turns
 it on.
 
-A wasmtime epoch deadline bounds the call. `PipelineRuntimeLoader` sets 100
-ticks of 100 ms, so a component that will not return is interrupted after ten
+A wasmtime epoch deadline bounds the call. `PipelineRuntimeLoader` defaults to a
+10 second timeout, which `with_timeout` changes and which becomes 100 ticks of 100 ms,
+so a component that will not return is interrupted after ten
 seconds instead of wedging the runner.
 
 The call runs on a blocking thread rather than the async worker, and only Arrow
@@ -99,7 +100,7 @@ and costs about 1.7 s of one fast core for the 4 MB smoketest, so
 `WasmEngine::program` does it once per distinct set of bytes. Every later load of
 the same module is a `memcmp` plus an `Arc` clone, about 0.1 ms.
 
-The engine is shareable. `ServiceBuilder::with_wasm_engine` hands one engine to
+The engine is shareable. `ServiceBuilder::wasm_engine` hands one engine to
 several builders, and the ticker stops with the last clone rather than outliving
 it.
 

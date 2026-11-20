@@ -55,7 +55,7 @@ does, and `saci_processor_metric` stays empty for a plugin.
 
 `processor.batch` is the `debug` span the plugin host opens under `runtime.run`.
 
-A `plugin` node with no `library` takes its runtime from `with_runtime(id, ..)`, and
+A `plugin` node with no `library` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
 `build_processor_node` **removes** that injected runtime from the builder, so `rebuild_blocker`
 reports such a workflow as `restartable: false` and the control plane answers 409 to `start`,
 `stop` and `restart`.

@@ -61,7 +61,7 @@ the dashboard shows.
             <rect class="row" x="460" y="74" width="186" height="20" rx="3"/>
             <text class="t-sm" x="468" y="88">1  drain sources</text>
             <rect class="row" x="460" y="98" width="186" height="20" rx="3"/>
-            <text class="t-sm" x="468" y="112">2  runtime.run_on(data)</text>
+            <text class="t-sm" x="468" y="112">2  runtime.run_batch(data)</text>
             <rect class="row" x="460" y="122" width="186" height="20" rx="3"/>
             <text class="t-sm" x="468" y="136">3  drain sinks</text>
             <rect class="row-w" x="460" y="146" width="186" height="20" rx="3"/>
@@ -205,16 +205,15 @@ Four probes answer on `http.bind`, `0.0.0.0:8080` by default, behind a
 | `GET /health` | `{ status, uptime_seconds, liveness_counter }` | 200 while the watchdog counter is within 5 s of uptime; 503 once it falls behind |
 | `GET /ready` | `{ status }`, either `ready` or `not_ready` | 200 or 503 |
 | `GET /metrics` | Prometheus exposition, version 0.0.4 | Always 200 |
-| `GET /status` | `node_id`, `node_name`, `mode`, `uptime_seconds`, `build.version`, plus `standalone` or `cluster` | Always 200. The block that does not match the mode is `null` |
+| `GET /status` | `node_id`, `node_name`, `mode`, `uptime_seconds`, `build.version`, plus `standalone` | Always 200. `standalone` is `null` in cluster mode |
 
 In standalone mode the `standalone` block is an array, one entry per declared
 workflow, each carrying `workflow_id`, `iterations`, `rows_processed`,
 `source_batches_drained`, `sink_batches_written`, `iteration_errors`,
 `total_busy_micros` and `max_item_micros`, plus `state` when the lifecycle
 endpoints are mounted; see
-[Workflow lifecycle](@/service/operate/workflows.md). `"cluster"` reports
-`null` even when the node is clustered; the three Raft gauges on `/metrics`
-carry term, commit index and leader instead.
+[Workflow lifecycle](@/service/operate/workflows.md). In cluster mode `standalone` is `null`;
+the three Raft gauges on `/metrics` carry term, commit index and leader.
 
 Linux/macOS:
 
@@ -436,8 +435,8 @@ own, so a dashboard number and a `/metrics` number are always the same value.
 
 - **Export covers spans only.** `otlp_endpoint` installs a span exporter.
   Metrics stay pull-only on `/metrics`.
-- **`/status` answers `"cluster": null` in cluster mode.** The three
-  `saci_raft_*` gauges carry term, commit index and leader instead.
+- **`/status` has no cluster block.** In cluster mode `standalone` is `null` and the three
+  `saci_raft_*` gauges carry term, commit index and leader.
 - **`/ready` reports the process, not the workflow.** The flag flips as soon as
   the runner is spawned, so it never means an iteration succeeded.
 - **A native plugin's own metric names are log lines.** A plugin's metric call

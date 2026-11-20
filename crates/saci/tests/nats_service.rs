@@ -32,9 +32,9 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_util::sync::CancellationToken;
 
 use saci::codec::ndjson::NdjsonCodec;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::dlq::DlqRegistry;
+use saci::service::DlqRegistry;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 
@@ -336,9 +336,9 @@ fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
 #[cfg(feature = "wasm-host")]
 #[test]
 fn the_shipped_example_config_loads_and_its_io_tables_are_accepted() {
+    use saci::connector::nats::{NatsSinkFactory, NatsSourceFactory};
     use saci::service::ConnectorContext;
-    use saci::service::factories::{NatsSinkFactory, NatsSourceFactory};
-    use saci::service::registry::{SinkFactory, SourceFactory};
+    use saci::service::{SinkFactory, SourceFactory};
 
     let config = ServiceConfig::load("../../examples/configs/nats.kdl")
         .expect("the shipped example must load");
@@ -540,7 +540,7 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
     async fn run_once(
         kdl: String,
         registry: Option<Arc<DlqRegistry>>,
-    ) -> (saci::service::standalone::WorkflowStats, Arc<DlqRegistry>) {
+    ) -> (saci::service::WorkflowStats, Arc<DlqRegistry>) {
         let config = ServiceConfig::from_kdl(&kdl).expect("config loads");
         let registry = registry.unwrap_or_else(|| Arc::new(DlqRegistry::from_config(&config)));
         let built = ServiceBuilder::new()

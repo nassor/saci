@@ -216,7 +216,7 @@ with a `restart_blocked_reason`, answers `409` to `start`, `stop` and
 
 | Shape | Why |
 |---|---|
-| A `wasm` node with no `module`, or a `plugin` node with no `library` | Its runtime came from `ServiceBuilder::with_runtime` and the build consumed it |
+| A `wasm` node with no `module`, or a `plugin` node with no `library` | Its runtime came from `ServiceBuilder::runtime` and the build consumed it |
 | A `ChannelSource` or `ChannelSink` | It is bound to one in-process channel, and its sink is the only sender the consumer's end of file depends on |
 
 `stop` is refused too, deliberately, because stopping a workflow that cannot

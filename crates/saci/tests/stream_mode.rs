@@ -34,8 +34,8 @@ use saci::error::SaciError;
 use saci::io::Sink;
 use saci::io::Source;
 use saci::runtime::{PipelineRuntime, RuntimeOutput};
+use saci::service::BuiltWorkflow;
 use saci::service::RunMode;
-use saci::service::builder::BuiltWorkflow;
 
 const COMP: &str = "values";
 
@@ -753,7 +753,7 @@ async fn stream_windowed_processor_tracks_watermark_across_items() {
         )
         .window(
             "p",
-            saci::service::config::WindowConfig {
+            saci::service::WindowConfig {
                 spec: WindowSpec::tumbling(1_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),

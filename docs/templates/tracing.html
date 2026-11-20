@@ -61,7 +61,7 @@
         <!-- the data plane: the thing being observed, and it is untouched -->
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="44" width="654" height="30" rx="8"/>
-            <text class="t-lbl t-data" x="12" y="63">batch &rarr; run_on &rarr; checkpoint</text>
+            <text class="t-lbl t-data" x="12" y="63">batch &rarr; run_batch &rarr; checkpoint</text>
             <text class="t-sm t-end" x="642" y="63">spans per run and per stage, no per-row events</text>
         </g>
 
@@ -310,7 +310,7 @@ service = ["connector-api", "distributed", "parquet-checkpoint", "tracing", "ins
     <dd>The same <code>processor.batch</code> span for a native plugin, with <code>plugin_wall_us</code> in place of <code>guest_wall_us</code>. The <code>debug</code> reports a loaded plugin's <code>plugin</code>, <code>version</code>, <code>stateful</code> and <code>components</code>.</dd>
     <dt><code>saci::service::http</code>, <code>::shutdown</code> <small>info, debug, warn, error</small></dt>
     <dd>Control-plane bind and clean shutdown, signal receipt, and the 30-second shutdown budget being exceeded.</dd>
-    <dt><code>saci::service::cli::commands::serve</code> <small>info, error</small></dt>
+    <dt><code>saci::service::serve</code> <small>info, error</small></dt>
     <dd>Binary startup (<code>node_id</code>), which of signal-or-runner-exit fired first, and the exit path.</dd>
     <dt><code>saci::flow_control</code> <small>info</small></dt>
     <dd>The adaptive-flow-control lines: <code>flow control starting</code> per governed source, <code>flow control decision</code> per episode, <code>flow control finished</code> per governed source at runner exit, and one naming each <code>stream</code> source a windowed path leaves ungoverned. The <code>EnvFilter</code> enables this target at <code>info</code> whatever <code>log_level</code> says, and the sampler never drops it, so admission control is readable at the error-only default.</dd>
@@ -473,8 +473,7 @@ async fn main() {
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>what the binary calls</em></div>
-    <pre><code class="language-rust">use saci::service::config::ObservabilityConfig;
-use saci::service::logging::init_logging;
+    <pre><code class="language-rust">use saci::service::{ObservabilityConfig, init_logging};
 
 let cfg = ObservabilityConfig::default();  // Pretty, "error", no span export
 // init_logging returns the guard and the inspector handle, None when capture is off.

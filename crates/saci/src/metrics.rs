@@ -6,7 +6,7 @@
 //!
 //! Unlike the connector crates, these instruments are process-global: a
 //! service process can run several workflows, but
-//! [`ServiceConfig::validate`](crate::service::config::ServiceConfig::validate)
+//! [`ServiceConfig::validate`](crate::service::ServiceConfig::validate)
 //! enforces node ids unique across every declared workflow, so the OTel
 //! attribution keys (`source=`/`processor=`/`sink=`, bare node ids) never
 //! collide. There is therefore no per-workflow handle to thread through the
@@ -31,9 +31,9 @@
 //! | `saci_processor_*` | the wasm host, from the WIT `run-metrics` record and `host-io::metric` |
 //! | `saci_window_watermark_seconds` | the standalone and stream runners, per windowed processor node |
 //! | `saci_window_late_arrivals_total` | the same two runners, per arrival such a node dropped whole |
-//! | `saci_flow_target_rows`, `saci_flow_throughput_rows_per_second`, `saci_flow_backoff_total` | the standalone and stream runners, per source node, from its [`FlowController`](crate::service::flow::FlowController) |
-//! | `saci_connector_heals_total`, `saci_connector_heal_failures_total` | [`HealingSource`](crate::service::heal::HealingSource) and [`HealingSink`](crate::service::heal::HealingSink), per rebuild of a failing connector |
-//! | `saci_dlq_letters_recorded_total`, `saci_dlq_rows_recorded_total`, `saci_dlq_letters_replayed_total`, `saci_dlq_letters_lost_total` | [`DeadLetterQueue`](crate::service::dlq::DeadLetterQueue), per batch a sink refused and per letter a replay delivered or the store dropped |
+//! | `saci_flow_target_rows`, `saci_flow_throughput_rows_per_second`, `saci_flow_backoff_total` | the standalone and stream runners, per source node, from its [`FlowController`](crate::service::FlowController) |
+//! | `saci_connector_heals_total`, `saci_connector_heal_failures_total` | [`HealingSource`](crate::service::HealingSource) and [`HealingSink`](crate::service::HealingSink), per rebuild of a failing connector |
+//! | `saci_dlq_letters_recorded_total`, `saci_dlq_rows_recorded_total`, `saci_dlq_letters_replayed_total`, `saci_dlq_letters_lost_total` | [`DeadLetterQueue`](crate::service::DeadLetterQueue), per batch a sink refused and per letter a replay delivered or the store dropped |
 //! | `saci_dlq_letters` | the same type, per workflow, after every record and every replay |
 //! | `saci_http_requests_total`, `saci_http_request_errors_total`, `saci_http_request_duration_seconds`, `saci_http_bytes_total` | the `http` connector's `HttpSource`, `HttpSink` and `HttpListenSource`, on the process-global meter with no registration here |
 //!

@@ -108,7 +108,7 @@ pub trait CodecFactory: Send + Sync + 'static {
 }
 
 // in a custom binary
-let builder = register_builtin_factories(ServiceBuilder::new())
+let builder = ServiceBuilder::new()
     .codec(ProtobufCodecFactory);
 ```
 
@@ -120,7 +120,7 @@ so a custom `csv` can stand in for the built-in one.
 ## Features
 
 With `service` on, one feature per codec decides what
-`register_builtin_factories` installs: `codec-csv`, `codec-ndjson`,
+`ServiceBuilder::new()` installs: `codec-csv`, `codec-ndjson`,
 `codec-parquet`, `codec-avro` and `codec-arrow-ipc`.
 `connector-kafka`, `connector-nats` and `connector-udp` each imply
 `codec-ndjson` and `connector-tcp` implies `codec-arrow-ipc`, so

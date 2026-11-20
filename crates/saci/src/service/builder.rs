@@ -12,7 +12,7 @@
 //! ```rust
 //! # #[cfg(feature = "service")]
 //! # {
-//! use saci::service::builder::ServiceBuilder;
+//! use saci::service::ServiceBuilder;
 //! use saci::pipeline::Pipeline;
 //!
 //! let pipeline = Pipeline::new("my_pipeline");
@@ -779,7 +779,7 @@ impl BuiltWorkflowBuilder {
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::builder::ServiceBuilder;
+/// use saci::service::ServiceBuilder;
 /// use saci::pipeline::Pipeline;
 ///
 /// let pipeline = Pipeline::new("my_pipeline");

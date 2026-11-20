@@ -23,8 +23,8 @@ use arrow_schema::{DataType, Field, Schema};
 use mysql_async::prelude::Queryable;
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
-use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
-use saci::service::config::ServiceConfig;
+use saci::service::ServiceConfig;
+use saci::service::{BuiltNodeKind, ServiceBuilder};
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -332,7 +332,7 @@ observability log_level="warn"
 }
 
 /// Build the config at `path` with `pipeline` as the `transform` runtime.
-fn build(path: &std::path::Path, pipeline: Pipeline) -> saci::service::builder::BuiltWorkflow {
+fn build(path: &std::path::Path, pipeline: Pipeline) -> saci::service::BuiltWorkflow {
     let config = ServiceConfig::load(path).expect("config loads");
     ServiceBuilder::new()
         .runtime("transform", pipeline)

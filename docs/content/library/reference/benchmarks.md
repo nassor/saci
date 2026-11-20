@@ -230,7 +230,7 @@ to arrive at the sink.
         <desc id="lat-d">
             Logarithmic, one gridline per ten-fold step. Native source to systems to sink, over 10
             000 items: mean 1.0 µs, p50 1 µs, p99 2 µs, max 6 µs. The same single-row round trip
-            through a WebAssembly processor calling run_on_with_state, over 1 000 items: mean
+            through a WebAssembly processor calling run_batch, over 1 000 items: mean
             179.4 µs, p50 159 µs, p99 420 µs, max 678 µs. Every WASM bar sits roughly two
             gridlines, two orders of magnitude, to the right of its native counterpart.
         </desc>
@@ -256,7 +256,7 @@ to arrive at the sink.
         <text class="t-sm t-end" x="96" y="96">max</text>
         <rect class="bar bar-data" x="108" y="87" width="147.8" height="9" rx="2"/>
         <text class="t-num" x="261.8" y="96">6 µs</text>
-        <text class="t-lbl" x="0" y="142">WASM processor · run_on_with_state · n = 1 000</text>
+        <text class="t-lbl" x="0" y="142">WASM processor · run_batch · n = 1 000</text>
         <text class="t-sm t-end" x="96" y="159">mean</text>
         <rect class="bar bar-bnd" x="108" y="150" width="349.8" height="9" rx="2"/>
         <text class="t-num" x="463.8" y="159">179.4 µs</text>

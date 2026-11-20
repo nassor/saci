@@ -25,12 +25,12 @@ use std::sync::Arc;
 use arrow_array::{Array, RecordBatch, UInt64Array};
 use saci::component::Component as _;
 use saci::connector::channel::{ChannelSink, ChannelSource};
-use saci::service::builder::BuiltWorkflow;
-use saci::service::config::{
+use saci::service::BuiltWorkflow;
+use saci::service::FlowPlan;
+use saci::service::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WorkflowSpec,
 };
-use saci::service::flow::FlowPlan;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

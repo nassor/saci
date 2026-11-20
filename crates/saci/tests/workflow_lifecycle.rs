@@ -35,12 +35,12 @@ use tokio::sync::RwLock;
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
-use saci::service::builder::{ServiceBuilder, rebuild_blocker};
-use saci::service::config::ServiceConfig;
-use saci::service::http::{ServiceModeLabel, ServiceState, build_router};
-use saci::service::lifecycle::{LifecycleRegistryBuilder, PauseHandle, RunControl};
-use saci::service::standalone::WorkflowStats;
+use saci::service::ServiceConfig;
+use saci::service::WorkflowStats;
+use saci::service::{LifecycleRegistryBuilder, PauseHandle, RunControl};
 use saci::service::{RunOptions, run_supervised};
+use saci::service::{ServiceBuilder, rebuild_blocker};
+use saci::service::{ServiceModeLabel, ServiceState, build_router};
 
 /// How long a state poll waits before it gives up and fails the test.
 const SETTLE_BUDGET: Duration = Duration::from_secs(10);
