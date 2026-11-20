@@ -32,14 +32,14 @@ default = ["engine"]
 server = [
     "mimalloc", "service", "wasm-host", "windows", "parquet-checkpoint",
     "connector-channel", "connector-file", "connector-http", "connector-tcp",
-    "connector-udp", "connector-saci", "connector-redb",
+    "connector-udp", "connector-peer", "connector-redb",
     "codec-ndjson", "codec-csv", "codec-parquet",
     "codec-avro", "codec-arrow-ipc",
 ]
 # The connectors that need nothing installed or already running.
 connectors = [
     "connector-channel", "connector-file", "connector-redb", "connector-http",
-    "connector-tcp", "connector-udp", "connector-saci",
+    "connector-tcp", "connector-udp", "connector-peer",
 ]
 codecs = [
     "codec-arrow-ipc", "codec-avro", "codec-csv",
@@ -57,7 +57,7 @@ all = [
     "engine", "windows", "processor", "plugin", "server", "service-cluster",
     "plugin-host", "connectors", "codecs",
     "connector-clickhouse", "connector-kafka", "connector-mariadb",
-    "connector-nats", "connector-opentelemetry", "connector-postgresql",
+    "connector-nats", "connector-otlp", "connector-postgresql",
     "connector-s3", "connector-turso",
 ]
 
@@ -87,7 +87,7 @@ processor = ["derive"]
 plugin = ["engine", "dep:pollster", "dep:serde_json", "dep:base64"]
 
 # Contracts, pulled in by the features below; not meant to be named directly.
-config = ["dep:kdl", "dep:serde_json"]
+config = ["dep:kdl", "dep:serde_json", "dep:serde_path_to_error"]
 codec-api = ["engine", "config"]
 connector-api = ["engine", "codec-api"]
 
@@ -112,7 +112,7 @@ connector-http = [
 ]
 connector-kafka = ["connector-api", "dep:futures-util", "dep:rdkafka", "codec-ndjson"]
 connector-nats = ["connector-api", "dep:futures-util", "tokio/fs", "dep:bytes", "dep:async-nats", "codec-ndjson"]
-connector-opentelemetry = [
+connector-otlp = [
     "connector-api", "dep:base64", "dep:bytes", "dep:serde_json", "tokio/net",
     "dep:opentelemetry-proto", "dep:prost",
     "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util",
@@ -143,7 +143,7 @@ connector-s3 = [
 connector-tcp = ["connector-api", "tokio/net", "tokio/io-util", "codec-arrow-ipc"]
 connector-udp = ["connector-api", "tokio/net", "codec-ndjson", "dep:futures"]
 connector-redb = ["connector-api", "dep:redb"]
-connector-saci = ["connector-api", "tokio/net", "tokio/io-util"]
+connector-peer = ["connector-api", "tokio/net", "tokio/io-util"]
 
 # Host
 
@@ -206,6 +206,7 @@ pollster      = { version = "1.0.1", optional = true }
 saci-macros   = { workspace = true, optional = true }
 kdl           = { workspace = true, optional = true }
 serde_json    = { workspace = true, optional = true }
+serde_path_to_error = { version = "0.1.20", optional = true }
 base64        = { workspace = true, optional = true }
 bytes         = { workspace = true, optional = true }
 futures-util  = { workspace = true, optional = true }

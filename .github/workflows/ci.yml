@@ -135,7 +135,7 @@ jobs:
 
     # The `server` bundle, which is what `cargo install saci --features
     # server` produces. It registers 12 of the 28 connector type names in
-    # `BUILTIN_CONNECTOR_FEATURES` (the channel, file, HTTP, TCP, UDP, saci
+    # `BUILTIN_CONNECTOR_FEATURES` (the channel, file, HTTP, TCP, UDP, peer
     # and redb connectors), a partial set neither neighbouring step reaches:
     # the reduced build above registers only the channel connector, the
     # `--all-features` suite below all of them. A premise that holds at one

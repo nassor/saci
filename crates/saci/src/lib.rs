@@ -13,7 +13,7 @@
 //!   enables the seven that need nothing installed or already running:
 //!   `channel`, `file`, `redb`, `http`, `tcp`, `udp` and `saci`. `kafka`,
 //!   `mariadb`, `nats`, `postgresql`, `s3`, `turso`, `clickhouse` and
-//!   `opentelemetry` each need a specific broker, database, object store or
+//!   `otlp` each need a specific broker, database, object store or
 //!   OTLP endpoint running first.
 //! - `codec-<format>`: one byte format in `codec::<format>`.
 //!   `codecs` enables all five: `arrow-ipc`, `avro`, `csv`, `ndjson`

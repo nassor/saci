@@ -7,38 +7,44 @@ description: Use when adding, changing, configuring, testing or documenting a SA
 
 ## Contract
 
-`saci::connector` (feature `connector-contract`) holds the factory contract: `SourceFactory`,
-`SinkFactory`, `ConnectorContext` (which carries the transformer the host resolved for this node,
+`saci::connector` (feature `connector-api`) holds the factory contract: `SourceFactory`,
+`SinkFactory`, `ConnectorContext` (which carries the codec the host resolved for this node,
 the optional channel bridge, and the `NodeIdentity` the host binds to every connector it builds),
 the `ChannelBridge` trait itself (`connector::bridge`), `parse_schema_fields` and
 `parse_optional_schema_fields`. Both
 factory traits also carry `rebuildable(&config) -> Result<(), &'static str>`, defaulting to
 `Err(REBUILD_UNDECLARED)`: whether the host may build this connector a second time to heal it. The
 contract needs no host feature, so a connector needs no dependency on the host. `ConfigValue` is
-the value type in the `SourceFactory`/`SinkFactory`/`TransformerFactory` signatures, so every
-connector and transformer reaches it through `saci::connector` or `saci::transformer`, which
+the value type in the `SourceFactory`/`SinkFactory`/`CodecFactory` signatures, so every
+connector and codec reaches it through `saci::connector` or `saci::codec`, which
 re-export it.
 
 `NodeIdentity { service, workflow, node }` is where a connector instance sits: the `node.label()`
 of the service running it (`node.name`, or the decimal `node.id` when unnamed), the workflow it is
 declared in, and its own node id. `ConnectorContext::with_identity` binds it and
-`identity(what) -> Result<&NodeIdentity, SaciError>` reads it, mirroring `transformer(what)`: a
+`identity(what) -> Result<&NodeIdentity, SaciError>` reads it, mirroring `codec(what)`: a
 connector built with none gets a configuration error naming itself. `Rebuilder` carries it, so a
 heal rebuilds with the same identity; `builder.rs`'s `build_source_node`/`build_sink_node` pass
 `Some(...)` and `dlq.rs` passes `None`, because a dead-letter store is not a peer-facing node.
 
-The `engine` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
-connector moves bytes and a transformer turns bytes into `RecordBatch`es and back, so transport and
+The `engine` feature provides the `Source`/`Sink` traits, the `RetryingSource`/`RetryingSink`
+wrappers, `cast_batch(&batch, &Arc<Schema>, &CastOptions)`, and `read_all(&mut source, &mut data,
+"Comp")` / `write_all(&mut sink, &data, "Comp")`; all of them are exported from `saci::io`. A
+connector moves bytes and a codec turns bytes into `RecordBatch`es and back, so transport and
 format are separate modules. Connectors, each `saci::connector::<name>`: `channel`, `clickhouse`,
-`file`, `http`, `kafka`, `mariadb`, `nats`, `opentelemetry`, `postgresql`, `redb`, `s3`, `saci`,
-`tcp`, `turso`, `udp`. Transformers, each `saci::transformer::<name>`: `arrow_ipc`, `avro`, `csv`,
+`file`, `http`, `kafka`, `mariadb`, `nats`, `otlp`, `peer`, `postgresql`, `redb`, `s3`,
+`tcp`, `turso`, `udp`. Codecs, each `saci::codec::<name>`: `arrow_ipc`, `avro`, `csv`,
 `ndjson`, `parquet`, each registered under its own
-`format` name. A byte-carrying source or sink node names a declared `transformer` node's id;
-`ServiceBuilder` resolves that node's `format` against the `TransformerRegistry` in
-`saci::transformer` once per workflow build and hands the result to the factory inside a
-`ConnectorContext`, so no connector resolves a format itself. The `service` feature owns the `Registry`
-and `register_builtin_factories`, extended through `register_source`, `register_sink`, and
-`register_transformer`. Pipelines integrate via `drain_into_dataset` and `drain_dataset`.
+`format` name. A byte-carrying source or sink node names a declared `transformer` node's id (the
+KDL spelling of a codec declaration);
+`ServiceBuilder` resolves that node's `format` against the `CodecRegistry` in
+`saci::codec` once per workflow build and hands the result to the factory inside a
+`ConnectorContext`, which a connector reads with `codec(what)`, so no connector resolves a format
+itself. The same context carries the channel registry through `channels()`. The `service` feature
+owns the `Registry` and `register_builtin_factories`, extended through `register_source`,
+`register_sink`, and `ServiceBuilder::codec(factory)` (`Registry::register_codec`). A connector
+that holds a whole document passes it to `Codec::open_reader` as `ReadInput::Memory`; one that
+spools a large document to disk passes `ReadInput::File`.
 
 - `Source::request_batch_rows` is the advisory counterpart `KafkaSource`, `NatsSource`,
   `PostgresSource` and `MariadbSource` act on; every other source is still governed, reshaped with a zero-copy
@@ -48,7 +54,7 @@ and `register_builtin_factories`, extended through `register_source`, `register_
   taken from `Sink::pending_rows`; a sink that answers `None` records nothing rather than zero.
 - `Source::finish` is the source-side counterpart of `Sink::finish`: called once, after the last
   `next_batch`, for a source whose delivery is a commitment. The default does nothing, `Box`,
-  `CastingSource`, `RetryingSource` and `HealingSource` all forward it, and both runners call it
+  `RetryingSource` and `HealingSource` all forward it, and both runners call it
   per exit path after the sinks are finished, so a source that consumes what it handed over does
   it only once the downstream write landed. A source dropped without it consumes nothing, which
   is a re-delivery rather than a loss. `RedbSource`'s `consume` mode is the only implementor
@@ -64,7 +70,7 @@ connector author implements.
 
 `Rebuilder` is the single connector-construction path: `build_source_node`/`build_sink_node`
 build the initial instance through it too, so a heal cannot drift from the first build. It
-captures `Arc<Registry>` plus the node's `type_name`, `config`, bound transformer, channel
+captures `Arc<Registry>` plus the node's `type_name`, `config`, bound codec, channel
 bridge and `Option<RetryMode>` (`None` for a stream-mode source, matching
 `sources_take_retry_wrapper`).
 Which nodes are reached is the factory's answer, not a list here: `builder::resolve_heal`
@@ -80,11 +86,29 @@ workflow holding one as `restartable: false`.
 
 ## Connectors
 
+One constructor rule: `X::new(config, ..)`. A byte connector takes `(config, schema, codec)`;
+`FileSource` and `HttpSource` take the schema as `Option<Arc<Schema>>`. A connector that owns its
+encoding takes `(config, schema, identity)` (`PeerSource`, `PeerSink`) or `(config,
+Option<Arc<Schema>>)` (`OtlpMetricsSource`, `OtlpMetricsSink`).
+`FileSource::new_async` moves the open off the executor, `FileSink::new` appends unless
+`FileSinkConfig.truncate` is set, `RedbSink::new` opens the file. `ChannelSource::new(schema,
+buffer)` returns `(Self, Sender)` and `ChannelSink::new` returns `(Self, Receiver)`;
+`with_receiver` and `with_sender` wrap an endpoint the registry resolved. The config types are
+`FileSourceConfig`, `FileSinkConfig`, `TcpSourceConfig`, `TcpSinkConfig`, `UdpSourceConfig`,
+`UdpSinkConfig` (with `udp::ProbeConfig`), `PeerSourceConfig`, `PeerSinkConfig`,
+`HttpSourceConfig` (with `HttpClientConfig` and `http::BatchWindow`), `HttpSinkConfig` and
+`HttpListenConfig`, each with `new(<required>)`, plus `ConnectionConfig` in `connector::clickhouse`
+and `connector::s3`. The file, tcp, udp, peer and channel factories drop `schema_fields` from a
+clone of the table (`without_schema_fields`) and deserialize the rest with `deserialize_config`:
+the structs are `deny_unknown_fields`, a wrong type names its key, and a `0` for a `buffer` or size
+key is the error `{connector}: '{key}' must be at least 1` (`at_least_one`). The HTTP factory keeps
+its hand parser and refuses a key outside the role's list as `http: unknown key '{key}'`.
+
 - `connector::channel`: `ChannelSource`, `ChannelSink`, an in-memory mpsc transport.
   `Sink::pending_rows` reports the row backlog still queued, not the message count.
   `ChannelRegistry` is the name-keyed `ChannelBridge` pairing a sink in one workflow with a source
   in another.
-- `connector::file`: `FileSource`, `FileSink`, local-file IO, format from a transformer.
+- `connector::file`: `FileSource`, `FileSink`, local-file IO, format from a codec.
   `FileSink` makes `write_batch` exactly-once under `RetryingSink` and cancellation: it records
   the file length before each batch (`pending`), flushes (`BatchWriter::flush`) and syncs, and on
   any failure, or at the top of the next call after a dropped future, drops the writer and cuts
@@ -96,8 +120,9 @@ workflow holding one as `restartable: false`.
   append-only one). Writers write through `Counting`, and `recover` cuts only when the file length
   equals the pre-batch length plus the bytes counted, else another process appended: it leaves the
   file and refuses later calls. A failed `finish` also refuses later calls.
-- `connector::http`: `HttpSource`, `HttpSink`, `HttpPushSource`: two halves that dial and one
-  that listens, each decoded and encoded by a transformer. `http_version` picks `"auto"`, `"1.1"`,
+- `connector::http` (`http/listen.rs` holds the listener): `HttpSource`, `HttpSink`,
+  `HttpListenSource` (KDL type `HttpPushSource`): two halves that dial and one
+  that listens, each decoded and encoded by a codec. `http_version` picks `"auto"`, `"1.1"`,
   `"2"` or `"3"` per node. reqwest carries HTTP/1.1 and HTTP/2, a direct `h3`/`h3-quinn`/`quinn`
   client carries HTTP/3, and `"auto"` never reaches it, because nothing here reads `Alt-Svc` and
   there is no h2c upgrade; `"2"` is prior knowledge, so it is h2c on an http url, and `"3"` needs
@@ -105,13 +130,13 @@ workflow holding one as `restartable: false`.
   presents a client certificate on the two dialling halves. Every rustls configuration is built on
   the `ring` provider, so nothing here reaches `aws-lc-rs`. No request at build.
   - `mode kind` is the source's read shape. `document` is one GET spooled to a temp file and read
-    through the transformer's stream surface; it reports EOF at the end of that stream and re-arms,
+    through the codec's stream surface; it reports EOF at the end of that stream and re-arms,
     so `interval` re-reads the resource on every tick. `lines` reads a body that never ends as
     newline-delimited records, `events` reads one as `text/event-stream` and takes `event` to
     filter to one event name; both go through the message surface, close a batch at `batch_size`
     frames or `poll_timeout_ms`, re-request a body that ended after `reconnect_ms`, require
-    `schema_fields`, and are live sources only the stream runner drives, alongside `tcp`, `udp`,
-    `saci` and `HttpPushSource`. `max_body_bytes` caps a document body, or one frame in a
+    `schema_fields`, and are live sources only the stream runner drives, alongside the KDL types
+    `tcp`, `udp`, `saci` and `HttpPushSource`. `max_body_bytes` caps a document body, or one frame in a
     streaming kind.
   - `pagination "link"` follows `Link: <...>; rel="next"` as one read. A relative target resolves
     against the url the response came from, the last hop when the GET was redirected, as RFC
@@ -120,7 +145,7 @@ workflow holding one as `restartable: false`.
     last response carried, so an unchanged resource answers `304` and decodes nothing. Both are
     `kind="document"` only, as is `schema_from "body"`.
   - The sink sends one self-contained document per batch and derives its `content-type` from the
-    transformer's format (`text/csv`, `application/x-ndjson`,
+    codec's `media_type()` (`text/csv`, `application/x-ndjson`,
     `application/vnd.apache.parquet`, `avro/binary`, `application/vnd.apache.arrow.stream`) unless
     `headers` names one. `content_encoding` `"gzip"`, `"br"` or `"zstd"` compresses the whole body
     and declares it, refused next to a `content-encoding` header. Response bodies are decompressed
@@ -130,7 +155,7 @@ workflow holding one as `restartable: false`.
     only, the two that keep the method and the body, and reports every other 3xx as
     `HttpSink: status 302 Found from {url}`: following one would send a bodyless `GET` and report
     the new target's `200` for a batch that never arrived. The HTTP/3 client follows nothing.
-  - `HttpPushSource` binds at build the way `tcp` and `udp` do and never reaches EOF. One
+  - `HttpListenSource` binds at build the way `tcp` and `udp` do and never reaches EOF. One
     `hyper-util` auto listener serves HTTP/1.1 and h2c on `bind`, both sub-builders carrying a
     `TokioTimer`, which is what arms hyper's 30 second HTTP/1 header read timeout: with no timer
     an idle keep-alive connection holds its handler, and the ingest channel with it, for as long
@@ -147,8 +172,8 @@ workflow holding one as `restartable: false`.
     4xx or 5xx, duplicates no rows; a retry after the client stopped waiting for the `202`, say
     on a timeout while the channel is full, can, because hyper polls that request to completion
     and queues its document anyway, so ingest is at-least-once. `buffer` counts queued documents
-    rather than batches, and is the one lenient key, clamped to at least 1 and defaulting to 64,
-    matching `tcp`. A connection has 30 seconds, the same figure hyper gives a request head, to
+    rather than batches, and is the one lenient key, clamped to at least 1 and defaulting to 64.
+    A connection has 30 seconds, the same figure hyper gives a request head, to
     finish its TLS handshake or to send bytes that decide the protocol; one that stalls before
     that is dropped, so it holds no handler and no ingest sender. Under `tls` the negotiated ALPN
     picks `http1_only` or `http2_only`, so nothing is sniffed at all.
@@ -164,10 +189,10 @@ workflow holding one as `restartable: false`.
 - `connector::kafka`: `KafkaSource`, `KafkaSink`, librdkafka-backed, one topic or several.
 - `connector::nats`: `NatsSource`, `NatsSink`, core subject pub/sub or JetStream, chosen by a
   mode node's `kind` key.
-- `connector::opentelemetry`: `OpenTelemetryMetricsSource`,
-  `OpenTelemetryMetricsSink`, OTLP/HTTP metrics in and out, Protobuf or JSON, and no `transformer`:
-  an OTLP request is the wire format, so the connector decodes and encodes it itself the way `saci`
-  owns Arrow IPC.
+- `connector::otlp`: `OtlpMetricsSource`,
+  `OtlpMetricsSink`, OTLP/HTTP metrics in and out, Protobuf or JSON, and no codec:
+  an OTLP request is the wire format, so the connector decodes and encodes it itself the way `peer`
+  owns Arrow IPC. The mode enum is `otlp::SourceMode`.
   - Rows are the connector's Arrow view of OTLP, documented in its `schema` module.
     `schema::metrics_schema` is the ten-column canonical schema a source with no `schema_fields`
     emits, one row per data point (name, value, timestamp, kind, unit, description, attributes,
@@ -221,7 +246,7 @@ workflow holding one as `restartable: false`.
   queues a `ROLLBACK` for a dropped transaction and fails a dropped `COPY` ahead of the next request.
 - `connector::mariadb`: `MariadbSource`, `MariadbSink`, one native client (`mysql_async`, rustls on
   ring) for both MariaDB and MySQL servers; `Flavor::{Mariadb, Mysql}` is detected per connection from
-  `SELECT VERSION()` and only the SQL spelling differs (statement timeout, upsert tail). No transformer:
+  `SELECT VERSION()` and only the SQL spelling differs (statement timeout, upsert tail). No codec:
   rows arrive typed. Source modes: `polling` (cursor column, optional tiebreak); `cdc_trigger`, either an
   operator outbox or `install_triggers #true`, where the connector creates the three row triggers and
   the changelog table `saci_cdc_<name>` and reads it by `__seq`, defaulting to `delete_acked`
@@ -325,7 +350,7 @@ workflow holding one as `restartable: false`.
   native `ArrowStream` format. Source modes `polling` (cursor column, optional initial cursor and
   tiebreak column, which resumes inside a repeated cursor value), `dump` (paginated full table
   scan), and `query` (arbitrary SQL statement); sink write mode `append` with optional
-  `truncate_before_first_write`, one INSERT per `chunk_rows` rows. No transformer needed:
+  `truncate_before_first_write`, one INSERT per `chunk_rows` rows. No codec needed:
   ClickHouse sends and accepts Arrow IPC streams directly. A date/time cursor goes out as a
   ClickHouse datetime literal, and a `Date` column is widened from the `UInt16` ArrowStream sends
   to the declared `date32`. The client sets `output_format_arrow_compression_method = none`,
@@ -395,11 +420,11 @@ workflow holding one as `restartable: false`.
   landed but reported failure. A dropped call leaves `own_rows` set and the next call, or the
   `max_age_ms` ticker, takes that batch back out (`take_back`). Tests drive an in-memory store
   with scripted `put` failures (`FlakyStore` in `connector/s3/sink.rs`).
-- `connector::tcp`: `TcpIngestSource`, `TcpSink`, live length-prefixed frames, decoded and
-  encoded by a transformer. The source listens, the sink dials, both register as `"tcp"`. Framing
+- `connector::tcp`: `TcpSource`, `TcpSink`, live length-prefixed frames, decoded and
+  encoded by a codec. The source listens, the sink dials, both register as `"tcp"`. Framing
   is transport, decoding is format.
 - `connector::udp`: `UdpSource`, `UdpSink`, fire-and-forget datagrams, one message each with
-  no length prefix, decoded and encoded by a transformer. The source binds, the sink sends, both
+  no length prefix, decoded and encoded by a codec. The source binds, the sink sends, both
   register as `"udp"`.
   - A zero-length datagram is the liveness probe: the source answers one with a zero-length
     datagram to its sender and never decodes it, and the sink never sends an empty payload as
@@ -429,13 +454,14 @@ workflow holding one as `restartable: false`.
     per host: tokio's socket exposes no address reuse option.
   - Every optional key of both halves is refused when it is present with the wrong type, the way
     `max_datagram_bytes` is: `multicast_group`, `broadcast`, and the probe's `kind`,
-    `interval_ms`, `timeout_ms` and `on_failure`. `buffer` is the one lenient key, clamped to at
-    least 1 and defaulting to 64, matching `tcp`.
+    `interval_ms`, `timeout_ms` and `on_failure`. A `0` for `buffer` is refused too, as on `tcp`;
+    `buffer` defaults to 64.
   - Reconnecting is the host's `heal` block and nothing else: a rebuilt sink re-resolves every
     `connect` address and opens fresh sockets.
-- `connector::saci`: `SaciSource`, `SaciSink`, one standalone service pushing
-  `RecordBatch`es to another. Both register as `"saci"` and neither takes a `transformer`: Arrow
-  IPC is the fixed wire format, so `ConnectorContext::transformer` is never called and only
+- `connector::peer` (`peer/`): `PeerSource`, `PeerSink`, one standalone service pushing
+  `RecordBatch`es to another. Both register as the KDL type `"saci"` and neither takes a
+  `transformer` key: Arrow
+  IPC is the fixed wire format, so `ConnectorContext::codec` is never called and only
   `identity` is.
   - `wire.rs` is public, because the protocol is: a `u32` big-endian body length, then a kind
     byte. `1` hello (`u8` version, `str` service, `str` workflow, `str` sink, `u32` schema length,
@@ -449,7 +475,7 @@ workflow holding one as `restartable: false`.
     frame the sink turns into a `SaciError::Configuration`, because those are disagreements
     between two config files. A dial that fails, errors, times out past `handshake_timeout_ms`, or
     answers something else is a failed dial instead: the sink tries the next `connect` address,
-    and reports `SaciSink: no peer accepted a session:` with every address when none is left.
+    and reports `PeerSink: no peer accepted a session:` with every address when none is left.
   - One `StreamEncoder` per session on the sink and one `StreamDecoder` per session on the source,
     so the Arrow IPC schema message is emitted once and the decoder never sees a second one. A
     failed write drops the session rather than keeping it, so the runner's retry redials and
@@ -473,12 +499,12 @@ workflow holding one as `restartable: false`.
 `crates/saci/Cargo.toml`:
 
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
-  `connector-mariadb`, `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
-  `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
+  `connector-mariadb`, `connector-nats`, `connector-otlp`, `connector-peer`, `connector-postgresql`,
+  `connector-redb`, `connector-s3`, `connector-tcp`, `connector-turso`, `connector-udp`:
   one per connector module. Each compiles `saci::connector::<name>` with that module's optional
   dependencies and registers its factories in `register_builtin_factories` only when `service` is
   also on. `connector-channel`, `connector-file`, `connector-http`,
-  `connector-tcp`, `connector-udp`, `connector-saci` and `connector-redb` are in `connectors` and `server`: an
+  `connector-tcp`, `connector-udp`, `connector-peer` and `connector-redb` are in `connectors` and `server`: an
   in-process channel, local disk, an
   HTTP client and a listening HTTP source, two raw sockets, a peer SACI service, and an embedded
   key/value file on local
@@ -487,24 +513,24 @@ workflow holding one as `restartable: false`.
   network,
   and they qualify because they are generic primitives tied to no server product. `connector-kafka`,
   `connector-mariadb`, `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso`, `connector-clickhouse` and
-  `connector-opentelemetry` each need a
+  `connector-otlp` each need a
   specific broker, database, object store or OTLP endpoint running first, so each is opt-in
   instead. `all` turns
   on every one of the fifteen. `connector-kafka`, `connector-nats` and `connector-udp` imply
-  `transformer-ndjson` and
-  `connector-tcp` implies `transformer-arrow-ipc`, so the connector feature alone is runnable. No
+  `codec-ndjson` and
+  `connector-tcp` implies `codec-arrow-ipc`, so the connector feature alone is runnable. No
   connector resolves a format implicitly: a byte-carrying node names a declared `transformer`
   node's id, and that node's own `format` key is what the registry resolves. `connector-file`,
-  `connector-http`, `connector-redb` and `connector-s3` imply no transformer, so the config picks
-  which formats the binary carries. `connector-saci` implies none and resolves none. The metrics,
-  spans and W3C trace propagation of `connector-http` and `connector-saci` follow the `metrics`,
+  `connector-http`, `connector-redb` and `connector-s3` imply no codec, so the config picks
+  which formats the binary carries. `connector-peer` implies none and resolves none. The metrics,
+  spans and W3C trace propagation of `connector-http` and `connector-peer` follow the `metrics`,
   `tracing` and `trace-context` features, which `service` turns on. TLS is always compiled into
   `connector-postgresql`, `connector-mariadb` and `connector-clickhouse`.
 - `connectors` enables the seven that need nothing installed or already running: `connector-channel`,
   `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`, `connector-udp` and
-  `connector-saci`. `server` carries the same seven. Both deliberately exclude `connector-kafka`,
+  `connector-peer`. `server` carries the same seven. Both deliberately exclude `connector-kafka`,
   `connector-mariadb`, `connector-nats`, `connector-postgresql`, `connector-s3`, `connector-turso`,
-  `connector-clickhouse` and `connector-opentelemetry`, each of which requires a specific broker,
+  `connector-clickhouse` and `connector-otlp`, each of which requires a specific broker,
   database, object store or OTLP endpoint installed and running first.
 
 ## Build prerequisites
@@ -540,16 +566,19 @@ the directory rather than a hand-maintained list.
 Docker-backed tests soft-skip when no daemon is reachable; the `try_start` convention is in
 `AGENTS.md`'s Testing section.
 
+The peer link's integration binary is `crates/saci/tests/peer_round_trip.rs`, the OTLP one
+`otlp_roundtrip.rs`.
+
 `crates/saci/tests/connector_matrix.rs` (`cargo xtask matrix`, the `matrix` nextest
 profile, `ci.yml`'s `connector_matrix_build` and `connector_matrix` jobs) covers 4320 cases, one
 per `{source connector, sink connector, byte format, processor runtime}` tuple over 16 source
 connectors and 15 sink connectors (`HttpPushSource` registers a source and no sink, so the two
-dimensions are not one list), 6 formats (the five transformers plus the absence of one, for the
+dimensions are not one list), 6 formats (the five codecs plus the absence of one, for the
 seven connectors that carry `RecordBatch`es natively) and 3 processor runtimes (native pipeline,
 WASM component, native plugin), plus one maximal workflow declaring every node kind at once. One
 format applies to both the source and the sink of a case; the independent source-format x
 sink-format cross product (25920 cases) is deliberately not taken, because a mixed pair adds no
-connector or transformer coverage over the two paired cases that already cover each half.
+connector or codec coverage over the two paired cases that already cover each half.
 
 The cases are split into 288 `#[ignore]`d tests, one per `{source, processor, format}` slice,
 named `live::<source>::<processor>::<format>` and each running its source against all 15 sinks,
@@ -587,7 +616,7 @@ resource, so that coverage holds with no Docker daemon at all.
 The same file holds two Docker-free tests that run under every profile.
 `dimensions_cover_the_registry` compares the real factory registry's `source_names`/`sink_names`
 against `CONNECTORS` through `Connector::source_type`/`Connector::sink_type`, and its registered
-transformer `formats` against `FORMATS`, as sorted name sets rather than counts.
+codec `names` against `FORMATS`, as sorted name sets rather than counts.
 `every_slice_has_a_test` compares the `live_slices!` lists against `CONNECTORS`, `PROCESSORS` and
 `FORMATS`, so a dimension entry with no slice test fails.
 
@@ -613,14 +642,14 @@ binaries run alongside each other instead of one binary finishing before the nex
 1. Module `crates/saci/src/connector/<name>.rs`, with sub-files under `connector/<name>/`, declared in
    `crates/saci/src/connector.rs` as `#[cfg(feature = "connector-<name>")] pub mod <name>;`. Write
    no `use` of an extern crate named like a connector module (`http`, `redb`, `turso`,
-   `clickhouse`, `opentelemetry`) in `connector.rs` itself: the child module shadows it there.
+   `clickhouse`) in `connector.rs` itself: the child module shadows it there.
 2. Implement `SourceFactory` and/or `SinkFactory` from `saci::connector`, including `type_name` and
-   `rebuildable`; read the format from `ConnectorContext`, never resolve one.
+   `rebuildable`; read the codec from `ConnectorContext::codec`, never resolve a format.
 3. Add a `connector-<name>` feature to the `[features]` table of `crates/saci/Cargo.toml`. It
-   starts with `connector-contract`, then lists every `dep:` entry and `tokio/...` feature the
+   starts with `connector-api`, then lists every `dep:` entry and `tokio/...` feature the
    module needs; each such dependency is `optional = true` in `[dependencies]`. Imply the
-   transformer feature the connector needs to be runnable alone, the way `connector-kafka` implies
-   `transformer-ndjson`. A feature a module needs from a shared dependency is widened in that
+   codec feature the connector needs to be runnable alone, the way `connector-kafka` implies
+   `codec-ndjson`. A feature a module needs from a shared dependency is widened in that
    connector's list, never in the base declaration.
 4. Register the factories in `register_builtin_factories`
    (`crates/saci/src/service/factories.rs`) under `#[cfg(feature = "connector-<name>")]` and add each
@@ -630,7 +659,7 @@ binaries run alongside each other instead of one binary finishing before the nex
    when nothing has to be installed or already running for the connector to work and it needs no
    extra build toolchain. In `crates/saci/tests/feature_bundles.rs`, `all_bundle_lists_every_feature`
    asserts `all` reaches every feature the crate declares except `default`, `all` and `conformance`,
-   following `server`, `connectors` and `transformers` transitively;
+   following `server`, `connectors` and `codecs` transitively;
    `all_bundle_excludes_the_conformance_switch` fails when `conformance` sits in `all`, and
    `server_bundle_requires_no_installed_service` fails when a connector outside
    `SELF_CONTAINED_CONNECTORS` that needs an installed broker, database or object store sits in
@@ -645,14 +674,14 @@ binaries run alongside each other instead of one binary finishing before the nex
    `crates/saci/tests/connector_matrix.rs`; `dimensions_cover_the_registry` and
    `every_slice_has_a_test` fail until this is done. A connector that needs a server adds a
    `Resource`, its `SACI_MATRIX_*` variable and readiness wait in `matrix.rs`, and its
-   container to `services()` in `xtask/src/matrix.rs`. A connector or transformer not in the
+   container to `services()` in `xtask/src/matrix.rs`. A connector or codec not in the
    matrix is not considered wired.
 8. Tests live in `crates/saci/tests/<name>_<case>.rs`, each opening with
-   `#![cfg(feature = "connector-<name>")]` plus the feature of every transformer it names. Docker-backed
+   `#![cfg(feature = "connector-<name>")]` plus the feature of every codec it names. Docker-backed
    tests share `crates/saci/tests/common/<name>.rs` with `try_start() -> Option<Container>`, included as
    `#[path = "common/<name>.rs"] mod common;`, and each such binary is added to the `default`
    profile exclusion in `.config/nextest.toml` as `binary_id(=saci::<name>_<case>)`. A `#[cfg(test)]`
-   item that names another `crate::connector::<n>` or `crate::transformer::<f>` module carries that
+   item that names another `crate::connector::<n>` or `crate::codec::<f>` module carries that
    module's feature.
 9. A runnable config under `examples/configs/` and a page under
    `docs/content/service/connectors/` (skill `saci-docs`).
@@ -666,9 +695,11 @@ renames a connector config key, read mode or write mode; changes a connector's b
 changes the connector matrix's dimensions or rejection sites; changes `Source::request_batch_rows`,
 `Source::finish` or `Sink::pending_rows` semantics; changes `rebuild_blocker`'s `restartable` rule for a
 `ChannelSource`/`ChannelSink` pair (also check skill `saci-service`'s Service layer section, the
-canonical copy); changes the IO layer contract a connector relies on to reach its transformer, or
-the `Registry`'s `register_source`/`register_sink`/`register_transformer` surface (also check skill
+canonical copy); changes the IO layer contract a connector relies on to reach its codec
+(`ConnectorContext::codec`, `ReadInput`), or
+the `Registry`'s `register_source`/`register_sink`/`register_codec` surface (also check skill
 `saci-transformers`); changes which bundle (`all`, `connectors`, `server`) a connector feature belongs to
 (also check skill `saci-service`);
-changes which transformer feature a connector feature implies (also update skill
-`saci-transformers`).
+changes which codec feature a connector feature implies (also update skill
+`saci-transformers`); changes the `saci::io` surface (`Source`, `Sink`, `read_all`, `write_all`,
+`cast_batch`, `RetryingSource`, `RetryingSink`).

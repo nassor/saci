@@ -76,13 +76,13 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use prost::Message as _;
 use serde_json::{Map, Value as Json};
 
-use crate::connector::opentelemetry::config::Encoding;
+use crate::connector::otlp::config::Encoding;
 
 /// The connector name every error of the request-to-rows direction opens with.
-const WHAT: &str = "OpenTelemetryMetricsSource";
+const WHAT: &str = "OtlpMetricsSource";
 
 /// The connector name every error of the rows-to-request direction opens with.
-const SINK_WHAT: &str = "OpenTelemetryMetricsSink";
+const SINK_WHAT: &str = "OtlpMetricsSink";
 
 /// The columns of the canonical schema, and the aliases a sink also reads.
 pub mod column {

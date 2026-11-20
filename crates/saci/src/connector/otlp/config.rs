@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use crate::connector::{ConfigValue, one_or_many};
 use crate::error::SaciError;
 use serde::Deserialize;
 
@@ -94,14 +93,14 @@ pub struct PullMode {
 /// The read strategy of one source.
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SourceModeConfig {
+pub enum SourceMode {
     /// Listen for OTLP/HTTP bodies.
     Push(PushMode),
     /// Read a url that answers one body.
     Pull(PullMode),
 }
 
-impl SourceModeConfig {
+impl SourceMode {
     /// The mode's own name, for messages.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -127,7 +126,7 @@ impl SourceModeConfig {
 /// listener declares nothing at all.
 #[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct OpenTelemetryMetricsSourceConfig {
+pub struct OtlpMetricsSourceConfig {
     /// The listen address of the push mode, when no `mode` block is given.
     #[serde(default)]
     pub bind: Option<String>,
@@ -136,7 +135,7 @@ pub struct OpenTelemetryMetricsSourceConfig {
     pub path: Option<String>,
     /// The read strategy. Absent means `push`.
     #[serde(default)]
-    pub mode: Option<SourceModeConfig>,
+    pub mode: Option<SourceMode>,
     /// The bearer token of the push mode, when no `mode` block is given.
     #[serde(default)]
     pub auth: Option<AuthConfig>,
@@ -147,22 +146,16 @@ pub struct OpenTelemetryMetricsSourceConfig {
     /// The largest body accepted, when no `mode` block is given.
     #[serde(default)]
     pub max_body_bytes: Option<usize>,
-    /// The Arrow schema to emit, as `schema_fields` entries. Parsed by
-    /// `crate::connector::parse_optional_schema_fields` from the same table so
-    /// the type vocabulary matches every other connector; declared here only
-    /// so `deny_unknown_fields` accepts the key.
-    #[serde(default, deserialize_with = "one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
-impl OpenTelemetryMetricsSourceConfig {
+impl OtlpMetricsSourceConfig {
     /// The read strategy, with the top-level shorthand filled in.
     ///
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] when a shorthand key and a `mode`
     /// block are both present, or when a value is not usable.
-    pub fn resolve_mode(&self, what: &str) -> Result<SourceModeConfig, SaciError> {
+    pub fn resolve_mode(&self, what: &str) -> Result<SourceMode, SaciError> {
         let shorthand = self.bind.is_some()
             || self.path.is_some()
             || self.auth.is_some()
@@ -179,7 +172,7 @@ impl OpenTelemetryMetricsSourceConfig {
         // `tcp`, `udp` and `http-push` clamp it.
         let mode = match &self.mode {
             Some(mode) => mode.clone(),
-            None => SourceModeConfig::Push(PushMode {
+            None => SourceMode::Push(PushMode {
                 bind: self.bind.clone().unwrap_or_else(default_bind),
                 path: self.path.clone().unwrap_or_else(default_path),
                 buffer: self.buffer.unwrap_or(DEFAULT_BUFFER).max(1),
@@ -188,7 +181,7 @@ impl OpenTelemetryMetricsSourceConfig {
             }),
         };
         match &mode {
-            SourceModeConfig::Push(push) => {
+            SourceMode::Push(push) => {
                 if push.buffer == 0 {
                     return Err(SaciError::configuration(format!(
                         "{what}: mode.buffer must be at least 1"
@@ -213,7 +206,7 @@ impl OpenTelemetryMetricsSourceConfig {
                     )));
                 }
             }
-            SourceModeConfig::Pull(pull) => {
+            SourceMode::Pull(pull) => {
                 if !pull.url.starts_with("http://") && !pull.url.starts_with("https://") {
                     return Err(SaciError::configuration(format!(
                         "{what}: mode.url must start with 'http://' or 'https://', and it is '{}'",
@@ -239,7 +232,7 @@ impl OpenTelemetryMetricsSourceConfig {
 /// Configuration for the metrics sink.
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct OpenTelemetryMetricsSinkConfig {
+pub struct OtlpMetricsSinkConfig {
     /// The collector's endpoint, either an OTLP/HTTP url or a base url the
     /// `/v1/metrics` path is appended to.
     pub url: String,
@@ -261,20 +254,9 @@ pub struct OpenTelemetryMetricsSinkConfig {
     /// How many rows one export carries at most.
     #[serde(default = "default_batch_rows")]
     pub batch_rows: usize,
-    /// The Arrow schema the sink declares to the workflow graph, as
-    /// `schema_fields` entries. Parsed by
-    /// `crate::connector::parse_optional_schema_fields` from the same table so
-    /// the type vocabulary matches every other connector; declared here only
-    /// so `deny_unknown_fields` accepts the key.
-    ///
-    /// The nodes on either side of a `link` must declare the same schema, so a
-    /// source that projects its rows declares this list too. The conversion
-    /// itself reads the batch's own columns by name and needs no declaration.
-    #[serde(default, deserialize_with = "one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
-impl OpenTelemetryMetricsSinkConfig {
+impl OtlpMetricsSinkConfig {
     /// The endpoint every export is posted to, with the standard path added
     /// when the config names only a base url.
     ///
@@ -343,13 +325,13 @@ mod tests {
 
     use super::*;
 
-    fn source(text: &str) -> OpenTelemetryMetricsSourceConfig {
-        OpenTelemetryMetricsSourceConfig::deserialize(from_kdl_str(text).expect("valid KDL"))
+    fn source(text: &str) -> OtlpMetricsSourceConfig {
+        OtlpMetricsSourceConfig::deserialize(from_kdl_str(text).expect("valid KDL"))
             .expect("the config parses")
     }
 
-    fn sink(text: &str) -> OpenTelemetryMetricsSinkConfig {
-        OpenTelemetryMetricsSinkConfig::deserialize(from_kdl_str(text).expect("valid KDL"))
+    fn sink(text: &str) -> OtlpMetricsSinkConfig {
+        OtlpMetricsSinkConfig::deserialize(from_kdl_str(text).expect("valid KDL"))
             .expect("the config parses")
     }
 
@@ -358,7 +340,7 @@ mod tests {
         let mode = source("")
             .resolve_mode("src")
             .expect("the defaults resolve");
-        let SourceModeConfig::Push(push) = mode else {
+        let SourceMode::Push(push) = mode else {
             panic!("no mode block means push");
         };
         assert_eq!(push.bind, DEFAULT_BIND);
@@ -374,7 +356,7 @@ mod tests {
             "bind \"0.0.0.0:9999\"\npath \"/custom\"\nbuffer 8\nmax_body_bytes 1024\nauth bearer=\"t\"",
         );
         let mode = config.resolve_mode("src").expect("the shorthand resolves");
-        let SourceModeConfig::Push(push) = mode else {
+        let SourceMode::Push(push) = mode else {
             panic!("the shorthand builds the push mode");
         };
         assert_eq!(push.bind, "0.0.0.0:9999");
@@ -392,7 +374,7 @@ mod tests {
             .expect("the pull mode resolves");
         assert!(mode.is_live());
         assert_eq!(mode.kind(), "pull");
-        let SourceModeConfig::Pull(pull) = mode else {
+        let SourceMode::Pull(pull) = mode else {
             panic!("a pull mode block builds the pull mode");
         };
         assert_eq!(pull.interval_ms, DEFAULT_INTERVAL_MS);
@@ -442,13 +424,13 @@ mod tests {
     #[test]
     fn an_unknown_key_is_refused() {
         assert!(
-            OpenTelemetryMetricsSourceConfig::deserialize(
+            OtlpMetricsSourceConfig::deserialize(
                 from_kdl_str("bin \"0.0.0.0:1\"").expect("valid KDL")
             )
             .is_err()
         );
         assert!(
-            OpenTelemetryMetricsSinkConfig::deserialize(
+            OtlpMetricsSinkConfig::deserialize(
                 from_kdl_str("url \"http://127.0.0.1:1\"\nencodng \"json\"").expect("valid KDL")
             )
             .is_err()
@@ -458,14 +440,14 @@ mod tests {
     #[test]
     fn an_unknown_key_inside_a_mode_block_is_refused() {
         assert!(
-            OpenTelemetryMetricsSourceConfig::deserialize(
+            OtlpMetricsSourceConfig::deserialize(
                 from_kdl_str("mode kind=\"pull\" url=\"http://127.0.0.1:1/\" intervl_ms=1")
                     .expect("valid KDL")
             )
             .is_err()
         );
         assert!(
-            OpenTelemetryMetricsSourceConfig::deserialize(
+            OtlpMetricsSourceConfig::deserialize(
                 from_kdl_str("mode kind=\"push\" bnd=\"0.0.0.0:1\"").expect("valid KDL")
             )
             .is_err()
@@ -475,7 +457,7 @@ mod tests {
     #[test]
     fn a_mode_kind_nothing_names_is_refused() {
         assert!(
-            OpenTelemetryMetricsSourceConfig::deserialize(
+            OtlpMetricsSourceConfig::deserialize(
                 from_kdl_str("mode kind=\"stream\" url=\"http://127.0.0.1:1/\"")
                     .expect("valid KDL")
             )

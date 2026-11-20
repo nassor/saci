@@ -12,7 +12,7 @@ use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 
 use saci::codec::parquet::ParquetCodec;
-use saci::connector::file::{FileSink, FileSource};
+use saci::connector::file::{FileSink, FileSinkConfig, FileSource, FileSourceConfig};
 use saci::prelude::*;
 
 /// Schema with `id` (Int64), `price` (Float64), `rounded` (Int64).
@@ -95,7 +95,11 @@ async fn generate_input(path: &std::path::Path, n: usize) -> Result<(), SaciErro
     let batch = RecordBatch::try_new(schema.clone(), vec![ids, prices])
         .map_err(|e| SaciError::generic(format!("generate_input: {e}")))?;
 
-    let mut sink = FileSink::create(path, Arc::new(ParquetCodec::new()), schema)?;
+    let mut sink = FileSink::new(
+        FileSinkConfig::new(path),
+        schema,
+        Arc::new(ParquetCodec::new()),
+    )?;
     sink.write_batch(&batch).await?;
     sink.finish().await
 }
@@ -148,16 +152,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let inner_src =
-        FileSource::open_async(&input_path, Arc::new(ParquetCodec::new()), None).await?;
+    let inner_src = FileSource::new_async(
+        FileSourceConfig::new(&input_path),
+        None,
+        Arc::new(ParquetCodec::new()),
+    )
+    .await?;
     let src = PaddedParquetSource {
         inner: inner_src,
         full_schema: full_schema.clone(),
     };
-    let sink = FileSink::create(
-        &output_path,
-        Arc::new(ParquetCodec::new()),
+    let sink = FileSink::new(
+        FileSinkConfig::new(&output_path),
         full_schema.clone(),
+        Arc::new(ParquetCodec::new()),
     )?;
 
     let mut pipeline = Pipeline::new("parquet-etl")
@@ -178,8 +186,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:<8} {:<14} {:<10}", "id", "price", "rounded");
     println!("{}", "-".repeat(34));
 
-    let mut out_src =
-        FileSource::open_async(&output_path, Arc::new(ParquetCodec::new()), None).await?;
+    let mut out_src = FileSource::new_async(
+        FileSourceConfig::new(&output_path),
+        None,
+        Arc::new(ParquetCodec::new()),
+    )
+    .await?;
     let mut printed = 0usize;
     'outer: while let Some(batch) = out_src.next_batch().await? {
         let ids = batch

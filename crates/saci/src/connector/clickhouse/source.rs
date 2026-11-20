@@ -719,13 +719,13 @@ mod tests {
     #[test]
     fn source_request_batch_rows_updates_batch_rows() {
         use crate::connector::clickhouse::config::{
-            ClickhouseConnectionConfig, ClickhouseFieldType, DumpMode, FieldSpec,
+            ClickhouseFieldType, ConnectionConfig, DumpMode, FieldSpec,
         };
         use std::collections::HashMap;
 
         let config = ClickhouseSourceConfig {
             name: "src".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,

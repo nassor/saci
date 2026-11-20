@@ -102,7 +102,7 @@ aggregation.
 | Kafka | no: opt in with `--features connector-kafka` |
 | Turso | no: opt in with `--features connector-turso` |
 | ClickHouse | no: opt in with `--features connector-clickhouse` |
-| OpenTelemetry | no: opt in with `--features connector-opentelemetry` |
+| OpenTelemetry | no: opt in with `--features connector-otlp` |
 | Native plugins | no: opt in with `--features plugin-host` |
 | Cluster mode | no: opt in with `--features service-cluster` |
 
@@ -110,7 +110,7 @@ aggregation.
 installer already put on your PATH, so `saci-service` answers in any shell.
 
 A checkout can also build a binary with only the parts a deployment uses, for example
-`cargo xtask server --connectors=file,kafka --transformers=ndjson --processors=wasm`.
+`cargo xtask server --connectors=file,kafka --codecs=ndjson --processors=wasm`.
 [Which feature adds which node](@/library/reference/crates.md#which-feature-adds-which-node) lists
 the options.
 
@@ -165,7 +165,7 @@ its flag after `server`, from the same checkout:
   Turso endpoint, so it stays opt-in. Install with `--features connector-turso`.
 - ClickHouse needs a running ClickHouse server. Install with `--features connector-clickhouse` when
   you need [ClickHouse](@/service/connectors/clickhouse.md).
-- OpenTelemetry needs a running OTLP endpoint. Install with `--features connector-opentelemetry`
+- OpenTelemetry needs a running OTLP endpoint. Install with `--features connector-otlp`
   when you need [OpenTelemetry](@/service/connectors/opentelemetry.md).
 - Native plugins replace the sandbox with a shared library, so opting in is an
   explicit choice. Install with `--features plugin-host`, then follow

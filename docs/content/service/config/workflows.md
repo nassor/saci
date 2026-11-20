@@ -141,8 +141,8 @@ OK: workflow graph validated (components and schemas agree end to end)
 ## 2. Connect them with links
 
 A `link` names two declared node ids. `from` is the upstream node and `to` the
-downstream one. A transformer id is never either of them: a transformer is a
-format that a source or a sink names, and it holds no place in the graph.
+downstream one. A `transformer` id is never either of them: a `transformer` node declares a
+codec that a source or a sink names, and it holds no place in the graph.
 
 ```kdl,name=Two edges make the graph
 link from="orders_in" to="enrich"
@@ -237,7 +237,7 @@ is the runnable example.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| leading argument | string | required | the transformer id a source or sink names |
+| leading argument | string | required | the id a source or sink names as its `transformer` |
 | `name` | string | the id | display name on the dashboard |
 | `format` | string | required | `csv`, `ndjson`, `parquet`, `avro` or `arrow-ipc`; see [Formats](@/service/formats/_index.md) |
 | `options` | child block | empty | handed to that format verbatim; the keys are on the format's own page |
@@ -250,7 +250,7 @@ is the runnable example.
 | `name` | string | the id | display name on the dashboard |
 | `type` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
 | `component` | string | required | the rows this source produces, which its downstream processor must declare |
-| `transformer` | string | none | id of the `transformer` that decodes its bytes; omitted by a connector that carries rows already |
+| `transformer` | string | none | id of the `transformer` node whose codec decodes its bytes; omitted by a connector that carries rows already |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
 | `flow_control` | child block | the top-level policy | admission override for this source; see [Flow control](@/service/operate/flow-control.md) |
 | `config` | child block | empty | read verbatim by the connector; the keys are on the connector's own page |
@@ -263,7 +263,7 @@ is the runnable example.
 | `name` | string | the id | display name on the dashboard |
 | `type` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
 | `component` | string | required | the rows this sink reads, which its upstream processor must declare |
-| `transformer` | string | none | id of the `transformer` that encodes its bytes; omitted by a connector that takes rows directly |
+| `transformer` | string | none | id of the `transformer` node whose codec encodes its bytes; omitted by a connector that takes rows directly |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
 | `config` | child block | empty | read verbatim by the connector; the keys are on the connector's own page |
 

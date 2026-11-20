@@ -25,8 +25,8 @@ worth naming, because the payload already holds the columns the workflow works o
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="ai-t ai-d">
-        <title id="ai-t">An arrow-ipc transformer decoding a stream into rows and encoding rows back into a stream</title>
-        <desc id="ai-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is arrow-ipc. The upper arrow runs left to right and is the decode path, which reads the schema out of the stream header. The lower arrow runs right to left and is the encode path, which writes one whole stream per call. One message is one whole stream.</desc>
+        <title id="ai-t">An arrow-ipc codec decoding a stream into rows and encoding rows back into a stream</title>
+        <desc id="ai-d">Bytes on the left and rows on the right, with a codec in the middle whose format is arrow-ipc. The upper arrow runs left to right and is the decode path, which reads the schema out of the stream header. The lower arrow runs right to left and is the encode path, which writes one whole stream per call. One message is one whole stream.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>
@@ -116,7 +116,7 @@ workflow "ticks" {
 
 </div>
 
-On files the same transformer works on the stream surface, and there the source needs no columns at
+On files the same codec works on the stream surface, and there the source needs no columns at
 all:
 
 <div class="code">

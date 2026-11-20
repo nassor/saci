@@ -82,7 +82,7 @@ can take rows from anywhere.
 
 - A free port for the source's `bind`. The listener is opened while the config is built, `validate`
   included, so a busy port fails before the service starts.
-- The `connector-opentelemetry` feature on both the `validate` and the `serve` run. It is not in
+- The `connector-otlp` feature on both the `validate` and the `serve` run. It is not in
   the `server` feature, because an OpenTelemetry deployment is a deliberate choice of endpoint.
 - `run_mode kind="stream"` whenever a listening source is declared. It blocks for the next request
   and never reaches EOF, and validation rejects it in any other run mode. A `stop_at_end` pull
@@ -94,7 +94,7 @@ can take rows from anywhere.
   against the sink's field for field.
 
 No `transformer` node and no `format` key. An OTLP request is the wire format, so there is nothing
-for a transformer to decode.
+for a codec to decode.
 
 ## 1. Receive: the source node
 
@@ -208,7 +208,7 @@ saci-service validate --config examples/configs/opentelemetry_metrics.kdl --conn
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: metrics (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -362,15 +362,15 @@ shorthand key beside a `mode` block.
 
 | Message | What to change |
 |---|---|
-| `OpenTelemetryMetricsSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
-| `OpenTelemetryMetricsSource: mode.path must start with '/', and it is '{path}'` | make the path absolute |
-| `OpenTelemetryMetricsSource: mode.url must start with 'http://' or 'https://'` | give the pull url its scheme |
-| `OpenTelemetryMetricsSource: bind, path, auth, buffer and max_body_bytes belong to the push mode, and a 'mode' block sets them for whichever kind it names` | keep one of the two forms |
-| `OpenTelemetryMetricsSource: mode.interval_ms must be at least 1 when the pull mode repeats` | raise the interval, or set `stop_at_end=#true` |
-| `OpenTelemetryMetricsSource: mode.auth.bearer must not be empty` | name the token, or drop the block |
-| `OpenTelemetryMetricsSink: url must start with 'http://' or 'https://'` | give the endpoint its scheme |
-| `OpenTelemetryMetricsSink: batch_rows must be at least 1` | raise the count, or drop the key |
-| `OpenTelemetryMetricsSink: 'not a name' is not a valid header name` | fix the header pair |
+| `OtlpMetricsSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
+| `OtlpMetricsSource: mode.path must start with '/', and it is '{path}'` | make the path absolute |
+| `OtlpMetricsSource: mode.url must start with 'http://' or 'https://'` | give the pull url its scheme |
+| `OtlpMetricsSource: bind, path, auth, buffer and max_body_bytes belong to the push mode, and a 'mode' block sets them for whichever kind it names` | keep one of the two forms |
+| `OtlpMetricsSource: mode.interval_ms must be at least 1 when the pull mode repeats` | raise the interval, or set `stop_at_end=#true` |
+| `OtlpMetricsSource: mode.auth.bearer must not be empty` | name the token, or drop the block |
+| `OtlpMetricsSink: url must start with 'http://' or 'https://'` | give the endpoint its scheme |
+| `OtlpMetricsSink: batch_rows must be at least 1` | raise the count, or drop the key |
+| `OtlpMetricsSink: 'not a name' is not a valid header name` | fix the header pair |
 | `source type 'OpenTelemetryMetricsSource' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"`, or make the pull read `stop_at_end` |
 
 ## Next

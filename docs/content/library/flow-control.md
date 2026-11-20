@@ -17,7 +17,7 @@ A source may yield one giant batch, or a connector tuned for a different workloa
 over whatever size it happens to produce. The runner reshapes it regardless, with a
 zero-copy `RecordBatch::slice`, admitting only the controller's current target and holding
 the remainder as carry-over for the next pass. A source does not have to cooperate for this
-to apply: it works even against `FileSource`, `HttpSource`, `S3Source`, `TcpIngestSource` and
+to apply: it works even against `FileSource`, `HttpSource`, `S3Source`, `TcpSource` and
 `ChannelSource`, none of which implement the advisory hint below.
 
 ## How the search is paced: an epoch, two arms
@@ -155,7 +155,7 @@ pass, and a hinted fetch size would be a measurement choosing a pass boundary. I
 | `NatsSource` | Yes | `batch_size`: the same, for a core subscription or a JetStream pull |
 | `PostgresSource` | Yes | `batch_rows`: the cursor query's `LIMIT`, or the logical-decode chunk size |
 | `MariadbSource` | Yes | `batch_rows`: the cursor query's `LIMIT`, or the binlog chunk size |
-| `FileSource`, `HttpSource`, `S3Source`, `TcpIngestSource`, `TursoSource`, `ChannelSource` | No (trait default) | Nothing; each is still governed on an ordinary path, because the runner reshapes its output |
+| `FileSource`, `HttpSource`, `S3Source`, `TcpSource`, `TursoSource`, `ChannelSource` | No (trait default) | Nothing; each is still governed on an ordinary path, because the runner reshapes its output |
 
 ## The decision record
 

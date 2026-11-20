@@ -6,8 +6,7 @@
 //! says, including nothing, and lets the format decide, while a sink always
 //! needs one because it is the schema the rows are written with.
 
-use std::path::Path;
-
+use crate::connector::schema::deserialize_config;
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_optional_schema_fields,
     parse_schema_fields,
@@ -15,15 +14,16 @@ use crate::connector::{
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
 
-use crate::connector::file::{FileSink, FileSource};
+use crate::connector::file::{FileSink, FileSinkConfig, FileSource, FileSourceConfig};
 
 /// Factory for [`FileSource`].
 ///
-/// Config fields:
+/// The `config` table is [`FileSourceConfig`]:
 /// - `path` (string, required): the file to read.
-/// - `schema_fields` (list, optional): the declared Arrow schema. Required by
-///   `csv`, a projection target for `parquet`, `avro` and `arrow-ipc`, and
-///   inferred by `ndjson` when absent.
+///
+/// Beside it, `schema_fields` (list, optional) is the declared Arrow schema.
+/// Required by `csv`, a projection target for `parquet`, `avro` and
+/// `arrow-ipc`, and inferred by `ndjson` when absent.
 ///
 /// The byte format is whatever codec the `source` node's `transformer`
 /// key names; see [`ConnectorContext::codec`].
@@ -39,16 +39,10 @@ impl SourceFactory for FileSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let path = config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            SaciError::configuration("FileSource config requires a 'path' string field")
-        })?;
+        let cfg: FileSourceConfig = deserialize_config(config, "FileSource")?;
         let codec = ctx.codec("FileSource")?;
         let declared = parse_optional_schema_fields(config, "FileSource")?;
-        Ok(Box::new(FileSource::open(
-            Path::new(path),
-            codec,
-            declared,
-        )?))
+        Ok(Box::new(FileSource::new(cfg, declared, codec)?))
     }
 
     /// A file is read from its start, so a second build re-delivers every
@@ -60,11 +54,13 @@ impl SourceFactory for FileSourceFactory {
 
 /// Factory for [`FileSink`].
 ///
-/// Config fields:
+/// The `config` table is [`FileSinkConfig`]:
 /// - `path` (string, required): the file to write.
-/// - `schema_fields` (list, required): the Arrow schema for the output file.
 /// - `truncate` (bool, optional, default `false`): replace the file rather
 ///   than append to it.
+///
+/// Beside it, `schema_fields` (list, required) is the Arrow schema for the
+/// output file.
 ///
 /// The byte format is whatever codec the `sink` node's `transformer`
 /// key names; see [`ConnectorContext::codec`].
@@ -80,22 +76,10 @@ impl SinkFactory for FileSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let path = config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            SaciError::configuration("FileSink config requires a 'path' string field")
-        })?;
+        let cfg: FileSinkConfig = deserialize_config(config, "FileSink")?;
         let codec = ctx.codec("FileSink")?;
         let schema = parse_schema_fields(config, "FileSink")?;
-        let truncate = config
-            .get("truncate")
-            .and_then(ConfigValue::as_bool)
-            .unwrap_or(false);
-        let path = Path::new(path);
-        let sink = if truncate {
-            FileSink::create_truncating(path, codec, schema)?
-        } else {
-            FileSink::create(path, codec, schema)?
-        };
-        Ok(Box::new(sink))
+        Ok(Box::new(FileSink::new(cfg, schema, codec)?))
     }
 
     /// An appending sink reopened is an appending sink; a truncating one
@@ -183,18 +167,35 @@ schema_fields "id" type="Int64" nullable=#false
             panic!("path is required");
         };
         assert_eq!(err.category(), "configuration");
-        assert_eq!(
-            err.message(),
-            "FileSource config requires a 'path' string field"
-        );
+        assert!(err.message().contains("FileSource config"), "got: {err}");
+        assert!(err.message().contains("`path`"), "got: {err}");
 
         let Err(err) = FileSinkFactory.build(&empty_config(), &ctx) else {
             panic!("path is required");
         };
-        assert_eq!(
-            err.message(),
-            "FileSink config requires a 'path' string field"
-        );
+        assert!(err.message().contains("FileSink config"), "got: {err}");
+        assert!(err.message().contains("`path`"), "got: {err}");
+    }
+
+    /// A misspelled key is refused and named, not ignored: the source would
+    /// otherwise read a different file than the config says.
+    #[test]
+    fn a_misspelled_key_is_a_configuration_error_naming_it() {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let raw = format!("pth \"/data/in.ndjson\"\n{CSV_SCHEMA}");
+
+        let Err(err) = FileSourceFactory.build(&config(&raw), &ctx) else {
+            panic!("`pth` is not a file source key");
+        };
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("pth"), "got: {err}");
+
+        let raw = format!("path \"/data/out.ndjson\"\ntruncat #true\n{CSV_SCHEMA}");
+        let Err(err) = FileSinkFactory.build(&config(&raw), &ctx) else {
+            panic!("`truncat` is not a file sink key");
+        };
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("truncat"), "got: {err}");
     }
 
     #[test]

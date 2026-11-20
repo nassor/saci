@@ -19,7 +19,7 @@ use arrow_schema::{DataType, Field, Schema};
 use tokio_util::sync::CancellationToken;
 
 use saci::codec::parquet::ParquetCodec;
-use saci::connector::file::FileSource;
+use saci::connector::file::{FileSource, FileSourceConfig};
 use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
@@ -131,8 +131,12 @@ async fn a_csv_source_and_a_parquet_sink_share_one_file_connector() {
 
     // Read the Parquet output back. Its schema comes from the file, which is
     // itself proof the footer was written.
-    let mut readback = FileSource::open(&output_path, Arc::new(ParquetCodec::new()), None)
-        .expect("the sink wrote a readable Parquet file");
+    let mut readback = FileSource::new(
+        FileSourceConfig::new(&output_path),
+        None,
+        Arc::new(ParquetCodec::new()),
+    )
+    .expect("the sink wrote a readable Parquet file");
     assert_eq!(readback.estimated_rows(), Some(4));
 
     let batch = readback

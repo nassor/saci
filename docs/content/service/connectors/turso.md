@@ -9,7 +9,7 @@ label = "Direction"
 value = "Source and sink"
 [[extra.facts]]
 label = "Format"
-value = "None: batches arrive already typed, so no transformer is named"
+value = "None: batches arrive already typed, so no codec is named"
 [[extra.facts]]
 label = "Run modes"
 value = "Any"
@@ -73,7 +73,7 @@ SQLite-compatible database. This page pins the engine at `0.8.2`.
 - For an embedded database, a writable path. The file is created on first use.
 - For a synced replica, the local path plus a `remote` block naming the endpoint URL and an auth
   token. A `turso://` or `libsql://` URL is rewritten to `https://`.
-- No transformer. Batches arrive and leave already typed.
+- No codec. Batches arrive and leave already typed.
 
 ## 1. Read from a database: the source node
 
@@ -230,7 +230,7 @@ cargo run -p saci --features server,connector-turso,wasm-host --bin saci-service
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
 ```
 
 The first drain cycle is where a missing table or file surfaces.

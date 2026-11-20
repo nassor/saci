@@ -712,7 +712,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     use crate::connector::from_kdl_str;
     use crate::connector::{ConfigMap, ConfigValue, SinkFactory, SourceFactory};
     use arrow_array::Int64Array;
@@ -1328,12 +1328,12 @@ mod tests {
     /// The `Rebuilder` carries the node identity into every heal, so a
     /// `saci` source rebuilds on a fresh ephemeral port without losing the
     /// identity its factory requires.
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     #[test]
-    fn a_rebuilt_saci_source_binds_a_fresh_port_and_keeps_its_identity() {
+    fn a_rebuilt_peer_source_binds_a_fresh_port_and_keeps_its_identity() {
         let mut registry = Registry::new();
-        registry.register_source(crate::connector::saci::SaciSourceFactory);
-        registry.register_sink(crate::connector::saci::SaciSinkFactory);
+        registry.register_source(crate::connector::peer::SaciSourceFactory);
+        registry.register_sink(crate::connector::peer::SaciSinkFactory);
 
         let config = from_kdl_str(
             r#"

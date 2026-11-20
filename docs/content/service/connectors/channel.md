@@ -9,7 +9,7 @@ label = "Direction"
 value = "Source and sink"
 [[extra.facts]]
 label = "Format"
-value = "None: batches arrive already typed, so no transformer is named"
+value = "None: batches arrive already typed, so no codec is named"
 [[extra.facts]]
 label = "Run modes"
 value = "Any"
@@ -71,7 +71,7 @@ and no file in between.
   they meet by the `name` they both declare.
 - Exactly one sink and one source per `name`. Two of either half, or only one half, is rejected
   before any connector is built.
-- No transformer. Batches cross already typed, so no format is involved.
+- No codec. Batches cross already typed, so no format is involved.
 
 ## 1. Read from a channel: the source node
 
@@ -136,7 +136,7 @@ saci-service validate --config examples/multi_workflow/multi_workflow.kdl --conn
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: route (sources: 1, sinks: 2)
   workflow: settle (sources: 2, sinks: 1)
 OK: all declared types resolved in built-in registry
@@ -190,10 +190,10 @@ Source and sink take the same three keys:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `name` | string | required | the channel both halves join |
-| `buffer` | integer | `8` | batches the channel holds before the writer waits; both halves must agree |
+| `buffer` | integer | `8` | batches the channel holds before the writer waits; at least 1, and both halves must agree |
 | `schema_fields` | list of fields | required | the schema batches carry; both halves must agree |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector.
+An unrecognised key inside `config` is a configuration error naming the key. `schema_fields` is read beside these keys.
 
 ## When it refuses to start
 
@@ -201,7 +201,8 @@ An unrecognised key inside `config` is ignored rather than rejected on this conn
 |---|---|
 | `channel '<name>': declares a ChannelSink but no ChannelSource` | declare the missing half, in this workflow or another |
 | `channel '<name>': more than one ChannelSink declared` | keep exactly one sink for that `name` |
-| `ChannelSource config requires a 'name' key naming the shared channel` | add `name="..."` to the `config` |
+| ``ChannelSource config: missing field `name` `` | add `name="..."` to the `config` |
+| `channel: 'buffer' must be at least 1` | give `buffer` a positive value |
 | `ChannelSource config requires a 'schema_fields' list` | declare `schema_fields` in the `config` |
 | `channel '<name>': the paired ChannelSource and ChannelSink declare different schemas` | make both `schema_fields` lists identical |
 | `channel '<name>': buffer <n> differs from the paired half's buffer <m>` | give both halves the same `buffer` |

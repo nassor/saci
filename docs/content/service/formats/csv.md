@@ -25,8 +25,8 @@ the schema you declare is what gives the columns their types.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="cs-t cs-d">
-        <title id="cs-t">A csv transformer decoding bytes into rows and encoding rows back into bytes</title>
-        <desc id="cs-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is csv. The upper arrow runs left to right and is the decode path, which needs the declared schema. The lower arrow runs right to left and is the encode path, which takes the columns of the batch it is handed.</desc>
+        <title id="cs-t">A csv codec decoding bytes into rows and encoding rows back into bytes</title>
+        <desc id="cs-d">Bytes on the left and rows on the right, with a codec in the middle whose format is csv. The upper arrow runs left to right and is the decode path, which needs the declared schema. The lower arrow runs right to left and is the encode path, which takes the columns of the batch it is handed.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>

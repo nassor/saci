@@ -39,7 +39,7 @@ pub mod source;
 
 mod key;
 
-pub use config::{Flush, S3ConnectionConfig, S3SinkConfig, S3SourceConfig, SchemaFrom};
+pub use config::{ConnectionConfig, Flush, S3SinkConfig, S3SourceConfig, SchemaFrom};
 pub use factory::{S3SinkFactory, S3SourceFactory};
 pub use sink::S3Sink;
 pub use source::S3Source;

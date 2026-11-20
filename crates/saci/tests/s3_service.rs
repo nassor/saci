@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use saci::connector::s3::{
-    Flush, S3ConnectionConfig, S3Sink, S3SinkConfig, S3Source, S3SourceConfig, SchemaFrom,
+    ConnectionConfig, Flush, S3Sink, S3SinkConfig, S3Source, S3SourceConfig, SchemaFrom,
 };
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
@@ -61,7 +61,7 @@ fn build_pipeline() -> Pipeline {
     pipeline
 }
 
-fn config_kdl(connection: &S3ConnectionConfig, in_prefix: &str, out_prefix: &str) -> String {
+fn config_kdl(connection: &ConnectionConfig, in_prefix: &str, out_prefix: &str) -> String {
     format!(
         r#"
 mode "standalone"
@@ -133,7 +133,7 @@ observability log_level="warn"
 /// needed.
 #[tokio::test]
 async fn the_s3_factories_build_without_reaching_the_endpoint() {
-    let connection = S3ConnectionConfig {
+    let connection = ConnectionConfig {
         bucket: "test".to_string(),
         endpoint: Some("http://127.0.0.1:1".to_string()),
         access_key_id: Some("key".to_string()),
@@ -152,7 +152,7 @@ async fn the_s3_factories_build_without_reaching_the_endpoint() {
 }
 
 /// Start a RustFS container, or return `None` with a printed reason.
-async fn start_rustfs() -> Option<(ContainerAsync<GenericImage>, S3ConnectionConfig)> {
+async fn start_rustfs() -> Option<(ContainerAsync<GenericImage>, ConnectionConfig)> {
     const ACCESS_KEY: &str = "saciaccesskey";
     const SECRET_KEY: &str = "sacisecretkey";
 
@@ -177,7 +177,7 @@ async fn start_rustfs() -> Option<(ContainerAsync<GenericImage>, S3ConnectionCon
         }
     };
     let bucket = format!("saci-{}", nanos_since_epoch());
-    let connection = S3ConnectionConfig {
+    let connection = ConnectionConfig {
         bucket,
         endpoint: Some(format!("http://127.0.0.1:{port}")),
         access_key_id: Some(ACCESS_KEY.to_string()),
@@ -266,7 +266,6 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
                 max_bytes: 0,
                 max_age_ms: 0,
             },
-            schema_fields: vec![],
         },
         schema.clone(),
         Arc::new(NdjsonCodec::default()),
@@ -317,7 +316,6 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
             connection,
             prefix: out_prefix,
             schema_from: SchemaFrom::Config,
-            schema_fields: vec![],
         },
         schema.clone(),
         Arc::new(NdjsonCodec::default()),

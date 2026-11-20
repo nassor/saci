@@ -9,7 +9,7 @@ label = "Direction"
 value = "Source and sink"
 [[extra.facts]]
 label = "Format"
-value = "None: rows arrive already typed, so no transformer is named"
+value = "None: rows arrive already typed, so no codec is named"
 [[extra.facts]]
 label = "Run modes"
 value = "Any: every mode reaches EOF once it is caught up"
@@ -22,7 +22,7 @@ A workflow reads rows out of one ClickHouse table, processes the data, and write
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 124" role="img" aria-labelledby="ch-t ch-d">
         <title id="ch-t">One ClickHouse table read into a workflow and the result written to another table</title>
-        <desc id="ch-d">A table box on the left feeds a source node named ch_events. The source hands rows to a WebAssembly processor, drawn as a boundary box, which hands them to a sink node named ch_enriched. The sink writes the table box on the right. No transformer sits in the chain because ClickHouse exchanges native Arrow streams directly.</desc>
+        <desc id="ch-d">A table box on the left feeds a source node named ch_events. The source hands rows to a WebAssembly processor, drawn as a boundary box, which hands them to a sink node named ch_enriched. The sink writes the table box on the right. No codec sits in the chain because ClickHouse exchanges native Arrow streams directly.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="36" width="104" height="52" rx="8"/>
             <rect class="hd hd-data" x="0" y="36" width="104" height="18" rx="8"/>

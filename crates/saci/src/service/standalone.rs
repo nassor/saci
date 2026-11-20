@@ -1742,7 +1742,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_straight_to_sink_forwards_every_row() {
-        let (tx, source) = ChannelSource::new(schema(), 8);
+        let (source, tx) = ChannelSource::new(schema(), 8);
         let (sink, mut rx) = ChannelSink::new(schema(), 8);
 
         let batch = RecordBatch::try_new(
@@ -2104,8 +2104,8 @@ mod tests {
     /// receives the rows of every one of its inbound nodes in one batch.
     #[tokio::test]
     async fn two_sources_merge_into_one_processor() {
-        let (tx_a, source_a) = ChannelSource::new(schema(), 8);
-        let (tx_b, source_b) = ChannelSource::new(schema(), 8);
+        let (source_a, tx_a) = ChannelSource::new(schema(), 8);
+        let (source_b, tx_b) = ChannelSource::new(schema(), 8);
         let rows_seen = Arc::new(std::sync::Mutex::new(0u64));
 
         let batch_a = RecordBatch::try_new(
@@ -2203,7 +2203,7 @@ mod tests {
     /// downstream processor) must merge just like the all-sources case.
     #[tokio::test]
     async fn source_and_processor_fan_in_merge_into_one_processor() {
-        let (tx, source) = ChannelSource::new(schema(), 8);
+        let (source, tx) = ChannelSource::new(schema(), 8);
         let rows_seen = Arc::new(std::sync::Mutex::new(0u64));
 
         let batch = RecordBatch::try_new(
@@ -2328,8 +2328,8 @@ mod tests {
             ]))
         }
 
-        let (tx_a, source_a) = ChannelSource::new(trade_schema(), 8);
-        let (tx_b, source_b) = ChannelSource::new(trade_schema(), 8);
+        let (source_a, tx_a) = ChannelSource::new(trade_schema(), 8);
+        let (source_b, tx_b) = ChannelSource::new(trade_schema(), 8);
         let watermark_seen = Arc::new(std::sync::Mutex::new(i64::MIN));
 
         struct WatermarkReader {
@@ -2466,7 +2466,7 @@ mod tests {
     #[tokio::test]
     async fn a_disabled_controller_publishes_no_flow_target() {
         async fn run_briefly(source_id: &str, enabled: bool) {
-            let (tx, source) = ChannelSource::new(schema(), 8);
+            let (source, tx) = ChannelSource::new(schema(), 8);
             let (sink, _rx) = ChannelSink::new(schema(), 8);
             let batch = RecordBatch::try_new(
                 schema(),
@@ -2599,7 +2599,7 @@ mod tests {
                 .with(InspectorLayer::new(spans, logs.clone())),
         );
 
-        let (tx, source) = ChannelSource::new(schema(), 8);
+        let (source, tx) = ChannelSource::new(schema(), 8);
         let (sink, _rx) = ChannelSink::new(schema(), 8);
         let batch = RecordBatch::try_new(
             schema(),
@@ -2794,7 +2794,7 @@ mod tests {
     #[cfg(all(feature = "metrics", feature = "windows"))]
     #[tokio::test]
     async fn a_windowed_path_source_publishes_no_flow_target_in_stream_mode() {
-        let (tx, source) = ChannelSource::new(windowed_schema(), 8);
+        let (source, tx) = ChannelSource::new(windowed_schema(), 8);
         tx.send(windowed_batch(1_000)).await.unwrap();
         drop(tx);
 
@@ -2830,7 +2830,7 @@ mod tests {
     #[cfg(all(feature = "metrics", feature = "windows"))]
     #[tokio::test]
     async fn a_windowed_path_source_publishes_a_flow_target_in_continuous_mode() {
-        let (tx, source) = ChannelSource::new(windowed_schema(), 8);
+        let (source, tx) = ChannelSource::new(windowed_schema(), 8);
         tx.send(windowed_batch(1_000)).await.unwrap();
         drop(tx);
 
@@ -3019,7 +3019,7 @@ mod tests {
     /// A source holding one arrival of `rows` consecutive values, then EOF.
     #[cfg(feature = "metrics")]
     async fn one_big_arrival(rows: i32) -> ChannelSource {
-        let (tx, source) = ChannelSource::new(schema(), 4);
+        let (source, tx) = ChannelSource::new(schema(), 4);
         let batch = RecordBatch::try_new(
             schema(),
             vec![Arc::new(arrow_array::Int32Array::from(
@@ -3039,7 +3039,7 @@ mod tests {
     #[cfg(feature = "metrics")]
     #[tokio::test]
     async fn one_sources_drain_error_does_not_back_off_its_healthy_peers() {
-        let (tx, healthy) = ChannelSource::new(schema(), 8);
+        let (healthy, tx) = ChannelSource::new(schema(), 8);
         let (sink, _rx) = ChannelSink::new(schema(), 8);
         let batch = RecordBatch::try_new(
             schema(),
@@ -3195,8 +3195,8 @@ mod tests {
     #[cfg(feature = "metrics")]
     #[tokio::test]
     async fn a_shared_chain_failure_backs_off_every_feeding_source() {
-        let (tx_left, left) = ChannelSource::new(schema(), 8);
-        let (tx_right, right) = ChannelSource::new(schema(), 8);
+        let (left, tx_left) = ChannelSource::new(schema(), 8);
+        let (right, tx_right) = ChannelSource::new(schema(), 8);
         for tx in [&tx_left, &tx_right] {
             let batch = RecordBatch::try_new(
                 schema(),
@@ -3648,7 +3648,7 @@ mod tests {
             behaviour: SinkBehaviour,
             queue: DeadLetterQueue,
         ) -> (StandaloneStats, Arc<std::sync::atomic::AtomicU64>) {
-            let (tx, source) = ChannelSource::new(schema(), 4);
+            let (source, tx) = ChannelSource::new(schema(), 4);
             let batch = RecordBatch::try_new(
                 schema(),
                 vec![Arc::new(arrow_array::Int32Array::from(vec![7, 8, 9]))],
@@ -3845,7 +3845,7 @@ mod tests {
     /// One item queued for a [`LoggingSource`], EOF right after.
     #[cfg(feature = "metrics")]
     async fn one_item_source(log: FinishLog) -> (LoggingSource, Arc<std::sync::atomic::AtomicU64>) {
-        let (tx, source) = ChannelSource::new(schema(), 4);
+        let (source, tx) = ChannelSource::new(schema(), 4);
         let batch = RecordBatch::try_new(
             schema(),
             vec![Arc::new(arrow_array::Int32Array::from(vec![1, 2, 3]))],
@@ -4060,7 +4060,7 @@ mod tests {
     #[tokio::test]
     async fn a_source_finish_error_is_counted_without_failing_the_run() {
         let log: FinishLog = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (tx, chan_source) = ChannelSource::new(schema(), 4);
+        let (chan_source, tx) = ChannelSource::new(schema(), 4);
         drop(tx);
         let (source, source_finishes) = LoggingSource::failing(chan_source, Arc::clone(&log));
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));

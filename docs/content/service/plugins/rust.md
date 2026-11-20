@@ -179,7 +179,7 @@ is used as it stands. An unknown key in the node is a parse error.
 Linux/macOS:
 
 ```bash,name=Validate the config
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate \
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- validate \
   --config examples/configs/standalone_plugin.kdl --strict
 ```
 
@@ -187,13 +187,13 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/debug/saci_plugin_smoketest.dll"
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate --config examples/configs/standalone_plugin.kdl --strict
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- validate --config examples/configs/standalone_plugin.kdl --strict
 ```
 
 Linux/macOS:
 
 ```bash,name=Run the service
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve \
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- serve \
   --config examples/configs/standalone_plugin.kdl
 ```
 
@@ -201,7 +201,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/debug/saci_plugin_smoketest.dll"
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve --config examples/configs/standalone_plugin.kdl
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- serve --config examples/configs/standalone_plugin.kdl
 ```
 
 The config reads `examples/configs/fixtures/counter_input.csv`, runs the

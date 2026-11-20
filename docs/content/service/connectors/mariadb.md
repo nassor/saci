@@ -9,7 +9,7 @@ label = "Direction"
 value = "Source and sink"
 [[extra.facts]]
 label = "Format"
-value = "None: rows arrive already typed, so no transformer is named"
+value = "None: rows arrive already typed, so no codec is named"
 [[extra.facts]]
 label = "Run modes"
 value = "Any: every mode reaches EOF once it is caught up"
@@ -26,7 +26,7 @@ MySQL 8.4 and 9.
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 124" role="img" aria-labelledby="mdb-t mdb-d">
         <title id="mdb-t">One table read into a workflow and the result written to another table</title>
-        <desc id="mdb-d">A table box on the left feeds a source node named maria_orders. The source hands rows to a WebAssembly processor, drawn as a boundary box, which hands them to a sink node named maria_enriched. The sink writes the table box on the right. The two tables may live on a MariaDB server, a MySQL server, or one of each. No transformer sits anywhere in the chain, because rows arrive already typed.</desc>
+        <desc id="mdb-d">A table box on the left feeds a source node named maria_orders. The source hands rows to a WebAssembly processor, drawn as a boundary box, which hands them to a sink node named maria_enriched. The sink writes the table box on the right. The two tables may live on a MariaDB server, a MySQL server, or one of each. No codec sits anywhere in the chain, because rows arrive already typed.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="36" width="104" height="52" rx="8"/>
             <rect class="hd hd-data" x="0" y="36" width="104" height="18" rx="8"/>
@@ -110,7 +110,7 @@ log line `ready for connections`; both images restart once while they initialise
 - The processor component the config names, at `pipelines/orders.wasm`, for the `serve` step.
   [Build your own processor](@/service/processors/build/_index.md) is where that comes from;
   `validate --connectors-only` below runs without it.
-- No transformer. Rows arrive typed, so this connector names no format at all.
+- No codec. Rows arrive typed, so this connector names no format at all.
 
 ## Choose how to read changes
 
@@ -373,7 +373,7 @@ saci-service validate --config examples/configs/mariadb.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```

@@ -540,7 +540,7 @@ mod tests {
     #[cfg(feature = "connector-channel")]
     fn source_node(id: &str, component: &'static str, schema: Arc<Schema>) -> BuiltNode {
         use crate::connector::channel::ChannelSource;
-        let (_tx, src) = ChannelSource::new(schema, 1);
+        let (src, _tx) = ChannelSource::new(schema, 1);
         BuiltNode {
             id: id.to_string(),
             name: None,

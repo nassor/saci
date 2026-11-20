@@ -23,7 +23,7 @@ user-level skills under `~/.agents/skills/`, shared by every project.
 | Skill | Read before |
 |---|---|
 | `saci-connectors` | touching `crates/saci/src/connector.rs` or anything under `crates/saci/src/connector/`, a `SourceFactory`/`SinkFactory` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
-| `saci-transformers` | touching `crates/saci/src/transformer.rs` or anything under `crates/saci/src/transformer/`, a `format` registration, or a transformer option |
+| `saci-transformers` | touching `crates/saci/src/codec.rs` or anything under `crates/saci/src/codec/`, a `format` registration, or a codec option |
 | `saci-processors` | touching `crates/saci/src/sdk.rs` or `sdk/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/arrow-ipc-conformance/`, or `examples/{wasm,quickstart,conformance}/` |
 | `saci-plugins` | touching `crates/saci/src/sdk/plugin_rt.rs`, `crates/saci-macros/src/plugin.rs`, `crates/saci/src/plugin_abi.rs`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
 | `saci-service` | touching `crates/saci/src/{service,distributed,inspector,bin}/`, `src/metrics.rs`, `src/inspector_wire.rs`, `crates/saci-service-ui`, or `examples/{native,branching,windowing,multi_workflow,integrity,distributed_fulfillment}/` |
@@ -33,7 +33,7 @@ user-level skills under `~/.agents/skills/`, shared by every project.
 | `ponytail` | designing or writing any change: the smallest change that fully solves the task |
 
 The five `saci-*` area skills are documentation of record. A change to how a connector,
-transformer, processor, plugin, or the service and its dashboard works (a new or removed crate,
+codec, processor, plugin, or the service and its dashboard works (a new or removed crate,
 a renamed type, a changed trait method, a new config key, a new metric series, a changed build
 step, fixture or example) updates the matching skill in the same change; each skill's last
 section, "Keep this skill current", lists its triggers. A skill that lags the code is a defect
@@ -59,7 +59,7 @@ cargo xtask check-wasm-processor                             # saci still builds
 cargo xtask bench tpch_q6                                    # Benchmarks, always via the harness
 cargo check --examples --all-features                        # Verify examples compile; --all-features keeps connector-gated examples compiled
 cargo build -p saci --features server --bin saci-service     # The server binary
-cargo xtask server --connectors=file --transformers=csv --processors=wasm  # A server binary with only the named parts
+cargo xtask server --connectors=file --codecs=csv --processors=wasm  # A server binary with only the named parts
 cargo run -p saci --example scheduler_etl                    # Run an example
 cargo run -p saci --example first_pipeline                   # The native tutorial's example
 cargo run -p saci --example distributed_scheduler --features distributed  # No external service
@@ -152,7 +152,7 @@ both this file and `ci.yml`: nextest does not run doctests.
 Five commands cover the feature configurations. Four of them widen: `--workspace --lib` is the
 library default, the engine alone; `-p saci --no-default-features --features
 service,connector-channel --lib` is the narrowest runnable service plus the channel connector its
-unit tests drive, registering no other connector and no transformer; `-p saci --features server
+unit tests drive, registering no other connector and no codec; `-p saci --features server
 --lib` is the `server` bundle, which registers only the `BUILTIN_CONNECTOR_FEATURES` entries
 whose feature is on; and `--workspace --all-features` registers every one of them. The fifth,
 `-p saci --no-default-features --features service,wasm-host,plugin-host,connector-channel --lib`,
@@ -226,9 +226,9 @@ crates/
 │                             #   connector     SourceFactory, SinkFactory, ConnectorContext,
 │                             #                 NodeIdentity, bridge::ChannelBridge, and one child
 │                             #                 module per connector. skill saci-connectors
-│                             #   transformer   Transformer, BatchReader, BatchWriter,
-│                             #                 MessageDecoder, TransformerRegistry, and one child
-│                             #                 module per byte format. skill saci-transformers
+│                             #   codec         Codec, CodecFactory, CodecRegistry, BatchReader,
+│                             #                 BatchWriter, MessageDecoder, ReadInput, and one
+│                             #                 child module per byte format. skill saci-transformers
 │                             #   processor     Processor SDK; `wit/` holds the canonical WIT
 │                             #                 package. skill saci-processors
 │                             #   plugin, plugin_abi
@@ -302,10 +302,10 @@ Both SDKs share `saci::sdk` (`State`, `RouteDecision`, `Config`, `Error`, `Resul
 The macros and `sdk` are exported at the crate root and in `saci::prelude`.
 
 Connectors and formats: `connector-<name>` compiles `saci::connector::<name>`,
-`transformer-<format>` compiles `saci::transformer::<format>`. `connectors` enables the seven
+`codec-<format>` compiles `saci::codec::<format>`. `connectors` enables the seven
 that need nothing installed or already running (`channel`, `file`, `redb`, `http`, `tcp`, `udp`,
-`saci`); `transformers` enables all five formats. `connector-kafka`, `connector-nats` and
-`connector-udp` imply `transformer-ndjson`, `connector-tcp` implies `transformer-arrow-ipc`.
+`peer`); `codecs` enables all five formats. `connector-kafka`, `connector-nats` and
+`connector-udp` imply `codec-ndjson`, `connector-tcp` implies `codec-arrow-ipc`.
 TLS is always compiled into the PostgreSQL, MariaDB and ClickHouse connectors.
 `connector-kafka` needs `cmake` and a C toolchain for vendored librdkafka.
 
@@ -345,7 +345,7 @@ calls `saci::service::cli::main()`, or `main_with` to register its own factories
 - **`Source`/`Sink` traits** (`src/io/`, `engine` feature): `Source::finish`, like `Sink::finish`, is
   called once after the last `next_batch`, and defaults to nothing. It is where a source whose
   delivery is a commitment makes it durable, so a caller that dropped the source instead sees the
-  same data again; every wrapper (`Box`, `CastingSource`, `RetryingSource`, `HealingSource`)
+  same data again; every wrapper (`Box`, `RetryingSource`, `HealingSource`)
   forwards it, and the service's runners call it per exit path after the sinks are finished.
 - **`System` trait** (`src/system.rs`): `meta()` declares field-level read/write access,
   `async fn run(&self, data: &mut Dataset)` does the work, `run_sync` is an optional sync fast path,
@@ -482,8 +482,8 @@ persists it through `CheckpointStore`.
 ### Host (`service` and the modules beside it)
 
 The host is documented in four skills. `saci-connectors` and `saci-transformers` carry the IO
-layer: a connector moves bytes, a transformer turns bytes into `RecordBatch`es and back, and
-`ServiceBuilder` resolves a node's `transformer` id against the `TransformerRegistry` so no
+layer: a connector moves bytes, a codec turns bytes into `RecordBatch`es and back, and
+`ServiceBuilder` resolves a node's `transformer` id against the `CodecRegistry` so no
 connector resolves a format itself. `saci-processors` carries the wasm host (`src/wasm_host/`)
 and the processor SDK; `saci-plugins` carries the native plugin host and SDK. `saci-service`
 carries the rest: the distributed runner and Raft consensus (`src/distributed/`); config,
@@ -500,7 +500,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   empty method surface when the `metrics` feature is off. Do not wrap a metric call in
   `#[cfg(feature = "metrics")]`.
 - `saci::prelude` is the documented entry point for a downstream embedder: the engine types plus
-  whatever the enabled `processor`, `connector-*` and `transformer-*` features add.
+  whatever the enabled `processor`, `connector-*` and `codec-*` features add.
   An authoring crate (wasm processor or native plugin) writes `use saci::prelude::*;` and reaches
   the SDK types through `sdk::`.
 - An example that needs nothing outside the `saci` crate (no processor component, plugin, config
@@ -517,7 +517,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
 - Tests live in `#[cfg(test)]` modules within each source file; integration tests are in each crate's
   `tests/`, run through `cargo nextest`. See "Testing" for the fast/full profile split, the
   Docker soft-skip convention, and why testcontainers-backed tests are safe to run in parallel.
-- Every new source connector, sink connector, transformer, and processor runtime is added to
+- Every new source connector, sink connector, codec, and processor runtime is added to
   `crates/saci/tests/connector_matrix.rs`'s dimension lists and its `live_slices!` lists
   in the same change that introduces it; `dimensions_cover_the_registry` and
   `every_slice_has_a_test` fail on an omission. Skill `saci-connectors` has the checklist.

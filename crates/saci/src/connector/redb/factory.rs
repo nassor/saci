@@ -8,6 +8,7 @@
 
 use serde::Deserialize;
 
+use crate::connector::schema::without_schema_fields;
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
@@ -57,7 +58,7 @@ impl SourceFactory for RedbSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let cfg = RedbSourceConfig::deserialize(config.clone())
+        let cfg = RedbSourceConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("RedbSource config: {e}")))?;
         let codec = ctx.codec("RedbSource")?;
         let schema = parse_schema_fields(config, "RedbSource")?;
@@ -114,11 +115,11 @@ impl SinkFactory for RedbSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let cfg = RedbSinkConfig::deserialize(config.clone())
+        let cfg = RedbSinkConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("RedbSink config: {e}")))?;
         let codec = ctx.codec("RedbSink")?;
         let schema = parse_schema_fields(config, "RedbSink")?;
-        Ok(Box::new(RedbSink::open(cfg, schema, codec)?))
+        Ok(Box::new(RedbSink::new(cfg, schema, codec)?))
     }
 
     /// Every accepted batch is its own committed transaction, so nothing is

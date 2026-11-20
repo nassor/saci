@@ -26,8 +26,8 @@ narrows the read to those columns.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="pq-t pq-d">
-        <title id="pq-t">A parquet transformer decoding a file into rows and encoding rows back into a file</title>
-        <desc id="pq-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is parquet. The upper arrow runs left to right and is the decode path, which reads the schema from the file's footer. The lower arrow runs right to left and is the encode path, which needs a declared schema. One message is one whole file.</desc>
+        <title id="pq-t">A parquet codec decoding a file into rows and encoding rows back into a file</title>
+        <desc id="pq-d">Bytes on the left and rows on the right, with a codec in the middle whose format is parquet. The upper arrow runs left to right and is the decode path, which reads the schema from the file's footer. The lower arrow runs right to left and is the encode path, which needs a declared schema. One message is one whole file.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>
@@ -86,7 +86,7 @@ transformer "pq" format="parquet"
 ## 2. Name it from a source or sink
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>one declared transformer serves both ends</em></div>
+<div class="code-cap"><span>KDL</span><em>one declared codec serves both ends</em></div>
 
 ```kdl
 source "orders_in" type="FileSource" component="Order" transformer="pq" {

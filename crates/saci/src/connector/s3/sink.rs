@@ -251,11 +251,11 @@ impl Pending {
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::Schema;
-/// use saci::connector::s3::{Flush, S3ConnectionConfig, S3Sink, S3SinkConfig};
+/// use saci::connector::s3::{ConnectionConfig, Flush, S3Sink, S3SinkConfig};
 /// use saci::codec::csv::CsvCodec;
 ///
 /// let config = S3SinkConfig {
-///     connection: S3ConnectionConfig {
+///     connection: ConnectionConfig {
 ///         bucket: "orders".to_string(),
 ///         endpoint: Some("http://127.0.0.1:9000".to_string()),
 ///         access_key_id: Some("key".to_string()),
@@ -266,7 +266,6 @@ impl Pending {
 ///     prefix: "out".to_string(),
 ///     suffix: ".csv".to_string(),
 ///     flush: Flush::default(),
-///     schema_fields: Vec::new(),
 /// };
 /// let sink = S3Sink::new(config, Arc::new(Schema::empty()), Arc::new(CsvCodec::new()))
 ///     .unwrap();
@@ -506,7 +505,7 @@ mod tests {
 
     use super::*;
 
-    use crate::connector::s3::S3ConnectionConfig;
+    use crate::connector::s3::ConnectionConfig;
     use std::collections::VecDeque;
     use std::fmt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -539,7 +538,7 @@ mod tests {
 
     fn config() -> S3SinkConfig {
         S3SinkConfig {
-            connection: S3ConnectionConfig {
+            connection: ConnectionConfig {
                 bucket: "test".to_string(),
                 endpoint: Some("http://127.0.0.1:1".to_string()),
                 allow_http: true,
@@ -548,7 +547,6 @@ mod tests {
             prefix: String::new(),
             suffix: String::new(),
             flush: Flush::default(),
-            schema_fields: Vec::new(),
         }
     }
 

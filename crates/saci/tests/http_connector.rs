@@ -6,7 +6,7 @@
 //! `one_shot` drive it, and the sink's captured body decodes back to the rows
 //! that were served.
 //!
-//! The `push` module drives an `HttpPushSource` under `stream`: three POSTed
+//! The `listen` module drives an `HttpListenSource` under `stream`: three POSTed
 //! ndjson documents become three sink requests, and the connector's own
 //! `saci_http_*` series are read back out of a Prometheus registry.
 //!
@@ -244,12 +244,12 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
 
 /// The listening half under `run_mode kind="stream"`.
 ///
-/// `HttpPushSource` never reaches EOF, so the stream runner is the only one
+/// `HttpListenSource` never reaches EOF, so the stream runner is the only one
 /// that may drive it, and one POSTed document is one item. The format is
 /// `ndjson`, so one request body is a batch of json lines and the sink writes
 /// the same shape back out.
 #[cfg(feature = "codec-ndjson")]
-mod push {
+mod listen {
     use std::time::Duration;
 
     use arrow_array::RecordBatch;
@@ -346,7 +346,7 @@ observability log_level="warn"
         batches
     }
 
-    /// POST every document into the push source and collect what the sink
+    /// POST every document into the listen source and collect what the sink
     /// sent on.
     ///
     /// The listener is already bound by the factory, so a POST issued before
@@ -366,7 +366,7 @@ observability log_level="warn"
         let built = register_builtin_factories(ServiceBuilder::new())
             .with_runtime("relay", Box::new(build_pipeline()))
             .build_all(&config)
-            .expect("the push source and the sink resolve through the registry")
+            .expect("the listen source and the sink resolve through the registry")
             .remove(0);
 
         let cancel = CancellationToken::new();
@@ -416,7 +416,7 @@ observability log_level="warn"
     }
 
     #[tokio::test]
-    async fn documents_posted_to_the_push_source_come_back_out_of_the_http_sink() {
+    async fn documents_posted_to_the_listen_source_come_back_out_of_the_http_sink() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (stats, posted) = drive(dir.path()).await;
 
@@ -477,7 +477,7 @@ observability log_level="warn"
                 r#"status="202""#,
             ],
         )
-        .unwrap_or_else(|| panic!("the push source's 202s are missing from:\n{text}"));
+        .unwrap_or_else(|| panic!("the listen source's 202s are missing from:\n{text}"));
         assert!(
             accepted >= 3.0,
             "three documents were accepted, got {accepted} in:\n{text}"

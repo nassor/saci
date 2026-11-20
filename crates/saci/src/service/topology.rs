@@ -455,7 +455,7 @@ connection url="nats://localhost:4222" password="hunter2"
     ///
     /// A key that matches no connector is dead: the connector it was meant for
     /// silently renders no detail, which reads as "this connector has nothing
-    /// to show" rather than as the typo it is. `TcpIngestSource` registers as
+    /// to show" rather than as the typo it is. `TcpSource` registers as
     /// `"tcp"`, which is exactly the mistake this pins down.
     ///
     /// Pinned against
@@ -601,7 +601,7 @@ connection url="nats://localhost:4222" password="hunter2"
     /// the concrete Rust type underneath never needs to be the real connector.
     fn built_source(id: &str, type_name: &str) -> BuiltNode {
         use crate::connector::channel::ChannelSource;
-        let (_tx, src) = ChannelSource::new(order_schema(), 1);
+        let (src, _tx) = ChannelSource::new(order_schema(), 1);
         BuiltNode {
             id: id.to_string(),
             name: None,

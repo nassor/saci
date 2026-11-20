@@ -104,7 +104,7 @@ exactly one. Fill one in with
 | `mode` | which runner: `"standalone"` or `"cluster"`; see [Running a cluster](@/service/operate/cluster.md) | required |
 | `node` | `id`, optional `name`, `data_dir`, plus the cluster keys beside it; see [Running a cluster](@/service/operate/cluster.md) | required |
 | `run_mode` | how a standalone run paces itself; see [Run modes and persistence](@/service/config/run-modes.md) | `kind="continuous"` |
-| `workflow` | the graph: transformers, sources, processors, sinks, links; see [Workflows and links](@/service/config/workflows.md) | required |
+| `workflow` | the graph: `transformer` nodes, sources, processors, sinks, links; see [Workflows and links](@/service/config/workflows.md) | required |
 | `store` | standalone persistence, a `store "redb"` block; see [Run modes and persistence](@/service/config/run-modes.md) | none |
 | `http` | the control-plane address, `disabled`, and `control`; see [Logs, metrics and traces](@/service/operate/observability.md) and [Workflow lifecycle](@/service/operate/workflows.md) | `bind="0.0.0.0:8080"`, control on |
 | `observability` | log format and level, sampling, OTLP export, the in-process capture behind the dashboard; see [Logs, metrics and traces](@/service/operate/observability.md) | pretty at `error`, capture on |
@@ -205,7 +205,7 @@ it accepts:
   custom binary names factories this one does not know. A connector this
   binary ships but was built without is an error instead, in every mode, and
   `--strict` does not reach it.
-- `--connectors-only` builds every source, sink and transformer and skips the
+- `--connectors-only` builds every source, sink and codec and skips the
   processor load and the graph check, so it validates a config whose processor
   artifact is not present yet.
 

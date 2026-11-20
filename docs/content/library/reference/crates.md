@@ -30,30 +30,30 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 
 | Module | Feature | What it gives you |
 |---|---|---|
-| crate root | `engine` (default) | `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, plus the `Source` and `Sink` traits and the schema cast helpers. Arrow and serde are always present; tokio and rayon arrive with `engine`, and `futures` with `service` or `connector-udp`. |
+| crate root | `engine` (default) | `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, plus the `Source` and `Sink` traits; the rest of the IO surface (`read_all`, `write_all`, `cast_batch`, the retry wrappers) is in `saci::io`. Arrow and serde are always present; tokio and rayon arrive with `engine`, and `futures` with `service` or `connector-udp`. |
 | `saci::config` | `config` | The configuration language: parses KDL into `ConfigValue` (an alias for `serde_json::Value`) plus `ConfigMap`, and exports `from_kdl_str`, `from_kdl_str_with_vars`, `one_or_many`, `substitute_env_vars` and `substitute_vars`. `from_kdl_str_with_vars` substitutes and parses in one call, and a parse failure over substituted text names the variables whose values were inserted, plus any holding a backslash or double quote. Values stay out of the message. |
-| `saci::transformer` | `transformer-contract` | The byte-format contract: `Transformer`, `BatchReader`, `BatchWriter`, `MessageDecoder`, `TransformerFactory`, `TransformerRegistry`. The traits live in `transformer::contract`. |
-| `saci::transformer::arrow_ipc` | `transformer-arrow-ipc` | `ArrowIpcTransformer`: stream read and write plus `PerBatch` messages, both over the same Arrow IPC stream encapsulation. |
-| `saci::transformer::avro` | `transformer-avro` | `AvroTransformer`: object container files plus `PerRow` messages, framed single-object or Confluent. Options `compression`, `schema_id`. |
-| `saci::transformer::csv` | `transformer-csv` | `CsvTransformer`: stream read and write plus `PerRow` messages, one record per payload. Option `has_headers`. |
-| `saci::transformer::ndjson` | `transformer-ndjson` | `NdjsonTransformer`: stream plus `PerRow` messages. Option `infer_max`. |
-| `saci::transformer::parquet` | `transformer-parquet` | `ParquetTransformer`: stream read and write plus `PerBatch` messages, one whole file per payload. Snappy compression is fixed and the factory reads no options; the reader reports `estimated_rows` from row-group metadata. |
-| `saci::connector` | `connector-contract` | The factory contract: `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` and `parse_optional_schema_fields`. `connector::bridge` holds the `ChannelBridge` trait. A connector needs no dependency on the host. |
+| `saci::codec` | `codec-api` | The byte-format contract: `Codec`, `BatchReader`, `BatchWriter`, `MessageDecoder`, `MessageShape`, `CodecFactory`, `CodecRegistry` and `ReadInput`. The traits live in `codec::contract`. |
+| `saci::codec::arrow_ipc` | `codec-arrow-ipc` | `ArrowIpcCodec`: stream read and write plus `PerBatch` messages, both over the same Arrow IPC stream encapsulation. Takes no options. |
+| `saci::codec::avro` | `codec-avro` | `AvroCodec`: object container files plus `PerRow` messages, framed single-object or Confluent. Options `compression` (`AvroCompression`), `schema_id`. |
+| `saci::codec::csv` | `codec-csv` | `CsvCodec`: stream read and write plus `PerRow` messages, one record per payload. Option `has_headers`. |
+| `saci::codec::ndjson` | `codec-ndjson` | `NdjsonCodec`: stream plus `PerRow` messages. Option `infer_max`. |
+| `saci::codec::parquet` | `codec-parquet` | `ParquetCodec`: stream read and write plus `PerBatch` messages, one whole file per payload. Snappy compression is fixed and the factory reads no options; the reader reports `estimated_rows` from row-group metadata. |
+| `saci::connector` | `connector-api` | The factory contract: `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` and `parse_optional_schema_fields`. `connector::bridge` holds the `ChannelBridge` trait. A connector needs no dependency on the host. |
 | `saci::connector::channel` | `connector-channel` | `ChannelSource`, `ChannelSink`: in-memory mpsc transport. `ChannelRegistry` is the name-keyed bridge pairing a sink in one workflow with a source in another. |
-| `saci::connector::clickhouse` | `connector-clickhouse` | `ClickhouseSource`, `ClickhouseSink`: ClickHouse HTTP client with native `ArrowStream` format. Source modes `polling`, `dump` and `query`; sink write mode `append` with optional `truncate_before_first_write`. No transformer: ClickHouse sends and accepts Arrow IPC streams directly. |
-| `saci::connector::file` | `connector-file` | `FileSource`, `FileSink`: local-file IO, format from a transformer. |
-| `saci::connector::http` | `connector-http` | `HttpSource`, `HttpSink`: one GET spooled through a transformer, and one self-contained document per batch back out. |
+| `saci::connector::clickhouse` | `connector-clickhouse` | `ClickhouseSource`, `ClickhouseSink`: ClickHouse HTTP client with native `ArrowStream` format. Source modes `polling`, `dump` and `query`; sink write mode `append` with optional `truncate_before_first_write`. No codec: ClickHouse sends and accepts Arrow IPC streams directly. |
+| `saci::connector::file` | `connector-file` | `FileSource`, `FileSink`: local-file IO, format from a codec. |
+| `saci::connector::http` | `connector-http` | `HttpSource`, `HttpSink`: one GET spooled through a codec, and one self-contained document per batch back out. |
 | `saci::connector::kafka` | `connector-kafka` | `KafkaSource`, `KafkaSink`: `librdkafka` backed, one topic or several. |
 | `saci::connector::nats` | `connector-nats` | `NatsSource`, `NatsSink`: core subject pub/sub or JetStream, chosen by a mode node's `kind` key. |
-| `saci::connector::opentelemetry` | `connector-opentelemetry` | `OpenTelemetryMetricsSource`, `OpenTelemetryMetricsSink`: OTLP/HTTP metrics in and out, Protobuf or JSON, one row per data point under the ten-column canonical schema. No transformer: an OTLP request is the wire format, so the connector decodes and encodes it itself. |
+| `saci::connector::otlp` | `connector-otlp` | `OtlpMetricsSource`, `OtlpMetricsSink`: OTLP/HTTP metrics in and out, Protobuf or JSON, one row per data point under the ten-column canonical schema. No codec: an OTLP request is the wire format, so the connector decodes and encodes it itself. |
 | `saci::connector::postgresql` | `connector-postgresql` | `PostgresSource`, `PostgresSink`: native client, TLS, and `polling` / `cdc_trigger` / `cdc_logical` read modes. |
 | `saci::connector::mariadb` | `connector-mariadb` | `MariadbSource`, `MariadbSink`: one native client for MariaDB and MySQL servers, TLS, and `polling` / `cdc_trigger` / `cdc_binlog` read modes (binlog by file position, or by GTID on MySQL, with an optional initial snapshot); writes through `append`, `upsert`, `ignore_conflicts` or `apply_changes`. |
 | `saci::connector::turso` | `connector-turso` | `TursoSource`, `TursoSink`: the in-process, SQLite-compatible `turso` engine, embedded in the service's own process or a synced replica of Turso Cloud or sqld. Reads through `polling`, `dump` or `cdc`; writes through `append`, `upsert` or `ignore_conflicts` over a `deferred`, `immediate` or `concurrent` (MVCC) transaction, with optional change capture and page-level encryption. Pins `turso = "=0.7.2"`. |
-| `saci::connector::redb` | `connector-redb` | `RedbSource`, `RedbSink`: an embedded redb key/value file as a transport. One entry per batch, keyed `{key_prefix}{seq:020}{key_suffix}` so key order is insertion order, in the byte format a declared transformer names. |
+| `saci::connector::redb` | `connector-redb` | `RedbSource`, `RedbSink`: an embedded redb key/value file as a transport. One entry per batch, keyed `{key_prefix}{seq:020}{key_suffix}` so key order is insertion order, in the byte format a declared codec names. |
 | `saci::connector::s3` | `connector-s3` | `S3Source`, `S3Sink`: any S3-compatible endpoint, timestamped object keys, row, byte and age flush thresholds. |
-| `saci::connector::tcp` | `connector-tcp` | `TcpIngestSource`, `TcpSink`: live length-prefixed frames, decoded and encoded by a transformer. |
-| `saci::connector::udp` | `connector-udp` | `UdpSource`, `UdpSink`: fire-and-forget datagrams, one message each, decoded and encoded by a transformer. The sink's optional `probe` block is what tells it whether a peer is still there. |
-| `saci::connector::saci` | `connector-saci` | `SaciSource`, `SaciSink`: one SACI service pushing `RecordBatch`es to another over Arrow IPC. A session opens with a hello naming the sending service, workflow and sink node, which the receiving side puts in its own series labels and span fields. |
+| `saci::connector::tcp` | `connector-tcp` | `TcpSource`, `TcpSink`: live length-prefixed frames, decoded and encoded by a codec. |
+| `saci::connector::udp` | `connector-udp` | `UdpSource`, `UdpSink`: fire-and-forget datagrams, one message each, decoded and encoded by a codec. The sink's optional `probe` block is what tells it whether a peer is still there. |
+| `saci::connector::peer` | `connector-peer` | `PeerSource`, `PeerSink`: one SACI service pushing `RecordBatch`es to another over Arrow IPC. A session opens with a hello naming the sending service, workflow and sink node, which the receiving side puts in its own series labels and span fields. |
 | `saci::sdk` | always | The authoring module shared by wasm processors and native plugins: `sdk::State`, `sdk::RouteDecision`, `sdk::Config`, `sdk::Error`, `sdk::Result` and `sdk::host` (`config`, `config_parse`, `trace` to `error`, `metric`, `with_config`). `#[transform]` and `#[fold]` need `derive`, `#[processor]` needs `processor` and `#[plugin]` needs `plugin`; all four are in `saci::prelude`. The canonical WIT package is `crates/saci/wit/pipeline.wit`. |
 | `saci::plugin_abi` | `plugin` or `plugin-host` | The C ABI itself: the two symbols a plugin exports, `saci_abi_version` and `saci_plugin_v1`, the `SaciPluginV1` and `SaciHostV1` vtables they fill, and their layout. The C header is `crates/saci/include/saci_plugin.h`. |
 | `saci::inspector_wire` | `metrics` | The inspector's JSON contract: `Topology`, `Snapshot`, `SpanRecord` and friends. serde only, so both the host and the browser compile it. |
@@ -62,11 +62,11 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 | `saci::distributed` | `distributed` | `PartitionSource`, `CheckpointStore`, `DistributedRunner`, `CheckpointStrategy` and `RedbSharedStore`. |
 | `saci::inspector` | `inspector` | The in-process telemetry behind the `/ui` dashboard. |
 | `saci::metrics` | `metrics` | The OpenTelemetry instruments. |
-| `saci::service` | `service` | The host: HTTP control plane, config loading, the factory `Registry`, the runners, and `saci::service::cli`, the `saci-service` command line. It ships no `Source`, `Sink` or `Transformer` of its own. |
+| `saci::service` | `service` | The host: HTTP control plane, config loading, the factory `Registry`, the runners, and `saci::service::cli`, the `saci-service` command line. It ships no `Source`, `Sink` or `Codec` of its own. |
 
 ## Features
 
-Library default is `engine` alone: the columnar engine with no connector, transformer, host or
+Library default is `engine` alone: the columnar engine with no connector, codec, host or
 authoring SDK.
 
 - `engine` (**default**): `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, the
@@ -82,27 +82,27 @@ authoring SDK.
   only on a retry.
 - `metrics`: the OpenTelemetry instruments in `src/metrics.rs` and the `inspector_wire` types.
   Stands alone, so a library embedder can compile the writers without the HTTP control plane.
-- `trace-context`: trace context carried across a `connector-saci` link (implies `tracing`).
+- `trace-context`: trace context carried across a `connector-peer` link (implies `tracing`).
 - `processor`: the wasm processor SDK targeting WASI 0.3 (`wasm32-wasip3`) and Component Model
   Async. Build with `--no-default-features --features processor` so tokio stays out.
 - `plugin`: the native plugin SDK (implies `engine`).
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`,
-  `connector-kafka`, `connector-mariadb`, `connector-nats`, `connector-opentelemetry`,
-  `connector-postgresql`, `connector-redb`, `connector-s3`, `connector-saci`, `connector-tcp`,
+  `connector-kafka`, `connector-mariadb`, `connector-nats`, `connector-otlp`,
+  `connector-peer`, `connector-postgresql`, `connector-redb`, `connector-s3`, `connector-tcp`,
   `connector-turso`, `connector-udp`: one per connector module. `connector-kafka`,
-  `connector-nats` and `connector-udp` imply `transformer-ndjson`, and `connector-tcp` implies
-  `transformer-arrow-ipc`, so the connector feature alone is runnable. `connector-file`,
-  `connector-http`, `connector-redb` and `connector-s3` imply no transformer, so the config picks
-  which formats the build carries. `connector-saci` implies none either: Arrow IPC is its fixed
+  `connector-nats` and `connector-udp` imply `codec-ndjson`, and `connector-tcp` implies
+  `codec-arrow-ipc`, so the connector feature alone is runnable. `connector-file`,
+  `connector-http`, `connector-redb` and `connector-s3` imply no codec, so the config picks
+  which formats the build carries. `connector-peer` implies none either: Arrow IPC is its fixed
   wire format and a `saci` node takes no `transformer` key. TLS is always compiled into
   `connector-postgresql`, `connector-mariadb` and `connector-clickhouse`.
-- `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`, `transformer-ndjson`,
-  `transformer-parquet`: one per byte format.
+- `codec-arrow-ipc`, `codec-avro`, `codec-csv`, `codec-ndjson`,
+  `codec-parquet`: one per byte format.
 - `connectors`: the seven connectors that need nothing installed or already running:
   `connector-channel`, `connector-file`, `connector-redb`, `connector-http`, `connector-tcp`,
-  `connector-udp` and `connector-saci`.
-- `transformers`: all five `transformer-*` features.
-- `config`, `transformer-contract`, `connector-contract`: the contracts. The features above turn
+  `connector-udp` and `connector-peer`.
+- `codecs`: all five `codec-*` features.
+- `config`, `codec-api`, `connector-api`: the contracts. The features above turn
   them on, so a build rarely names them.
 - `inspector`: the in-process telemetry: time-bounded ring buffers for spans, log events, metric
   samples and flow-control decisions, read back through the JSON API and the `/ui` dashboard.
@@ -120,7 +120,7 @@ authoring SDK.
   shared library exporting the plugin C ABI, validates its manifest, and runs each batch through
   the vtable's `run_batch` slot.
 - `service`: the `saci-service` binary and `saci::service`. axum HTTP control plane, KDL config,
-  metrics and the standalone runner (implies `connector-contract`, `distributed`,
+  metrics and the standalone runner (implies `connector-api`, `distributed`,
   `parquet-checkpoint`, `tracing`, `metrics`, `trace-context` and `inspector`). It does **not**
   imply `distributed-raft`.
 - `service-cluster`: cluster and raft mode on top of `service` (implies `service` and
@@ -129,16 +129,16 @@ authoring SDK.
 - `mimalloc`: the mimalloc global allocator for the binary.
 - `server`: what `cargo install saci --features server` builds, a runnable `saci-service` with no
   further flags: `mimalloc`, `service`, `wasm-host`, `windows`, `parquet-checkpoint`, the seven
-  `connectors` and all five transformers. A connector joins it only when nothing has to be
+  `connectors` and all five codecs. A connector joins it only when nothing has to be
   installed or already running for it to work and it needs no extra build toolchain. Every
   connector that needs a database, broker, object store or OTLP endpoint is opt-in instead:
   `connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`,
-  `connector-kafka`, `connector-turso`, `connector-clickhouse` and `connector-opentelemetry`.
+  `connector-kafka`, `connector-turso`, `connector-clickhouse` and `connector-otlp`.
   `connector-kafka` needs `cmake` plus a C toolchain because `librdkafka-sys` builds vendored C,
   `connector-turso` pulls hyper and rustls for its synced mode, and `service-cluster` is a
   deliberate deployment choice.
 - `all`: every capability: `engine`, `windows`, `processor`, `plugin`, `server`,
-  `service-cluster`, `plugin-host`, `connectors`, `transformers` and the eight opt-in
+  `service-cluster`, `plugin-host`, `connectors`, `codecs` and the eight opt-in
   connectors. Excludes `conformance`.
 - `conformance`: the generator behind `packages/arrow-ipc-conformance/`. Turns on
   `arrow-ipc/lz4` so the corpus can write one compressed batch, which every codec must reject.
@@ -152,7 +152,7 @@ are not meant to be combined in one build, but doing so is redundant, not ambigu
 ## Which feature adds which node
 
 `service` registers no source, sink or format by itself. With `service` on, each `connector-*`
-feature registers one connector's factories and each `transformer-*` one byte format.
+feature registers one connector's factories and each `codec-*` one byte format.
 Without `service`, those features give the module and nothing else. `mode "cluster"` needs
 `service-cluster` and nothing else. Neither `service` nor `connector-*` implies `wasm-host`, and
 `plugin-host` is its own feature.
@@ -177,12 +177,12 @@ declare a <code>plugin</code> node.
 ```bash,name=Building a narrower binary
 # Single node, WASM pipelines, CSV in and out.
 cargo build --release -p saci --bin saci-service \
-  --no-default-features --features mimalloc,service,connector-file,transformer-csv,wasm-host
+  --no-default-features --features mimalloc,service,connector-file,codec-csv,wasm-host
 
 # Same, plus cluster mode.
 cargo build --release -p saci --bin saci-service \
   --no-default-features \
-  --features mimalloc,service-cluster,connector-file,transformer-csv,wasm-host
+  --features mimalloc,service-cluster,connector-file,codec-csv,wasm-host
 ```
 
 Windows (PowerShell):
@@ -190,12 +190,12 @@ Windows (PowerShell):
 ```powershell
 # Single node, WASM pipelines, CSV in and out.
 cargo build --release -p saci --bin saci-service `
-  --no-default-features --features mimalloc,service,connector-file,transformer-csv,wasm-host
+  --no-default-features --features mimalloc,service,connector-file,codec-csv,wasm-host
 
 # Same, plus cluster mode.
 cargo build --release -p saci --bin saci-service `
   --no-default-features `
-  --features mimalloc,service-cluster,connector-file,transformer-csv,wasm-host
+  --features mimalloc,service-cluster,connector-file,codec-csv,wasm-host
 ```
 
 From a checkout, `cargo xtask server` builds the same binary from short names. It always turns
@@ -203,7 +203,7 @@ on `service`, checks every name against the crate's feature table before cargo s
 the release binary to `target/server/saci-service` (`--out=PATH` picks another place):
 
 ```bash,name=The first build above, through the task runner
-cargo xtask server --connectors=file --transformers=csv --processors=wasm --features=mimalloc
+cargo xtask server --connectors=file --codecs=csv --processors=wasm --features=mimalloc
 ```
 
 `--processors` takes `wasm` and `plugin`, `--features` takes any other feature such as
@@ -226,7 +226,7 @@ A binary crate that depends on `saci` with the server features it needs is a com
 
 ```toml
 [dependencies]
-saci = { version = "0.1", default-features = false, features = ["service", "connector-file", "transformer-csv"] }
+saci = { version = "0.1", default-features = false, features = ["service", "connector-file", "codec-csv"] }
 ```
 
 ```rust
@@ -250,7 +250,7 @@ An embedder names the features it uses and nothing else:
 
 ```toml
 [dependencies]
-saci = { version = "0.1", features = ["connector-file", "transformer-csv"] }
+saci = { version = "0.1", features = ["connector-file", "codec-csv"] }
 ```
 
 A wasm processor crate depends on the SDK feature alone, with the default features off, and gets
@@ -268,8 +268,8 @@ Add `windows` for windowed aggregation, or use `plugin` for a native plugin.
 
 | What | Items | Module | Feature |
 |---|---|---|---|
-| Traits and drains | `Source`, `Sink`, `drain_into_dataset`, `drain_dataset` | crate root | `engine` |
-| Cast helpers | `cast_batch`, `CastingSource`, `build_target_schema` | crate root | `engine` |
-| Factory contract | `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` | `saci::connector` | `connector-contract` |
-| Transformer contract | `Transformer`, `BatchReader`, `BatchWriter`, `MessageDecoder` | `saci::transformer` | `transformer-contract` |
+| Traits and helpers | `Source`, `Sink`, `RetryingSource`, `RetryingSink`, `read_all`, `write_all` | `saci::io` | `engine` |
+| Cast helper | `cast_batch` | `saci::io` | `engine` |
+| Factory contract | `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` | `saci::connector` | `connector-api` |
+| Codec contract | `Codec`, `BatchReader`, `BatchWriter`, `MessageDecoder` | `saci::codec` | `codec-api` |
 | Config registration | `Registry`, `register_builtin_factories` | `saci::service` | `service` |

@@ -121,7 +121,6 @@ fn source_cfg(brokers: &str, topic: &str, group_id: &str) -> KafkaSourceConfig {
         compacted: false,
         provision: TopicProvision::default(),
         properties: BTreeMap::new(),
-        schema_fields: vec![],
     }
 }
 
@@ -135,7 +134,6 @@ fn sink_cfg(brokers: &str, topic: &str) -> KafkaSinkConfig {
         flush_timeout_ms: 30_000,
         provision: TopicProvision::default(),
         properties: BTreeMap::new(),
-        schema_fields: vec![],
     }
 }
 

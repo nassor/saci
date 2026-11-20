@@ -22,7 +22,7 @@ use saci::codec::Codec;
 use saci::codec::csv::CsvCodec;
 use saci::codec::ndjson::NdjsonCodec;
 use saci::codec::parquet::ParquetCodec;
-use saci::connector::file::{FileSink, FileSource};
+use saci::connector::file::{FileSink, FileSinkConfig, FileSource, FileSourceConfig};
 use saci::io::Sink;
 use saci::io::Source;
 
@@ -57,7 +57,7 @@ async fn read_back(
     codec: Arc<dyn Codec>,
     declared: Option<Arc<Schema>>,
 ) -> Vec<RecordBatch> {
-    let mut source = FileSource::open_async(path, codec, declared)
+    let mut source = FileSource::new_async(FileSourceConfig::new(path), declared, codec)
         .await
         .expect("source opens");
 
@@ -78,7 +78,8 @@ async fn round_trip(
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join(file_name);
 
-    let mut sink = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
+    let mut sink = FileSink::new(FileSinkConfig::new(&path), schema(), Arc::clone(&codec))
+        .expect("sink opens");
     sink.write_batch(&batch(rows)).await.expect("write");
     sink.finish().await.expect("finish");
 
@@ -143,21 +144,37 @@ async fn only_parquet_reports_estimated_rows() {
     let dir = TempDir::new().expect("temp dir");
 
     let parquet_path = dir.path().join("rows.parquet");
-    let mut sink = FileSink::create(&parquet_path, Arc::new(ParquetCodec::new()), schema())
-        .expect("sink opens");
+    let mut sink = FileSink::new(
+        FileSinkConfig::new(&parquet_path),
+        schema(),
+        Arc::new(ParquetCodec::new()),
+    )
+    .expect("sink opens");
     sink.write_batch(&batch(42)).await.expect("write");
     sink.finish().await.expect("finish");
-    let parquet =
-        FileSource::open(&parquet_path, Arc::new(ParquetCodec::new()), None).expect("source opens");
+    let parquet = FileSource::new(
+        FileSourceConfig::new(&parquet_path),
+        None,
+        Arc::new(ParquetCodec::new()),
+    )
+    .expect("source opens");
     assert_eq!(parquet.estimated_rows(), Some(42));
 
     let csv_path = dir.path().join("rows.csv");
-    let mut sink =
-        FileSink::create(&csv_path, Arc::new(CsvCodec::new()), schema()).expect("sink opens");
+    let mut sink = FileSink::new(
+        FileSinkConfig::new(&csv_path),
+        schema(),
+        Arc::new(CsvCodec::new()),
+    )
+    .expect("sink opens");
     sink.write_batch(&batch(42)).await.expect("write");
     sink.finish().await.expect("finish");
-    let csv = FileSource::open(&csv_path, Arc::new(CsvCodec::new()), Some(schema()))
-        .expect("source opens");
+    let csv = FileSource::new(
+        FileSourceConfig::new(&csv_path),
+        Some(schema()),
+        Arc::new(CsvCodec::new()),
+    )
+    .expect("source opens");
     assert_eq!(csv.estimated_rows(), None);
 }
 
@@ -166,8 +183,12 @@ async fn a_write_after_finish_is_an_error_naming_the_sink() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("closed.parquet");
 
-    let mut sink =
-        FileSink::create(&path, Arc::new(ParquetCodec::new()), schema()).expect("sink opens");
+    let mut sink = FileSink::new(
+        FileSinkConfig::new(&path),
+        schema(),
+        Arc::new(ParquetCodec::new()),
+    )
+    .expect("sink opens");
     sink.write_batch(&batch(1)).await.expect("write");
     sink.finish().await.expect("finish");
 
@@ -185,7 +206,11 @@ async fn a_write_after_finish_is_an_error_naming_the_sink() {
 async fn opening_a_missing_file_names_the_path() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("absent.csv");
-    let Err(err) = FileSource::open(&path, Arc::new(CsvCodec::new()), Some(schema())) else {
+    let Err(err) = FileSource::new(
+        FileSourceConfig::new(&path),
+        Some(schema()),
+        Arc::new(CsvCodec::new()),
+    ) else {
         panic!("a missing file must not open");
     };
     assert!(
@@ -201,13 +226,15 @@ async fn appending_to_an_existing_file_preserves_prior_rows() {
     let path = dir.path().join("appended.ndjson");
     let codec: Arc<dyn Codec> = Arc::new(NdjsonCodec::default());
 
-    let mut first = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
+    let mut first = FileSink::new(FileSinkConfig::new(&path), schema(), Arc::clone(&codec))
+        .expect("sink opens");
     first.write_batch(&batch_range(1, 4)).await.expect("write");
     first.finish().await.expect("finish");
 
     // A second sink on the same path: the default open mode keeps what the
     // first one wrote.
-    let mut second = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
+    let mut second = FileSink::new(FileSinkConfig::new(&path), schema(), Arc::clone(&codec))
+        .expect("sink opens");
     second.write_batch(&batch_range(4, 7)).await.expect("write");
     second.finish().await.expect("finish");
 
@@ -221,12 +248,20 @@ async fn truncating_mode_replaces_the_file() {
     let path = dir.path().join("replaced.ndjson");
     let codec: Arc<dyn Codec> = Arc::new(NdjsonCodec::default());
 
-    let mut first = FileSink::create(&path, Arc::clone(&codec), schema()).expect("sink opens");
+    let mut first = FileSink::new(FileSinkConfig::new(&path), schema(), Arc::clone(&codec))
+        .expect("sink opens");
     first.write_batch(&batch_range(1, 4)).await.expect("write");
     first.finish().await.expect("finish");
 
-    let mut second =
-        FileSink::create_truncating(&path, Arc::clone(&codec), schema()).expect("sink opens");
+    let mut second = FileSink::new(
+        FileSinkConfig {
+            truncate: true,
+            ..FileSinkConfig::new(&path)
+        },
+        schema(),
+        Arc::clone(&codec),
+    )
+    .expect("sink opens");
     second.write_batch(&batch_range(4, 7)).await.expect("write");
     second.finish().await.expect("finish");
 
@@ -241,7 +276,7 @@ async fn a_sink_that_cannot_open_its_path_names_the_mode() {
     let path = dir.path().to_path_buf();
     let codec: Arc<dyn Codec> = Arc::new(NdjsonCodec::default());
 
-    let Err(err) = FileSink::create(&path, Arc::clone(&codec), schema()) else {
+    let Err(err) = FileSink::new(FileSinkConfig::new(&path), schema(), Arc::clone(&codec)) else {
         panic!("a directory must not open as a sink");
     };
     assert!(
@@ -250,7 +285,14 @@ async fn a_sink_that_cannot_open_its_path_names_the_mode() {
     );
     assert!(err.message().contains("for append"), "got: {err}");
 
-    let Err(err) = FileSink::create_truncating(&path, codec, schema()) else {
+    let Err(err) = FileSink::new(
+        FileSinkConfig {
+            truncate: true,
+            ..FileSinkConfig::new(&path)
+        },
+        schema(),
+        codec,
+    ) else {
         panic!("a directory must not open as a sink");
     };
     assert!(

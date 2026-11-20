@@ -77,10 +77,9 @@ impl std::io::Write for SharedBuffer {
 ///     durability: DurabilityMode::Immediate,
 ///     two_phase_commit: true,
 ///     quick_repair: true,
-///     schema_fields: Vec::new(),
 /// };
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-/// let sink = RedbSink::open(config, schema, Arc::new(CsvCodec::new())).unwrap();
+/// let sink = RedbSink::new(config, schema, Arc::new(CsvCodec::new())).unwrap();
 /// ```
 pub struct RedbSink {
     /// `None` after [`Sink::finish`], which is what releases the file lock.
@@ -106,7 +105,7 @@ pub struct RedbSink {
 impl RedbSink {
     /// Create or open the redb file and resume the key sequence from it.
     ///
-    /// Synchronous and touches the disk, matching `FileSink::create`: the
+    /// Synchronous and touches the disk, like `FileSink::new`: the
     /// directory is created if absent, the file is created if absent, and the
     /// highest key already carrying `key_prefix`/`key_suffix` decides where the
     /// sequence continues.
@@ -118,7 +117,7 @@ impl RedbSink {
     /// cannot be opened (a second open of a file this process already holds is
     /// one such failure: redb locks it exclusively), the integrity check fails,
     /// or the table cannot be read.
-    pub fn open(
+    pub fn new(
         config: RedbSinkConfig,
         schema: Arc<Schema>,
         codec: Arc<dyn Codec>,

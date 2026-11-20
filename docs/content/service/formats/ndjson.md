@@ -25,8 +25,8 @@ that can work out its own schema.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="nd-t nd-d">
-        <title id="nd-t">An ndjson transformer decoding bytes into rows and encoding rows back into bytes</title>
-        <desc id="nd-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is ndjson. The upper arrow runs left to right and is the decode path, which infers a schema when none is declared. The lower arrow runs right to left and is the encode path, one JSON object per row.</desc>
+        <title id="nd-t">An ndjson codec decoding bytes into rows and encoding rows back into bytes</title>
+        <desc id="nd-d">Bytes on the left and rows on the right, with a codec in the middle whose format is ndjson. The upper arrow runs left to right and is the decode path, which infers a schema when none is declared. The lower arrow runs right to left and is the encode path, one JSON object per row.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>

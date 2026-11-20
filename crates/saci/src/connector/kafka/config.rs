@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use rdkafka::ClientConfig;
 use serde::Deserialize;
 
-use crate::connector::ConfigValue;
 use crate::error::SaciError;
 
 /// How a topic is provisioned before the client uses it.
@@ -108,11 +107,6 @@ pub struct KafkaSourceConfig {
     /// librdkafka properties, applied after every default this crate sets.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
-    /// Declared Arrow schema. Parsed by `crate::connector::parse_schema_fields`
-    /// from the same table so the type vocabulary matches every other
-    /// connector; declared here only so `deny_unknown_fields` accepts the key.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// Configuration for [`KafkaSink`](crate::connector::kafka::KafkaSink).
@@ -142,9 +136,6 @@ pub struct KafkaSinkConfig {
     /// librdkafka properties, applied after every default this crate sets.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
-    /// See [`KafkaSourceConfig::schema_fields`].
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 impl KafkaSourceConfig {

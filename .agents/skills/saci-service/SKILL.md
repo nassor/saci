@@ -10,8 +10,8 @@ description: Use when changing, operating, testing or documenting the saci-servi
 - The host is part of the one `saci` crate (`crates/saci`), behind features: `src/service/`,
   `src/distributed/`, `src/inspector/`, `src/metrics.rs`, `src/descriptor.rs`, `src/wasm_host/`
   and `src/plugin_host/`. It carries wasmtime, distributed/Raft, the HTTP control plane, config
-  loading and the factory `Registry`. Connectors and transformers are sibling modules
-  (`connector::<name>`, `transformer::<format>`), each behind its own feature.
+  loading and the factory `Registry`. Connectors and codecs are sibling modules
+  (`connector::<name>`, `codec::<format>`), each behind its own feature.
 - The `saci-service` binary: `src/bin/saci-service/main.rs` holds the optional mimalloc
   `#[global_allocator]` and `fn main() -> ExitCode { saci::service::cli::main() }`. The CLI lives in
   the library: `src/service/cli.rs` (the `Cli` parser, `main`, `main_with`) and
@@ -32,55 +32,55 @@ description: Use when changing, operating, testing or documenting the saci-servi
   target wasm32-unknown-unknown with the host features on.
 
 The wasm host (`src/wasm_host/`) is documented in skill `saci-processors` and the native plugin
-host (`src/plugin_host/`) in skill `saci-plugins`; connectors and transformers in their own skills.
+host (`src/plugin_host/`) in skill `saci-plugins`; connectors and codecs in their own skills.
 
 ## Features
 
 Defined in `crates/saci/Cargo.toml` `[features]`. The library default is `engine` only. The
 **`server`** bundle is `mimalloc`, `service`, `wasm-host`, `windows`, `parquet-checkpoint`,
 `connector-channel`, `connector-file`, `connector-http`, `connector-tcp`, `connector-udp`,
-`connector-saci`, `connector-redb`, and
-every transformer,
+`connector-peer`, `connector-redb`, and
+every codec,
 so `cargo install saci --features server` yields a runnable `saci-service` binary. A connector may
 be in `server` only
 when nothing has to be installed or already running for it to work, and it needs no extra
 build toolchain: `connector-channel` is in-process, `connector-file` reads the local filesystem,
 `connector-redb` reads and writes one embedded key/value file on local disk,
 `connector-http` is an HTTP client with no server of its own (one GET in, one request per batch
-out), `connector-tcp` and `connector-udp` are raw sockets, and `connector-saci`'s peer is
+out), `connector-tcp` and `connector-udp` are raw sockets, and `connector-peer`'s peer is
 another `saci-service`.
 HTTP, TCP, UDP and the peer link speak the network, and they qualify
 because they are generic primitives tied to no server product. Every connector that needs a
 specific broker, database, object store or OTLP endpoint running first is opt-in instead:
 `connector-postgresql`, `connector-mariadb`,
 `connector-nats`, `connector-s3`, `connector-kafka`, `connector-turso`, `connector-clickhouse` and
-`connector-opentelemetry`. `connector-kafka` stays
+`connector-otlp`. `connector-kafka` stays
 opt-in because `librdkafka-sys` builds vendored C and needs `cmake` plus a C toolchain;
 `connector-turso` stays opt-in because its synced mode pulls hyper and rustls; `distributed-raft`
 and `service-cluster` stay opt-in because a cluster node is a deliberate deployment choice.
 
-- `server`, `connectors`, `transformers`: bundles. `connectors` is the seven connectors `server`
-  carries; `transformers` is the five formats.
+- `server`, `connectors`, `codecs`: bundles. `connectors` is the seven connectors `server`
+  carries; `codecs` is the five formats.
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`, `connector-kafka`,
-  `connector-mariadb`, `connector-nats`, `connector-opentelemetry`, `connector-postgresql`, `connector-redb`,
-  `connector-s3`, `connector-saci`, `connector-tcp`, `connector-turso`, `connector-udp`:
-  one per connector module `connector::<name>`. Each implies `connector-contract`. Its factories
+  `connector-mariadb`, `connector-nats`, `connector-otlp`, `connector-peer`, `connector-postgresql`, `connector-redb`,
+  `connector-s3`, `connector-tcp`, `connector-turso`, `connector-udp`:
+  one per connector module `connector::<name>`. Each implies `connector-api`. Its factories
   register in `register_builtin_factories` only when `service` is also on; without `service` the
   feature is a library module.
   TLS is always compiled into `connector-postgresql`, `connector-mariadb` and
   `connector-clickhouse`; there is no `tls` feature.
-  `connector-kafka`, `connector-nats` and `connector-udp` imply `transformer-ndjson` and
+  `connector-kafka`, `connector-nats` and `connector-udp` imply `codec-ndjson` and
   `connector-tcp` implies
-  `transformer-arrow-ipc`, so the connector feature alone is runnable. No connector resolves a
+  `codec-arrow-ipc`, so the connector feature alone is runnable. No connector resolves a
   format implicitly: a byte-carrying node names a declared `transformer` node's id, and that
   node's own `format` key is what the registry resolves. `connector-file`, `connector-http`,
-  `connector-redb` and `connector-s3` imply no transformer, so the config picks which formats the
-  binary carries. `connector-saci` implies none and resolves none, since Arrow IPC is its fixed
+  `connector-redb` and `connector-s3` imply no codec, so the config picks which formats the
+  binary carries. `connector-peer` implies none and resolves none, since Arrow IPC is its fixed
   wire format; its trace propagation and series compile under `trace-context` and `metrics`,
   which `service` turns on.
-- `transformer-arrow-ipc`, `transformer-avro`, `transformer-csv`, `transformer-ndjson`,
-  `transformer-parquet`: one per `transformer::<format>` module, registering its factory under its
-  `format` name when `service` is also on.
+- `codec-arrow-ipc`, `codec-avro`, `codec-csv`, `codec-ndjson`,
+  `codec-parquet`: one per `codec::<format>` module, registering its factory under its
+  `format` name when `service` is also on. `codec-api` compiles the contract they share.
 - `processor`, `plugin`: the authoring SDKs (skills `saci-processors`, `saci-plugins`), not hosts.
   `processor` carries the derive and attribute macros, so a processor crate needs only
   `saci` with `default-features = false, features = ["processor"]`.
@@ -113,11 +113,11 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
   transport. `RedbSharedStore::multi_node` proposes every mutation through it (implies
   `distributed`).
 - `service`: KDL configuration through `config`, the factory `Registry`, the axum HTTP control
-  plane, the standalone runner, the CLI and the `saci-service` binary (implies `connector-contract`,
+  plane, the standalone runner, the CLI and the `saci-service` binary (implies `connector-api`,
   `distributed`, `parquet-checkpoint`, `tracing`, `metrics`, `inspector`, `trace-context`). Also
   pulls `opentelemetry-otlp` and `tracing-opentelemetry` for OTLP span export, `dep:postcard` for
-  the source cursors `RedbStateClient` persists, and compiles `transformer::arrow_ipc`, which the
-  dead letter queue names directly to encode a refused batch. `transformer-arrow-ipc` still owns
+  the source cursors `RedbStateClient` persists, and compiles `codec::arrow_ipc`, which the
+  dead letter queue names directly to encode a refused batch. `codec-arrow-ipc` still owns
   the registration that lets a config name the format.
   It does **not** imply `distributed-raft`.
 - `service-cluster`: cluster/Raft mode on top of `service` (implies `service`, `distributed-raft`).
@@ -125,23 +125,23 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
   feature: `--features service-cluster`.
 - `all`: every capability this crate carries, including all eight opt-in connectors, the native
   plugin host and a Raft cluster node (`connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`,
-  `connector-kafka`, `connector-turso`, `connector-clickhouse`, `connector-opentelemetry`, `plugin-host`,
-  `service-cluster`, on top of `server`, `connectors`, `transformers`, `engine`, `windows`,
+  `connector-kafka`, `connector-turso`, `connector-clickhouse`, `connector-otlp`, `plugin-host`,
+  `service-cluster`, on top of `server`, `connectors`, `codecs`, `engine`, `windows`,
   `processor` and `plugin`). Excludes `conformance`: that feature turns on `arrow-ipc/lz4` so the corpus generator
   can write a compressed record batch, which the wire format otherwise rejects, so it is the
   corpus generator's own switch rather than a capability of the service.
 
 A custom server is a binary crate depending on `saci` with `default-features = false` and
-the features it needs (`service`, the `connector-*` and `transformer-*` it carries), whose
+the features it needs (`service`, the `connector-*` and `codec-*` it carries), whose
 `main.rs` is `fn main() -> std::process::ExitCode { saci::service::cli::main() }`. To add factories of its own it calls
 `saci::service::cli::main_with(|builder| builder.register_source(MyFactory))`.
 
 `cargo xtask server` (`xtask/src/server.rs`) builds a narrowed `saci-service` from the repo:
-`--connectors=`, `--transformers=` and `--processors=` (`wasm`, `plugin`) take short names,
+`--connectors=`, `--codecs=` and `--processors=` (`wasm`, `plugin`) take short names,
 `--features=` any other feature; `service` is always on, every name is checked against the
 `[features]` table of `crates/saci/Cargo.toml` (a line scan for keys), and the release binary is
 copied to `target/server/saci-service` or `--out=PATH`. `--list` prints the accepted names. A
-new connector or transformer feature is picked up with no change there.
+new connector or codec feature is picked up with no change there.
 
 ## Distributed processing (`src/distributed/`)
 
@@ -268,7 +268,7 @@ Key types:
   stay available.
 - `Registry` plus `saci::connector::{SourceFactory, SinkFactory}`, re-exported from
   `saci::service::registry`: the whole extension surface. `source_names` and `sink_names`
-  enumerate what actually registered, the counterpart of `TransformerRegistry::formats`.
+  enumerate what actually registered, the counterpart of `CodecRegistry::names`.
 - `BUILTIN_CONNECTOR_FEATURES` and `builtin_feature` (`src/service/factories.rs`): the eighteen
   connector type names this crate carries, each paired with the feature that compiles it in
   (`tcp` and `saci` are one entry each, since both halves register under that name). Listed
@@ -290,20 +290,21 @@ Key types:
   allowlist key is a name nothing ever registers. The converse is deliberately unasserted:
   `HttpSource` and `HttpSink` are tabled with no allowlisted key, because a URL carries
   credentials.
-- `BUILTIN_TRANSFORMER_FEATURES` and `builtin_transformer_feature`
+- `BUILTIN_CODEC_FEATURES` and `builtin_codec_feature`
   (`src/service/factories.rs`): the same table for the five format names, `arrow-ipc`, `avro`,
-  `csv`, `ndjson`, `parquet`, each paired with its `transformer-*` feature. Kept separate from
+  `csv`, `ndjson`, `parquet`, each paired with its `codec-*` feature. Kept separate from
   the connector table because a format name and a connector type name are different namespaces;
-  both go through one private `tabled_feature`. Read only by `missing_transformer_error`, the
-  sole producer of the unregistered-format wording, which `build_transformers` calls: a tabled
+  both go through one private `tabled_feature`. Read only by `missing_codec_error`, the
+  sole producer of the unregistered-format wording, which `build_codecs` calls: a tabled
   format names the `--features` flag, any other format keeps the plain
-  `transformer '<id>' names format '<fmt>', which no transformer is registered for
-  (registered: ...)` wording. `builtin_transformer_table_matches_the_registry` (unit test,
-  gated on `all`) pins the table against `TransformerRegistry::formats` in both directions.
+  `transformer '<id>' names format '<fmt>', which no codec is registered for
+  (registered: ...)` wording. `builtin_codec_table_matches_the_registry` (unit test,
+  gated on `all`) pins the table against `CodecRegistry::names` in both directions.
   This matters most in `--no-default-features --features service`, the reduced build CI
-  gates, which carries no transformer at all. The binary's `validate` does not partition
+  gates, which carries no codec at all. The binary's `validate` does not partition
   unresolved formats the way it partitions unknown connector types: a missing format is a
   fatal build error in every mode, so the builder message is the only surface.
+  `validate --connectors-only` prints `OK: every source, sink and codec built`.
 - `missing_wasm_host_error`, `missing_plugin_host_error`, `missing_windows_engine_error` and
   `missing_cluster_host_error`
   (`src/service/factories.rs`): the third shape of the same question, for a declaration that
@@ -490,7 +491,7 @@ Key types:
   controls it.
   `Rebuilder` is the single connector-construction path: `build_source_node`/`build_sink_node`
   build the initial instance through it too, so a heal cannot drift from the first build. It
-  captures `Arc<Registry>` plus the node's `type_name`, `config`, bound transformer, channel
+  captures `Arc<Registry>` plus the node's `type_name`, `config`, bound codec, channel
   bridge and `Option<RetryMode>` (`None` for a stream-mode source, matching
   `sources_take_retry_wrapper`).
   Which nodes are reached is the factory's answer, not a list here: `builder::resolve_heal`
@@ -555,7 +556,7 @@ Key types:
   rather than ending the drain, which would leave its entry at the head of the store blocking
   every letter behind it. A `Purge` discards each fetched window without decoding it, so a row
   `Letter::from_row` refuses never blocks emptying the store; a row the source half's own
-  transformer refuses still fails in `next_batch`, before any trigger is consulted.
+  codec refuses still fails in `next_batch`, before any trigger is consulted.
   Both halves are built in `DeadLetterQueue::build`, the source one built and dropped again, so
   a key either half refuses is a load-time error rather than something the first replay finds.
   Log lines ride `sampling::DLQ_TARGET` (`saci::dlq`) at `warn`. `DlqRegistry::from_config` is
@@ -951,7 +952,7 @@ test because a meter provider is a process-global one-shot; `windowed_fetch_hint
 withheld `request_batch_rows` hint in both runners; `feature_bundles.rs` parses this crate's own
 `Cargo.toml` and holds the three bundle invariants, that `all` reaches every feature the crate
 declares except `default`, `all` and `conformance` (transitively, so it may name `server`,
-`connectors` and `transformers`), that `conformance` (the corpus generator's
+`connectors` and `codecs`), that `conformance` (the corpus generator's
 `arrow-ipc/lz4` switch, which relaxes a refusal instead of adding a capability) stays out of
 `all`, and that `server` carries no connector that needs an installed broker, database or object
 store, so it needs no Docker and no running service. Lib unit tests that assert on a series read

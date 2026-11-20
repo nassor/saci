@@ -13,6 +13,7 @@
 
 use serde::Deserialize;
 
+use crate::connector::schema::without_schema_fields;
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
@@ -39,7 +40,7 @@ impl SourceFactory for NatsSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let cfg = NatsSourceConfig::deserialize(config.clone())
+        let cfg = NatsSourceConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("NatsSource config: {e}")))?;
         let schema = parse_schema_fields(config, "NatsSource")?;
         let codec = ctx.codec("NatsSource")?;
@@ -71,7 +72,7 @@ impl SinkFactory for NatsSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let cfg = NatsSinkConfig::deserialize(config.clone())
+        let cfg = NatsSinkConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("NatsSink config: {e}")))?;
         let schema = parse_schema_fields(config, "NatsSink")?;
         let codec = ctx.codec("NatsSink")?;

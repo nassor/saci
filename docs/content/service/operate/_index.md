@@ -71,7 +71,7 @@ variables.
 | Command | What it does |
 |---|---|
 | `serve` | Start and keep running. `--node-id N` overrides `node.id`; `--port P` overrides the port in `http.bind`, and `--port 0` prints the address the OS assigned on stdout. |
-| `validate` | Check the config and exit without moving anything. A declared `type` that is a connector this binary was built without fails, naming the feature to rebuild with. `--strict` also turns a warning about a type no crate here provides into a failure. `--connectors-only` builds every source, sink and transformer instead of loading the processor and checking the graph, so a config whose processor artifact is missing still validates. |
+| `validate` | Check the config and exit without moving anything. A declared `type` that is a connector this binary was built without fails, naming the feature to rebuild with. `--strict` also turns a warning about a type no crate here provides into a failure. `--connectors-only` builds every source, sink and codec instead of loading the processor and checking the graph, so a config whose processor artifact is missing still validates. |
 | `status --addr URL` | One summary line from `/status`. `--full` prints the whole JSON document. |
 | `cluster init` | Pre-flight only: confirms `mode "cluster"` and `bootstrap #true`, then tells you to run `serve`. It starts nothing. |
 | `cluster status --addr URL` | The `cluster` field of `/status`. |

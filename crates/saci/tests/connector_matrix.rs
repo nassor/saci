@@ -31,11 +31,11 @@
     feature = "connector-kafka",
     feature = "connector-mariadb",
     feature = "connector-nats",
-    feature = "connector-opentelemetry",
+    feature = "connector-otlp",
+    feature = "connector-peer",
     feature = "connector-postgresql",
     feature = "connector-redb",
     feature = "connector-s3",
-    feature = "connector-saci",
     feature = "connector-tcp",
     feature = "connector-turso",
     feature = "connector-udp",
@@ -371,7 +371,7 @@ fn refuses(err: &SaciError, format: &str, capability: &str) -> bool {
 /// with whether it really answers both message calls.
 ///
 /// `message_shape()` is a declaration, and six connector call sites
-/// (`KafkaSource`, `KafkaSink`, `NatsSource`, `NatsSink`, `TcpIngestSource`,
+/// (`KafkaSource`, `KafkaSink`, `NatsSource`, `NatsSink`, `TcpSource`,
 /// `TcpSink`) refuse a config at *build* time on its `is_none()`. Nothing in
 /// the type system ties that declaration to the methods: a codec
 /// declaring `Some` without an encoder passes a message sink's gate and fails

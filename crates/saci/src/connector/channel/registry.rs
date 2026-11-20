@@ -97,7 +97,7 @@ impl ChannelBridge for ChannelRegistry {
             .take()
             .expect("sender present for the sink half");
         entry.sink_built = true;
-        Ok(Box::new(ChannelSink::from_sender(schema, buffer, tx)))
+        Ok(Box::new(ChannelSink::with_sender(schema, buffer, tx)))
     }
 
     fn source(
@@ -137,7 +137,7 @@ impl ChannelBridge for ChannelRegistry {
             .take()
             .expect("receiver present for the source half");
         entry.source_built = true;
-        Ok(Box::new(ChannelSource::from_receiver(schema, rx)))
+        Ok(Box::new(ChannelSource::with_receiver(schema, rx)))
     }
 }
 

@@ -75,6 +75,38 @@
   `mean` and `process` build the function. `WindowResults` fields are `on_time`, `late` and
   `dropped`; `SideOutput` and `DroppedLate` are removed. `saci::windows` exports a flat list, with
   `key_hash` for the key hash; an empty run publishes the same result schema as a non-empty one.
+- `saci::transformer` is `saci::codec`: `Codec`, `CodecFactory`, `CodecRegistry` (`len`, `names`,
+  `is_empty`), and `CsvCodec`, `NdjsonCodec`, `AvroCodec`, `ParquetCodec`, `ArrowIpcCodec` with
+  their `*CodecFactory`. Features `transformer-*`, `transformers`, `transformer-contract` and
+  `connector-contract` are `codec-*`, `codecs`, `codec-api` and `connector-api`.
+  `ConnectorContext::codec` and `channels`, `ServiceBuilder::codec`, `Registry::register_codec`,
+  `codecs` and `codec_count`, and `service::config::CodecSpec` follow;
+  `ServiceBuilder::register_transformer_mut` is removed. KDL keys are unchanged.
+- `codec`: every codec is built with `new()` and chained setters (`CsvCodec::new().has_headers`,
+  `NdjsonCodec::new().infer_max`, `AvroCodec::new().compression(AvroCompression).schema_id`).
+  A codec factory refuses an option it does not read. `Codec::open_reader` takes a `ReadInput`
+  (`File` or `Memory`), and `Codec::media_type` names the HTTP content type.
+- `io`: `saci::io::{Source, Sink, RetryingSource, RetryingSink, cast_batch, read_all, write_all}`
+  is the one path. `drain_into_dataset` and `drain_dataset` are `read_all(source, data, comp)` and
+  `write_all(sink, data, comp)`; `CastingSource` and `build_target_schema` are removed;
+  `cast_batch` takes the target as `&Arc<Schema>`.
+- Connectors: `TcpIngestSource` is `TcpSource`; `HttpPushSource` and `HttpPushOptions` are
+  `HttpListenSource` and `HttpListenConfig`; `HttpSourceOptions`, `HttpSinkOptions` and
+  `HttpClientOptions` are `*Config`; `http::Window` is `http::BatchWindow`. `connector::saci`
+  (feature `connector-saci`, `SaciSource`, `SaciSink`) is `connector::peer` (`connector-peer`,
+  `PeerSource`, `PeerSink`); `connector::opentelemetry` (`connector-opentelemetry`,
+  `OpenTelemetryMetrics*`, `SourceModeConfig`) is `connector::otlp` (`connector-otlp`,
+  `OtlpMetrics*`, `SourceMode`); `udp::ProbeSettings` is `udp::ProbeConfig`;
+  `ClickhouseConnectionConfig` and `S3ConnectionConfig` are `ConnectionConfig` in their module.
+  KDL type names are unchanged.
+- Connectors: every constructor is `X::new(config, ..)`, a byte connector's taking
+  `(config, schema, codec)`: `FileSource::new`/`new_async`, `FileSink::new` (a `truncate` config
+  field), `TcpSink::new`, `UdpSink::new`, `PeerSource::new`, `PeerSink::new`, `RedbSink::new`,
+  `HttpSource::new`, `HttpSink::new`, `HttpListenSource::new`. `ChannelSource::new` returns
+  `(Self, Sender)`; `from_receiver` and `from_sender` are `with_receiver` and `with_sender`.
+- Connectors: the file, tcp, udp, peer and channel factories deserialize a config struct and
+  refuse an unknown key; a `0` buffer or size is a configuration error instead of being clamped
+  (a channel `buffer 0` no longer panics). The HTTP factory refuses a key its role does not read.
 
 ### Changed
 
@@ -85,6 +117,11 @@
 - `windows`: sliding windows expand rows in one pre-sized pass, session windows reuse the key hash
   instead of hashing twice, and a `Reduce` aggregate gathers only its input column instead of
   sorting the whole batch.
+- `connector-redb` and the HTTP listen source decode a value or request body from memory instead
+  of spooling it to a temporary file; `cast_batch` returns its input when the schemas match.
+- `connector-tcp`: the source reads frames through a buffered reader into one reused buffer, and
+  the sink buffers writes and flushes once per batch; the channel source compares schemas by
+  pointer first.
 
 ## 0.2.0 - 2026-11-19
 

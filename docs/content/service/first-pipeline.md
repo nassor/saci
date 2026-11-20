@@ -30,7 +30,7 @@ no .NET.
             That source links to the wasm node process_orders, drawn on the WebAssembly
             boundary, which fills the valid and usd_amount columns. The processor links to
             the sink node csv_out, which writes saci-first-out.csv. Both the source and the
-            sink decode and encode through the same declared transformer, csv_fmt.
+            sink decode and encode through the same declared codec, csv_fmt.
         </desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="44" width="118" height="56" rx="8"/>
@@ -65,7 +65,7 @@ no .NET.
             <text class="t-lbl" x="584" y="66">orders</text>
             <text class="t-sm" x="584" y="84">_out.csv</text>
             <path class="ln" d="M0 126 H654"/>
-            <text class="t-sm" x="0" y="148">One declared transformer, csv_fmt, is what both the source and the sink name.</text>
+            <text class="t-sm" x="0" y="148">One declared codec, csv_fmt, is what both the source and the sink name.</text>
         </g>
         <defs>
             <marker id="svc-fp-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -170,7 +170,7 @@ What each part does:
   would exit after the first iteration instead:
   [Run modes and persistence](@/service/config/run-modes.md).
 - One `workflow` node declares the whole graph. The `transformer "csv_fmt"`
-  node names the byte format; both the source and the sink reference it by id.
+  node declares the codec; both the source and the sink reference it by id.
 - The `source` is a `FileSource` reading `order_processing_input.csv`, decoded
   into the five fields of the `Transaction` component.
 - The `wasm` node names the component you built. The `config` block holds the

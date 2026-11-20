@@ -462,7 +462,7 @@ impl Sink for ClickhouseSink {
 mod tests {
     use super::*;
     use crate::connector::clickhouse::config::{
-        ClickhouseConnectionConfig, ClickhouseFieldType, FieldSpec, WriteMode,
+        ClickhouseFieldType, ConnectionConfig, FieldSpec, WriteMode,
     };
     use std::collections::HashMap;
 
@@ -470,7 +470,7 @@ mod tests {
     async fn sink_initialization_and_buffering() {
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -512,7 +512,7 @@ mod tests {
         use arrow_array::Int64Array;
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -562,7 +562,7 @@ mod tests {
 
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -606,7 +606,7 @@ mod tests {
 
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -724,7 +724,7 @@ mod tests {
     fn sink_at(url: &str, flush_rows: usize) -> ClickhouseSink {
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: url.to_string(),
                 user: None,
                 password: None,

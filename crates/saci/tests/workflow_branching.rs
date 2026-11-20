@@ -83,7 +83,7 @@ fn branching_built(
     mpsc::Receiver<RecordBatch>,
     mpsc::Receiver<RecordBatch>,
 ) {
-    let (tx, source) = ChannelSource::new(Ping::schema(), 8);
+    let (source, tx) = ChannelSource::new(Ping::schema(), 8);
     let (sink_a, rx_a) = ChannelSink::new(Ping::schema(), 8);
     let (sink_b, rx_b) = ChannelSink::new(Ping::schema(), 8);
     let nodes = vec![

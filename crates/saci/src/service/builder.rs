@@ -1163,12 +1163,12 @@ mod tests {
     use arrow_array::{Int32Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use async_trait::async_trait;
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     use tempfile::NamedTempFile;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -1199,7 +1199,7 @@ mod tests {
         ) -> Result<Box<dyn Source>, SaciError> {
             use crate::connector::channel::ChannelSource;
             let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-            let (_tx, src) = ChannelSource::new(schema, 1);
+            let (src, _tx) = ChannelSource::new(schema, 1);
             Ok(Box::new(src))
         }
     }
@@ -1559,7 +1559,7 @@ mod tests {
                     .map_err(|e| SaciError::configuration(format!("StrictSource config: {e}")))?;
                 use crate::connector::channel::ChannelSource;
                 let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-                let (_tx, src) = ChannelSource::new(schema, 1);
+                let (src, _tx) = ChannelSource::new(schema, 1);
                 Ok(Box::new(src))
             }
         }
@@ -1657,7 +1657,7 @@ mod tests {
     /// `build_sink_node` path `build_all` does, so a `saci` source and sink
     /// pair gets the node identity `ConnectorContext::identity` requires
     /// without ever reaching the "no identity" refusal.
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     #[test]
     fn build_connectors_only_binds_the_node_identity_for_a_saci_pair() {
         let raw = r#"

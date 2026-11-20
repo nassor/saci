@@ -24,7 +24,6 @@ use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, ReplayPolicy};
 use async_nats::jetstream::stream::{Compression, DiscardPolicy, RetentionPolicy, StorageType};
 use serde::Deserialize;
 
-use crate::connector::ConfigValue;
 use crate::error::SaciError;
 
 // ---------------------------------------------------------------- connection
@@ -300,11 +299,6 @@ pub struct NatsSourceConfig {
     /// source.
     #[serde(default)]
     pub stop_at_end: bool,
-    /// Declared Arrow schema. Parsed by `crate::connector::parse_schema_fields`
-    /// from the same table so the type vocabulary matches every other
-    /// connector; declared here only so `deny_unknown_fields` accepts the key.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// The read strategy, chosen by `kind`.
@@ -972,9 +966,6 @@ pub struct NatsSinkConfig {
     pub connection: ConnectionConfig,
     /// Core subject publish or JetStream publish with acks.
     pub mode: SinkMode,
-    /// See [`NatsSourceConfig::schema_fields`].
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// The write strategy, chosen by `kind`.
@@ -1408,8 +1399,6 @@ mode kind="jetstream" stream="ORDERS" {
         metadata team="data"
     }
 }
-
-schema_fields "id" type="int64"
 "#;
         let cfg: NatsSourceConfig = parse(raw).unwrap_or_else(|e| panic!("parse: {e}"));
         cfg.validate().expect("a fully specified config is valid");
@@ -1430,7 +1419,6 @@ schema_fields "id" type="int64"
         assert_eq!(js.metadata.get("owner").map(String::as_str), Some("saci"));
         // Written once, so a single value in the tree.
         assert_eq!(js.stream_provision.subjects, vec!["orders.>"]);
-        assert_eq!(cfg.schema_fields.len(), 1);
     }
 
     #[test]

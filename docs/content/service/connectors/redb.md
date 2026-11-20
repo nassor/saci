@@ -1,6 +1,6 @@
 +++
 title = "redb"
-description = "An embedded key/value file as a transport. One entry per batch, in the byte format a declared transformer names."
+description = "An embedded key/value file as a transport. One entry per batch, in the byte format a declared codec names."
 template = "subpage.html"
 weight = 11
 aliases = ["/connectors/redb/"]
@@ -24,7 +24,7 @@ entries back in key order.
 ## What one entry is
 
 One entry per non-empty batch. The value is a self-contained document in whatever format the node's
-`transformer` names: a csv with its header row, a block of ndjson lines, one whole parquet or avro
+codec names: a csv with its header row, a block of ndjson lines, one whole parquet or avro
 container. A batch with no rows writes nothing.
 
 The key is `{key_prefix}{seq:020}{key_suffix}`, where `seq` counts batches from zero and is padded
@@ -37,7 +37,7 @@ of replacing them. A key that already exists is refused rather than overwritten.
 
 The source reads every entry whose key starts with `key_prefix` and ends with `key_suffix`. It does
 not parse the middle, so an entry another writer put in the same table under a matching name reaches
-the transformer and fails there by name.
+the codec and fails there by name.
 
 ## What you need
 
@@ -50,7 +50,7 @@ the transformer and fails there by name.
 A redb entry carries bytes, so the node names a declared `transformer`.
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>one declared transformer serves both halves</em></div>
+<div class="code-cap"><span>KDL</span><em>one declared codec serves both halves</em></div>
 
 ```kdl
 transformer "orders_csv" format="csv" {
@@ -123,7 +123,7 @@ as a projection target, so a self-describing format is cast back to the declared
 Runs the same on Linux, macOS and Windows (PowerShell):
 
 <div class="code">
-<div class="code-cap"><span>Shell</span><em>the source, the sink and the transformer, all built for real</em></div>
+<div class="code-cap"><span>Shell</span><em>the source, the sink and the codec, all built for real</em></div>
 
 ```text
 saci-service validate --config examples/configs/redb_connector.kdl --connectors-only
@@ -133,7 +133,7 @@ saci-service validate --config examples/configs/redb_connector.kdl --connectors-
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```

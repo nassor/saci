@@ -39,11 +39,11 @@ const CHANNEL_CAPACITY: usize = 4;
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::Schema;
-/// use saci::connector::s3::{S3ConnectionConfig, S3Source, S3SourceConfig};
+/// use saci::connector::s3::{ConnectionConfig, S3Source, S3SourceConfig};
 /// use saci::codec::csv::CsvCodec;
 ///
 /// let config = S3SourceConfig {
-///     connection: S3ConnectionConfig {
+///     connection: ConnectionConfig {
 ///         bucket: "orders".to_string(),
 ///         endpoint: Some("http://127.0.0.1:9000".to_string()),
 ///         access_key_id: Some("key".to_string()),
@@ -53,7 +53,6 @@ const CHANNEL_CAPACITY: usize = 4;
 ///     },
 ///     prefix: "incoming".to_string(),
 ///     schema_from: saci::connector::s3::SchemaFrom::Config,
-///     schema_fields: Vec::new(),
 /// };
 /// let src = S3Source::new(
 ///     config,

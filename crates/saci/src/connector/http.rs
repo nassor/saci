@@ -23,14 +23,14 @@
 //! follows from the format unless `headers` names one, and `content_encoding`
 //! compresses the whole body.
 //!
-//! [`HttpPushSource`] listens. It accepts the same documents [`HttpSink`]
+//! [`HttpListenSource`] listens. It accepts the same documents [`HttpSink`]
 //! sends, on one path and one set of methods, optionally behind a bearer token,
 //! and answers `202` once every batch of a document is queued. One TCP listener
 //! serves HTTP/1.1 and HTTP/2 (h2c by prior knowledge, or `h2` over ALPN under
 //! `tls`), and `quic_bind` adds HTTP/3.
 //!
 //! No half touches the network while it is built, so `saci-service validate`
-//! needs no reachable endpoint; a push source does bind its sockets, the way
+//! needs no reachable endpoint; a listening source does bind its sockets, the way
 //! the `tcp` and `udp` sources do. HTTPS works with no configuration: rustls
 //! verifies the peer against the platform trust store, and the optional `tls`
 //! block only adds a private CA to it or presents a client certificate.
@@ -76,17 +76,17 @@ mod document;
 pub mod factory;
 mod framing;
 mod h3client;
+pub mod listen;
 mod metrics;
-pub mod push;
 pub mod sink;
 pub mod source;
 mod tls;
 
 pub use client::HttpVersion;
-pub use factory::{HttpPushSourceFactory, HttpSinkFactory, HttpSourceFactory};
-pub use push::{HttpPushOptions, HttpPushSource, ServerTls};
-pub use sink::{ContentEncoding, HttpSink, HttpSinkOptions};
+pub use factory::{HttpListenSourceFactory, HttpSinkFactory, HttpSourceFactory};
+pub use listen::{HttpListenConfig, HttpListenSource, ServerTls};
+pub use sink::{ContentEncoding, HttpSink, HttpSinkConfig};
 pub use source::{
-    HttpClientOptions, HttpSource, HttpSourceOptions, Pagination, ReadMode, SchemaFrom, Window,
+    BatchWindow, HttpClientConfig, HttpSource, HttpSourceConfig, Pagination, ReadMode, SchemaFrom,
 };
 pub use tls::TlsFiles;

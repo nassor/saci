@@ -253,24 +253,24 @@ wasm "settle" module="target/wasm32-wasip3/release/settle_wasm.wasm" {
 ```
 
 The fixture pre-seeds `settlement` as `PENDING` rather than leaving it blank.
-The csv transformer turns an empty field into a null, and the column is
+The csv codec turns an empty field into a null, and the column is
 declared non-nullable, so a blank field fails the batch before any row is
 ingested.
 
 Run it from the repository root:
 
 ```bash,name=Validate the config then serve it
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate \
+cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- validate \
   --config examples/configs/standalone_settle.kdl --strict
 
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve \
+cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- serve \
   --config examples/configs/standalone_settle.kdl
 ```
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_settle.kdl --strict
-cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_settle.kdl
+cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- validate --config examples/configs/standalone_settle.kdl --strict
+cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- serve --config examples/configs/standalone_settle.kdl
 ```
 
 You can also validate and run the config in one command with `cargo xtask demo standalone_settle`.

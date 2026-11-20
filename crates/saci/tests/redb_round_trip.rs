@@ -58,7 +58,6 @@ fn sink_config(dir: &std::path::Path) -> RedbSinkConfig {
         durability: DurabilityMode::Immediate,
         two_phase_commit: true,
         quick_repair: true,
-        schema_fields: Vec::new(),
     }
 }
 
@@ -72,7 +71,6 @@ fn source_config(dir: &std::path::Path) -> RedbSourceConfig {
         check_integrity: false,
         cache_size_bytes: None,
         consume: false,
-        schema_fields: Vec::new(),
     }
 }
 
@@ -187,7 +185,7 @@ fn csv_document(ids: &[i64]) -> Vec<u8> {
 #[tokio::test]
 async fn sink_then_source_round_trip_through_parquet() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut sink = RedbSink::open(
+    let mut sink = RedbSink::new(
         sink_config(dir.path()),
         schema(),
         Arc::new(ParquetCodec::new()),
@@ -214,8 +212,7 @@ async fn durability_none_still_leaves_the_entries_in_the_file() {
         durability: DurabilityMode::None,
         ..sink_config(dir.path())
     };
-    let mut sink =
-        RedbSink::open(config, schema(), Arc::new(CsvCodec::new())).expect("open sink");
+    let mut sink = RedbSink::new(config, schema(), Arc::new(CsvCodec::new())).expect("open sink");
     sink.write_batch(&batch(&[1, 2]))
         .await
         .expect("first batch");
@@ -242,14 +239,14 @@ async fn keys_resume_from_the_file_across_reopen() {
     };
 
     let mut sink =
-        RedbSink::open(config.clone(), schema(), Arc::new(ParquetCodec::new())).expect("open sink");
+        RedbSink::new(config.clone(), schema(), Arc::new(ParquetCodec::new())).expect("open sink");
     sink.write_batch(&batch(&[1])).await.expect("first batch");
     sink.write_batch(&batch(&[2])).await.expect("second batch");
     sink.finish().await.expect("finish");
 
     // The second open proves `finish` released redb's exclusive file lock.
     let mut sink =
-        RedbSink::open(config, schema(), Arc::new(ParquetCodec::new())).expect("reopen sink");
+        RedbSink::new(config, schema(), Arc::new(ParquetCodec::new())).expect("reopen sink");
     sink.write_batch(&batch(&[3])).await.expect("third batch");
     sink.finish().await.expect("finish again");
 
@@ -281,8 +278,7 @@ async fn a_foreign_key_sorting_above_the_prefix_does_not_reset_the_sequence() {
         key_suffix: ".csv".to_string(),
         ..sink_config(dir.path())
     };
-    let mut sink =
-        RedbSink::open(config, schema(), Arc::new(CsvCodec::new())).expect("open sink");
+    let mut sink = RedbSink::new(config, schema(), Arc::new(CsvCodec::new())).expect("open sink");
     sink.write_batch(&batch(&[2])).await.expect("write batch");
     sink.finish().await.expect("finish");
 
@@ -407,12 +403,8 @@ async fn source_reports_a_missing_file() {
 #[tokio::test]
 async fn write_after_finish_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut sink = RedbSink::open(
-        sink_config(dir.path()),
-        schema(),
-        Arc::new(CsvCodec::new()),
-    )
-    .expect("open sink");
+    let mut sink = RedbSink::new(sink_config(dir.path()), schema(), Arc::new(CsvCodec::new()))
+        .expect("open sink");
     sink.finish().await.expect("finish");
     let Err(err) = sink.write_batch(&batch(&[1])).await else {
         panic!("a write after finish must fail");

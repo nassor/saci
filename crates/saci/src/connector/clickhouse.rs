@@ -58,8 +58,8 @@ pub mod sink;
 pub mod source;
 
 pub use config::{
-    ClickhouseConnectionConfig, ClickhouseFieldType, ClickhouseSinkConfig, ClickhouseSourceConfig,
-    CompressionConfig, DumpMode, FieldSpec, PollingMode, QueryMode, SourceMode, WriteMode,
+    ClickhouseFieldType, ClickhouseSinkConfig, ClickhouseSourceConfig, CompressionConfig,
+    ConnectionConfig, DumpMode, FieldSpec, PollingMode, QueryMode, SourceMode, WriteMode,
 };
 pub use factory::{ClickhouseSinkFactory, ClickhouseSourceFactory};
 pub use sink::ClickhouseSink;

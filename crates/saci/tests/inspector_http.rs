@@ -192,8 +192,8 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     // takes ownership through `BuiltNode`, so the instance actually driven
     // below by `run_on` has to be a separate one.
     let reading_schema = Reading::schema();
-    let (_tx_eu, src_eu) = ChannelSource::new(Arc::clone(&reading_schema), 1);
-    let (_tx_us, src_us) = ChannelSource::new(Arc::clone(&reading_schema), 1);
+    let (src_eu, _tx_eu) = ChannelSource::new(Arc::clone(&reading_schema), 1);
+    let (src_us, _tx_us) = ChannelSource::new(Arc::clone(&reading_schema), 1);
     let (sink, _rx) = ChannelSink::new(Arc::clone(&reading_schema), 1);
     let topology_pipeline = Pipeline::new("inspector-http")
         .component::<Reading>()

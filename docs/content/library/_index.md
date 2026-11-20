@@ -199,7 +199,7 @@ saci = "0.1"
 saci = { version = "0.1", features = ["service", "wasm-host"] }
 ```
 
-Add `connector-file` plus a `transformer-*` feature for each format you
+Add `connector-file` plus a `codec-*` feature for each format you
 read or write. [Crates and features](@/library/reference/crates.md) lists every
 feature flag and the module behind it.
 

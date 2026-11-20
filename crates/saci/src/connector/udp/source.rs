@@ -32,7 +32,7 @@
 //! Whether the format can decode a message at all is not a per-datagram
 //! question but a property of the config. [`new`](UdpSource::new) therefore
 //! asks the codec for a decoder while binding and hands the refusal
-//! back, the way `TcpIngestSource::new` does.
+//! back, the way `TcpSource::new` does.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -49,6 +49,7 @@ use crate::error::SaciError;
 use crate::io::Source;
 
 use crate::connector::udp::DATAGRAM_BUFFER_BYTES;
+use crate::connector::udp::UdpSourceConfig;
 
 /// Live UDP ingestion source: one datagram in, one `RecordBatch` out.
 ///
@@ -73,34 +74,38 @@ pub struct UdpSource {
 }
 
 impl UdpSource {
-    /// Bind `bind`, optionally join `multicast_group`, and prepare the batch
-    /// channel.
+    /// Bind `config.bind`, optionally join `config.multicast_group`, and
+    /// prepare the batch channel.
     ///
-    /// `buffer` is the number of decoded batches that may queue before the
-    /// receive loop stops reading the socket. `codec` decodes each
+    /// `config.buffer` is the number of decoded batches that may queue before
+    /// the receive loop stops reading the socket. `codec` decodes each
     /// datagram; one decoder is opened here to settle whether this format can
     /// decode a message against `schema` at all.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `codec` cannot open a
-    /// message decoder for `schema`, if `bind` cannot be bound, or if
-    /// `multicast_group` is not a multicast address, is of a different IP
-    /// family than `bind`, or cannot be joined.
+    /// Returns [`SaciError::Configuration`] if `buffer` is `0`, if `codec`
+    /// cannot open a message decoder for `schema`, if `bind` cannot be bound,
+    /// or if `multicast_group` is not a multicast address, is of a different
+    /// IP family than `bind`, or cannot be joined.
     pub fn new(
-        bind: &str,
-        multicast_group: Option<IpAddr>,
+        config: UdpSourceConfig,
         schema: Arc<Schema>,
-        buffer: usize,
         codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
+        config.validate()?;
         // Opening a decoder reads `schema` and nothing else, so every datagram
         // would get this same answer. Asking here is what makes a format with
         // no message decoder a config error the caller is told about, rather
         // than a socket that receives and delivers nothing at all.
         codec.open_message_decoder(Arc::clone(&schema))?;
 
-        let socket = std::net::UdpSocket::bind(bind).map_err(|e| {
+        let UdpSourceConfig {
+            bind,
+            multicast_group,
+            buffer,
+        } = config;
+        let socket = std::net::UdpSocket::bind(&bind).map_err(|e| {
             SaciError::configuration(format!("UdpSource: cannot bind '{bind}': {e}"))
         })?;
         socket.set_nonblocking(true).map_err(|e| {
@@ -111,10 +116,10 @@ impl UdpSource {
             .map_err(|e| SaciError::configuration(format!("UdpSource: local_addr failed: {e}")))?;
 
         if let Some(group) = multicast_group {
-            join_multicast(&socket, group, local_addr, bind)?;
+            join_multicast(&socket, group, local_addr, &bind)?;
         }
 
-        let (tx, rx) = mpsc::channel(buffer.max(1));
+        let (tx, rx) = mpsc::channel(buffer);
 
         Ok(Self {
             socket: Some(socket),
@@ -403,15 +408,30 @@ mod tests {
         UdpSocket::bind("127.0.0.1:0").await.expect("bind sender")
     }
 
+    /// A source built from the pieces a test varies, over the real config.
+    fn source_at(
+        bind: &str,
+        multicast_group: Option<IpAddr>,
+        buffer: usize,
+        codec: Arc<dyn Codec>,
+    ) -> Result<UdpSource, SaciError> {
+        let config = UdpSourceConfig {
+            bind: bind.to_string(),
+            multicast_group,
+            buffer,
+        };
+        UdpSource::new(config, test_schema(), codec)
+    }
+
     #[test]
     fn new_reports_bound_port() {
-        let src = UdpSource::new("127.0.0.1:0", None, test_schema(), 4, arrow_ipc()).unwrap();
+        let src = source_at("127.0.0.1:0", None, 4, arrow_ipc()).unwrap();
         assert_ne!(src.local_addr().port(), 0);
     }
 
     #[test]
     fn new_rejects_unbindable_address() {
-        let err = UdpSource::new("256.256.256.256:1", None, test_schema(), 4, arrow_ipc())
+        let err = source_at("256.256.256.256:1", None, 4, arrow_ipc())
             .err()
             .expect("bind must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -430,7 +450,7 @@ mod tests {
 
     #[test]
     fn new_rejects_a_format_with_no_message_decoder() {
-        let err = UdpSource::new("127.0.0.1:0", None, test_schema(), 4, Arc::new(StreamOnly))
+        let err = source_at("127.0.0.1:0", None, 4, Arc::new(StreamOnly))
             .err()
             .expect("a format with no message decoder must be refused");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -444,7 +464,7 @@ mod tests {
     #[test]
     fn new_rejects_a_unicast_multicast_group() {
         let group = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        let err = UdpSource::new("127.0.0.1:0", Some(group), test_schema(), 4, arrow_ipc())
+        let err = source_at("127.0.0.1:0", Some(group), 4, arrow_ipc())
             .err()
             .expect("a unicast group must be refused");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -457,7 +477,7 @@ mod tests {
     #[test]
     fn new_rejects_a_group_of_the_other_family() {
         let group: IpAddr = "ff02::1".parse().expect("parse group");
-        let err = UdpSource::new("127.0.0.1:0", Some(group), test_schema(), 4, arrow_ipc())
+        let err = source_at("127.0.0.1:0", Some(group), 4, arrow_ipc())
             .err()
             .expect("a v6 group on a v4 bind must be refused");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -466,8 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_datagram_is_one_batch() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 4, arrow_ipc()).expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, arrow_ipc()).expect("bind");
         let addr = source.local_addr();
         let payloads = encode(&arrow_ipc(), &[7, 8]);
 
@@ -489,8 +508,7 @@ mod tests {
     /// the order one producer sent them.
     #[tokio::test]
     async fn each_datagram_is_one_batch() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 4, ndjson()).expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, ndjson()).expect("bind");
         let addr = source.local_addr();
         let payloads = encode(&ndjson(), &[1, 2]);
         assert_eq!(payloads.len(), 2, "ndjson emits one message per row");
@@ -510,8 +528,7 @@ mod tests {
     /// never reaches the decoder, so data after it still decodes.
     #[tokio::test]
     async fn an_empty_datagram_is_echoed_not_decoded() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 4, arrow_ipc()).expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, arrow_ipc()).expect("bind");
         let addr = source.local_addr();
         let payloads = encode(&arrow_ipc(), &[5]);
 
@@ -542,8 +559,7 @@ mod tests {
     /// close, so the next one decodes.
     #[tokio::test]
     async fn an_undecodable_datagram_is_dropped_and_the_next_one_decodes() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 4, arrow_ipc()).expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, arrow_ipc()).expect("bind");
         let addr = source.local_addr();
         let payloads = encode(&arrow_ipc(), &[9]);
 
@@ -568,14 +584,13 @@ mod tests {
     #[tokio::test]
     async fn a_multicast_group_is_received() {
         let group: IpAddr = "239.255.0.1".parse().expect("parse group");
-        let mut source =
-            match UdpSource::new("0.0.0.0:0", Some(group), test_schema(), 4, arrow_ipc()) {
-                Ok(source) => source,
-                Err(e) => {
-                    println!("SKIP: multicast unavailable: {e}");
-                    return;
-                }
-            };
+        let mut source = match source_at("0.0.0.0:0", Some(group), 4, arrow_ipc()) {
+            Ok(source) => source,
+            Err(e) => {
+                println!("SKIP: multicast unavailable: {e}");
+                return;
+            }
+        };
         let port = source.local_addr().port();
         let payloads = encode(&arrow_ipc(), &[4]);
 
@@ -597,8 +612,7 @@ mod tests {
     /// once this source is gone.
     #[tokio::test]
     async fn dropping_the_source_frees_its_port() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 4, arrow_ipc()).expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, arrow_ipc()).expect("bind");
         let addr = source.local_addr();
 
         // Drives the receive loop's first poll, which must time out: nothing
@@ -625,33 +639,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn buffer_zero_is_clamped_to_one() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 0, arrow_ipc()).expect("bind");
-        let addr = source.local_addr();
-        let payloads = encode(&arrow_ipc(), &[3]);
-
-        let sender = sender().await;
-        sender
-            .send_to(&payloads[0], addr)
-            .await
-            .expect("send datagram");
-
-        let received = source
-            .next_batch()
-            .await
-            .expect("receive")
-            .expect("one batch");
-        assert_eq!(values(&received), vec![3]);
+    #[test]
+    fn a_zero_buffer_is_refused_not_clamped() {
+        let err = source_at("127.0.0.1:0", None, 0, arrow_ipc())
+            .err()
+            .expect("a zero buffer must be refused");
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(
+            err.to_string().contains("'buffer' must be at least 1"),
+            "got: {err}"
+        );
     }
 
     /// A blank line decodes to no rows, the same "dropped" outcome as a
     /// decode error: the next real datagram still decodes.
     #[tokio::test]
     async fn a_datagram_that_decodes_to_nothing_is_dropped_and_the_next_one_decodes() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 4, ndjson()).expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, ndjson()).expect("bind");
         let addr = source.local_addr();
         let payloads = encode(&ndjson(), &[6]);
 
@@ -674,8 +678,7 @@ mod tests {
     /// still both land in the same source's batch stream.
     #[tokio::test]
     async fn several_producers_share_one_source() {
-        let mut source =
-            UdpSource::new("127.0.0.1:0", None, test_schema(), 4, ndjson()).expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, ndjson()).expect("bind");
         let addr = source.local_addr();
 
         let first_sender = sender().await;
@@ -751,14 +754,7 @@ mod tests {
     /// ahead of the datagram that really produced it.
     #[tokio::test]
     async fn a_decoder_that_buffers_across_datagrams_is_replaced_after_an_empty_flush() {
-        let mut source = UdpSource::new(
-            "127.0.0.1:0",
-            None,
-            test_schema(),
-            4,
-            Arc::new(BufferingCodec),
-        )
-        .expect("bind");
+        let mut source = source_at("127.0.0.1:0", None, 4, Arc::new(BufferingCodec)).expect("bind");
         let addr = source.local_addr();
 
         let sender = sender().await;

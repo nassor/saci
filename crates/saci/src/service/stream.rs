@@ -1188,7 +1188,7 @@ mod tests {
     #[tokio::test]
     async fn chunking_one_large_arrival_does_not_trip_the_byte_ceiling() {
         let rows = 8_192;
-        let (tx, source) = ChannelSource::new(schema(), 8);
+        let (source, tx) = ChannelSource::new(schema(), 8);
         let delivered = Arc::new(AtomicU64::new(0));
         let sink = CountingSink {
             schema: schema(),
@@ -1316,7 +1316,7 @@ mod tests {
             }
         }
 
-        let (tx, source) = ChannelSource::new(sale_schema(), 16);
+        let (source, tx) = ChannelSource::new(sale_schema(), 16);
         let arrival = |ts: i64| {
             RecordBatch::try_new(sale_schema(), vec![Arc::new(Int64Array::from(vec![ts]))])
                 .expect("the arrival is well formed")
@@ -1507,7 +1507,7 @@ mod tests {
     #[tokio::test]
     async fn a_stream_run_at_eof_finishes_its_source_once_and_after_its_sink() {
         let log: FinishLog = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (tx, chan_source) = ChannelSource::new(schema(), 4);
+        let (chan_source, tx) = ChannelSource::new(schema(), 4);
         let batch = RecordBatch::try_new(schema(), vec![Arc::new(Int64Array::from(vec![1, 2, 3]))])
             .expect("the batch is well formed");
         tx.send(batch).await.expect("the source accepts it");
@@ -1559,7 +1559,7 @@ mod tests {
     #[tokio::test]
     async fn a_cancel_mid_item_finishes_the_source_once_and_after_the_sink() {
         let log: FinishLog = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (tx, chan_source) = ChannelSource::new(schema(), 4);
+        let (chan_source, tx) = ChannelSource::new(schema(), 4);
         let batch = RecordBatch::try_new(schema(), vec![Arc::new(Int64Array::from(vec![1]))])
             .expect("the batch is well formed");
         tx.send(batch).await.expect("the source accepts it");
@@ -1626,7 +1626,7 @@ mod tests {
         // No batch ever sent, and `tx` kept alive: `next_batch` blocks
         // forever rather than returning EOF, so the only way out is the
         // `tokio::select!` cancel arm.
-        let (_tx, chan_source) = ChannelSource::new(schema(), 4);
+        let (chan_source, _tx) = ChannelSource::new(schema(), 4);
         let (source, source_finishes) = LoggingSource::new(chan_source, Arc::clone(&log));
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 

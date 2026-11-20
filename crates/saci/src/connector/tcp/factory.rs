@@ -4,7 +4,7 @@
 //! apart, so one string names the listening half in a `source` node and the
 //! connecting half in a `sink` node.
 //!
-//! [`TcpIngestSource`] is a live source: it never reaches EOF, so it only works
+//! [`TcpSource`] is a live source: it never reaches EOF, so it only works
 //! under standalone stream mode (`run_mode kind="stream"`). The service config
 //! validator rejects `type="tcp"` on a `source` node in any other mode. That
 //! rule reads source nodes only, so a `tcp` sink runs in every mode.
@@ -15,26 +15,24 @@
 //! and that node's format decides how each frame encodes or decodes. There is
 //! no default.
 
+use crate::connector::schema::deserialize_config;
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
 
-use crate::connector::tcp::{TcpIngestSource, TcpSink};
+use crate::connector::tcp::{TcpSink, TcpSinkConfig, TcpSource, TcpSourceConfig};
 
-/// Default number of decoded batches queued before backpressure.
-const DEFAULT_BUFFER: usize = 64;
-/// Default per-frame size cap (8 MiB).
-const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
-/// Factory for [`TcpIngestSource`].
+/// Factory for [`TcpSource`].
 ///
-/// Config fields:
+/// The `config` table is [`TcpSourceConfig`]:
 /// - `bind` (string, required): listen address, e.g. `"0.0.0.0:9500"`.
 /// - `buffer` (usize, optional, default `64`): queued batch capacity.
 /// - `max_frame_bytes` (usize, optional, default `8388608`): per-frame cap.
-/// - `schema_fields` (list, required): Arrow schema definition.
+///
+/// Beside it, `schema_fields` (list, required) is the Arrow schema
+/// definition.
 ///
 /// Each frame's payload is decoded by the codec the host bound to this
 /// node from its `transformer` key, reached through the [`ConnectorContext`]
@@ -51,32 +49,11 @@ impl SourceFactory for TcpSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let bind = config.get("bind").and_then(|v| v.as_str()).ok_or_else(|| {
-            SaciError::configuration("tcp source config requires a 'bind' string")
-        })?;
-
-        let buffer = config
-            .get("buffer")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.max(1) as usize)
-            .unwrap_or(DEFAULT_BUFFER);
-
-        let max_frame_bytes = config
-            .get("max_frame_bytes")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.max(1) as usize)
-            .unwrap_or(DEFAULT_MAX_FRAME_BYTES);
-
+        let cfg: TcpSourceConfig = deserialize_config(config, "TcpSource")?;
         let schema = parse_schema_fields(config, "tcp")?;
         let codec = ctx.codec("tcp")?;
 
-        Ok(Box::new(TcpIngestSource::new(
-            bind,
-            schema,
-            buffer,
-            max_frame_bytes,
-            codec,
-        )?))
+        Ok(Box::new(TcpSource::new(cfg, schema, codec)?))
     }
 
     /// The listener is dropped before a rebuild, so its bind address is free
@@ -89,10 +66,12 @@ impl SourceFactory for TcpSourceFactory {
 
 /// Factory for [`TcpSink`].
 ///
-/// Config fields:
+/// The `config` table is [`TcpSinkConfig`]:
 /// - `connect` (string, required): peer address to dial, e.g.
 ///   `"collector.internal:9500"`.
-/// - `schema_fields` (list, required): Arrow schema definition.
+///
+/// Beside it, `schema_fields` (list, required) is the Arrow schema
+/// definition.
 ///
 /// Each batch is encoded by the codec the host bound to this node from
 /// its `transformer` key, reached through the [`ConnectorContext`] rather than
@@ -110,21 +89,16 @@ impl SinkFactory for TcpSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let connect = config
-            .get("connect")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                SaciError::configuration("tcp sink config requires a 'connect' string")
-            })?;
-
+        let cfg: TcpSinkConfig = deserialize_config(config, "TcpSink")?;
         let schema = parse_schema_fields(config, "tcp")?;
         let codec = ctx.codec("tcp")?;
 
-        Ok(Box::new(TcpSink::connect(connect, schema, codec)?))
+        Ok(Box::new(TcpSink::new(cfg, schema, codec)?))
     }
 
     /// One socket serves the sink's whole life and a fresh instance dials
-    /// again on its first write. A failed write leaves nothing buffered.
+    /// again on its first write. A rebuilt instance drops whatever the failed
+    /// one still buffered, along with its socket.
     fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
         Ok(())
     }
@@ -178,7 +152,7 @@ schema_fields "v" type="Int64"
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'bind'"), "got: {err}");
+        assert!(err.to_string().contains("`bind`"), "got: {err}");
     }
 
     #[test]
@@ -241,7 +215,7 @@ schema_fields "v" type="Int64"
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'connect'"), "got: {err}");
+        assert!(err.to_string().contains("`connect`"), "got: {err}");
     }
 
     #[test]
@@ -263,5 +237,31 @@ schema_fields "v" type="Int64"
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
         assert!(err.message().contains("'transformer'"), "got: {err}");
+    }
+
+    #[test]
+    fn a_misspelled_key_is_named() {
+        let err = TcpSourceFactory
+            .build(
+                &config("max_frame_byts 1024"),
+                &ConnectorContext::new(Some(codec())),
+            )
+            .err()
+            .expect("build must fail");
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(err.to_string().contains("max_frame_byts"), "got: {err}");
+    }
+
+    #[test]
+    fn a_zero_buffer_is_refused_not_clamped() {
+        let err = TcpSourceFactory
+            .build(&config("buffer 0"), &ConnectorContext::new(Some(codec())))
+            .err()
+            .expect("build must fail");
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(
+            err.to_string().contains("'buffer' must be at least 1"),
+            "got: {err}"
+        );
     }
 }

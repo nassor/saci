@@ -14,10 +14,10 @@ running pipeline.
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 242" role="img" aria-labelledby="cx-t cx-d">
         <title id="cx-t">A source node turns a transport into rows for the workflow, and a sink node turns rows back into a transport</title>
-        <desc id="cx-d">Two lanes run left to right. In the top lane, a byte transport (file, http, kafka, nats, redb, s3, tcp or udp) hands bytes to a transformer, which decodes them into rows for the workflow. In the bottom lane, a row transport (postgres, mariadb, turso, clickhouse, saci, channel or opentelemetry) hands rows to the workflow directly, with no format. The right half mirrors the left: the workflow's rows pass through a transformer to a byte transport, or go straight to a row transport. A bracket over the left half names it the source node, and one over the right half the sink node.</desc>
+        <desc id="cx-d">Two lanes run left to right. In the top lane, a byte transport (file, http, kafka, nats, redb, s3, tcp or udp) hands bytes to a codec, which decodes them into rows for the workflow. In the bottom lane, a row transport (postgres, mariadb, turso, clickhouse, saci, channel or opentelemetry) hands rows to the workflow directly, with no format. The right half mirrors the left: the workflow's rows pass through a codec to a byte transport, or go straight to a row transport. A bracket over the left half names it the source node, and one over the right half the sink node.</desc>
         <g class="anim anim-1">
             <text class="t-lbl t-data t-mid" x="126" y="14">source node</text>
-            <text class="t-sm t-mid" x="126" y="28">a type, plus a transformer for bytes</text>
+            <text class="t-sm t-mid" x="126" y="28">a type, plus a codec for bytes</text>
             <path class="ln" d="M0 42 V36 H252 V42"/>
             <rect class="blk blk-data" x="0" y="52" width="140" height="74" rx="8"/>
             <rect class="hd hd-data" x="0" y="52" width="140" height="18" rx="8"/>
@@ -38,7 +38,7 @@ running pipeline.
             <rect class="blk blk-bnd" x="162" y="52" width="90" height="74" rx="8"/>
             <rect class="hd hd-bnd" x="162" y="52" width="90" height="18" rx="8"/>
             <rect class="hd hd-bnd" x="162" y="64" width="90" height="6"/>
-            <text class="t-lbl" x="170" y="66">transformer</text>
+            <text class="t-lbl" x="170" y="66">codec</text>
             <text class="t-sm t-bnd" x="170" y="86">csv ndjson</text>
             <text class="t-sm t-bnd" x="170" y="100">avro parquet</text>
             <text class="t-sm t-bnd" x="170" y="114">arrow-ipc</text>
@@ -56,13 +56,13 @@ running pipeline.
         </g>
         <g class="anim anim-3">
             <text class="t-lbl t-data t-mid" x="534" y="14">sink node</text>
-            <text class="t-sm t-mid" x="534" y="28">a type, plus a transformer for bytes</text>
+            <text class="t-sm t-mid" x="534" y="28">a type, plus a codec for bytes</text>
             <path class="ln" d="M408 42 V36 H660 V42"/>
             <path class="arw arw-data" d="M386 89 H404" marker-end="url(#cx-a)"/>
             <rect class="blk blk-bnd" x="408" y="52" width="90" height="74" rx="8"/>
             <rect class="hd hd-bnd" x="408" y="52" width="90" height="18" rx="8"/>
             <rect class="hd hd-bnd" x="408" y="64" width="90" height="6"/>
-            <text class="t-lbl" x="416" y="66">transformer</text>
+            <text class="t-lbl" x="416" y="66">codec</text>
             <text class="t-sm t-bnd" x="416" y="86">csv ndjson</text>
             <text class="t-sm t-bnd" x="416" y="100">avro parquet</text>
             <text class="t-sm t-bnd" x="416" y="114">arrow-ipc</text>
@@ -94,7 +94,7 @@ running pipeline.
     </div>
     <div class="dgm-key">
         <span class="k-data"><i></i> transports and rows</span>
-        <span class="k-boundary"><i></i> transformers</span>
+        <span class="k-boundary"><i></i> codecs</span>
         <span class="k-control"><i></i> the workflow</span>
     </div>
 </div>
@@ -102,7 +102,7 @@ running pipeline.
 ## Pick a connector
 
 Every row is a source and a sink, so one transport serves both ends of a workflow. `Needs a format`
-means the node names a declared [transformer](@/service/formats/_index.md); the seven row-carrying
+means the node names a declared codec, a [`transformer` node](@/service/formats/_index.md); the seven row-carrying
 connectors take none.
 
 | Connector | Source | Sink | Needs a format | Run modes | In the server build |
@@ -120,7 +120,7 @@ connectors take none.
 | [TCP](@/service/connectors/tcp.md) | yes | yes | yes | stream for the source, any for the sink | yes |
 | [UDP](@/service/connectors/udp.md) | yes | yes | yes | stream for the source, any for the sink | yes |
 | [SACI](@/service/connectors/saci.md) | yes | yes | no | stream for the source, any for the sink | yes |
-| [OpenTelemetry](@/service/connectors/opentelemetry.md) | yes | yes | no | stream for the source, any for the sink | no: build with `--features connector-opentelemetry` |
+| [OpenTelemetry](@/service/connectors/opentelemetry.md) | yes | yes | no | stream for the source, any for the sink | no: build with `--features connector-otlp` |
 | [Channel](@/service/connectors/channel.md) | yes | yes | no | any | yes |
 
 A node picks its transport with a `type` string: `FileSource` and `FileSink`, `HttpSource` and
@@ -175,7 +175,7 @@ connectors it keeps:
 
 ```toml
 [dependencies]
-saci = { version = "0.1", default-features = false, features = ["service", "connector-file", "transformer-csv"] }
+saci = { version = "0.1", default-features = false, features = ["service", "connector-file", "codec-csv"] }
 ```
 
 Its `main` hands the factory to the same `serve` and `validate` subcommands as `saci-service`:

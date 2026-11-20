@@ -173,7 +173,7 @@ what the binary does carry, and names the feature when the format is one this
 crate ships:
 
 ```text
-error: Configuration error: transformer 'csv_fmt' names format 'csv', which no transformer is registered for (registered: none): that is a built-in format this binary was built without, so rebuild or reinstall with `--features transformer-csv`, or register your own transformer under that name
+error: Configuration error: transformer 'csv_fmt' names format 'csv', which no codec is registered for (registered: none): that is a built-in format this binary was built without, so rebuild or reinstall with `--features codec-csv`, or register your own codec under that name
 ```
 
 A build capability has no second kind either, and nothing registered at serve

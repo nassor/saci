@@ -26,8 +26,8 @@ does not.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="av-t av-d">
-        <title id="av-t">An avro transformer decoding bytes into rows and encoding rows back into bytes</title>
-        <desc id="av-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is avro. The upper arrow runs left to right and is the decode path, which reads a container file's own header or a framed message. The lower arrow runs right to left and is the encode path, which needs a declared schema. The schema_id option selects the framing.</desc>
+        <title id="av-t">An avro codec decoding bytes into rows and encoding rows back into bytes</title>
+        <desc id="av-d">Bytes on the left and rows on the right, with a codec in the middle whose format is avro. The upper arrow runs left to right and is the decode path, which reads a container file's own header or a framed message. The lower arrow runs right to left and is the encode path, which needs a declared schema. The schema_id option selects the framing.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>
@@ -137,7 +137,7 @@ wider `int`. A value that does not fit the declared column is an error rather th
 
 ## How it behaves
 
-Two framings exist on the message surface, and `schema_id` picks which one this transformer writes.
+Two framings exist on the message surface, and `schema_id` picks which one this codec writes.
 Without it the encoder emits single-object framing; with it, the Confluent framing carrying that
 registry id.
 

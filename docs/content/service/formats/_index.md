@@ -1,6 +1,6 @@
 +++
 title = "Formats"
-description = "A connector moves bytes, a transformer gives them meaning. A declared transformer node picks csv, ndjson, parquet, avro or arrow-ipc."
+description = "A connector moves bytes, a codec gives them meaning. A declared transformer node picks csv, ndjson, parquet, avro or arrow-ipc."
 template = "section.html"
 sort_by = "weight"
 weight = 5
@@ -8,13 +8,13 @@ aliases = ["/transformers/"]
 +++
 
 A connector owns a transport: a path, a socket, a topic, a bucket. Giving those bytes meaning is a
-`transformer` node's job, and five formats ship with `saci-service`: `csv`, `ndjson`, `parquet`,
-`avro` and `arrow-ipc`.
+codec's job, declared with a `transformer` node, and five formats ship with `saci-service`: `csv`,
+`ndjson`, `parquet`, `avro` and `arrow-ipc`.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 196" role="img" aria-labelledby="tf-a-title tf-a-desc">
-        <title id="tf-a-title">Bytes entering a file source, decoded by a transformer, arriving at the workflow as rows</title>
-        <desc id="tf-a-desc">A CSV file of bytes enters a FileSource node, which reads it in batches rather than whole. Inside that node the declared transformer, format csv, decodes the bytes one batch at a time. The node forwards each batch to the workflow, whose columns are typed Int64 and Float64. Naming a different transformer replaces the inner box and nothing else.</desc>
+        <title id="tf-a-title">Bytes entering a file source, decoded by a codec, arriving at the workflow as rows</title>
+        <desc id="tf-a-desc">A CSV file of bytes enters a FileSource node, which reads it in batches rather than whole. Inside that node the declared codec, format csv, decodes the bytes one batch at a time. The node forwards each batch to the workflow, whose columns are typed Int64 and Float64. Naming a different codec replaces the inner box and nothing else.</desc>
         <text class="t-title" x="0" y="14">One file, one format</text>
         <text class="t-sm" x="0" y="30">path = "orders.csv", transformer = "orders_csv"</text>
         <g class="anim anim-1">
@@ -75,15 +75,15 @@ A connector owns a transport: a path, a socket, a topic, a bucket. Giving those 
     </figcaption>
 </div>
 
-## Declare a transformer
+## Declare a codec
 
 A workflow declares each byte format it needs as its own `transformer` node. The node's leading
 argument is its id, `format` names the format, and an `options` child holds that format's own
-settings. Every source or sink that moves bytes names one declared transformer through its own
+settings. Every source or sink that moves bytes names one declared codec through its own
 `transformer` key.
 
 There is no default and no sniffing. A file connector does not read the extension, and Kafka,
-NATS and TCP each name a transformer like everything else.
+NATS and TCP each name a codec like everything else.
 
 <div class="code">
 <div class="code-cap"><span>KDL</span><em>options belongs to the format, the transformer key to the node; both nodes sit inside one workflow</em></div>
@@ -142,15 +142,15 @@ Every connector that moves bytes accepts all five formats. Which surface it uses
 | [UDP](@/service/connectors/udp.md) | discrete messages, one per datagram | all five | ndjson is the natural pairing, one row per datagram; a whole-batch format has to fit `max_datagram_bytes` |
 
 [PostgreSQL](@/service/connectors/postgresql.md) and
-[Channel](@/service/connectors/channel.md) carry rows rather than bytes and name no transformer at
+[Channel](@/service/connectors/channel.md) carry rows rather than bytes and name no codec at
 all.
 
 The same bytes work on either surface, so a file written with `arrow-ipc` or `parquet` decodes
 through the message path and one Kafka payload in those formats opens as a stream.
 
-Teaching `saci-service` a format it does not ship means writing a transformer in Rust and
-registering it in your own binary, with `builder.register_transformer(..)` inside
-`saci::service::cli::main_with`. [Writing a transformer](@/library/service/transformers.md)
+Teaching `saci-service` a format it does not ship means writing a codec in Rust and
+registering it in your own binary, with `builder.codec(..)` inside
+`saci::service::cli::main_with`. [Writing a codec](@/library/service/transformers.md)
 shows how.
 
 ## Next

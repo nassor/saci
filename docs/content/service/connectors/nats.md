@@ -226,7 +226,7 @@ saci-service validate --config examples/configs/nats.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -457,7 +457,7 @@ A `tls://` URL requires encryption on its own. `tls_first` needs the matching se
 | `NatsSource: connection.auth kind = "token" needs exactly one of 'token' or 'token_file'` | set exactly one of the pair |
 | `NatsSource: connection.tls needs both 'client_certificate' and 'client_key', or neither` | add the missing half, or drop both |
 | `NatsSource config: 'mode.domain' and 'mode.api_prefix' are two ways to say the same thing; set one` | keep one of the two |
-| `NatsSink config: 'mode.subject_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro transformer, or drop the key |
+| `NatsSink config: 'mode.subject_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro codec, or drop the key |
 | `NatsSink: format '{format}' has no message codec` | name a format that encodes discrete messages |
 | `NatsSink config: 'mode.expected_last_sequence' needs 'mode.atomic_batch #true'` | add `atomic_batch #true`, since the guard is a batch-level claim |
 | `NatsSink config: 'mode.atomic_batch' needs 'stream_provision.allow_atomic #true' when the stream is provisioned` | add `allow_atomic #true` to `stream_provision`, or set `create #false` and allow atomic publishes on the pre-existing stream |

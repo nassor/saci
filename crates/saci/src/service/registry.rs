@@ -167,7 +167,7 @@ mod tests {
         ) -> Result<Box<dyn Source>, SaciError> {
             use crate::connector::channel::ChannelSource;
             let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-            let (_tx, src) = ChannelSource::new(schema, 1);
+            let (src, _tx) = ChannelSource::new(schema, 1);
             Ok(Box::new(src))
         }
     }

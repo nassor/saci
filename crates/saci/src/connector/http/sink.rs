@@ -28,7 +28,7 @@ use crate::io::Sink;
 
 use crate::connector::http::client::{self, HttpClient};
 use crate::connector::http::metrics::Instruments;
-use crate::connector::http::source::HttpClientOptions;
+use crate::connector::http::source::HttpClientConfig;
 
 /// The connector name every error and metric label of this half carries.
 const WHAT: &str = "HttpSink";
@@ -58,7 +58,7 @@ impl ContentEncoding {
     }
 }
 
-/// Everything [`HttpSink::new`] takes past the url, schema and codec.
+/// What [`HttpSink::new`] takes past the schema and the codec.
 ///
 /// The url is followed across `307` and `308` only, up to ten hops, because
 /// those are the two redirects that keep the method and the body. A `301`,
@@ -66,19 +66,24 @@ impl ContentEncoding {
 /// send a bodyless `GET` and report the new target's `200` for a batch that
 /// never arrived. Over HTTP/3 nothing is followed at all.
 #[derive(Debug, Clone)]
-pub struct HttpSinkOptions {
+pub struct HttpSinkConfig {
+    /// The endpoint each batch is sent to.
+    pub url: String,
     /// Transport, TLS, headers and the budget.
-    pub client: HttpClientOptions,
+    pub client: HttpClientConfig,
     /// The HTTP method, `"POST"` in the usual case.
     pub method: String,
     /// How to compress each body, `None` to send it as written.
     pub content_encoding: Option<ContentEncoding>,
 }
 
-impl Default for HttpSinkOptions {
-    fn default() -> Self {
+impl HttpSinkConfig {
+    /// A `POST` of each batch to `url` with the default client and no body
+    /// compression.
+    pub fn new(url: impl Into<String>) -> Self {
         Self {
-            client: HttpClientOptions::default(),
+            url: url.into(),
+            client: HttpClientConfig::default(),
             method: "POST".to_string(),
             content_encoding: None,
         }
@@ -131,19 +136,13 @@ impl std::io::Write for SharedBuffer {
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::{DataType, Field, Schema};
-/// use saci::connector::http::{HttpSink, HttpSinkOptions, HttpVersion};
+/// use saci::connector::http::{HttpSink, HttpSinkConfig, HttpVersion};
 /// use saci::codec::csv::CsvCodec;
 ///
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-/// let mut options = HttpSinkOptions::default();
-/// options.client.http_version = HttpVersion::Http2;
-/// let sink = HttpSink::new(
-///     "https://example.invalid/ingest",
-///     schema,
-///     Arc::new(CsvCodec::new()),
-///     options,
-/// )
-/// .unwrap();
+/// let mut config = HttpSinkConfig::new("https://example.invalid/ingest");
+/// config.client.http_version = HttpVersion::Http2;
+/// let sink = HttpSink::new(config, schema, Arc::new(CsvCodec::new())).unwrap();
 /// ```
 pub struct HttpSink {
     client: HttpClient,
@@ -161,35 +160,35 @@ impl HttpSink {
     /// Prepare the sink without making a request.
     ///
     /// `schema` is the schema the rows are written with. A `content-type` is
-    /// added from the codec's format unless `options.client.headers`
+    /// added from the codec's format unless `config.client.headers`
     /// already carries one.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] when `options.method` is not a
+    /// Returns [`SaciError::Configuration`] when `config.method` is not a
     /// valid HTTP method, when `content_encoding` is set next to a
     /// `content-encoding` header, when `http_version "3"` is pointed at a
     /// non-https url, when a header name or value is malformed, when a `tls`
     /// file is missing or malformed, or when the HTTP client cannot be built.
     /// No request is made.
     pub fn new(
-        url: &str,
+        config: HttpSinkConfig,
         schema: Arc<Schema>,
         codec: Arc<dyn Codec>,
-        options: HttpSinkOptions,
     ) -> Result<Self, SaciError> {
-        let HttpSinkOptions {
+        let HttpSinkConfig {
+            url,
             client: client_options,
             method,
             content_encoding,
-        } = options;
+        } = config;
 
         let parsed_method = Method::from_bytes(method.as_bytes()).map_err(|e| {
             SaciError::configuration(format!(
                 "HttpSink: '{method}' is not a valid HTTP method: {e}"
             ))
         })?;
-        client::require_https(WHAT, client_options.http_version, url)?;
+        client::require_https(WHAT, client_options.http_version, &url)?;
 
         let mut headers = client_options.headers.clone();
         let declares = |name: &str| {
@@ -224,7 +223,7 @@ impl HttpSink {
                 // the body is safe to follow.
                 redirects: client::Redirects::MethodPreserving,
             })?,
-            url: url.to_string(),
+            url,
             method: parsed_method,
             headers: client::header_map(WHAT, headers)?,
             schema,
@@ -374,13 +373,14 @@ mod tests {
             .expect("batch")
     }
 
-    fn sink(options: HttpSinkOptions) -> Result<HttpSink, SaciError> {
-        HttpSink::new(
-            "http://127.0.0.1:1/ingest",
-            schema(),
-            Arc::new(NoStream),
-            options,
-        )
+    const URL: &str = "http://127.0.0.1:1/ingest";
+
+    fn config() -> HttpSinkConfig {
+        HttpSinkConfig::new(URL)
+    }
+
+    fn sink(config: HttpSinkConfig) -> Result<HttpSink, SaciError> {
+        HttpSink::new(config, schema(), Arc::new(NoStream))
     }
 
     /// A codec with no surfaces at all. Every registered format
@@ -407,8 +407,8 @@ mod tests {
         }
     }
 
-    fn sink_with(codec: Arc<dyn Codec>, options: HttpSinkOptions) -> Result<HttpSink, SaciError> {
-        HttpSink::new("http://127.0.0.1:1/ingest", schema(), codec, options)
+    fn sink_with(codec: Arc<dyn Codec>, config: HttpSinkConfig) -> Result<HttpSink, SaciError> {
+        HttpSink::new(config, schema(), codec)
     }
 
     #[test]
@@ -425,18 +425,18 @@ mod tests {
     /// config declares wins over the codec's.
     #[test]
     fn the_codecs_media_type_is_the_content_type_unless_the_config_declares_one() {
-        let typed = sink_with(Arc::new(Typed), HttpSinkOptions::default()).expect("sink");
+        let typed = sink_with(Arc::new(Typed), config()).expect("sink");
         assert_eq!(
             typed.headers.get("content-type").map(|v| v.as_bytes()),
             Some(&b"application/x-typed"[..])
         );
 
-        let bare = sink(HttpSinkOptions::default()).expect("sink");
+        let bare = sink(config()).expect("sink");
         assert!(bare.headers.get("content-type").is_none());
 
-        let mut options = HttpSinkOptions::default();
-        options.client.headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
-        let declared = sink_with(Arc::new(Typed), options).expect("sink");
+        let mut declaring = config();
+        declaring.client.headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        let declared = sink_with(Arc::new(Typed), declaring).expect("sink");
         assert_eq!(declared.headers.get_all("content-type").iter().count(), 1);
         assert_eq!(
             declared.headers.get("content-type").map(|v| v.as_bytes()),
@@ -446,9 +446,9 @@ mod tests {
 
     #[test]
     fn an_invalid_method_is_a_configuration_error_naming_it() {
-        let Err(err) = sink(HttpSinkOptions {
+        let Err(err) = sink(HttpSinkConfig {
             method: "PO ST".to_string(),
-            ..HttpSinkOptions::default()
+            ..config()
         }) else {
             panic!("a space is not legal in a method name");
         };
@@ -458,13 +458,13 @@ mod tests {
 
     #[test]
     fn content_encoding_next_to_its_own_header_is_refused() {
-        let mut options = HttpSinkOptions {
+        let mut config = HttpSinkConfig {
             content_encoding: Some(ContentEncoding::Gzip),
-            ..HttpSinkOptions::default()
+            ..config()
         };
-        options.client.headers = vec![("Content-Encoding".to_string(), "gzip".to_string())];
+        config.client.headers = vec![("Content-Encoding".to_string(), "gzip".to_string())];
 
-        let Err(err) = sink(options) else {
+        let Err(err) = sink(config) else {
             panic!("one header, one source of truth");
         };
         assert_eq!(
@@ -504,8 +504,7 @@ mod tests {
     /// first batch, before any request is attempted.
     #[tokio::test]
     async fn a_format_with_no_stream_write_surface_fails_on_the_first_batch() {
-        let mut sink =
-            sink(HttpSinkOptions::default()).expect("the sink builds whatever the format can do");
+        let mut sink = sink(config()).expect("the sink builds whatever the format can do");
 
         let Err(err) = sink.write_batch(&batch(&[1])).await else {
             panic!("a format with no stream write surface cannot write a body");
@@ -520,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_is_a_no_op_and_idempotent() {
-        let mut sink = sink(HttpSinkOptions::default()).expect("sink builds");
+        let mut sink = sink(config()).expect("sink builds");
         sink.finish().await.expect("finish");
         sink.finish().await.expect("finish is idempotent");
     }

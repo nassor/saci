@@ -10,16 +10,16 @@
 //! - `connector-clickhouse`: [`ClickhouseSourceFactory`], [`ClickhouseSinkFactory`]
 //! - `connector-file`: [`FileSourceFactory`], [`FileSinkFactory`]
 //! - `connector-http`: [`HttpSourceFactory`], [`HttpSinkFactory`],
-//!   [`HttpPushSourceFactory`]
+//!   [`HttpListenSourceFactory`]
 //! - `connector-kafka`: [`KafkaSourceFactory`], [`KafkaSinkFactory`]
 //! - `connector-mariadb`: [`MariadbSourceFactory`], [`MariadbSinkFactory`]
 //! - `connector-nats`: [`NatsSourceFactory`], [`NatsSinkFactory`]
-//! - `connector-opentelemetry`: [`OpenTelemetryMetricsSourceFactory`],
-//!   [`OpenTelemetryMetricsSinkFactory`]
+//! - `connector-otlp`: [`OtlpMetricsSourceFactory`],
+//!   [`OtlpMetricsSinkFactory`]
 //! - `connector-postgresql`: [`PostgresSourceFactory`], [`PostgresSinkFactory`]
 //! - `connector-redb`: [`RedbSourceFactory`], [`RedbSinkFactory`]
 //! - `connector-s3`: [`S3SourceFactory`], [`S3SinkFactory`]
-//! - `connector-saci`: [`SaciSourceFactory`], [`SaciSinkFactory`]
+//! - `connector-peer`: [`SaciSourceFactory`], [`SaciSinkFactory`]
 //! - `connector-tcp`: [`TcpSourceFactory`], [`TcpSinkFactory`]
 //! - `connector-udp`: [`UdpSourceFactory`], [`UdpSinkFactory`]
 //! - `connector-turso`: [`TursoSourceFactory`], [`TursoSinkFactory`]
@@ -60,25 +60,23 @@ pub use crate::connector::clickhouse::{ClickhouseSinkFactory, ClickhouseSourceFa
 #[cfg(feature = "connector-file")]
 pub use crate::connector::file::{FileSinkFactory, FileSourceFactory};
 #[cfg(feature = "connector-http")]
-pub use crate::connector::http::{HttpPushSourceFactory, HttpSinkFactory, HttpSourceFactory};
+pub use crate::connector::http::{HttpListenSourceFactory, HttpSinkFactory, HttpSourceFactory};
 #[cfg(feature = "connector-kafka")]
 pub use crate::connector::kafka::{KafkaSinkFactory, KafkaSourceFactory};
 #[cfg(feature = "connector-mariadb")]
 pub use crate::connector::mariadb::{MariadbSinkFactory, MariadbSourceFactory};
 #[cfg(feature = "connector-nats")]
 pub use crate::connector::nats::{NatsSinkFactory, NatsSourceFactory};
-#[cfg(feature = "connector-opentelemetry")]
-pub use crate::connector::opentelemetry::{
-    OpenTelemetryMetricsSinkFactory, OpenTelemetryMetricsSourceFactory,
-};
+#[cfg(feature = "connector-otlp")]
+pub use crate::connector::otlp::{OtlpMetricsSinkFactory, OtlpMetricsSourceFactory};
+#[cfg(feature = "connector-peer")]
+pub use crate::connector::peer::{SaciSinkFactory, SaciSourceFactory};
 #[cfg(feature = "connector-postgresql")]
 pub use crate::connector::postgresql::{PostgresSinkFactory, PostgresSourceFactory};
 #[cfg(feature = "connector-redb")]
 pub use crate::connector::redb::{RedbSinkFactory, RedbSourceFactory};
 #[cfg(feature = "connector-s3")]
 pub use crate::connector::s3::{S3SinkFactory, S3SourceFactory};
-#[cfg(feature = "connector-saci")]
-pub use crate::connector::saci::{SaciSinkFactory, SaciSourceFactory};
 #[cfg(feature = "connector-tcp")]
 pub use crate::connector::tcp::{TcpSinkFactory, TcpSourceFactory};
 #[cfg(feature = "connector-turso")]
@@ -121,8 +119,8 @@ pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
     ("MariadbSink", "connector-mariadb"),
     ("NatsSource", "connector-nats"),
     ("NatsSink", "connector-nats"),
-    ("OpenTelemetryMetricsSource", "connector-opentelemetry"),
-    ("OpenTelemetryMetricsSink", "connector-opentelemetry"),
+    ("OpenTelemetryMetricsSource", "connector-otlp"),
+    ("OpenTelemetryMetricsSink", "connector-otlp"),
     ("PostgresSource", "connector-postgresql"),
     ("PostgresSink", "connector-postgresql"),
     ("RedbSource", "connector-redb"),
@@ -131,7 +129,7 @@ pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
     ("S3Sink", "connector-s3"),
     ("tcp", "connector-tcp"),
     ("udp", "connector-udp"),
-    ("saci", "connector-saci"),
+    ("saci", "connector-peer"),
     ("TursoSource", "connector-turso"),
     ("TursoSink", "connector-turso"),
 ];
@@ -387,7 +385,7 @@ pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
     #[cfg(feature = "connector-http")]
     let builder = builder
         .register_source(HttpSourceFactory)
-        .register_source(HttpPushSourceFactory)
+        .register_source(HttpListenSourceFactory)
         .register_sink(HttpSinkFactory);
 
     #[cfg(feature = "connector-kafka")]
@@ -400,10 +398,10 @@ pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
         .register_source(NatsSourceFactory)
         .register_sink(NatsSinkFactory);
 
-    #[cfg(feature = "connector-opentelemetry")]
+    #[cfg(feature = "connector-otlp")]
     let builder = builder
-        .register_source(OpenTelemetryMetricsSourceFactory)
-        .register_sink(OpenTelemetryMetricsSinkFactory);
+        .register_source(OtlpMetricsSourceFactory)
+        .register_sink(OtlpMetricsSinkFactory);
 
     #[cfg(feature = "connector-postgresql")]
     let builder = builder
@@ -440,7 +438,7 @@ pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
         .register_source(UdpSourceFactory)
         .register_sink(UdpSinkFactory);
 
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     let builder = builder
         .register_source(SaciSourceFactory)
         .register_sink(SaciSinkFactory);

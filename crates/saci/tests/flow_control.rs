@@ -206,7 +206,7 @@ fn preloaded_source(
     batches: usize,
     rows_per_batch: usize,
 ) -> Box<dyn Source> {
-    let (tx, source) = ChannelSource::new(Arc::clone(schema), batches + 1);
+    let (source, tx) = ChannelSource::new(Arc::clone(schema), batches + 1);
     for b in 0..batches {
         let start = (b * rows_per_batch) as i64;
         let end = start + rows_per_batch as i64;
@@ -708,7 +708,7 @@ async fn a_stream_tail_is_finished_before_a_sibling_source_is_polled() {
 
     let schema = test_schema();
     let big = preloaded_source(&schema, 1, BIG_ROWS);
-    let (tx, sibling) = ChannelSource::new(Arc::clone(&schema), 8);
+    let (sibling, tx) = ChannelSource::new(Arc::clone(&schema), 8);
     for batch in 0..SIBLING_BATCHES {
         let start = SIBLING_BASE + batch * SIBLING_ROWS;
         tx.try_send(batch_of(&schema, (start..start + SIBLING_ROWS).collect()))
@@ -1134,7 +1134,7 @@ mod windowed {
         offset_ms: i64,
         amount_base: i64,
     ) -> Box<dyn Source> {
-        let (tx, source) = ChannelSource::new(Arc::clone(schema), batches + 1);
+        let (source, tx) = ChannelSource::new(Arc::clone(schema), batches + 1);
         for b in 0..batches {
             tx.try_send(sale_batch(
                 schema,
@@ -1211,7 +1211,7 @@ mod windowed {
         late_offset: usize,
         back_ms: i64,
     ) -> Box<dyn Source> {
-        let (tx, source) = ChannelSource::new(Arc::clone(schema), batches + 1);
+        let (source, tx) = ChannelSource::new(Arc::clone(schema), batches + 1);
         for b in 0..batches {
             tx.try_send(late_row_batch(
                 schema,

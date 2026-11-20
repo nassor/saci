@@ -1,6 +1,6 @@
 +++
 title = "File"
-description = "One transport for every local file. The byte format is a declared transformer, named by the required transformer key."
+description = "One transport for every local file. The byte format is a declared codec, named by the required transformer key."
 template = "subpage.html"
 weight = 1
 aliases = ["/connectors/file/"]
@@ -85,11 +85,11 @@ to a second file.
 
 ## 1. Declare the format
 
-A file carries bytes, so the node names a declared `transformer` and that transformer names the
-format. Nothing is inferred from the extension.
+A file carries bytes, so the node names a declared `transformer` node, and that node's `format`
+names the codec. Nothing is inferred from the extension.
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>one declared transformer serves both halves</em></div>
+<div class="code-cap"><span>KDL</span><em>one declared codec serves both halves</em></div>
 
 ```kdl
 transformer "orders_csv" format="csv" {
@@ -158,7 +158,7 @@ processor module the config names.
 Runs the same on Linux, macOS and Windows (PowerShell):
 
 <div class="code">
-<div class="code-cap"><span>Shell</span><em>the source, the sink and the transformer, all built for real</em></div>
+<div class="code-cap"><span>Shell</span><em>the source, the sink and the codec, all built for real</em></div>
 
 ```text
 saci-service validate --config examples/configs/standalone.kdl --connectors-only
@@ -168,7 +168,7 @@ saci-service validate --config examples/configs/standalone.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -251,15 +251,17 @@ Sink:
 | `schema_fields` | list of fields | required | the schema the rows are written with |
 | `truncate` | bool | `#false` | replace the file on build instead of appending to it |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector, so a
-misspelled `truncate` silently keeps the default.
+An unrecognised key inside `config` is a configuration error naming the key, so a misspelled
+`truncate` is refused rather than defaulted. `schema_fields` is read beside these keys.
 
 ## When it refuses to start
 
 | Message | What to change |
 |---|---|
-| `FileSource config requires a 'path' string field` | add `path="..."` to the source's `config` |
-| `FileSink config requires a 'path' string field` | add `path="..."` to the sink's `config` |
+| ``FileSource config: missing field `path` `` | add `path="..."` to the source's `config` |
+| ``FileSink config: missing field `path` `` | add `path="..."` to the sink's `config` |
+| ``FileSource config: unknown field `{key}`, expected `path` `` | fix the key's spelling, or drop it |
+| ``FileSink config: unknown field `{key}`, expected `path` or `truncate` `` | the same, for the sink |
 | `FileSource moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node, naming a declared `transformer` |
 | `FileSource: cannot open {path:?}: {e}` | point `path` at a file that exists and is readable |
 | `FileSink: cannot create {path:?}: {e}` | create the parent directory, or fix the permissions, for a `truncate #true` sink |

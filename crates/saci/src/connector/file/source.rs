@@ -5,7 +5,6 @@
 //! bounded channel; [`Source::next_batch`] awaits that channel. The executor
 //! never blocks on the disk and the file is never materialised in full.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -14,6 +13,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::codec::Codec;
+use crate::connector::file::FileSourceConfig;
 use crate::error::SaciError;
 use crate::io::Source;
 
@@ -27,17 +27,16 @@ const CHANNEL_CAPACITY: usize = 4;
 /// # Example
 ///
 /// ```rust,no_run
-/// use std::path::Path;
 /// use std::sync::Arc;
 ///
-/// use saci::connector::file::FileSource;
+/// use saci::connector::file::{FileSource, FileSourceConfig};
 /// use saci::codec::parquet::ParquetCodec;
 ///
 /// // Parquet carries its own schema, so nothing is declared here.
-/// let src = FileSource::open(
-///     Path::new("trades.parquet"),
-///     Arc::new(ParquetCodec::new()),
+/// let src = FileSource::new(
+///     FileSourceConfig::new("trades.parquet"),
 ///     None,
+///     Arc::new(ParquetCodec::new()),
 /// )
 /// .unwrap();
 /// ```
@@ -48,26 +47,28 @@ pub struct FileSource {
 }
 
 impl FileSource {
-    /// Open `path`, hand the handle to `codec`, and spawn the reader
+    /// Open `config.path`, hand the handle to `codec`, and spawn the reader
     /// thread. Returns once the format has reported its schema, which for a
     /// self-describing format means its metadata has been read.
     ///
-    /// `declared` is the schema the config named, `None` when it named none.
-    /// What that means is the format's business: csv requires one, parquet,
-    /// avro and arrow-ipc project onto one, ndjson infers when it is absent.
+    /// `schema` is the schema the config declared, `None` when it declared
+    /// none. What that means is the format's business: csv requires one,
+    /// parquet, avro and arrow-ipc project onto one, ndjson infers when it is
+    /// absent.
     ///
     /// # Errors
     ///
     /// Returns [`SaciError::Generic`] when the file cannot be opened, or the
     /// codec's own error when it cannot read this handle.
-    pub fn open(
-        path: &Path,
+    pub fn new(
+        config: FileSourceConfig,
+        schema: Option<Arc<Schema>>,
         codec: Arc<dyn Codec>,
-        declared: Option<Arc<Schema>>,
     ) -> Result<Self, SaciError> {
-        let file = std::fs::File::open(path)
+        let path = config.path;
+        let file = std::fs::File::open(&path)
             .map_err(|e| SaciError::generic(format!("FileSource: cannot open {path:?}: {e}")))?;
-        let mut reader = codec.open_reader(file.into(), declared)?;
+        let mut reader = codec.open_reader(file.into(), schema)?;
         let schema = reader.schema();
         let estimated_rows = reader.estimated_rows();
 
@@ -105,15 +106,14 @@ impl FileSource {
     ///
     /// # Errors
     ///
-    /// Returns what [`open`](Self::open) returns, or [`SaciError::Generic`] if
+    /// Returns what [`new`](Self::new) returns, or [`SaciError::Generic`] if
     /// the blocking task panics.
-    pub async fn open_async(
-        path: &Path,
+    pub async fn new_async(
+        config: FileSourceConfig,
+        schema: Option<Arc<Schema>>,
         codec: Arc<dyn Codec>,
-        declared: Option<Arc<Schema>>,
     ) -> Result<Self, SaciError> {
-        let path: PathBuf = path.to_owned();
-        tokio::task::spawn_blocking(move || Self::open(&path, codec, declared))
+        tokio::task::spawn_blocking(move || Self::new(config, schema, codec))
             .await
             .map_err(|e| SaciError::generic(format!("FileSource: spawn_blocking panic: {e}")))?
     }

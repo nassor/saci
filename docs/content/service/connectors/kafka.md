@@ -197,7 +197,7 @@ saci-service validate --config examples/configs/kafka.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
   workflow: customers (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
@@ -316,7 +316,7 @@ A misspelled key anywhere in this `config` fails the parse and is named in the e
 | `KafkaSource config: set the brokers with 'brokers', not properties.bootstrap.servers` | move the value to the `brokers` key |
 | `KafkaSource moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
 | `source type 'KafkaSource' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `stop_at_end #true`, or `compacted #true`, or switch to `run_mode kind="stream"` |
-| `KafkaSink config: 'key_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro transformer, or drop `key_field` |
+| `KafkaSink config: 'key_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro codec, or drop `key_field` |
 | `KafkaSource config: 'compacted' needs a row-per-message format; '{format}' emits one message per batch, which carries no per-row key` | the same, for the source |
 | `KafkaSink: format '{format}' has no message codec` | name a format that encodes discrete messages |
 

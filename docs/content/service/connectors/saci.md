@@ -151,7 +151,7 @@ saci-service validate --config examples/configs/saci.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: ticks (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -206,7 +206,7 @@ the list would answer the same way.
 The other two answers are about the network, and they are what `connect`'s order is for. A peer
 that cannot be dialled, that errors mid-handshake, or that stays silent past
 `handshake_timeout_ms`, is skipped and the next is tried. With no peer left the sink reports
-`SaciSink: no peer accepted a session:` followed by every address and what it said.
+`PeerSink: no peer accepted a session:` followed by every address and what it said.
 
 A write the sink sees fail drops the session, so the runner's retry redials and that batch is sent
 again, possibly to the next peer. There is no acknowledgement frame: a batch the socket already
@@ -254,8 +254,8 @@ Source:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `bind` | string | required | the address the listener accepts peer services on |
-| `buffer` | integer | `64` | batches queued before backpressure |
-| `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default |
+| `buffer` | integer | `64` | batches queued before backpressure; at least 1 |
+| `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default; at least 1 |
 | `schema_fields` | list of fields | required | the schema a peer's hello must declare |
 
 Sink:
@@ -263,21 +263,22 @@ Sink:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `connect` | string or list of strings | required | the peers this sink dials, in order |
-| `handshake_timeout_ms` | integer | `5000` | how long to wait for a peer's answer |
+| `handshake_timeout_ms` | integer | `5000` | how long to wait for a peer's answer; at least 1 |
 | `schema_fields` | list of fields | required | the schema announced to the peer |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector.
+An unrecognised key inside `config` is a configuration error naming the key, and so is a value of the wrong type. `schema_fields` is read beside these keys on both halves.
 
 ## When it refuses to start
 
 | Message | What to change |
 |---|---|
-| `saci source config requires a 'bind' string` | add `bind "host:port"` to the source's `config` |
-| `saci sink config requires 'connect', one address string or a list of them` | add `connect "host:port"` to the sink's `config` |
+| ``PeerSource config: missing field `bind` `` | add `bind "host:port"` to the source's `config` |
+| ``PeerSink config: missing field `connect` `` | add `connect "host:port"` to the sink's `config` |
+| `peer: '{key}' must be at least 1` | give `buffer`, `max_frame_bytes` or `handshake_timeout_ms` a positive value |
 | `saci needs the node identity (service, workflow, node) the host binds to every connector it builds` | declare the node inside a `workflow`; the host binds this itself |
-| `SaciSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
-| `SaciSink: cannot resolve 'connect' address '{connect}': {e}` | fix the host name or the port |
-| `SaciSink: 'connect' address '{connect}' resolved to no address` | the same, when the name resolves to nothing |
+| `PeerSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
+| `PeerSink: cannot resolve 'connect' address '{connect}': {e}` | fix the host name or the port |
+| `PeerSink: 'connect' address '{connect}' resolved to no address` | the same, when the name resolves to nothing |
 | `source type 'saci' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"`, or drop the `saci` source |
 
 ## Next

@@ -19,7 +19,7 @@ For a server that only adds factories, skip the assembly below. A binary crate w
         <title id="emb-title">From a loaded config to a running workflow, in your own binary</title>
         <desc id="emb-desc">
             ServiceConfig::load reads the KDL file. ServiceBuilder takes it, together with the
-            source, sink and transformer factories you register and any runtime you hand it
+            source, sink and codec factories you register and any runtime you hand it
             through with_runtime or with_wasm_engine, and build_all returns one BuiltService per
             declared workflow. Each BuiltService is passed to run_standalone, which owns the
             drain loop until its cancellation token fires.
@@ -30,7 +30,7 @@ For a server that only adds factories, skip the assembly below. A binary crate w
             <text class="t-sm" x="12" y="110">load("saci.kdl")</text>
         </g>
         <g class="anim anim-2">
-            <text class="t-sm t-ctl" x="176" y="22">register_source, register_sink, register_transformer</text>
+            <text class="t-sm t-ctl" x="176" y="22">register_source, register_sink, codec</text>
             <text class="t-sm t-ctl" x="176" y="40">with_wasm_engine, with_runtime</text>
             <path class="arw arw-ctl" d="M266 48 V64" marker-end="url(#emb-c)"/>
             <path class="arw arw-ctl" d="M140 98 H170" marker-end="url(#emb-c)"/>
@@ -68,17 +68,17 @@ For a server that only adds factories, skip the assembly below. A binary crate w
     </div>
 </div>
 
-## Your own sources, sinks, transformers, and runtime
+## Your own sources, sinks, codecs, and runtime
 
 A `type` string in the config is a key into a registry of factories. To add your
 own, implement one trait and register it before `build_all()`. The factory receives
-that node's `config` plus a `ConnectorContext` carrying the transformer the host
+that node's `config` plus a `ConnectorContext` carrying the codec the host
 resolved, and returns a boxed `Source` or `Sink`.
 
 ```rust,name=A sink factory for your own connector
 use saci::connector::{ConfigValue, ConnectorContext, SinkFactory};
 use saci::SaciError;
-use saci::io::sink::Sink;
+use saci::io::Sink;
 
 struct ClickHouseSinkFactory;
 
@@ -95,19 +95,19 @@ impl SinkFactory for ClickHouseSinkFactory {
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| SaciError::configuration("ClickHouseSink needs a 'url'"))?;
-        // The transformer is whichever declared `transformer` id this sink
+        // The codec is whichever declared `transformer` id this sink
         // named. Naming the connector puts it in the error a sink that named
         // none gets.
-        let transformer = ctx.transformer("ClickHouseSink")?;
-        Ok(Box::new(ClickHouseSink::connect(url, transformer)?))
+        let codec = ctx.codec("ClickHouseSink")?;
+        Ok(Box::new(ClickHouseSink::connect(url, codec)?))
     }
 }
 ```
 
 Then assemble the service yourself. `register_builtin_factories` adds the
-connectors and transformers whose features are on, plus a default
+connectors and codecs whose features are on, plus a default
 `ChannelRegistry` bridge when `connector-channel` is one of them, and nothing
-else. `register_source`, `register_sink` and `register_transformer` chain your
+else. `register_source`, `register_sink` and `codec` chain your
 own on, where registering the same name twice replaces the earlier factory.
 
 ```rust,name=Assembling the service yourself
@@ -123,7 +123,7 @@ let config = ServiceConfig::load("service.kdl")?;
 let mut built = register_builtin_factories(ServiceBuilder::new())
     .register_source(MongoSourceFactory)
     .register_sink(ClickHouseSinkFactory)
-    .register_transformer(ProtobufTransformerFactory)
+    .codec(ProtobufCodecFactory)
     .build_all(&config)?;
 
 // Each workflow gets its own runner. `None` opts out of publishing live stats

@@ -12,6 +12,7 @@
 
 use serde::Deserialize;
 
+use crate::connector::schema::without_schema_fields;
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
@@ -38,7 +39,7 @@ impl SourceFactory for KafkaSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let cfg = KafkaSourceConfig::deserialize(config.clone())
+        let cfg = KafkaSourceConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("KafkaSource config: {e}")))?;
         let schema = parse_schema_fields(config, "KafkaSource")?;
         let codec = ctx.codec("KafkaSource")?;
@@ -71,7 +72,7 @@ impl SinkFactory for KafkaSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let cfg = KafkaSinkConfig::deserialize(config.clone())
+        let cfg = KafkaSinkConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("KafkaSink config: {e}")))?;
         let schema = parse_schema_fields(config, "KafkaSink")?;
         let codec = ctx.codec("KafkaSink")?;

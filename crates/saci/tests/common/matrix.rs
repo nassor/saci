@@ -143,8 +143,8 @@
 //! Every codec implements all four codec methods, so every byte
 //! connector, on either end, has exactly one format it refuses,
 //! [`Format::None`], and it refuses it while building. The `message_shape`
-//! gates in `KafkaSink`, `NatsSink`, `TcpSink::connect` and
-//! `UdpSink::connect`, and the decoders `TcpIngestSource::new` and
+//! gates in `KafkaSink`, `NatsSink`, `TcpSink::new` and
+//! `UdpSink::new`, and the decoders `TcpSource::new` and
 //! `UdpSource::new` open, are all still live; no registered format trips
 //! them.
 //!
@@ -1498,7 +1498,7 @@ pub struct MariadbResource {
 
 /// A live S3-compatible endpoint with the run's one bucket created.
 pub struct S3Resource {
-    pub connection: saci::connector::s3::S3ConnectionConfig,
+    pub connection: saci::connector::s3::ConnectionConfig,
 }
 
 /// A live ClickHouse server.
@@ -1727,7 +1727,7 @@ fn s3_from_env() -> Option<S3Resource> {
         variable(name).unwrap_or_else(|| panic!("{S3_ENDPOINT} is set but {name} is not"))
     };
     Some(S3Resource {
-        connection: saci::connector::s3::S3ConnectionConfig {
+        connection: saci::connector::s3::ConnectionConfig {
             bucket: required(S3_BUCKET),
             endpoint: Some(endpoint),
             access_key_id: Some(required(S3_ACCESS_KEY_ID)),
@@ -2001,7 +2001,7 @@ fn encode_datagrams(format: Format, batch: &RecordBatch) -> Result<Vec<Vec<u8>>,
 /// hello before it accepts and the accept is what the first data frame waits
 /// on: splitting them would make the harness wait for a reply it does not read.
 fn saci_hello_and_batch(batch: &RecordBatch) -> Result<Vec<u8>, String> {
-    use saci::connector::saci::wire::{Frame, PROTOCOL_VERSION, data_header, encode_frame};
+    use saci::connector::peer::wire::{Frame, PROTOCOL_VERSION, data_header, encode_frame};
 
     let schema = batch.schema();
     let mut out = Vec::new();
@@ -2038,7 +2038,7 @@ fn saci_hello_and_batch(batch: &RecordBatch) -> Result<Vec<u8>, String> {
 /// reason to exist.
 fn decode_saci_session(bytes: &[u8]) -> Result<Vec<RecordBatch>, String> {
     use arrow_buffer::Buffer;
-    use saci::connector::saci::wire::{Frame, decode_frame};
+    use saci::connector::peer::wire::{Frame, decode_frame};
 
     let mut decoder = arrow_ipc::reader::StreamDecoder::new();
     let mut batches = Vec::new();
@@ -2372,9 +2372,9 @@ fn accept_session(mut stream: std::net::TcpStream, stop: &AtomicBool) -> Option<
         .set_read_timeout(Some(Duration::from_millis(250)))
         .ok()?;
     let mut accept = Vec::new();
-    saci::connector::saci::wire::encode_frame(
+    saci::connector::peer::wire::encode_frame(
         &mut accept,
-        &saci::connector::saci::wire::Frame::Accept,
+        &saci::connector::peer::wire::Frame::Accept,
     )
     .ok()?;
     stream.write_all(&accept).ok()?;
@@ -2527,7 +2527,7 @@ struct SourceSide {
     /// is serving. Kept apart from `tcp` because the driver is an HTTP client
     /// rather than a socket, and one document is one request.
     http_push: Option<(String, Vec<Vec<u8>>)>,
-    /// `(url, body bytes)` an `OpenTelemetryMetricsSource` is fed once the
+    /// `(url, body bytes)` an `OtlpMetricsSource` is fed once the
     /// runner is serving. Kept apart from `http_push` because the body is an
     /// OTLP request rather than a document in one of the byte formats, and
     /// the listener answers it `200` rather than `202`.
@@ -2550,13 +2550,13 @@ enum SourceProbe {
         schema: Arc<Schema>,
     },
     S3 {
-        connection: saci::connector::s3::S3ConnectionConfig,
+        connection: saci::connector::s3::ConnectionConfig,
         prefix: String,
         format: Format,
         schema: Arc<Schema>,
         schema_from: saci::connector::s3::SchemaFrom,
     },
-    /// The one probe that is fed rather than read: an `HttpPushSource` reaches
+    /// The one probe that is fed rather than read: an `HttpListenSource` reaches
     /// no EOF, so the refusal is taken from the one `next_batch` that the
     /// posted document answers.
     HttpPush {
@@ -2577,19 +2577,18 @@ impl SourceProbe {
                 schema,
             } => Box::new(
                 saci::connector::http::HttpSource::new(
-                    &url,
-                    format
-                        .codec()
-                        .ok_or("a probed source always names a format")?,
-                    saci::connector::http::HttpSourceOptions {
-                        client: saci::connector::http::HttpClientOptions {
+                    saci::connector::http::HttpSourceConfig {
+                        client: saci::connector::http::HttpClientConfig {
                             timeout: Duration::from_secs(15),
                             ..Default::default()
                         },
-                        declared: Some(schema),
                         schema_from: saci::connector::http::SchemaFrom::Body,
-                        ..Default::default()
+                        ..saci::connector::http::HttpSourceConfig::new(url)
                     },
+                    Some(schema),
+                    format
+                        .codec()
+                        .ok_or("a probed source always names a format")?,
                 )
                 .map_err(|e| format!("probe source: {e}"))?,
             ),
@@ -2605,7 +2604,6 @@ impl SourceProbe {
                         connection,
                         prefix,
                         schema_from,
-                        schema_fields: Vec::new(),
                     },
                     schema,
                     format
@@ -2639,7 +2637,7 @@ impl SourceProbe {
     }
 }
 
-/// Post `document` at a fresh `HttpPushSource` and return the refusal its one
+/// Post `document` at a fresh `HttpListenSource` and return the refusal its one
 /// `next_batch` reports.
 ///
 /// The listener is bound by `new`, so the request waits in the accept backlog
@@ -2651,15 +2649,14 @@ async fn push_refusal(
     codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
 ) -> Result<String, String> {
-    let mut source = saci::connector::http::HttpPushSource::new(
-        "127.0.0.1:0",
-        codec,
-        saci::connector::http::HttpPushOptions {
-            declared: schema,
+    let mut source = saci::connector::http::HttpListenSource::new(
+        saci::connector::http::HttpListenConfig {
             schema_from: saci::connector::http::SchemaFrom::Body,
             path: "/matrix".to_string(),
-            ..Default::default()
+            ..saci::connector::http::HttpListenConfig::new("127.0.0.1:0")
         },
+        schema,
+        codec,
     )
     .map_err(|e| format!("probe source: {e}"))?;
     let url = format!("http://{}/matrix", source.local_addr());
@@ -2684,8 +2681,8 @@ async fn push_refusal(
             "the connector refused nothing: it queued a batch of {} row(s)",
             batch.num_rows()
         )),
-        Ok(Ok(None)) => Err("the push source reported EOF, which it never does".to_string()),
-        Err(_) => Err("the push source answered neither a batch nor an error".to_string()),
+        Ok(Ok(None)) => Err("the listen source reported EOF, which it never does".to_string()),
+        Err(_) => Err("the listen source answered neither a batch nor an error".to_string()),
     }
 }
 
@@ -2753,7 +2750,7 @@ enum Readback {
         _dir: tempfile::TempDir,
     },
     S3 {
-        connection: saci::connector::s3::S3ConnectionConfig,
+        connection: saci::connector::s3::ConnectionConfig,
         prefix: String,
         format: Format,
     },
@@ -2761,7 +2758,7 @@ enum Readback {
         url: String,
         table: String,
     },
-    /// An `OpenTelemetryMetricsSink` posts its batches at a stand-in
+    /// An `OtlpMetricsSink` posts its batches at a stand-in
     /// collector, which answers `200` and keeps every body.
     Otlp {
         probe: HttpProbe,
@@ -2780,7 +2777,7 @@ struct Endpoints {
     mariadb_dsn: String,
     mysql_dsn: String,
     clickhouse_url: String,
-    s3: saci::connector::s3::S3ConnectionConfig,
+    s3: saci::connector::s3::ConnectionConfig,
 }
 
 impl Endpoints {
@@ -2809,7 +2806,7 @@ impl Endpoints {
             clickhouse_url: clickhouse
                 .map_or_else(|| "http://127.0.0.1:1".to_string(), |c| c.url.clone()),
             s3: s3.map_or_else(
-                || saci::connector::s3::S3ConnectionConfig {
+                || saci::connector::s3::ConnectionConfig {
                     bucket: "saci-matrix-placeholder".to_string(),
                     endpoint: Some("http://127.0.0.1:1".to_string()),
                     access_key_id: Some("key".to_string()),
@@ -2841,7 +2838,7 @@ async fn mysql_conn(dsn: &str) -> Result<mysql_async::Conn, String> {
         .map_err(|e| format!("mariadb connect: {e}"))
 }
 
-fn s3_connection_kdl(connection: &saci::connector::s3::S3ConnectionConfig, indent: &str) -> String {
+fn s3_connection_kdl(connection: &saci::connector::s3::ConnectionConfig, indent: &str) -> String {
     format!(
         "{indent}connection {{\n\
          {indent}    bucket \"{}\"\n\
@@ -2899,7 +2896,7 @@ fn turso_text(row: &turso::Row, idx: usize) -> Result<String, String> {
 
 /// Build the source node and seed whatever it will read.
 ///
-/// Local seeding is unconditional: `FileSource::open` reads the format's
+/// Local seeding is unconditional: `FileSource::new` reads the format's
 /// header while the factory builds, so even a case refused at build time needs
 /// a well-formed file. `live` is false for a case refused at build, and gates
 /// only the seeding that would touch a container.
@@ -3068,14 +3065,13 @@ async fn prepare_source(
             // to deliver: one request per case, holding every row of `batch`.
             // `seedable` gates it like every other seed here.
             let bodies = if seedable {
-                let request =
-                    saci::connector::opentelemetry::schema::record_batch_to_export_request(
-                        &batch, None, None,
-                    )
-                    .map_err(|e| format!("opentelemetry feed: {e}"))?;
+                let request = saci::connector::otlp::schema::record_batch_to_export_request(
+                    &batch, None, None,
+                )
+                .map_err(|e| format!("opentelemetry feed: {e}"))?;
                 vec![
-                    saci::connector::opentelemetry::schema::encode(
-                        saci::connector::opentelemetry::Encoding::Protobuf,
+                    saci::connector::otlp::schema::encode(
+                        saci::connector::otlp::Encoding::Protobuf,
                         &request,
                     )
                     .map_err(|e| format!("opentelemetry feed: {e}"))?,
@@ -3648,7 +3644,6 @@ async fn seed_kafka(
             flush_timeout_ms: 30_000,
             provision: saci::connector::kafka::TopicProvision::default(),
             properties: Default::default(),
-            schema_fields: Vec::new(),
         },
         batch.schema(),
         codec,
@@ -3683,7 +3678,6 @@ async fn seed_nats(
                     ..Default::default()
                 },
             )),
-            schema_fields: Vec::new(),
         },
         batch.schema(),
         codec,
@@ -3698,7 +3692,7 @@ async fn seed_nats(
 }
 
 async fn seed_s3(
-    connection: &saci::connector::s3::S3ConnectionConfig,
+    connection: &saci::connector::s3::ConnectionConfig,
     prefix: &str,
     format: Format,
     batch: &RecordBatch,
@@ -3714,7 +3708,6 @@ async fn seed_s3(
                 max_bytes: 0,
                 max_age_ms: 0,
             },
-            schema_fields: Vec::new(),
         },
         batch.schema(),
         codec,
@@ -3861,18 +3854,17 @@ async fn read_back(
                 if body.is_empty() {
                     continue;
                 }
-                let request = saci::connector::opentelemetry::schema::decode(
-                    saci::connector::opentelemetry::Encoding::Protobuf,
+                let request = saci::connector::otlp::schema::decode(
+                    saci::connector::otlp::Encoding::Protobuf,
                     "opentelemetry readback",
                     &body,
                 )
                 .map_err(|e| format!("opentelemetry readback: {e}"))?;
-                let (batch, _) =
-                    saci::connector::opentelemetry::schema::export_request_to_record_batches(
-                        &request,
-                        Some(&row.schema()),
-                    )
-                    .map_err(|e| format!("opentelemetry readback: {e}"))?;
+                let (batch, _) = saci::connector::otlp::schema::export_request_to_record_batches(
+                    &request,
+                    Some(&row.schema()),
+                )
+                .map_err(|e| format!("opentelemetry readback: {e}"))?;
                 let group = row.render(&batch, widened_unsigned)?;
                 if previous.as_ref() == Some(&group) {
                     continue;
@@ -3952,7 +3944,6 @@ async fn read_back(
                     compacted: false,
                     provision: saci::connector::kafka::TopicProvision::default(),
                     properties: Default::default(),
-                    schema_fields: Vec::new(),
                 },
                 row.schema(),
                 codec,
@@ -3983,7 +3974,6 @@ async fn read_back(
                     batch_size: 1000,
                     poll_timeout_ms: 5_000,
                     stop_at_end: true,
-                    schema_fields: Vec::new(),
                 },
                 row.schema(),
                 codec,
@@ -4202,7 +4192,6 @@ async fn read_back(
                     } else {
                         saci::connector::s3::SchemaFrom::Config
                     },
-                    schema_fields: Vec::new(),
                 },
                 row.readback_schema(widened_unsigned),
                 codec,

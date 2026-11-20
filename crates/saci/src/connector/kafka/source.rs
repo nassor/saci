@@ -406,7 +406,7 @@ impl KafkaSource {
 
     /// Collect into [`self.buffer`](Self::buffer) for a live
     /// (non-`stop_at_end`) source: the first message blocks indefinitely,
-    /// exactly like `TcpIngestSource` idling for a connection; the rest are
+    /// exactly like `TcpSource` idling for a connection; the rest are
     /// bounded by one `poll_timeout_ms` window. Messages a cancelled call
     /// left behind already satisfy the blocking phase.
     async fn collect_live(&mut self) -> Result<(), SaciError> {

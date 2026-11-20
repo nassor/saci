@@ -87,7 +87,7 @@ pub enum Pagination {
 /// `poll_timeout` since the window's first frame. `reconnect` is how long the
 /// reader waits before re-requesting a body that ended.
 #[derive(Debug, Clone, Copy)]
-pub struct Window {
+pub struct BatchWindow {
     /// Frames per batch. A decoder that cannot flush after refusing a frame,
     /// ndjson's among them, loses the open window's other frames with it, so a
     /// smaller `batch_size` bounds that loss.
@@ -98,7 +98,7 @@ pub struct Window {
     pub reconnect: Duration,
 }
 
-impl Default for Window {
+impl Default for BatchWindow {
     fn default() -> Self {
         Self {
             batch_size: 1_000,
@@ -120,14 +120,14 @@ pub enum ReadMode {
         conditional: bool,
     },
     /// A body that never ends, one record per line.
-    Lines(Window),
+    Lines(BatchWindow),
     /// A `text/event-stream` body that never ends.
     Events {
         /// When set, only events whose `event:` field equals this are decoded;
         /// every other event, and every unnamed one, is skipped.
         event: Option<String>,
         /// Batch and reconnect geometry.
-        window: Window,
+        window: BatchWindow,
     },
 }
 
@@ -142,7 +142,7 @@ impl Default for ReadMode {
 
 /// What both client halves take: transport, TLS, headers and the budget.
 #[derive(Debug, Clone)]
-pub struct HttpClientOptions {
+pub struct HttpClientConfig {
     /// Which HTTP version to speak.
     pub http_version: HttpVersion,
     /// The `tls` block: a private CA to trust, a client identity to present.
@@ -157,7 +157,7 @@ pub struct HttpClientOptions {
     pub identity: Option<NodeIdentity>,
 }
 
-impl Default for HttpClientOptions {
+impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
             http_version: HttpVersion::default(),
@@ -169,19 +169,33 @@ impl Default for HttpClientOptions {
     }
 }
 
-/// Everything [`HttpSource::new`] takes past the url and the codec.
-#[derive(Debug, Clone, Default)]
-pub struct HttpSourceOptions {
+/// What [`HttpSource::new`] takes past the schema and the codec.
+#[derive(Debug, Clone)]
+pub struct HttpSourceConfig {
+    /// The resource to read.
+    pub url: String,
     /// Transport, TLS, headers and the budget.
-    pub client: HttpClientOptions,
-    /// The schema the config declared, `None` when it declared none.
-    pub declared: Option<Arc<Schema>>,
+    pub client: HttpClientConfig,
     /// Where the schema handed to the format comes from.
     pub schema_from: SchemaFrom,
     /// What shape the resource is.
     pub mode: ReadMode,
     /// The largest body to accept, `None` for no cap.
     pub max_body_bytes: Option<usize>,
+}
+
+impl HttpSourceConfig {
+    /// A document mode read of `url` with the default client, the schema
+    /// handed to the format as declared, and no body cap.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            client: HttpClientConfig::default(),
+            schema_from: SchemaFrom::default(),
+            mode: ReadMode::default(),
+            max_body_bytes: None,
+        }
+    }
 }
 
 /// What the source and the reader task share: the transport and the target.
@@ -238,7 +252,7 @@ struct DocumentState {
 
 /// Streaming mode state: the reader task and the channel it feeds.
 struct StreamState {
-    window: Window,
+    window: BatchWindow,
     /// `Some` in [`ReadMode::Events`], carrying the optional event filter.
     events: Option<Option<String>>,
     batches: Option<mpsc::Receiver<Result<RecordBatch, SaciError>>>,
@@ -270,19 +284,18 @@ enum Engine {
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::{DataType, Field, Schema};
-/// use saci::connector::http::{HttpSource, HttpSourceOptions, SchemaFrom};
+/// use saci::connector::http::{HttpSource, HttpSourceConfig, SchemaFrom};
 /// use saci::codec::csv::CsvCodec;
 ///
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 /// // csv carries no schema of its own, so the declared one is required.
 /// let src = HttpSource::new(
-///     "https://example.invalid/orders.csv",
-///     Arc::new(CsvCodec::new()),
-///     HttpSourceOptions {
-///         declared: Some(schema),
+///     HttpSourceConfig {
 ///         schema_from: SchemaFrom::Config,
-///         ..HttpSourceOptions::default()
+///         ..HttpSourceConfig::new("https://example.invalid/orders.csv")
 ///     },
+///     Some(schema),
+///     Arc::new(CsvCodec::new()),
 /// )
 /// .unwrap();
 /// ```
@@ -305,11 +318,12 @@ pub struct HttpSource {
 impl HttpSource {
     /// Prepare the source without making a request.
     ///
-    /// `url` is read on the first batch. In a streaming mode the codec's
-    /// message decoder is opened here, against the declared schema, so a
-    /// format that cannot decode discrete messages is a configuration error
-    /// before a connection is opened rather than a reader that connects,
-    /// closes, and delivers nothing.
+    /// `config.url` is read on the first batch. `schema` is the declared
+    /// schema, `None` when the config declared none. In a streaming mode the
+    /// codec's message decoder is opened here, against it, so a format that
+    /// cannot decode discrete messages is a configuration error before a
+    /// connection is opened rather than a reader that connects, closes, and
+    /// delivers nothing.
     ///
     /// # Errors
     ///
@@ -321,22 +335,22 @@ impl HttpSource {
     /// when a `tls` file is missing or malformed, or when the HTTP client
     /// cannot be built. No request is made.
     pub fn new(
-        url: &str,
+        config: HttpSourceConfig,
+        schema: Option<Arc<Schema>>,
         codec: Arc<dyn Codec>,
-        options: HttpSourceOptions,
     ) -> Result<Self, SaciError> {
-        let HttpSourceOptions {
+        let HttpSourceConfig {
+            url,
             client: client_options,
-            declared,
             schema_from,
             mode,
             max_body_bytes,
-        } = options;
+        } = config;
 
         // Without a declared schema there is nothing for `Source::schema` to
         // report, so `validate_workflow_graph` would reject the link before a
         // request is ever made. Refusing here names the missing key instead.
-        if schema_from == SchemaFrom::Body && declared.is_none() {
+        if schema_from == SchemaFrom::Body && schema.is_none() {
             return Err(SaciError::configuration(
                 "HttpSource: schema_from \"body\" needs a 'schema_fields' list to check the \
                  body's own schema against",
@@ -348,7 +362,7 @@ impl HttpSource {
                 "HttpSource: schema_from \"body\" applies to mode kind=\"document\" only",
             ));
         }
-        let declared_for_stream = match (streaming, &declared) {
+        let declared_for_stream = match (streaming, &schema) {
             (false, _) => None,
             (true, Some(schema)) => Some(Arc::clone(schema)),
             (true, None) => {
@@ -362,7 +376,7 @@ impl HttpSource {
                 )));
             }
         };
-        client::require_https(WHAT, client_options.http_version, url)?;
+        client::require_https(WHAT, client_options.http_version, &url)?;
 
         // The answer depends on the schema and nothing else, so every
         // connection would get the same one. Asking here is what makes a
@@ -423,16 +437,16 @@ impl HttpSource {
         Ok(Self {
             request: Arc::new(Request {
                 client,
-                url: url.to_string(),
+                url,
                 headers: client::header_map(WHAT, headers)?,
                 metrics: Instruments::new("source", client_options.identity.as_ref()),
             }),
             codec,
-            schema: match &declared {
+            schema: match &schema {
                 Some(schema) => Arc::clone(schema),
                 None => Arc::new(Schema::empty()),
             },
-            declared,
+            declared: schema,
             schema_from,
             max_body_bytes,
             engine,
@@ -650,7 +664,7 @@ async fn read_stream(
     request: Arc<Request>,
     codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
-    window: Window,
+    window: BatchWindow,
     events: Option<Option<String>>,
     cap: Option<usize>,
     tx: mpsc::Sender<Result<RecordBatch, SaciError>>,
@@ -727,7 +741,7 @@ async fn read_body(
     request: &Arc<Request>,
     codec: &Arc<dyn Codec>,
     schema: &Arc<Schema>,
-    window: Window,
+    window: BatchWindow,
     events: Option<&Option<String>>,
     cap: Option<usize>,
     tx: &mpsc::Sender<Result<RecordBatch, SaciError>>,
@@ -892,7 +906,7 @@ struct Frames<'a> {
     codec: &'a Arc<dyn Codec>,
     schema: &'a Arc<Schema>,
     tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
-    window: Window,
+    window: BatchWindow,
     decoder: Box<dyn crate::codec::MessageDecoder>,
     /// Frames pushed since the last close.
     pushed: usize,
@@ -912,7 +926,7 @@ impl<'a> Frames<'a> {
         codec: &'a Arc<dyn Codec>,
         schema: &'a Arc<Schema>,
         tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
-        window: Window,
+        window: BatchWindow,
     ) -> Result<Self, SaciError> {
         Ok(Self {
             metrics,
@@ -1235,9 +1249,9 @@ mod tests {
         let codec: Arc<dyn Codec> = Arc::new(CleanFormat);
         let schema = stub_schema();
         let (tx, mut rx) = mpsc::channel(8);
-        let window = Window {
+        let window = BatchWindow {
             batch_size: 1_000,
-            ..Window::default()
+            ..BatchWindow::default()
         };
 
         let mut decode = Frames::open(&metrics, &codec, &schema, &tx, window).expect("open");
@@ -1267,7 +1281,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
 
         let mut decode =
-            Frames::open(&metrics, &codec, &schema, &tx, Window::default()).expect("open");
+            Frames::open(&metrics, &codec, &schema, &tx, BatchWindow::default()).expect("open");
         decode
             .push(frames(&[r#"{"id":1}"#, "not json", r#"{"id":2}"#]))
             .await

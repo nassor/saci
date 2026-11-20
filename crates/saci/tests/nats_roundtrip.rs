@@ -82,7 +82,6 @@ fn core_source_cfg(url: &str, subject: &str) -> NatsSourceConfig {
         batch_size: 1000,
         poll_timeout_ms: 2_000,
         stop_at_end: true,
-        schema_fields: vec![],
     }
 }
 
@@ -93,7 +92,6 @@ fn core_sink_cfg(url: &str, subject: &str) -> NatsSinkConfig {
             subject: subject.to_string(),
             ..CoreSinkMode::default()
         }),
-        schema_fields: vec![],
     }
 }
 
@@ -110,7 +108,6 @@ fn js_source_cfg(url: &str, stream: &str, durable: &str) -> NatsSourceConfig {
         batch_size: 1000,
         poll_timeout_ms: 2_000,
         stop_at_end: true,
-        schema_fields: vec![],
     }
 }
 
@@ -125,7 +122,6 @@ fn js_sink_cfg(url: &str, stream: &str, subject: &str) -> NatsSinkConfig {
             subject: subject.to_string(),
             ..JetstreamSinkMode::default()
         })),
-        schema_fields: vec![],
     }
 }
 

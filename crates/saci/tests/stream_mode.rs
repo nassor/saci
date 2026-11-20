@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use saci::codec::arrow_ipc::ArrowIpcCodec;
 use saci::connector::channel::{ChannelSink, ChannelSource};
-use saci::connector::tcp::TcpIngestSource;
+use saci::connector::tcp::{TcpSource, TcpSourceConfig};
 use saci::error::SaciError;
 use saci::io::Source;
 use saci::runtime::PipelineRuntime;
@@ -176,7 +176,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn channel_source(schema: Arc<Schema>, buffer: usize) -> (mpsc::Sender<RecordBatch>, BuiltNode) {
-    let (tx, src) = ChannelSource::new(schema, buffer);
+    let (src, tx) = ChannelSource::new(schema, buffer);
     (
         tx,
         BuiltNode {
@@ -492,7 +492,7 @@ async fn stream_primes_every_source_before_blocking_on_any() {
         type_name: "SubscribeOnFirstPollSource".to_string(),
         component: Some(COMP),
         kind: BuiltNodeKind::Source(Box::new(SubscribeOnFirstPollSource {
-            inner: ChannelSource::from_receiver(Arc::clone(&schema), rx_a),
+            inner: ChannelSource::with_receiver(Arc::clone(&schema), rx_a),
             subscribed: Arc::clone(&subscribed_a),
         })),
         downstream: Vec::new(),
@@ -507,7 +507,7 @@ async fn stream_primes_every_source_before_blocking_on_any() {
         type_name: "SubscribeOnFirstPollSource".to_string(),
         component: Some(COMP),
         kind: BuiltNodeKind::Source(Box::new(SubscribeOnFirstPollSource {
-            inner: ChannelSource::from_receiver(Arc::clone(&schema), rx_b),
+            inner: ChannelSource::with_receiver(Arc::clone(&schema), rx_b),
             subscribed: Arc::clone(&subscribed_b),
         })),
         downstream: Vec::new(),
@@ -624,11 +624,13 @@ async fn recv_timeout(rx: &mut mpsc::Receiver<RecordBatch>) -> RecordBatch {
 #[tokio::test]
 async fn stream_ingests_tcp_frames_and_survives_a_bad_connection() {
     let schema = test_schema();
-    let tcp = TcpIngestSource::new(
-        "127.0.0.1:0",
+    let tcp = TcpSource::new(
+        TcpSourceConfig {
+            buffer: 8,
+            max_frame_bytes: 4096,
+            ..TcpSourceConfig::new("127.0.0.1:0")
+        },
         Arc::clone(&schema),
-        8,
-        4096,
         Arc::new(ArrowIpcCodec::new()),
     )
     .unwrap();
@@ -637,7 +639,7 @@ async fn stream_ingests_tcp_frames_and_survives_a_bad_connection() {
     let source = BuiltNode {
         id: "tcp_in".to_string(),
         name: None,
-        type_name: "TcpIngestSource".to_string(),
+        type_name: "tcp".to_string(),
         component: Some(COMP),
         kind: BuiltNodeKind::Source(Box::new(tcp)),
         downstream: Vec::new(),

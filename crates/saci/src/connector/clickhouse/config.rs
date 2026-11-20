@@ -46,7 +46,7 @@ pub enum CompressionConfig {
 /// Connection settings for ClickHouse.
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ClickhouseConnectionConfig {
+pub struct ConnectionConfig {
     /// ClickHouse HTTP endpoint URL (e.g. `http://localhost:8123`).
     pub url: String,
     /// Optional username for authentication.
@@ -69,7 +69,7 @@ pub struct ClickhouseConnectionConfig {
     pub settings: HashMap<String, String>,
 }
 
-impl ClickhouseConnectionConfig {
+impl ConnectionConfig {
     /// Validates connection settings.
     pub fn validate(&self, what: &str) -> Result<(), SaciError> {
         let url = self.url.trim();
@@ -341,7 +341,7 @@ pub struct ClickhouseSourceConfig {
     /// Stable name for this source instance.
     pub name: String,
     /// Connection configuration.
-    pub connection: ClickhouseConnectionConfig,
+    pub connection: ConnectionConfig,
     /// Read mode.
     pub mode: SourceMode,
     /// Declared Arrow schema fields.
@@ -466,7 +466,7 @@ pub struct ClickhouseSinkConfig {
     /// Stable name for this sink instance.
     pub name: String,
     /// Connection configuration.
-    pub connection: ClickhouseConnectionConfig,
+    pub connection: ConnectionConfig,
     /// Destination table name.
     pub table: String,
     /// Declared Arrow schema fields.
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn connection_config_requires_valid_url() {
-        let valid = ClickhouseConnectionConfig {
+        let valid = ConnectionConfig {
             url: "http://127.0.0.1:8123".to_string(),
             user: None,
             password: None,
@@ -633,19 +633,19 @@ mod tests {
         };
         assert!(valid.validate("test").is_ok());
 
-        let empty_url = ClickhouseConnectionConfig {
+        let empty_url = ConnectionConfig {
             url: "   ".to_string(),
             ..valid.clone()
         };
         assert!(empty_url.validate("test").is_err());
 
-        let bad_scheme = ClickhouseConnectionConfig {
+        let bad_scheme = ConnectionConfig {
             url: "ftp://127.0.0.1".to_string(),
             ..valid.clone()
         };
         assert!(bad_scheme.validate("test").is_err());
 
-        let empty_db = ClickhouseConnectionConfig {
+        let empty_db = ConnectionConfig {
             database: "  ".to_string(),
             ..valid
         };
@@ -656,7 +656,7 @@ mod tests {
     fn source_config_validates_polling_cursor_column() {
         let valid = ClickhouseSourceConfig {
             name: "src".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -717,7 +717,7 @@ mod tests {
     fn source_config_validation_failures() {
         let base = ClickhouseSourceConfig {
             name: "src".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -849,7 +849,7 @@ mod tests {
     fn sink_config_validation() {
         let valid = ClickhouseSinkConfig {
             name: "sink".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn deny_unknown_fields_on_config_structs() {
         let conn_json = r#"{"url": "http://localhost:8123", "unknown_key": 123}"#;
-        assert!(serde_json::from_str::<ClickhouseConnectionConfig>(conn_json).is_err());
+        assert!(serde_json::from_str::<ConnectionConfig>(conn_json).is_err());
 
         let field_json = r#"{"id": "col", "type": "int64", "extra": "invalid"}"#;
         assert!(serde_json::from_str::<FieldSpec>(field_json).is_err());

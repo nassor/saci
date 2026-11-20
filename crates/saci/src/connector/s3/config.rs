@@ -6,7 +6,7 @@
 //! passthrough `options` table carries every option that is not a named key
 //! here, and an unrecognised key there is an error too.
 //!
-//! [`S3ConnectionConfig::build_store`] constructs the client and is the one
+//! [`ConnectionConfig::build_store`] constructs the client and is the one
 //! place either half builds one. It is synchronous and opens no connection, so
 //! `saci-service validate` and a `serve` that cannot reach the endpoint stay
 //! load-time-safe: the first request happens inside `next_batch`/`write_batch`.
@@ -19,13 +19,12 @@ use object_store::ObjectStore;
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use serde::Deserialize;
 
-use crate::connector::ConfigValue;
 use crate::error::SaciError;
 
 /// Endpoint, credentials and client options shared by both halves.
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
-pub struct S3ConnectionConfig {
+pub struct ConnectionConfig {
     /// Bucket both halves address. Required; `object_store` has no bucket
     /// creation API, so the bucket must already exist.
     pub bucket: String,
@@ -73,7 +72,7 @@ pub struct S3ConnectionConfig {
     pub options: BTreeMap<String, String>,
 }
 
-impl S3ConnectionConfig {
+impl ConnectionConfig {
     /// Build the object client both halves share.
     ///
     /// Synchronous and opens no connection: construction never touches the
@@ -147,7 +146,7 @@ pub enum SchemaFrom {
 #[serde(deny_unknown_fields)]
 pub struct S3SourceConfig {
     /// Endpoint, credentials and client options.
-    pub connection: S3ConnectionConfig,
+    pub connection: ConnectionConfig,
     /// Path prefix listed, `orders/2026` style. Empty lists the whole bucket.
     /// Handed verbatim to the service's list API, so it is a byte prefix:
     /// `orders` also matches `orders-old/a.csv`. Name prefixes with a trailing
@@ -157,11 +156,6 @@ pub struct S3SourceConfig {
     /// Where the Arrow schema handed to the format comes from.
     #[serde(default)]
     pub schema_from: SchemaFrom,
-    /// Declared Arrow schema. Required: `Source::schema()` is read at load
-    /// time by `validate_workflow_graph`, before any request is made, so the
-    /// schema cannot be discovered from the bucket.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// Configuration for [`crate::connector::s3::sink::S3Sink`].
@@ -169,7 +163,7 @@ pub struct S3SourceConfig {
 #[serde(deny_unknown_fields)]
 pub struct S3SinkConfig {
     /// Endpoint, credentials and client options.
-    pub connection: S3ConnectionConfig,
+    pub connection: ConnectionConfig,
     /// Path prefix every written object lands under.
     #[serde(default)]
     pub prefix: String,
@@ -180,10 +174,6 @@ pub struct S3SinkConfig {
     /// The row/byte/age thresholds that close the open object.
     #[serde(default)]
     pub flush: Flush,
-    /// Declared Arrow schema. Required, whatever the codec: it is the
-    /// schema the rows are written with.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// How much this sink accumulates, or how long it waits, before it writes the
@@ -242,7 +232,7 @@ fn default_flush_max_age_ms() -> u64 {
 mod tests {
     use super::*;
 
-    use crate::connector::from_kdl_str;
+    use crate::connector::{ConfigValue, from_kdl_str};
 
     fn config(raw: &str) -> ConfigValue {
         from_kdl_str(raw).expect("parse test config")
@@ -268,7 +258,13 @@ mod tests {
             .expect("source config parses");
         assert_eq!(src.schema_from, SchemaFrom::Config);
         assert_eq!(src.prefix, "");
-        assert!(src.schema_fields.is_empty());
+    }
+
+    #[test]
+    fn the_schema_fields_key_belongs_to_the_factory_not_the_structs() {
+        let text = "connection { bucket \"b\" }\nschema_fields \"id\" type=\"int64\"";
+        assert!(S3SourceConfig::deserialize(config(text)).is_err());
+        assert!(S3SinkConfig::deserialize(config(text)).is_err());
     }
 
     #[test]
@@ -276,14 +272,14 @@ mod tests {
         let err = S3SinkConfig::deserialize(config("connection { bucket \"b\" }\nbogus_key \"x\""))
             .expect_err("unknown key must be rejected");
         assert!(err.to_string().contains("bogus_key"));
-        let err = S3ConnectionConfig::deserialize(config("bucket \"b\"\nbogus 1"))
+        let err = ConnectionConfig::deserialize(config("bucket \"b\"\nbogus 1"))
             .expect_err("unknown connection key must be rejected");
         assert!(err.to_string().contains("bogus"));
     }
 
     #[test]
     fn an_unknown_connection_option_is_a_configuration_error_naming_it() {
-        let cfg = S3ConnectionConfig::deserialize(config(
+        let cfg = ConnectionConfig::deserialize(config(
             "bucket \"b\"\noptions {\n    bogus_key \"v\"\n}",
         ))
         .expect("config parses");
@@ -303,7 +299,7 @@ mod tests {
 
     #[test]
     fn build_store_makes_no_request() {
-        let cfg = S3ConnectionConfig::deserialize(config(
+        let cfg = ConnectionConfig::deserialize(config(
             "bucket \"b\"\nendpoint \"http://127.0.0.1:1\"\nallow_http #true",
         ))
         .expect("config parses");

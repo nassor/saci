@@ -113,7 +113,7 @@ processor and runs them end to end.
 | `derive` | `#[derive(Component)]`; included in `engine`, `processor` and `plugin` |
 | `windows` | Tumbling, sliding and session windows with watermarks |
 | `connector-<name>` | One transport in `saci::connector`; `connectors` enables the seven that need no external service |
-| `transformer-<format>` | One byte format in `saci::transformer`; `transformers` enables all five |
+| `codec-<format>` | One byte format in `saci::codec`; `codecs` enables all five |
 | `processor` | The wasm32-wasip3 processor SDK and the `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |
 | `service`, `wasm-host`, `plugin-host` | The host: KDL config, runners, HTTP control plane, the two processor hosts |

@@ -50,7 +50,6 @@ const CHANNEL_CAPACITY: usize = 4;
 ///     check_integrity: false,
 ///     cache_size_bytes: None,
 ///     consume: false,
-///     schema_fields: Vec::new(),
 /// };
 /// let src = RedbSource::new(
 ///     config,

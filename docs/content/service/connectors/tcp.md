@@ -1,6 +1,6 @@
 +++
 title = "TCP"
-description = "Two halves of one frame: a source that listens and a sink that dials, with the payload decoded and encoded by the transformer you name."
+description = "Two halves of one frame: a source that listens and a sink that dials, with the payload decoded and encoded by the codec you name."
 template = "subpage.html"
 weight = 7
 aliases = ["/connectors/tcp/"]
@@ -167,7 +167,7 @@ saci-service validate --config examples/configs/tcp.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: ticks (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -228,8 +228,8 @@ Source:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `bind` | string | required | the address the listener accepts producers on |
-| `buffer` | integer | `64` | decoded batches queued before backpressure |
-| `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default |
+| `buffer` | integer | `64` | decoded batches queued before backpressure; at least 1 |
+| `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default; at least 1 |
 | `schema_fields` | list of fields | required | the schema each payload decodes against |
 
 Sink:
@@ -239,18 +239,20 @@ Sink:
 | `connect` | string | required | the peer this sink dials |
 | `schema_fields` | list of fields | required | the schema the frames are written with |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector.
+An unrecognised key inside `config` is a configuration error naming the key, and so is a value of the wrong type. `schema_fields` is read beside these keys on both halves.
 
 ## When it refuses to start
 
 | Message | What to change |
 |---|---|
-| `tcp source config requires a 'bind' string` | add `bind "host:port"` to the source's `config` |
-| `tcp sink config requires a 'connect' string` | add `connect "host:port"` to the sink's `config` |
+| ``TcpSource config: missing field `bind` `` | add `bind "host:port"` to the source's `config` |
+| ``TcpSink config: missing field `connect` `` | add `connect "host:port"` to the sink's `config` |
+| ``TcpSource config: unknown field `{key}`, expected one of `bind`, `buffer`, `max_frame_bytes` `` | fix the key's spelling, or drop it |
+| `tcp: '{key}' must be at least 1` | give `buffer` or `max_frame_bytes` a positive value |
 | `tcp moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
 | `format '{format}' does not support decoding discrete messages` | name a format that decodes discrete messages |
 | `TcpSink: format '{format}' has no message codec` | the same, for the sink |
-| `TcpIngestSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
+| `TcpSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
 | `TcpSink: cannot resolve 'connect' address '{connect}': {e}` | fix the host name or the port |
 | `TcpSink: 'connect' address '{connect}' resolved to no address` | the same, when the name resolves to nothing |
 | `source type 'tcp' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"`, or drop the `tcp` source |

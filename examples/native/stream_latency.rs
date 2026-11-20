@@ -92,7 +92,7 @@ async fn native_latency() -> Vec<u64> {
 
     // Buffer 1 on both ends keeps the producer from running ahead, so each
     // sample is one full source to sink traversal.
-    let (tx, source) = ChannelSource::new(Arc::clone(&schema), 1);
+    let (source, tx) = ChannelSource::new(Arc::clone(&schema), 1);
     let (sink, mut rx) = ChannelSink::new(Arc::clone(&schema), 1);
 
     let service = BuiltService {

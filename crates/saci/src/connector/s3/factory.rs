@@ -8,6 +8,7 @@
 
 use serde::Deserialize;
 
+use crate::connector::schema::without_schema_fields;
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
@@ -21,7 +22,7 @@ use crate::connector::s3::{S3Sink, S3Source};
 ///
 /// Config fields:
 /// - `connection` (node, required): endpoint, credentials and client options;
-///   see [`S3ConnectionConfig`](crate::connector::s3::S3ConnectionConfig).
+///   see [`ConnectionConfig`](crate::connector::s3::ConnectionConfig).
 /// - `prefix` (string, optional): the path prefix listed. Empty lists the
 ///   whole bucket.
 /// - `schema_from` (`"config"` or `"object"`, optional): where the Arrow
@@ -42,7 +43,7 @@ impl SourceFactory for S3SourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let cfg = S3SourceConfig::deserialize(config.clone())
+        let cfg = S3SourceConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("S3Source config: {e}")))?;
         let codec = ctx.codec("S3Source")?;
         let schema = parse_schema_fields(config, "S3Source")?;
@@ -65,7 +66,7 @@ impl SourceFactory for S3SourceFactory {
 ///
 /// Config fields:
 /// - `connection` (node, required): endpoint, credentials and client options;
-///   see [`S3ConnectionConfig`](crate::connector::s3::S3ConnectionConfig).
+///   see [`ConnectionConfig`](crate::connector::s3::ConnectionConfig).
 /// - `prefix` (string, optional): the path prefix every written object lands
 ///   under.
 /// - `suffix` (string, optional): appended to the generated object key.
@@ -88,7 +89,7 @@ impl SinkFactory for S3SinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let cfg = S3SinkConfig::deserialize(config.clone())
+        let cfg = S3SinkConfig::deserialize(without_schema_fields(config))
             .map_err(|e| SaciError::configuration(format!("S3Sink config: {e}")))?;
         let codec = ctx.codec("S3Sink")?;
         let schema = parse_schema_fields(config, "S3Sink")?;

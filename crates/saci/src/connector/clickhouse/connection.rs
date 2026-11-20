@@ -3,15 +3,15 @@
 use crate::error::SaciError;
 
 use crate::connector::clickhouse::config::{
-    ClickhouseConnectionConfig, ClickhouseFieldType, CompressionConfig,
+    ClickhouseFieldType, CompressionConfig, ConnectionConfig,
 };
 
-/// Builds a [`clickhouse::Client`] from [`ClickhouseConnectionConfig`].
+/// Builds a [`clickhouse::Client`] from [`ConnectionConfig`].
 ///
 /// # Errors
 ///
 /// Returns [`SaciError::Configuration`] if the URL or database is malformed.
-pub fn build_client(config: &ClickhouseConnectionConfig) -> Result<clickhouse::Client, SaciError> {
+pub fn build_client(config: &ConnectionConfig) -> Result<clickhouse::Client, SaciError> {
     config.validate("clickhouse connection")?;
 
     let mut client = clickhouse::Client::default().with_url(&config.url);
@@ -150,7 +150,7 @@ mod tests {
         let mut settings = HashMap::new();
         settings.insert("max_execution_time".to_string(), "60".to_string());
 
-        let cfg = ClickhouseConnectionConfig {
+        let cfg = ConnectionConfig {
             url: "https://clickhouse.internal:8443".to_string(),
             user: Some("admin".to_string()),
             password: Some("s3cret".to_string()),
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn build_client_fails_on_invalid_config() {
         use std::collections::HashMap;
-        let cfg = ClickhouseConnectionConfig {
+        let cfg = ConnectionConfig {
             url: "not_a_valid_url".to_string(),
             user: None,
             password: None,

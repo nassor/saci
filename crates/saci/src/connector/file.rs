@@ -24,10 +24,13 @@
 
 #![deny(missing_docs)]
 
+mod config;
+
 pub mod factory;
 pub mod sink;
 pub mod source;
 
+pub use config::{FileSinkConfig, FileSourceConfig};
 pub use factory::{FileSinkFactory, FileSourceFactory};
 pub use sink::FileSink;
 pub use source::FileSource;

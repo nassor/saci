@@ -1,4 +1,4 @@
-//! [`TcpIngestSource`]: live TCP [`Source`] for stream mode.
+//! [`TcpSource`]: live TCP [`Source`] for stream mode.
 //!
 //! Listens on a bind address and yields one [`RecordBatch`] per received frame.
 //! It never reaches EOF: `next_batch` blocks until the next frame arrives, so
@@ -26,9 +26,9 @@
 //!
 //! Whether the format can decode a message at all is not a protocol violation
 //! but a property of the config, and the answer is the same for every
-//! connection. [`new`](TcpIngestSource::new) therefore asks the codec
+//! connection. [`new`](TcpSource::new) therefore asks the codec
 //! for a decoder while building and hands the refusal back, the way
-//! `FileSource::open` asks its codec for a reader. A source that
+//! `FileSource::new` asks its codec for a reader. A source that
 //! deferred that answer would accept every connection, close it, and deliver
 //! nothing.
 
@@ -38,12 +38,13 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::codec::Codec;
+use crate::connector::tcp::TcpSourceConfig;
 use crate::error::SaciError;
 use crate::io::Source;
 
@@ -57,7 +58,7 @@ use crate::io::Source;
 /// Backpressure comes from the channel: once `buffer` batches are queued,
 /// reader tasks stop consuming their sockets and TCP flow control pushes back
 /// on the producers.
-pub struct TcpIngestSource {
+pub struct TcpSource {
     listener: Option<std::net::TcpListener>,
     local_addr: SocketAddr,
     schema: Arc<Schema>,
@@ -68,27 +69,28 @@ pub struct TcpIngestSource {
     listener_task: Option<JoinHandle<()>>,
 }
 
-impl TcpIngestSource {
-    /// Bind `bind` and prepare the ingest channel.
+impl TcpSource {
+    /// Bind `config.bind` and prepare the ingest channel.
     ///
-    /// `buffer` is the number of decoded batches that may queue before
-    /// backpressure reaches the producers. `max_frame_bytes` caps a single
-    /// frame; a producer that announces more has its connection closed.
-    /// `codec` decodes each frame's payload; every accepted connection
-    /// opens its own decoder from it, and one is opened here to settle whether
-    /// this format can decode a message against `schema` at all.
+    /// `config.buffer` is the number of decoded batches that may queue before
+    /// backpressure reaches the producers. `config.max_frame_bytes` caps a
+    /// single frame; a producer that announces more has its connection
+    /// closed. `codec` decodes each frame's payload; every accepted
+    /// connection opens its own decoder from it, and one is opened here to
+    /// settle whether this format can decode a message against `schema` at
+    /// all.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `codec` cannot open a
-    /// message decoder for `schema`, or if `bind` cannot be bound.
+    /// Returns [`SaciError::Configuration`] if `buffer` or `max_frame_bytes`
+    /// is `0`, if `codec` cannot open a message decoder for `schema`, or if
+    /// `bind` cannot be bound.
     pub fn new(
-        bind: &str,
+        config: TcpSourceConfig,
         schema: Arc<Schema>,
-        buffer: usize,
-        max_frame_bytes: usize,
         codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
+        config.validate()?;
         // Opening a decoder reads `schema` and nothing else, so every
         // connection would get this same answer. Asking here is what makes a
         // format with no message decoder a config error the caller is told
@@ -96,17 +98,22 @@ impl TcpIngestSource {
         // nothing at all.
         codec.open_message_decoder(Arc::clone(&schema))?;
 
-        let listener = std::net::TcpListener::bind(bind).map_err(|e| {
-            SaciError::configuration(format!("TcpIngestSource: cannot bind '{bind}': {e}"))
+        let TcpSourceConfig {
+            bind,
+            buffer,
+            max_frame_bytes,
+        } = config;
+        let listener = std::net::TcpListener::bind(&bind).map_err(|e| {
+            SaciError::configuration(format!("TcpSource: cannot bind '{bind}': {e}"))
         })?;
         listener.set_nonblocking(true).map_err(|e| {
-            SaciError::configuration(format!("TcpIngestSource: set_nonblocking failed: {e}"))
+            SaciError::configuration(format!("TcpSource: set_nonblocking failed: {e}"))
         })?;
-        let local_addr = listener.local_addr().map_err(|e| {
-            SaciError::configuration(format!("TcpIngestSource: local_addr failed: {e}"))
-        })?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| SaciError::configuration(format!("TcpSource: local_addr failed: {e}")))?;
 
-        let (tx, rx) = mpsc::channel(buffer.max(1));
+        let (tx, rx) = mpsc::channel(buffer);
 
         Ok(Self {
             listener: Some(listener),
@@ -134,7 +141,7 @@ impl TcpIngestSource {
             Ok(l) => l,
             Err(_e) => {
                 #[cfg(feature = "tracing")]
-                tracing::error!(error = %_e, "TcpIngestSource: cannot adopt listener into runtime");
+                tracing::error!(error = %_e, "TcpSource: cannot adopt listener into runtime");
                 return;
             }
         };
@@ -150,7 +157,7 @@ impl TcpIngestSource {
                     Ok(pair) => pair,
                     Err(_e) => {
                         #[cfg(feature = "tracing")]
-                        tracing::warn!(error = %_e, "TcpIngestSource: accept failed");
+                        tracing::warn!(error = %_e, "TcpSource: accept failed");
                         continue;
                     }
                 };
@@ -170,11 +177,11 @@ impl TcpIngestSource {
 /// the protocol.
 ///
 /// One decoder serves the whole connection: `flush` resets it, so a frame's
-/// batch never leaks into the next frame's. [`TcpIngestSource::new`] already
+/// batch never leaks into the next frame's. [`TcpSource::new`] already
 /// opened one off the same schema, so the open below fails only for a
 /// codec that answers differently twice.
 async fn read_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     tx: mpsc::Sender<RecordBatch>,
     schema: Arc<Schema>,
     codec: Arc<dyn Codec>,
@@ -184,20 +191,26 @@ async fn read_connection(
         Ok(decoder) => decoder,
         Err(_e) => {
             #[cfg(feature = "tracing")]
-            tracing::warn!(error = %_e, "TcpIngestSource: cannot decode this format, closing connection");
+            tracing::warn!(error = %_e, "TcpSource: cannot decode this format, closing connection");
             return;
         }
     };
 
+    // One buffered reader and one frame buffer serve the whole connection: a
+    // small frame costs the socket a single read instead of two, and the
+    // buffer is refilled in place rather than allocated per frame.
+    let mut reader = BufReader::new(stream);
+    let mut frame: Vec<u8> = Vec::new();
+
     loop {
         let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf).await {
+        match reader.read_exact(&mut len_buf).await {
             Ok(_) => {}
             // Clean close between frames: the normal disconnect path.
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return,
             Err(_e) => {
                 #[cfg(feature = "tracing")]
-                tracing::warn!(error = %_e, "TcpIngestSource: frame header read failed");
+                tracing::warn!(error = %_e, "TcpSource: frame header read failed");
                 return;
             }
         }
@@ -211,31 +224,32 @@ async fn read_connection(
             tracing::warn!(
                 frame_bytes = len,
                 max_frame_bytes,
-                "TcpIngestSource: oversized frame, closing connection"
+                "TcpSource: oversized frame, closing connection"
             );
             return;
         }
 
-        let mut payload = vec![0u8; len];
-        if let Err(_e) = stream.read_exact(&mut payload).await {
+        frame.clear();
+        frame.resize(len, 0);
+        if let Err(_e) = reader.read_exact(&mut frame).await {
             #[cfg(feature = "tracing")]
-            tracing::warn!(error = %_e, "TcpIngestSource: truncated frame payload, closing connection");
+            tracing::warn!(error = %_e, "TcpSource: truncated frame payload, closing connection");
             return;
         }
 
-        let decoded = decoder.push(&payload).and_then(|()| decoder.flush());
+        let decoded = decoder.push(&frame).and_then(|()| decoder.flush());
         let batch = match decoded {
             Ok(Some(batch)) => batch,
             // A frame that decodes to no rows at all is a protocol violation:
             // the producer sent bytes that carry nothing.
             Ok(None) => {
                 #[cfg(feature = "tracing")]
-                tracing::warn!("TcpIngestSource: frame decoded no batch");
+                tracing::warn!("TcpSource: frame decoded no batch");
                 return;
             }
             Err(_e) => {
                 #[cfg(feature = "tracing")]
-                tracing::warn!(error = %_e, "TcpIngestSource: bad frame, closing connection");
+                tracing::warn!(error = %_e, "TcpSource: bad frame, closing connection");
                 return;
             }
         };
@@ -249,7 +263,7 @@ async fn read_connection(
 }
 
 #[async_trait]
-impl Source for TcpIngestSource {
+impl Source for TcpSource {
     fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
     }
@@ -262,7 +276,7 @@ impl Source for TcpIngestSource {
     }
 }
 
-impl Drop for TcpIngestSource {
+impl Drop for TcpSource {
     fn drop(&mut self) {
         if let Some(handle) = self.listener_task.take() {
             handle.abort();
@@ -290,15 +304,24 @@ mod tests {
 
     #[test]
     fn new_reports_bound_port() {
-        let src = TcpIngestSource::new("127.0.0.1:0", test_schema(), 4, 1024, arrow_ipc()).unwrap();
+        let src = TcpSource::new(
+            TcpSourceConfig::new("127.0.0.1:0"),
+            test_schema(),
+            arrow_ipc(),
+        )
+        .unwrap();
         assert_ne!(src.local_addr().port(), 0);
     }
 
     #[test]
     fn new_rejects_unbindable_address() {
-        let err = TcpIngestSource::new("256.256.256.256:1", test_schema(), 4, 1024, arrow_ipc())
-            .err()
-            .expect("bind must fail");
+        let err = TcpSource::new(
+            TcpSourceConfig::new("256.256.256.256:1"),
+            test_schema(),
+            arrow_ipc(),
+        )
+        .err()
+        .expect("bind must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
     }
 
@@ -315,7 +338,11 @@ mod tests {
 
     #[test]
     fn new_rejects_a_format_with_no_message_decoder() {
-        let err = TcpIngestSource::new("127.0.0.1:0", test_schema(), 4, 1024, Arc::new(StreamOnly))
+        let err = TcpSource::new(
+            TcpSourceConfig::new("127.0.0.1:0"),
+            test_schema(),
+            Arc::new(StreamOnly),
+        )
             .err()
             .expect("a format with no message decoder must be refused");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -324,5 +351,90 @@ mod tests {
                 .contains("does not support decoding discrete messages"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn new_refuses_a_zero_buffer_or_frame_cap() {
+        for (buffer, max_frame_bytes, key) in [(0, 1024, "buffer"), (4, 0, "max_frame_bytes")] {
+            let config = TcpSourceConfig {
+                buffer,
+                max_frame_bytes,
+                ..TcpSourceConfig::new("127.0.0.1:0")
+            };
+            let err = TcpSource::new(config, test_schema(), arrow_ipc())
+                .err()
+                .expect("a zero limit must be refused");
+            assert_eq!(err.category(), "configuration", "got: {err}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("'{key}' must be at least 1")),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// One frame buffer serves a connection, so a short frame after a long one
+    /// must decode from its own bytes alone, and a frame larger than the read
+    /// buffer must still arrive whole.
+    #[tokio::test]
+    async fn frames_of_different_sizes_on_one_connection_decode_independently() {
+        use arrow_array::Int64Array;
+        use tokio::io::AsyncWriteExt;
+
+        let codec = arrow_ipc();
+        let mut src = TcpSource::new(
+            TcpSourceConfig::new("127.0.0.1:0"),
+            test_schema(),
+            Arc::clone(&codec),
+        )
+        .expect("bind");
+        let mut client = TcpStream::connect(src.local_addr())
+            .await
+            .expect("the listen backlog takes the dial");
+
+        let sizes = [20_000usize, 1, 9_000, 3];
+        let mut payloads = Vec::new();
+        for (n, size) in sizes.iter().enumerate() {
+            let base = (n as i64) * 1_000_000;
+            let values: Vec<i64> = (base..base + *size as i64).collect();
+            let batch =
+                RecordBatch::try_new(test_schema(), vec![Arc::new(Int64Array::from(values))])
+                    .expect("batch");
+            payloads.extend(codec.encode_messages(&batch).expect("encode"));
+        }
+        // The accept loop starts on the first `next_batch`, so the writes
+        // run beside it: written up front they could outgrow the socket
+        // buffers with nothing reading yet.
+        let writer = tokio::spawn(async move {
+            for payload in payloads {
+                let len = u32::try_from(payload.len()).expect("a frame that fits");
+                client.write_all(&len.to_be_bytes()).await.expect("header");
+                client.write_all(&payload).await.expect("payload");
+            }
+            client.flush().await.expect("flush");
+            client
+        });
+
+        for (n, size) in sizes.iter().enumerate() {
+            let batch = tokio::time::timeout(std::time::Duration::from_secs(5), src.next_batch())
+                .await
+                .expect("a frame must arrive")
+                .expect("next_batch")
+                .expect("a batch");
+            let base = (n as i64) * 1_000_000;
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("v is Int64");
+            assert_eq!(column.len(), *size, "frame {n}");
+            assert_eq!(column.value(0), base, "frame {n}");
+            assert_eq!(
+                column.value(*size - 1),
+                base + *size as i64 - 1,
+                "frame {n}"
+            );
+        }
+        let _client = writer.await.expect("writer task");
     }
 }

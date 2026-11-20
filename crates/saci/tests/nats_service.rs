@@ -210,7 +210,6 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
                 subject: in_subject.clone(),
                 ..JetstreamSinkMode::default()
             })),
-            schema_fields: vec![],
         },
         schema.clone(),
         Arc::new(NdjsonCodec::default()),
@@ -272,7 +271,6 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
             batch_size: 1000,
             poll_timeout_ms: 2_000,
             stop_at_end: true,
-            schema_fields: vec![],
         },
         schema.clone(),
         Arc::new(NdjsonCodec::default()),
@@ -514,7 +512,6 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
                 subject: in_subject.clone(),
                 ..JetstreamSinkMode::default()
             })),
-            schema_fields: vec![],
         },
         schema.clone(),
         Arc::new(NdjsonCodec::default()),

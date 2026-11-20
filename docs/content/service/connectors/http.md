@@ -93,7 +93,7 @@ serving them.
 The body is a whole document in one format, so both halves name a declared `transformer`.
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>one declared transformer serves the response body and every request body</em></div>
+<div class="code-cap"><span>KDL</span><em>one declared codec serves the response body and every request body</em></div>
 
 ```kdl
 transformer "orders_csv" format="csv" {
@@ -181,7 +181,7 @@ saci-service validate --config examples/configs/http.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -372,7 +372,7 @@ saci-service validate --config examples/configs/http_push.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -474,7 +474,7 @@ Push source:
 |---|---|---|---|
 | `bearer` | string | none | the token every request must present as `authorization: Bearer <token>` |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector.
+An unrecognised key inside `config` is a configuration error naming the key, on each of the three nodes: `HttpSource`, `HttpSink` and `HttpPushSource`.
 
 ## When it refuses to start
 
@@ -504,14 +504,15 @@ An unrecognised key inside `config` is ignored rather than rejected on this conn
 | `HttpSource: conditional applies to mode kind="document" only` | drop `conditional`, or read a document |
 | `HttpSink config.content_encoding must be "gzip", "br" or "zstd"` | name one of the three encodings |
 | `HttpSink: 'content-encoding' is set by content_encoding; remove it from headers` | drop the header and keep the key |
-| `HttpPushSource config requires a 'bind' string` | add `bind "host:port"` to the push source's `config` |
-| `HttpPushSource config.path must be a string starting with '/'` | write `path` as an absolute path |
-| `HttpPushSource config.methods must be one HTTP method name or a list of them` | write one method name, or several as arguments |
-| `HttpPushSource config.auth.bearer must be a non-empty string` | give `auth` a `bearer` token |
-| `HttpPushSource config.tls needs both 'cert_file' and 'key_file'` | name both files, or neither |
-| `HttpPushSource config.tls['ca_file'] is not a listener key: a push source authenticates callers with auth { bearer }, not with a client certificate` | drop `ca_file` and use `auth { bearer }` |
-| `HttpPushSource: quic_bind needs a 'tls' block: HTTP/3 runs over TLS` | add `tls`, or drop `quic_bind` |
-| `HttpPushSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
+| `http: unknown key '{key}'` | fix the spelling, or drop a key that belongs to another node |
+| `HttpListenSource config requires a 'bind' string` | add `bind "host:port"` to the listening source's `config` |
+| `HttpListenSource config.path must be a string starting with '/'` | write `path` as an absolute path |
+| `HttpListenSource config.methods must be one HTTP method name or a list of them` | write one method name, or several as arguments |
+| `HttpListenSource config.auth.bearer must be a non-empty string` | give `auth` a `bearer` token |
+| `HttpListenSource config.tls needs both 'cert_file' and 'key_file'` | name both files, or neither |
+| `HttpListenSource config.tls['ca_file'] is not a listener key: a listening source authenticates callers with auth { bearer }, not with a client certificate` | drop `ca_file` and use `auth { bearer }` |
+| `HttpListenSource: quic_bind needs a 'tls' block: HTTP/3 runs over TLS` | add `tls`, or drop `quic_bind` |
+| `HttpListenSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
 | `source type 'HttpPushSource' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"` |
 
 Two more wait for the first batch rather than the config check:

@@ -10,6 +10,52 @@ use arrow_schema::{DataType, Field, Schema};
 use crate::config::ConfigValue;
 use crate::error::SaciError;
 
+/// A clone of `config` without its `schema_fields` entry.
+///
+/// A factory parses `schema_fields` with [`parse_optional_schema_fields`] from
+/// the original table, then deserializes its `deny_unknown_fields` config
+/// struct from this copy, so the struct never has to declare the key.
+pub fn without_schema_fields(config: &ConfigValue) -> ConfigValue {
+    let mut table = config.clone();
+    if let ConfigValue::Object(entries) = &mut table {
+        entries.remove("schema_fields");
+    }
+    table
+}
+
+/// Deserialize a connector's `config` table into its `deny_unknown_fields`
+/// struct `T`, ignoring the `schema_fields` entry.
+///
+/// The error names the key the problem sits under: ``unknown field `pth` ..``,
+/// ``missing field `path` `` or ``buffer: invalid type: string "x", expected
+/// usize``. `context` prefixes it, e.g. `"FileSource"`.
+///
+/// # Errors
+///
+/// Returns [`SaciError::Configuration`] when `config` does not match `T`.
+pub fn deserialize_config<T: serde::de::DeserializeOwned>(
+    config: &ConfigValue,
+    context: &str,
+) -> Result<T, SaciError> {
+    serde_path_to_error::deserialize(without_schema_fields(config))
+        .map_err(|e| SaciError::configuration(format!("{context} config: {e}")))
+}
+
+/// Refuse a `0` for a config key whose floor is 1.
+///
+/// # Errors
+///
+/// Returns [`SaciError::Configuration`] reading `{connector}: '{key}' must be
+/// at least 1` when `value` is zero.
+pub fn at_least_one(connector: &str, key: &str, value: u64) -> Result<(), SaciError> {
+    if value == 0 {
+        return Err(SaciError::configuration(format!(
+            "{connector}: '{key}' must be at least 1"
+        )));
+    }
+    Ok(())
+}
+
 /// Build an Arrow schema from the `schema_fields` entries of a `config` table.
 ///
 /// `factory_name` prefixes every error message, so a bad entry names the

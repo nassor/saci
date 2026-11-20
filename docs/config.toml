@@ -262,7 +262,7 @@ path = "@/library/service/_index.md"
 title = "Writing a connector"
 path = "@/library/service/connectors.md"
 [[extra.areas.nav.items]]
-title = "Writing a transformer"
+title = "Writing a codec"
 path = "@/library/service/transformers.md"
 [[extra.areas.nav.items]]
 title = "What the loader validates"

@@ -102,7 +102,7 @@ PostgreSQL.
 
 ## 1. Declare two workflows
 
-Two `workflow` blocks in one file, each with its own id. Every node id, transformers included,
+Two `workflow` blocks in one file, each with its own id. Every node id, `transformer` ids included,
 is unique across the whole file rather than within one workflow, and every `link` names two
 nodes of its own workflow.
 
@@ -134,7 +134,7 @@ workflow "settle" {
 
 Each workflow gets its own runner, its own run and error counters, and its own card on the
 dashboard. A `transformer` declared in one workflow serves that workflow only, which is why
-`route` and `settle` each declare their own `ndjson` transformer.
+`route` and `settle` each declare their own `ndjson` codec.
 
 ## 2. Bridge them with a channel
 
@@ -211,14 +211,14 @@ Validate the config. The channel pairing is checked here, before any connector o
 Linux/macOS:
 
 ```bash,name=Validate the two-workflow config
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- validate \
   --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 
 ```text,name=What validate prints
@@ -231,14 +231,14 @@ Then serve it, and publish into both subjects from a second terminal:
 Linux/macOS:
 
 ```bash,name=Serve the config
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- serve \
   --config examples/multi_workflow/multi_workflow.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/multi_workflow/multi_workflow.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- serve --config examples/multi_workflow/multi_workflow.kdl
 ```
 
 ```bash,name=Publish into both subjects

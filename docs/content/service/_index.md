@@ -26,10 +26,10 @@ happens before the first row moves.
         <title id="svc-what-t">One config file names a source, a format, a processor and a sink, and saci-service runs them</title>
         <desc id="svc-what-d">
             A file or a topic on the left feeds a source node. The source names a
-            declared transformer, the byte format it decodes. The source links to a
+            declared transformer node, the codec that decodes its bytes. The source links to a
             wasm processor node drawn on the WebAssembly boundary, and that processor
             links to a sink node. The sink writes a file or a table on the right. The
-            source, the transformer, the processor and the sink all live inside one
+            source, the codec, the processor and the sink all live inside one
             saci-service process, drawn as a control-plane frame around them.
         </desc>
         <g class="anim anim-1">
@@ -94,7 +94,7 @@ Nine words cover the whole config file.
 - **source** reads rows into the workflow, from a file, an HTTP endpoint, a
   topic, a table, a socket or another workflow:
   [Sources and sinks](@/service/connectors/_index.md).
-- **transformer** is a declared byte format that a source decodes with and a
+- **transformer** declares a codec, the byte format that a source decodes with and a
   sink encodes with: [Formats](@/service/formats/_index.md).
 - **processor** is a WebAssembly component that takes rows in and hands rows
   back: [Processors in a workflow](@/service/processors/_index.md).

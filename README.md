@@ -181,7 +181,7 @@ Two crates are on crates.io:
 |---|---|
 | `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits, tokio and rayon stage parallelism |
 | `derive` | `#[derive(Component)]`; included in `engine`, `processor` and `plugin` |
-| `connector-<name>`, `transformer-<format>` | One transport or one byte format each, in `saci::connector` and `saci::transformer` |
+| `connector-<name>`, `codec-<format>` | One transport or one byte format each, in `saci::connector` and `saci::codec` |
 | `processor` | The processor SDK and the canonical `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |
 | `server` | The `saci-service` binary: wasmtime, KDL config, HTTP control plane, distributed runner |

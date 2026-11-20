@@ -21,7 +21,7 @@ node.
 
 Each `type="..."` also needs the feature that registers its factory. `server` carries `service`,
 `wasm-host` and the seven self-contained connectors (`connector-channel`, `connector-file`,
-`connector-http`, `connector-tcp`, `connector-udp`, `connector-saci`, `connector-redb`) with the
+`connector-http`, `connector-tcp`, `connector-udp`, `connector-peer`, `connector-redb`) with the
 five transformers. The table lists what to enable beside it:
 
 | Config | Features |
@@ -40,8 +40,8 @@ five transformers. The table lists what to enable beside it:
 | `nats.kdl` | `connector-nats,wasm-host` |
 | `tcp.kdl` | `connector-tcp,wasm-host` |
 | `udp.kdl` | `connector-udp,wasm-host` |
-| `saci.kdl` | `connector-saci,wasm-host` |
-| `opentelemetry_metrics.kdl` | `connector-opentelemetry`; it declares no processor node |
+| `saci.kdl` | `connector-peer,wasm-host` |
+| `opentelemetry_metrics.kdl` | `connector-otlp`; it declares no processor node |
 | `http.kdl` | `connector-http,transformer-csv,wasm-host` |
 | `http_push.kdl` | `connector-http,transformer-ndjson,wasm-host` |
 | `redb.kdl` | `connector-file,transformer-csv` |
@@ -192,8 +192,8 @@ source or sink always names its `transformer`: there is no implicit default form
 | `S3Source` | Lists a prefix once and drains every object in key order | `connection`, `schema_fields` | `connector-s3` |
 | `tcp` | Live framed messages off a listener, stream mode only | `bind`, `schema_fields` | `connector-tcp` |
 | `udp` | Live datagrams off a bound socket, one message each, stream mode only | `bind`, `schema_fields` | `connector-udp` |
-| `saci` | Batches pushed by a `saci` sink in another service, stream mode only | `bind`, `schema_fields` | `connector-saci` |
-| `OpenTelemetryMetricsSource` | Listens for OTLP/HTTP metrics, or reads a url, in Protobuf or JSON; listening is stream mode only | `bind`, `schema_fields` for a projection other than the canonical ten columns | `connector-opentelemetry` |
+| `saci` | Batches pushed by a `saci` sink in another service, stream mode only | `bind`, `schema_fields` | `connector-peer` |
+| `OpenTelemetryMetricsSource` | Listens for OTLP/HTTP metrics, or reads a url, in Protobuf or JSON; listening is stream mode only | `bind`, `schema_fields` for a projection other than the canonical ten columns | `connector-otlp` |
 | `ChannelSource` | In-process channel (testing/internal) | `schema_fields` | `connector-channel` |
 
 ### Sinks
@@ -211,8 +211,8 @@ source or sink always names its `transformer`: there is no implicit default form
 | `S3Sink` | Accumulates rows and uploads one object per flush | `connection`, `schema_fields` | `connector-s3` |
 | `tcp` | Dials a peer and writes one length-prefixed frame per message | `connect`, `schema_fields` | `connector-tcp` |
 | `udp` | Sends one datagram per message to every `connect` peer, fire and forget | `connect`, `schema_fields` | `connector-udp` |
-| `saci` | Dials a `saci` source in another service, first reachable of `connect` wins | `connect`, `schema_fields` | `connector-saci` |
-| `OpenTelemetryMetricsSink` | One OTLP/HTTP export per batch, in Protobuf or JSON | `url`, `schema_fields` for a projection other than the canonical ten columns | `connector-opentelemetry` |
+| `saci` | Dials a `saci` source in another service, first reachable of `connect` wins | `connect`, `schema_fields` | `connector-peer` |
+| `OpenTelemetryMetricsSink` | One OTLP/HTTP export per batch, in Protobuf or JSON | `url`, `schema_fields` for a projection other than the canonical ten columns | `connector-otlp` |
 | `ChannelSink` | In-process channel (testing/internal) | `schema_fields` | `connector-channel` |
 
 ### Retry

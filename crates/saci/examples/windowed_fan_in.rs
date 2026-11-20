@@ -146,8 +146,8 @@ async fn main() -> Result<(), SaciError> {
 
     // Two independent streams feeding the same component of one processor:
     // the fan-in merge is the whole point of the example.
-    let (tx_a, source_a) = ChannelSource::new(trade_schema.clone(), 16);
-    let (tx_b, source_b) = ChannelSource::new(trade_schema.clone(), 16);
+    let (source_a, tx_a) = ChannelSource::new(trade_schema.clone(), 16);
+    let (source_b, tx_b) = ChannelSource::new(trade_schema.clone(), 16);
     let (sink, mut rx) = ChannelSink::new(WindowTotal::schema(), 16);
 
     // Stream A: window 0 only. Stream B: window 0 and window 1.

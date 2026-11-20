@@ -17,11 +17,11 @@ refusal below as an `Err` from that one call.
 
 - The workflow declares at least one source, processor or sink node.
 - Every id (workflow and node) matches the id charset and length bound.
-- No id is declared twice, across transformers, sources, processors and sinks.
-- Every `source.transformer` and `sink.transformer` names a declared
+- No id is declared twice, across `transformer` nodes, sources, processors and sinks.
+- Every `transformer=` key on a source or sink names a declared
   `transformer` id.
 - Every `link.from` and `link.to` names a declared source, processor or sink id,
-  and no link names a node twice (`from == to`). A transformer id is not a
+  and no link names a node twice (`from == to`). A `transformer` id is not a
   graph node.
 - No `(from, to)` pair is declared twice.
 - Nothing links into a source; nothing links out of a sink.
@@ -45,7 +45,7 @@ Across workflows, `ServiceConfig::validate` adds:
 
 - Cluster mode declares exactly one workflow.
 - Workflow ids are unique.
-- Every declared id, transformer ids included, is unique across all workflows.
+- Every declared id, `transformer` ids included, is unique across all workflows.
   The metric attribution keys are bare node ids, so an overlap would double
   count.
 - Every `ChannelSource` name is paired with exactly one `ChannelSink` of the same
@@ -57,7 +57,7 @@ Across workflows, `ServiceConfig::validate` adds:
 `watch` property: nothing in the service builds a `System` from a type name, so
 those keys are parse errors.
 
-`WorkflowSpec`, `TransformerSpec`, `SourceSpec`, `SinkSpec`, `WasmSpec`,
+`WorkflowSpec`, `CodecSpec`, `SourceSpec`, `SinkSpec`, `WasmSpec`,
 `PluginSpec`, `RetryConfig`, `HealConfig` and `FlowControlConfig` carry
 `#[serde(deny_unknown_fields)]`, and the `window` block rejects unknown keys
 through its own hand-written reader, so a typo inside `workflow` fails the

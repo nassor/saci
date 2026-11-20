@@ -16,8 +16,8 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use saci::connector::clickhouse::config::{
-    ClickhouseConnectionConfig, ClickhouseFieldType, ClickhouseSinkConfig, ClickhouseSourceConfig,
-    CompressionConfig, DumpMode, FieldSpec, PollingMode, QueryMode, SourceMode, WriteMode,
+    ClickhouseFieldType, ClickhouseSinkConfig, ClickhouseSourceConfig, CompressionConfig,
+    ConnectionConfig, DumpMode, FieldSpec, PollingMode, QueryMode, SourceMode, WriteMode,
 };
 use saci::connector::clickhouse::{ClickhouseSink, ClickhouseSource};
 use saci::io::Sink;
@@ -45,7 +45,7 @@ async fn clickhouse_roundtrip_sink_and_source() {
         .await
         .expect("table created");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -222,7 +222,7 @@ async fn clickhouse_types_roundtrip() {
         .await
         .expect("table created");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -454,7 +454,7 @@ async fn clickhouse_polling_with_tiebreak_and_initial_cursor() {
         .await
         .expect("seed data");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -550,7 +550,7 @@ async fn clickhouse_sink_buffering_and_truncate() {
         .await
         .expect("seed old rows");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -660,7 +660,7 @@ async fn clickhouse_source_batch_size_and_limits() {
         .await
         .expect("seed 25 rows");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -726,7 +726,7 @@ async fn clickhouse_sink_chunks_a_write_larger_than_chunk_rows() {
         .await
         .expect("table created");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -840,7 +840,7 @@ async fn clickhouse_polling_resumes_a_timestamp_cursor_across_batches() {
         .await
         .expect("seed data");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -934,7 +934,7 @@ async fn clickhouse_polling_resumes_a_date_cursor_across_batches() {
         .await
         .expect("seed data");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -1011,7 +1011,7 @@ async fn clickhouse_date_column_round_trips() {
         .await
         .expect("table created");
 
-    let conn_cfg = ClickhouseConnectionConfig {
+    let conn_cfg = ConnectionConfig {
         url: ch.url.clone(),
         user: None,
         password: None,
@@ -1146,7 +1146,7 @@ fn retry_config(
 ) -> ClickhouseSinkConfig {
     ClickhouseSinkConfig {
         name: "retry_sink".into(),
-        connection: ClickhouseConnectionConfig {
+        connection: ConnectionConfig {
             url: ch.url.clone(),
             user: None,
             password: None,

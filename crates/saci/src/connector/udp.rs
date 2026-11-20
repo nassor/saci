@@ -54,13 +54,16 @@
 //! }
 //! ```
 
+mod config;
+
 pub mod factory;
 pub mod probe;
 pub mod sink;
 pub mod source;
 
+pub use config::{UdpSinkConfig, UdpSourceConfig};
 pub use factory::{UdpSinkFactory, UdpSourceFactory};
-pub use probe::{OnFailure, ProbeKind, ProbeSettings};
+pub use probe::{OnFailure, ProbeConfig, ProbeKind};
 pub use sink::{MAX_DATAGRAM_BYTES, UdpSink};
 pub use source::UdpSource;
 

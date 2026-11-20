@@ -14,35 +14,25 @@
 //! `transformer` key names a declared `transformer` node, and that node's
 //! format decides how each datagram encodes or decodes. There is no default.
 
-use std::net::IpAddr;
-use std::time::Duration;
-
+use crate::connector::schema::deserialize_config;
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
 
-use crate::connector::udp::probe::{OnFailure, ProbeKind, ProbeSettings};
-use crate::connector::udp::sink::MAX_DATAGRAM_BYTES;
-use crate::connector::udp::{UdpSink, UdpSource};
-
-/// Default number of decoded batches queued before the receive loop stops
-/// reading the socket.
-const DEFAULT_BUFFER: usize = 64;
-/// Default gap between probe rounds.
-const DEFAULT_PROBE_INTERVAL_MS: u64 = 5000;
-/// Default wait for one probe round's answer.
-const DEFAULT_PROBE_TIMEOUT_MS: u64 = 1000;
+use crate::connector::udp::{UdpSink, UdpSinkConfig, UdpSource, UdpSourceConfig};
 
 /// Factory for [`UdpSource`].
 ///
-/// Config fields:
+/// The `config` table is [`UdpSourceConfig`]:
 /// - `bind` (string, required): receive address, e.g. `"0.0.0.0:9700"`.
 /// - `buffer` (usize, optional, default `64`): queued batch capacity.
 /// - `multicast_group` (string, optional): a multicast address to join, of the
 ///   same IP family as `bind`.
-/// - `schema_fields` (list, required): Arrow schema definition.
+///
+/// Beside it, `schema_fields` (list, required) is the Arrow schema
+/// definition.
 ///
 /// Each datagram is decoded by the codec the host bound to this node
 /// from its `transformer` key, reached through the [`ConnectorContext`] rather
@@ -59,40 +49,11 @@ impl SourceFactory for UdpSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let bind = config.get("bind").and_then(|v| v.as_str()).ok_or_else(|| {
-            SaciError::configuration("udp source config requires a 'bind' string")
-        })?;
-
-        let buffer = config
-            .get("buffer")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.max(1) as usize)
-            .unwrap_or(DEFAULT_BUFFER);
-
-        let multicast_group = match config.get("multicast_group") {
-            None => None,
-            Some(value) => {
-                let raw = value.as_str().ok_or_else(|| {
-                    SaciError::configuration("udp source 'multicast_group' must be a string")
-                })?;
-                Some(raw.parse::<IpAddr>().map_err(|_| {
-                    SaciError::configuration(format!(
-                        "udp source 'multicast_group' is not an IP address: '{raw}'"
-                    ))
-                })?)
-            }
-        };
-
+        let cfg: UdpSourceConfig = deserialize_config(config, "UdpSource")?;
         let schema = parse_schema_fields(config, "udp")?;
         let codec = ctx.codec("udp")?;
 
-        Ok(Box::new(UdpSource::new(
-            bind,
-            multicast_group,
-            schema,
-            buffer,
-            codec,
-        )?))
+        Ok(Box::new(UdpSource::new(cfg, schema, codec)?))
     }
 
     /// The socket and its multicast membership are dropped before a rebuild,
@@ -106,7 +67,7 @@ impl SourceFactory for UdpSourceFactory {
 
 /// Factory for [`UdpSink`].
 ///
-/// Config fields:
+/// The `config` table is [`UdpSinkConfig`]:
 /// - `connect` (string or list of strings, required): peer addresses, e.g.
 ///   `"collector.internal:9701"`. Every message goes to every peer.
 /// - `broadcast` (bool, optional, default `#false`): enable `SO_BROADCAST`.
@@ -114,7 +75,9 @@ impl SourceFactory for UdpSourceFactory {
 /// - `probe` (node, optional): `kind` (`"echo"` or `"icmp"`, default
 ///   `"echo"`), `interval_ms` (default `5000`), `timeout_ms` (default `1000`),
 ///   `on_failure` (`"refuse"` or `"warn"`, default `"refuse"`).
-/// - `schema_fields` (list, required): Arrow schema definition.
+///
+/// Beside it, `schema_fields` (list, required) is the Arrow schema
+/// definition.
 ///
 /// Each batch is encoded by the codec the host bound to this node from
 /// its `transformer` key, reached through the [`ConnectorContext`] rather than
@@ -133,38 +96,11 @@ impl SinkFactory for UdpSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let connect = parse_connect(config)?;
-        let broadcast = match config.get("broadcast") {
-            None => false,
-            Some(value) => value.as_bool().ok_or_else(|| {
-                SaciError::configuration("udp sink 'broadcast' must be a boolean")
-            })?,
-        };
-
-        let max_datagram_bytes = match config.get("max_datagram_bytes") {
-            None => MAX_DATAGRAM_BYTES,
-            Some(value) => value
-                .as_u64()
-                .and_then(|v| usize::try_from(v).ok())
-                .ok_or_else(|| {
-                    SaciError::configuration(
-                        "udp sink 'max_datagram_bytes' must be a positive integer",
-                    )
-                })?,
-        };
-
-        let probe = parse_probe(config)?;
+        let cfg: UdpSinkConfig = deserialize_config(config, "UdpSink")?;
         let schema = parse_schema_fields(config, "udp")?;
         let codec = ctx.codec("udp")?;
 
-        Ok(Box::new(UdpSink::connect(
-            &connect,
-            broadcast,
-            max_datagram_bytes,
-            probe,
-            schema,
-            codec,
-        )?))
+        Ok(Box::new(UdpSink::new(cfg, schema, codec)?))
     }
 
     /// Nothing is buffered, so a rebuild loses no datagram the sink had
@@ -176,105 +112,12 @@ impl SinkFactory for UdpSinkFactory {
     }
 }
 
-/// Read `connect` as one address or a list of them.
-///
-/// KDL gives a node with one argument a scalar and a node with several an
-/// array, so `connect "a:1"` and `connect="a:1"` are strings while
-/// `connect "a:1" "b:2"` is an array.
-fn parse_connect(config: &ConfigValue) -> Result<Vec<String>, SaciError> {
-    let refusal = || {
-        SaciError::configuration(
-            "udp sink config requires 'connect', one address string or a list of them",
-        )
-    };
-    match config.get("connect") {
-        Some(ConfigValue::String(one)) => Ok(vec![one.clone()]),
-        Some(ConfigValue::Array(many)) if !many.is_empty() => many
-            .iter()
-            .map(|v| v.as_str().map(str::to_string).ok_or_else(refusal))
-            .collect(),
-        _ => Err(refusal()),
-    }
-}
-
-/// Read the optional `probe` node.
-///
-/// A bare `probe` node parses to an empty object, so the line alone enables
-/// the defaults.
-fn parse_probe(config: &ConfigValue) -> Result<Option<ProbeSettings>, SaciError> {
-    let Some(value) = config.get("probe") else {
-        return Ok(None);
-    };
-    let ConfigValue::Object(_) = value else {
-        return Err(SaciError::configuration(
-            "udp sink 'probe' must be a node with optional kind, interval_ms, timeout_ms and on_failure properties",
-        ));
-    };
-
-    let kind = match probe_str(value, "kind", "echo")? {
-        "echo" => ProbeKind::Echo,
-        "icmp" => ProbeKind::Icmp,
-        other => {
-            return Err(SaciError::configuration(format!(
-                "udp sink probe 'kind' must be \"echo\" or \"icmp\", got '{other}'"
-            )));
-        }
-    };
-    let interval = probe_millis(value, "interval_ms", DEFAULT_PROBE_INTERVAL_MS)?;
-    let timeout = probe_millis(value, "timeout_ms", DEFAULT_PROBE_TIMEOUT_MS)?;
-    let on_failure = match probe_str(value, "on_failure", "refuse")? {
-        "refuse" => OnFailure::Refuse,
-        "warn" => OnFailure::Warn,
-        other => {
-            return Err(SaciError::configuration(format!(
-                "udp sink probe 'on_failure' must be \"refuse\" or \"warn\", got '{other}'"
-            )));
-        }
-    };
-
-    Ok(Some(ProbeSettings {
-        kind,
-        interval: Duration::from_millis(interval),
-        timeout: Duration::from_millis(timeout),
-        on_failure,
-    }))
-}
-
-/// Read one optional string property of the `probe` node.
-///
-/// A property that is present with another type is a typo rather than a
-/// request for the default, which is why it is refused instead of ignored.
-fn probe_str<'a>(
-    value: &'a ConfigValue,
-    key: &str,
-    default: &'a str,
-) -> Result<&'a str, SaciError> {
-    match value.get(key) {
-        None => Ok(default),
-        Some(raw) => raw.as_str().ok_or_else(|| {
-            SaciError::configuration(format!("udp sink probe '{key}' must be a string"))
-        }),
-    }
-}
-
-/// Read one optional millisecond count of the `probe` node.
-///
-/// A negative or non-numeric value is refused for the same reason: the zero
-/// both keys already refuse is a value, and a typo is not.
-fn probe_millis(value: &ConfigValue, key: &str, default: u64) -> Result<u64, SaciError> {
-    match value.get(key) {
-        None => Ok(default),
-        Some(raw) => raw.as_u64().ok_or_else(|| {
-            SaciError::configuration(format!("udp sink probe '{key}' must be a positive integer"))
-        }),
-    }
-}
-
 #[cfg(all(test, feature = "codec-arrow-ipc"))]
 mod tests {
     use super::*;
     use crate::codec::arrow_ipc::ArrowIpcCodecFactory;
     use crate::codec::{Codec, CodecFactory};
+    use crate::connector::udp::{OnFailure, ProbeConfig, ProbeKind};
     use crate::connector::{ConfigMap, from_kdl_str};
     use std::sync::Arc;
 
@@ -318,7 +161,7 @@ schema_fields "v" type="Int64"
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'bind'"), "got: {err}");
+        assert!(err.to_string().contains("`bind`"), "got: {err}");
     }
 
     #[test]
@@ -352,7 +195,7 @@ schema_fields "v" type="Int64"
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'multicast_group'"), "got: {err}");
+        assert!(err.to_string().contains("multicast_group"), "got: {err}");
     }
 
     fn sink_config(extra: &str) -> ConfigValue {
@@ -395,7 +238,7 @@ schema_fields "v" type="Int64"
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'connect'"), "got: {err}");
+        assert!(err.to_string().contains("`connect`"), "got: {err}");
     }
 
     #[test]
@@ -429,8 +272,9 @@ schema_fields "v" type="Int64" nullable=#false
 "#,
         )
         .expect("parse test config");
+        let parsed: UdpSinkConfig = deserialize_config(&cfg, "UdpSink").expect("parse connect");
         assert_eq!(
-            parse_connect(&cfg).expect("parse connect"),
+            parsed.connect,
             vec!["127.0.0.1:9701".to_string(), "127.0.0.1:9702".to_string()]
         );
         UdpSinkFactory
@@ -443,15 +287,13 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn a_bare_probe_node_enables_the_defaults() {
         let cfg = sink_config("probe");
-        let settings = parse_probe(&cfg)
-            .expect("parse probe")
-            .expect("a bare node still declares a probe");
+        let parsed: UdpSinkConfig = deserialize_config(&cfg, "UdpSink").expect("parse probe");
         assert_eq!(
-            settings,
-            ProbeSettings {
+            parsed.probe.expect("a bare node still declares a probe"),
+            ProbeConfig {
                 kind: ProbeKind::Echo,
-                interval: Duration::from_millis(5000),
-                timeout: Duration::from_millis(1000),
+                interval_ms: 5000,
+                timeout_ms: 1000,
                 on_failure: OnFailure::Refuse,
             }
         );
@@ -470,7 +312,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'kind'"), "got: {err}");
+        assert!(err.to_string().contains("kind"), "got: {err}");
     }
 
     #[test]
@@ -483,7 +325,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'on_failure'"), "got: {err}");
+        assert!(err.to_string().contains("on_failure"), "got: {err}");
     }
 
     #[test]
@@ -509,10 +351,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(
-            err.to_string().contains("'max_datagram_bytes'"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("max_datagram_bytes"), "got: {err}");
     }
 
     #[test]
@@ -525,10 +364,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(
-            err.to_string().contains("'max_datagram_bytes'"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("max_datagram_bytes"), "got: {err}");
     }
 
     #[test]
@@ -541,7 +377,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'probe'"), "got: {err}");
+        assert!(err.to_string().contains("probe"), "got: {err}");
     }
 
     #[test]
@@ -559,7 +395,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'connect'"), "got: {err}");
+        assert!(err.to_string().contains("connect"), "got: {err}");
     }
 
     #[test]
@@ -577,7 +413,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'connect'"), "got: {err}");
+        assert!(err.to_string().contains("connect"), "got: {err}");
     }
 
     #[test]
@@ -607,18 +443,36 @@ schema_fields "v" type="Int64" nullable=#false
     }
 
     #[test]
-    fn buffer_below_one_still_builds() {
-        UdpSourceFactory
+    fn a_zero_buffer_is_refused_not_clamped() {
+        let err = UdpSourceFactory
             .build(&config("buffer 0"), &ConnectorContext::new(Some(codec())))
-            .expect("a buffer of zero must still build, clamped to one internally");
+            .err()
+            .expect("a zero buffer must be refused");
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(
+            err.to_string().contains("'buffer' must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_sink_key_is_named() {
+        let err = UdpSinkFactory
+            .build(
+                &sink_config("max_datagram_byts 512"),
+                &ConnectorContext::new(Some(codec())),
+            )
+            .err()
+            .expect("build must fail");
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(err.to_string().contains("max_datagram_byts"), "got: {err}");
     }
 
     #[test]
     fn a_probe_kind_of_icmp_builds() {
         let cfg = sink_config("probe kind=\"icmp\"");
-        let settings = parse_probe(&cfg)
-            .expect("parse probe")
-            .expect("a probe node declares a probe");
+        let parsed: UdpSinkConfig = deserialize_config(&cfg, "UdpSink").expect("parse probe");
+        let settings = parsed.probe.expect("a probe node declares a probe");
         assert_eq!(settings.kind, ProbeKind::Icmp);
         UdpSinkFactory
             .build(&cfg, &ConnectorContext::new(Some(codec())))
@@ -628,9 +482,8 @@ schema_fields "v" type="Int64" nullable=#false
     #[test]
     fn an_on_failure_of_warn_builds() {
         let cfg = sink_config("probe on_failure=\"warn\"");
-        let settings = parse_probe(&cfg)
-            .expect("parse probe")
-            .expect("a probe node declares a probe");
+        let parsed: UdpSinkConfig = deserialize_config(&cfg, "UdpSink").expect("parse probe");
+        let settings = parsed.probe.expect("a probe node declares a probe");
         assert_eq!(settings.on_failure, OnFailure::Warn);
         UdpSinkFactory
             .build(&cfg, &ConnectorContext::new(Some(codec())))
@@ -647,7 +500,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'multicast_group'"), "got: {err}");
+        assert!(err.to_string().contains("multicast_group"), "got: {err}");
     }
 
     #[test]
@@ -660,7 +513,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'broadcast'"), "got: {err}");
+        assert!(err.to_string().contains("broadcast"), "got: {err}");
     }
 
     #[test]
@@ -673,7 +526,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'interval_ms'"), "got: {err}");
+        assert!(err.to_string().contains("interval_ms"), "got: {err}");
     }
 
     #[test]
@@ -686,7 +539,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'timeout_ms'"), "got: {err}");
+        assert!(err.to_string().contains("timeout_ms"), "got: {err}");
     }
 
     #[test]
@@ -699,7 +552,7 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'kind'"), "got: {err}");
+        assert!(err.to_string().contains("kind"), "got: {err}");
     }
 
     #[test]
@@ -712,6 +565,6 @@ schema_fields "v" type="Int64" nullable=#false
             .err()
             .expect("build must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
-        assert!(err.to_string().contains("'on_failure'"), "got: {err}");
+        assert!(err.to_string().contains("on_failure"), "got: {err}");
     }
 }

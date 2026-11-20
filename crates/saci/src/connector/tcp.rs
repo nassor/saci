@@ -4,7 +4,7 @@
 //! [`Source`]: crate::io::Source
 //! [`Sink`]: crate::io::Sink
 //!
-//! [`TcpIngestSource`] listens on `bind` and yields one `RecordBatch` per
+//! [`TcpSource`] listens on `bind` and yields one `RecordBatch` per
 //! received frame. [`TcpSink`] dials `connect` and writes one frame per encoded
 //! message. A frame is a `u32` big-endian length prefix followed by that many
 //! payload bytes, so the two halves are wire compatible; the
@@ -36,10 +36,13 @@
 //! }
 //! ```
 
+mod config;
+
 pub mod factory;
 pub mod sink;
 pub mod source;
 
+pub use config::{TcpSinkConfig, TcpSourceConfig};
 pub use factory::{TcpSinkFactory, TcpSourceFactory};
 pub use sink::TcpSink;
-pub use source::TcpIngestSource;
+pub use source::TcpSource;

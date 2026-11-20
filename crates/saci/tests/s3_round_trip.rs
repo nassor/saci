@@ -48,7 +48,6 @@ fn sink_config(s3: &S3Container, prefix: &str, suffix: &str, flush: Flush) -> S3
         prefix: prefix.to_string(),
         suffix: suffix.to_string(),
         flush,
-        schema_fields: Vec::new(),
     }
 }
 
@@ -57,7 +56,6 @@ fn source_config(s3: &S3Container, prefix: &str, schema_from: SchemaFrom) -> S3S
         connection: s3.connection(),
         prefix: prefix.to_string(),
         schema_from,
-        schema_fields: Vec::new(),
     }
 }
 

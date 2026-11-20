@@ -179,7 +179,7 @@ saci-service validate --config examples/configs/udp.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: ticks (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -271,7 +271,7 @@ Source:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `bind` | string | required | the address the socket receives datagrams on |
-| `buffer` | integer | `64` | decoded batches queued before the receive loop stops reading |
+| `buffer` | integer | `64` | decoded batches queued before the receive loop stops reading; at least 1 |
 | `multicast_group` | string | none | a multicast address to join, of the same IP family as `bind` |
 | `schema_fields` | list of fields | required | the schema each payload decodes against |
 
@@ -289,30 +289,24 @@ Sink:
 | `probe on_failure` | string | `"refuse"` | `"refuse"` stops sending to a failed peer, `"warn"` logs and keeps sending |
 | `schema_fields` | list of fields | required | the schema the datagrams are written with |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector. A key from
-the tables above written with the wrong type is refused, so a typo reaches you as a message rather
-than as the default. `buffer` is the exception: it is clamped to at least 1 and falls back to 64.
+An unrecognised key inside `config` is a configuration error naming the key, and so is a value of
+the wrong type, so a typo reaches you as a message rather than as the default. `schema_fields` is
+read beside these keys on both halves.
 
 ## When it refuses to start
 
 | Message | What to change |
 |---|---|
-| `udp source config requires a 'bind' string` | add `bind "host:port"` to the source's `config` |
-| `udp sink config requires 'connect', one address string or a list of them` | add `connect "host:port"` to the sink's `config` |
+| ``UdpSource config: missing field `bind` `` | add `bind "host:port"` to the source's `config` |
+| ``UdpSink config: missing field `connect` `` | add `connect "host:port"` to the sink's `config` |
 | `udp moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
 | `format '{format}' does not support decoding discrete messages` | name a format that decodes discrete messages |
 | `UdpSink: format '{format}' has no message codec` | the same, for the sink |
-| `udp source 'multicast_group' is not an IP address: '{value}'` | write the group as a bare address, `"239.255.0.1"` |
-| `udp source 'multicast_group' must be a string` | quote the address |
-| `udp sink 'max_datagram_bytes' must be a positive integer` | write a whole number of bytes |
-| `udp sink 'broadcast' must be a boolean` | write `#true` or `#false` |
-| `udp sink 'probe' must be a node with optional kind, interval_ms, timeout_ms and on_failure properties` | write `probe` as a node, not a value |
-| `udp sink probe 'kind' must be a string` | quote the kind |
-| `udp sink probe 'interval_ms' must be a positive integer` | write a whole number of milliseconds |
-| `udp sink probe 'timeout_ms' must be a positive integer` | the same, for the round's wait |
-| `udp sink probe 'on_failure' must be a string` | quote the answer |
-| `udp sink probe 'kind' must be "echo" or "icmp", got '{value}'` | pick one of the two kinds |
-| `udp sink probe 'on_failure' must be "refuse" or "warn", got '{value}'` | pick one of the two answers |
+| `UdpSource config: multicast_group: {reason}` | write the group as a bare address, `"239.255.0.1"` |
+| ``UdpSource config: unknown field `{key}`, expected one of `bind`, `multicast_group`, `buffer` `` | fix the key's spelling, or drop it |
+| ``UdpSink config: unknown field `{key}` `` | the same, for the sink and for the keys of its `probe` |
+| `UdpSink config: {key}: invalid type: {found}, expected {type}` | write the value with the type the table above names |
+| `udp: 'buffer' must be at least 1` | give `buffer` a positive value |
 | `UdpSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
 | `UdpSource: set_nonblocking failed: {e}` | the OS refused to put the socket in non-blocking mode |
 | `UdpSource: local_addr failed: {e}` | the OS could not report the address the socket bound |

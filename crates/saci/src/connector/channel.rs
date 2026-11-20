@@ -12,7 +12,7 @@
 //!
 //! Their factories take `name` (the channel to resolve through the
 //! registered [`crate::connector::ChannelBridge`]), `buffer` (mpsc capacity,
-//! default 8) and a `schema_fields` array.
+//! default 8, at least 1) and a `schema_fields` array.
 
 pub mod factory;
 pub mod registry;

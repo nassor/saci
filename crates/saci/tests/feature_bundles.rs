@@ -46,8 +46,8 @@ const SELF_CONTAINED_CONNECTORS: [&str; 7] = [
     "connector-channel",
     "connector-file",
     "connector-http",
+    "connector-peer",
     "connector-redb",
-    "connector-saci",
     "connector-tcp",
     "connector-udp",
 ];

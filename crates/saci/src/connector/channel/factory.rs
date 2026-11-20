@@ -10,6 +10,9 @@
 //! `buffer` (mpsc capacity, default 8) and `schema_fields` in their `config`
 //! table.
 
+use serde::Deserialize;
+
+use crate::connector::schema::{at_least_one, deserialize_config};
 use crate::connector::{
     ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
 };
@@ -21,20 +24,31 @@ use crate::io::{Sink, Source};
 const CHANNEL_NOT_REBUILDABLE: &str =
     "a channel is bound to one mpsc pair created once per process";
 
-fn buffer_of(config: &ConfigValue) -> usize {
-    config
-        .get("buffer")
-        .and_then(|v| v.as_i64())
-        .map(|v| v.max(0) as usize)
-        .unwrap_or(8)
+/// Default mpsc capacity.
+const DEFAULT_BUFFER: usize = 8;
+
+fn default_buffer() -> usize {
+    DEFAULT_BUFFER
 }
 
-fn name_of<'a>(config: &'a ConfigValue, what: &str) -> Result<&'a str, SaciError> {
-    config.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
-        SaciError::configuration(format!(
-            "{what} config requires a 'name' key naming the shared channel"
-        ))
-    })
+/// The `config` table both halves of a channel read: the shared name and the
+/// mpsc capacity. `schema_fields` is read beside it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelConfig {
+    name: String,
+    #[serde(default = "default_buffer")]
+    buffer: usize,
+}
+
+impl ChannelConfig {
+    /// Read `config` for the half named `what`, refusing a zero capacity:
+    /// an mpsc channel of none panics instead of blocking.
+    fn read(config: &ConfigValue, what: &str) -> Result<Self, SaciError> {
+        let cfg: Self = deserialize_config(config, what)?;
+        at_least_one("channel", "buffer", cfg.buffer as u64)?;
+        Ok(cfg)
+    }
 }
 
 /// Factory for [`ChannelSource`](crate::connector::channel::ChannelSource).
@@ -42,11 +56,10 @@ fn name_of<'a>(config: &'a ConfigValue, what: &str) -> Result<&'a str, SaciError
 /// Resolves the source half of the named channel through the host's
 /// registered [`crate::connector::ChannelBridge`].
 ///
-/// Config fields:
-/// - `name` (string, required): the channel name, shared with the paired
-///   `ChannelSink`.
-/// - `buffer` (usize, optional, default `8`): mpsc channel capacity.
-/// - `schema_fields` (list, required): Arrow schema definition.
+/// The `config` table is a `name` (string, required: the channel name, shared
+/// with the paired `ChannelSink`) and a `buffer` (usize, optional, default
+/// `8`, at least `1`: mpsc channel capacity). Beside it, `schema_fields`
+/// (list, required) is the Arrow schema definition.
 pub struct ChannelSourceFactory;
 
 impl SourceFactory for ChannelSourceFactory {
@@ -65,10 +78,9 @@ impl SourceFactory for ChannelSourceFactory {
                  ServiceBuilder::with_channel_bridge",
             )
         })?;
-        let name = name_of(config, "ChannelSource")?;
-        let buffer = buffer_of(config);
+        let cfg = ChannelConfig::read(config, "ChannelSource")?;
         let schema = parse_schema_fields(config, "ChannelSource")?;
-        bridge.source(name, schema, buffer)
+        bridge.source(&cfg.name, schema, cfg.buffer)
     }
 
     /// `ChannelRegistry` latches each named half as it is built and refuses a
@@ -83,11 +95,10 @@ impl SourceFactory for ChannelSourceFactory {
 /// Resolves the sink half of the named channel through the host's registered
 /// [`crate::connector::ChannelBridge`].
 ///
-/// Config fields:
-/// - `name` (string, required): the channel name, shared with the paired
-///   `ChannelSource`.
-/// - `buffer` (usize, optional, default `8`): mpsc channel capacity.
-/// - `schema_fields` (list, required): Arrow schema definition.
+/// The `config` table is a `name` (string, required: the channel name, shared
+/// with the paired `ChannelSource`) and a `buffer` (usize, optional, default
+/// `8`, at least `1`: mpsc channel capacity). Beside it, `schema_fields`
+/// (list, required) is the Arrow schema definition.
 pub struct ChannelSinkFactory;
 
 impl SinkFactory for ChannelSinkFactory {
@@ -106,10 +117,9 @@ impl SinkFactory for ChannelSinkFactory {
                  ServiceBuilder::with_channel_bridge",
             )
         })?;
-        let name = name_of(config, "ChannelSink")?;
-        let buffer = buffer_of(config);
+        let cfg = ChannelConfig::read(config, "ChannelSink")?;
         let schema = parse_schema_fields(config, "ChannelSink")?;
-        bridge.sink(name, schema, buffer)
+        bridge.sink(&cfg.name, schema, cfg.buffer)
     }
 
     /// `ChannelRegistry` latches each named half as it is built and refuses a
@@ -188,7 +198,7 @@ schema_fields "id" type="Int64" nullable=#false
             .err()
             .expect("should return error");
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("'name'"));
+        assert!(err.message().contains("`name`"));
     }
 
     #[test]
@@ -200,7 +210,7 @@ schema_fields "id" type="Int64" nullable=#false
             .err()
             .expect("should return error");
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("'name'"));
+        assert!(err.message().contains("`name`"));
     }
 
     #[test]
@@ -221,5 +231,48 @@ schema_fields "id" type="Int64" nullable=#false
             .expect("should return error");
         assert_eq!(err.category(), "configuration");
         assert!(err.message().contains("channel bridge"));
+    }
+
+    /// An mpsc channel of capacity zero panics, so a zero is refused while
+    /// the config is read rather than reaching the bridge.
+    #[test]
+    fn test_a_zero_buffer_is_a_configuration_error_not_a_panic() {
+        let ctx = ctx_with_bridge();
+        let raw = from_kdl_str(
+            "name \"bridge\"\nbuffer 0\nschema_fields \"id\" type=\"Int64\" nullable=#false\n",
+        )
+        .unwrap();
+
+        let err = ChannelSourceFactory
+            .build(&raw, &ctx)
+            .err()
+            .expect("a zero buffer must be refused");
+        assert_eq!(err.category(), "configuration");
+        assert!(
+            err.message().contains("'buffer' must be at least 1"),
+            "got: {err}"
+        );
+
+        let err = ChannelSinkFactory
+            .build(&raw, &ctx)
+            .err()
+            .expect("a zero buffer must be refused");
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("'buffer' must be at least 1"));
+    }
+
+    #[test]
+    fn test_a_misspelled_key_is_named() {
+        let ctx = ctx_with_bridge();
+        let raw = from_kdl_str(
+            "name \"bridge\"\nbufer 4\nschema_fields \"id\" type=\"Int64\" nullable=#false\n",
+        )
+        .unwrap();
+        let err = ChannelSourceFactory
+            .build(&raw, &ctx)
+            .err()
+            .expect("an unknown key must be refused");
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("bufer"), "got: {err}");
     }
 }

@@ -19,7 +19,7 @@ use arrow_schema::{DataType, Field, Schema};
 use tokio_util::sync::CancellationToken;
 
 use saci::codec::avro::AvroCodec;
-use saci::connector::file::FileSource;
+use saci::connector::file::{FileSource, FileSourceConfig};
 use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
@@ -134,8 +134,12 @@ async fn a_csv_source_and_an_avro_sink_share_one_file_connector() {
     // A reader takes the codec from the container file header, so reading this
     // back with no compression of its own also proves the writer honoured the
     // `deflate` option.
-    let mut readback = FileSource::open(&output_path, Arc::new(AvroCodec::new()), None)
-        .expect("the sink wrote a readable Avro file");
+    let mut readback = FileSource::new(
+        FileSourceConfig::new(&output_path),
+        None,
+        Arc::new(AvroCodec::new()),
+    )
+    .expect("the sink wrote a readable Avro file");
 
     let batch = readback
         .next_batch()

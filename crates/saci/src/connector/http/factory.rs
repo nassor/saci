@@ -1,15 +1,15 @@
-//! The HTTP source, sink and push source factories.
+//! The HTTP source, sink and listen source factories.
 //!
 //! All three resolve their byte format through the codec the host bound
 //! to this connector instance via a declared `transformer` key. The schema is
 //! where they differ: a document mode source hands the format whatever
 //! `schema_fields` says, including nothing, and lets the format decide, while a
-//! sink and a push source always need one, because it is the schema the rows
+//! sink and a listen source always need one, because it is the schema the rows
 //! are written with and the one the graph is validated against before a request
 //! can arrive.
 //!
 //! No factory makes a request, so `saci-service validate` touches no network. A
-//! push source does bind its sockets, the way the `tcp` and `udp` sources do,
+//! listen source does bind its sockets, the way the `tcp` and `udp` sources do,
 //! so a port already in use is a load-time error rather than a listener that
 //! never accepts.
 
@@ -23,23 +23,81 @@ use crate::connector::{
 use crate::error::SaciError;
 use crate::io::{Sink, Source};
 
-use crate::connector::http::sink::{ContentEncoding, HttpSinkOptions};
+use crate::connector::http::sink::{ContentEncoding, HttpSinkConfig};
 use crate::connector::http::source::{
-    HttpClientOptions, HttpSourceOptions, Pagination, ReadMode, Window,
+    BatchWindow, HttpClientConfig, HttpSourceConfig, Pagination, ReadMode,
 };
 use crate::connector::http::tls::TlsFiles;
 use crate::connector::http::{
-    HttpPushOptions, HttpPushSource, HttpSink, HttpSource, HttpVersion, SchemaFrom, ServerTls,
+    HttpListenConfig, HttpListenSource, HttpSink, HttpSource, HttpVersion, SchemaFrom, ServerTls,
 };
 
 /// Whole-request budget when `timeout_ms` is absent.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// Method the sink sends when `method` is absent.
 const DEFAULT_METHOD: &str = "POST";
-/// Largest request body a push source accepts when `max_body_bytes` is absent.
-const DEFAULT_PUSH_BODY_BYTES: i64 = 67_108_864;
-/// Documents a push source queues when `buffer` is absent.
-const DEFAULT_PUSH_BUFFER: i64 = 64;
+/// Largest request body a listening source accepts when `max_body_bytes` is absent.
+const DEFAULT_LISTEN_BODY_BYTES: i64 = 67_108_864;
+/// Documents a listening source queues when `buffer` is absent.
+const DEFAULT_LISTEN_BUFFER: i64 = 64;
+
+/// The keys an `HttpSource` config may carry.
+const SOURCE_KEYS: &[&str] = &[
+    "url",
+    "timeout_ms",
+    "headers",
+    "http_version",
+    "tls",
+    "max_body_bytes",
+    "schema_from",
+    "schema_fields",
+    "pagination",
+    "conditional",
+    "mode",
+];
+/// The keys an `HttpSink` config may carry.
+const SINK_KEYS: &[&str] = &[
+    "url",
+    "timeout_ms",
+    "headers",
+    "http_version",
+    "tls",
+    "method",
+    "content_encoding",
+    "schema_fields",
+];
+/// The keys an `HttpListenSource` config may carry.
+const LISTEN_KEYS: &[&str] = &[
+    "bind",
+    "path",
+    "methods",
+    "max_body_bytes",
+    "buffer",
+    "tls",
+    "quic_bind",
+    "auth",
+    "schema_from",
+    "schema_fields",
+];
+
+/// Refuse the first key of `config` that `allowed` does not list.
+///
+/// # Errors
+///
+/// Returns [`SaciError::Configuration`] naming the key: a misspelled optional
+/// key read as absent would run the connector with a default the config author
+/// never chose.
+fn reject_unknown_keys(config: &ConfigValue, allowed: &[&str]) -> Result<(), SaciError> {
+    let Some(table) = config.as_object() else {
+        return Ok(());
+    };
+    match table.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(key) => Err(SaciError::configuration(format!(
+            "http: unknown key '{key}'"
+        ))),
+        None => Ok(()),
+    }
+}
 
 /// The `url` a factory needs, or a configuration error naming the key.
 fn required_url<'a>(config: &'a ConfigValue, what: &str) -> Result<&'a str, SaciError> {
@@ -282,7 +340,7 @@ fn read_mode(config: &ConfigValue) -> Result<ReadMode, SaciError> {
         ));
     }
 
-    let window = Window {
+    let window = BatchWindow {
         batch_size: mode_positive(table, "batch_size", 1_000)? as usize,
         poll_timeout: Duration::from_millis(mode_positive(table, "poll_timeout_ms", 1_000)?),
         reconnect: Duration::from_millis(mode_positive(table, "reconnect_ms", 1_000)?),
@@ -334,8 +392,8 @@ fn client_options(
     config: &ConfigValue,
     ctx: &ConnectorContext,
     what: &'static str,
-) -> Result<HttpClientOptions, SaciError> {
-    Ok(HttpClientOptions {
+) -> Result<HttpClientConfig, SaciError> {
+    Ok(HttpClientConfig {
         http_version: http_version(config, what)?,
         tls: tls_files(config, what)?,
         headers: headers(config, what)?,
@@ -387,6 +445,8 @@ fn client_options(
 ///   `"body"` withholds it and checks the body's own schema against it field
 ///   for field. `kind="document"` only.
 ///
+/// Any key outside this list is refused as `http: unknown key '{key}'`.
+///
 /// The byte format is whatever codec the `source` node's `transformer`
 /// key names; see [`ConnectorContext::codec`].
 pub struct HttpSourceFactory;
@@ -401,18 +461,21 @@ impl SourceFactory for HttpSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
+        reject_unknown_keys(config, SOURCE_KEYS)?;
         let url = required_url(config, "HttpSource")?;
         let codec = ctx.codec("HttpSource")?;
+        let client = client_options(config, ctx, "HttpSource")?;
+        let schema = parse_optional_schema_fields(config, "HttpSource")?;
         Ok(Box::new(HttpSource::new(
-            url,
-            codec,
-            HttpSourceOptions {
-                client: client_options(config, ctx, "HttpSource")?,
-                declared: parse_optional_schema_fields(config, "HttpSource")?,
+            HttpSourceConfig {
+                url: url.to_string(),
+                client,
                 schema_from: schema_from(config, "HttpSource")?,
                 mode: read_mode(config)?,
                 max_body_bytes: positive(config, "HttpSource", "max_body_bytes")?,
             },
+            schema,
+            codec,
         )?))
     }
 
@@ -445,6 +508,8 @@ impl SourceFactory for HttpSourceFactory {
 /// - `schema_fields` (list, required): the Arrow schema each body is written
 ///   with.
 ///
+/// Any key outside this list is refused as `http: unknown key '{key}'`.
+///
 /// The byte format is whatever codec the `sink` node's `transformer` key
 /// names; see [`ConnectorContext::codec`].
 pub struct HttpSinkFactory;
@@ -459,6 +524,7 @@ impl SinkFactory for HttpSinkFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
+        reject_unknown_keys(config, SINK_KEYS)?;
         let url = required_url(config, "HttpSink")?;
         let codec = ctx.codec("HttpSink")?;
         let schema = parse_schema_fields(config, "HttpSink")?;
@@ -469,14 +535,14 @@ impl SinkFactory for HttpSinkFactory {
             })?,
         };
         Ok(Box::new(HttpSink::new(
-            url,
-            schema,
-            codec,
-            HttpSinkOptions {
+            HttpSinkConfig {
+                url: url.to_string(),
                 client: client_options(config, ctx, "HttpSink")?,
                 method: method.to_string(),
                 content_encoding: content_encoding(config)?,
             },
+            schema,
+            codec,
         )?))
     }
 
@@ -487,7 +553,7 @@ impl SinkFactory for HttpSinkFactory {
     }
 }
 
-/// Factory for [`HttpPushSource`].
+/// Factory for [`HttpListenSource`].
 ///
 /// Config fields:
 /// - `bind` (string, required): the `host:port` to listen on.
@@ -513,11 +579,13 @@ impl SinkFactory for HttpSinkFactory {
 /// - `schema_from` (`"config"` or `"body"`, optional, default `"config"`): as
 ///   on [`HttpSourceFactory`].
 ///
+/// Any key outside this list is refused as `http: unknown key '{key}'`.
+///
 /// The byte format is whatever codec the `source` node's `transformer`
 /// key names; see [`ConnectorContext::codec`].
-pub struct HttpPushSourceFactory;
+pub struct HttpListenSourceFactory;
 
-impl SourceFactory for HttpPushSourceFactory {
+impl SourceFactory for HttpListenSourceFactory {
     fn type_name(&self) -> &'static str {
         "HttpPushSource"
     }
@@ -527,7 +595,8 @@ impl SourceFactory for HttpPushSourceFactory {
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let what = "HttpPushSource";
+        reject_unknown_keys(config, LISTEN_KEYS)?;
+        let what = "HttpListenSource";
         let bind = config.get("bind").and_then(|v| v.as_str()).ok_or_else(|| {
             SaciError::configuration(format!("{what} config requires a 'bind' string"))
         })?;
@@ -545,8 +614,8 @@ impl SourceFactory for HttpPushSourceFactory {
                 }
             },
         };
-        let methods = push_methods(config, what)?;
-        let tls = push_tls(config, what)?;
+        let methods = listen_methods(config, what)?;
+        let tls = listen_tls(config, what)?;
         let quic_bind = match config.get("quic_bind") {
             None => None,
             Some(value) => Some(
@@ -560,35 +629,35 @@ impl SourceFactory for HttpPushSourceFactory {
                     .to_string(),
             ),
         };
-        let bearer = push_bearer(config, what)?;
+        let bearer = listen_bearer(config, what)?;
 
-        Ok(Box::new(HttpPushSource::new(
-            bind,
-            codec,
-            HttpPushOptions {
-                declared,
+        Ok(Box::new(HttpListenSource::new(
+            HttpListenConfig {
+                bind: bind.to_string(),
                 schema_from: schema_from(config, what)?,
                 path,
                 methods,
                 max_body_bytes: positive(config, what, "max_body_bytes")?
-                    .unwrap_or(DEFAULT_PUSH_BODY_BYTES as usize),
+                    .unwrap_or(DEFAULT_LISTEN_BODY_BYTES as usize),
                 // Lenient, like `tcp`'s and `udp`'s: a zero is a request for
                 // no queueing at all, which the channel cannot express.
                 buffer: config
                     .get("buffer")
                     .and_then(ConfigValue::as_i64)
-                    .unwrap_or(DEFAULT_PUSH_BUFFER)
+                    .unwrap_or(DEFAULT_LISTEN_BUFFER)
                     .max(1) as usize,
                 tls,
                 quic_bind,
                 bearer,
                 identity: ctx.identity(what).ok().cloned(),
             },
+            declared,
+            codec,
         )?))
     }
 
     /// The listener is dropped before a rebuild, so the replacement binds the
-    /// same address, exactly as `TcpIngestSourceFactory`'s does.
+    /// same address, exactly as `TcpSourceFactory`'s does.
     fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
         Ok(())
     }
@@ -598,7 +667,7 @@ impl SourceFactory for HttpPushSourceFactory {
 ///
 /// `crate::config`'s rule 3 means two or more arguments arrive as an array and
 /// exactly one arrives as a scalar, so both shapes are read here.
-fn push_methods(config: &ConfigValue, what: &str) -> Result<Vec<String>, SaciError> {
+fn listen_methods(config: &ConfigValue, what: &str) -> Result<Vec<String>, SaciError> {
     let Some(value) = config.get("methods") else {
         return Ok(vec![DEFAULT_METHOD.to_string()]);
     };
@@ -619,12 +688,12 @@ fn push_methods(config: &ConfigValue, what: &str) -> Result<Vec<String>, SaciErr
         .collect()
 }
 
-/// The push source's `tls` block: the pair, or neither.
-fn push_tls(config: &ConfigValue, what: &str) -> Result<Option<ServerTls>, SaciError> {
+/// The listening source's `tls` block: the pair, or neither.
+fn listen_tls(config: &ConfigValue, what: &str) -> Result<Option<ServerTls>, SaciError> {
     let files = tls_files(config, what)?;
     if files.ca_file.is_some() {
         return Err(SaciError::configuration(format!(
-            "{what} config.tls['ca_file'] is not a listener key: a push source authenticates \
+            "{what} config.tls['ca_file'] is not a listener key: a listening source authenticates \
              callers with auth {{ bearer }}, not with a client certificate"
         )));
     }
@@ -641,7 +710,7 @@ fn push_tls(config: &ConfigValue, what: &str) -> Result<Option<ServerTls>, SaciE
 }
 
 /// The `auth` block's bearer token.
-fn push_bearer(config: &ConfigValue, what: &str) -> Result<Option<String>, SaciError> {
+fn listen_bearer(config: &ConfigValue, what: &str) -> Result<Option<String>, SaciError> {
     let Some(value) = config.get("auth") else {
         return Ok(None);
     };
@@ -715,10 +784,10 @@ mod tests {
         assert!(err.message().contains(fragment), "got: {err}");
     }
 
-    /// The same for a push source, which needs a message-capable format.
-    fn push_refuses(raw: &str, fragment: &str) {
+    /// The same for a listen source, which needs a message-capable format.
+    fn listen_refuses(raw: &str, fragment: &str) {
         let ctx = ConnectorContext::new(Some(ndjson_codec()));
-        let Err(err) = HttpPushSourceFactory.build(&config(raw), &ctx) else {
+        let Err(err) = HttpListenSourceFactory.build(&config(raw), &ctx) else {
             panic!("expected a refusal naming {fragment}");
         };
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -729,7 +798,7 @@ mod tests {
     fn the_type_names_match_the_config_type_key() {
         assert_eq!(HttpSourceFactory.type_name(), "HttpSource");
         assert_eq!(HttpSinkFactory.type_name(), "HttpSink");
-        assert_eq!(HttpPushSourceFactory.type_name(), "HttpPushSource");
+        assert_eq!(HttpListenSourceFactory.type_name(), "HttpPushSource");
     }
 
     #[test]
@@ -758,13 +827,68 @@ mod tests {
     #[test]
     fn a_missing_bind_is_a_configuration_error() {
         let ctx = ConnectorContext::new(Some(ndjson_codec()));
-        let Err(err) = HttpPushSourceFactory.build(&empty_config(), &ctx) else {
+        let Err(err) = HttpListenSourceFactory.build(&empty_config(), &ctx) else {
             panic!("a listener needs an address");
         };
         assert_eq!(
             err.message(),
-            "HttpPushSource config requires a 'bind' string"
+            "HttpListenSource config requires a 'bind' string"
         );
+    }
+
+    /// A misspelled optional key read as absent would run the node with a
+    /// default the config author never chose, and a key that belongs to
+    /// another role is as foreign here as a misspelling.
+    #[test]
+    fn an_unknown_source_key_is_refused_by_name() {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
+        for key in ["timeut_ms 500", "method \"POST\""] {
+            let Err(err) = HttpSourceFactory.build(
+                &config(&format!(
+                    "url \"http://127.0.0.1:1/data.csv\"\n{key}\n{SCHEMA}"
+                )),
+                &ctx,
+            ) else {
+                panic!("'{key}' is not a source key");
+            };
+            assert_eq!(err.category(), "configuration");
+            let name = key.split(' ').next().expect("a key name");
+            assert_eq!(err.message(), format!("http: unknown key '{name}'"));
+        }
+    }
+
+    #[test]
+    fn an_unknown_sink_key_is_refused_by_name() {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
+        for key in ["methd \"PUT\"", "pagination \"link\""] {
+            let Err(err) = HttpSinkFactory.build(
+                &config(&format!(
+                    "url \"http://127.0.0.1:1/ingest\"\n{key}\n{SCHEMA}"
+                )),
+                &ctx,
+            ) else {
+                panic!("'{key}' is not a sink key");
+            };
+            assert_eq!(err.category(), "configuration");
+            let name = key.split(' ').next().expect("a key name");
+            assert_eq!(err.message(), format!("http: unknown key '{name}'"));
+        }
+    }
+
+    #[test]
+    fn an_unknown_listen_key_is_refused_by_name() {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        for key in ["pth \"/orders\"", "url \"http://127.0.0.1:1/\""] {
+            let Err(err) = HttpListenSourceFactory.build(
+                &config(&format!("bind \"127.0.0.1:0\"\n{key}\n{SCHEMA}")),
+                &ctx,
+            ) else {
+                panic!("'{key}' is not a listen key");
+            };
+            assert_eq!(err.category(), "configuration");
+            let name = key.split(' ').next().expect("a key name");
+            assert_eq!(err.message(), format!("http: unknown key '{name}'"));
+        }
     }
 
     /// A misspelling read as the default would project the body onto the
@@ -1199,12 +1323,12 @@ headers {{
         );
     }
 
-    // ── the push source's keys ──────────────────────────────────────────────
+    // ── the listen source's keys ────────────────────────────────────────────
 
     #[test]
-    fn a_push_source_binds_and_reports_the_declared_schema() {
+    fn a_listen_source_binds_and_reports_the_declared_schema() {
         let ctx = ConnectorContext::new(Some(ndjson_codec()));
-        let source = HttpPushSourceFactory
+        let source = HttpListenSourceFactory
             .build(
                 &config(&format!(
                     "bind \"127.0.0.1:0\"\npath \"/orders\"\nmethods \"POST\" \"PUT\"\n{SCHEMA}"
@@ -1217,7 +1341,7 @@ headers {{
 
     #[test]
     fn a_path_without_a_leading_slash_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\npath \"orders\"\n{SCHEMA}"),
             "config.path must be a string starting with '/'",
         );
@@ -1225,7 +1349,7 @@ headers {{
 
     #[test]
     fn a_non_string_method_in_the_list_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nmethods \"POST\" 7\n{SCHEMA}"),
             "config.methods must be one HTTP method name or a list of them",
         );
@@ -1233,7 +1357,7 @@ headers {{
 
     #[test]
     fn a_non_string_quic_bind_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nquic_bind 9700\n{SCHEMA}"),
             "config.quic_bind must be a string",
         );
@@ -1241,7 +1365,7 @@ headers {{
 
     #[test]
     fn quic_bind_without_tls_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nquic_bind \"127.0.0.1:0\"\n{SCHEMA}"),
             "quic_bind needs a 'tls' block",
         );
@@ -1249,7 +1373,7 @@ headers {{
 
     #[test]
     fn half_a_listener_tls_pair_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\ntls {{\n cert_file \"c.pem\"\n}}\n{SCHEMA}"),
             "config.tls needs both 'cert_file' and 'key_file'",
         );
@@ -1259,7 +1383,7 @@ headers {{
     /// would look like client authentication that is not happening.
     #[test]
     fn a_ca_file_on_the_listener_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\ntls {{\n ca_file \"ca.pem\"\n}}\n{SCHEMA}"),
             "is not a listener key",
         );
@@ -1267,7 +1391,7 @@ headers {{
 
     #[test]
     fn a_scalar_auth_block_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nauth \"token\"\n{SCHEMA}"),
             "config.auth must be a table",
         );
@@ -1277,15 +1401,15 @@ headers {{
     /// for, names that key rather than the shape it already has.
     #[test]
     fn an_auth_block_without_a_bearer_key_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nauth {{\n token \"x\"\n}}\n{SCHEMA}"),
-            "HttpPushSource config.auth needs a 'bearer' string",
+            "HttpListenSource config.auth needs a 'bearer' string",
         );
     }
 
     #[test]
     fn an_empty_bearer_token_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nauth {{\n bearer \"\"\n}}\n{SCHEMA}"),
             "config.auth.bearer must be a non-empty string",
         );
@@ -1296,7 +1420,7 @@ headers {{
     #[test]
     fn a_zero_buffer_is_clamped_rather_than_refused() {
         let ctx = ConnectorContext::new(Some(ndjson_codec()));
-        HttpPushSourceFactory
+        HttpListenSourceFactory
             .build(
                 &config(&format!("bind \"127.0.0.1:0\"\nbuffer 0\n{SCHEMA}")),
                 &ctx,
@@ -1305,8 +1429,8 @@ headers {{
     }
 
     #[test]
-    fn a_push_source_is_rebuildable() {
-        HttpPushSourceFactory
+    fn a_listen_source_is_rebuildable() {
+        HttpListenSourceFactory
             .rebuildable(&empty_config())
             .expect("the listener is dropped before a rebuild");
     }
