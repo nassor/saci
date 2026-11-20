@@ -2,7 +2,7 @@
 //!
 //! For each claimed batch the runner builds a fresh [`Dataset`] from `world_factory()`,
 //! loads the prior window accumulator plus the runtime's opaque state blob, calls
-//! `runtime.run_on_with_state`, saves a checkpoint, then acks the claim. The runtime is a
+//! `runtime.run_batch`, saves a checkpoint, then acks the claim. The runtime is a
 //! template reused across batches: it keeps no per-batch state, and its own data, sources,
 //! and sinks go unused because partition data arrives via [`PartitionSource`].
 //!
@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::PipelineRuntime;
+use crate::RuntimeOutput;
 
 use crate::SaciError;
 use crate::SaciResult;
@@ -276,7 +277,7 @@ where
                 }
             }
 
-            // Opaque to the host: whatever `run_on_with_state` returned on this runner's
+            // Opaque to the host: whatever `run_batch` returned as its state on this runner's
             // previous batch, handed straight back.
             let prior_state = match state_claim_id {
                 None => None,
@@ -322,8 +323,8 @@ where
             }
 
             // Renewal is a sibling select branch, so tokio polls it concurrently with
-            // `run_on`. When renewal fails its branch resolves first, and dropping the
-            // select cancels `run_on` at its next `.await`.
+            // `run_batch`. When renewal fails its branch resolves first, and dropping the
+            // select cancels `run_batch` at its next `.await`.
             let renewal_interval = Duration::from_millis((claim.lease_ttl_millis / 3).max(1));
             let claim_id = claim.claim_id;
             let claim_instance_id = claim.instance_id;
@@ -342,7 +343,7 @@ where
                             workflow = %workflow_id_for_renewal,
                             %claim_id,
                             error = %e,
-                            "mid-execution lease renewal failed; cancelling run_on"
+                            "mid-execution lease renewal failed; cancelling run_batch"
                         );
                         #[cfg(not(feature = "tracing"))]
                         let _ = e;
@@ -359,7 +360,7 @@ where
             batch_span.record("rows", partition_data.rows() as u64);
 
             enum RunOutcome {
-                Ran(SaciResult<Option<Vec<u8>>>),
+                Ran(SaciResult<RuntimeOutput>),
                 RenewalFailed,
             }
             let runtime = &*self.runtime;
@@ -377,7 +378,7 @@ where
                     rows_out = tracing::field::Empty
                 )
             });
-            let run = runtime.run_on_with_state(&mut partition_data, prior_state.as_deref());
+            let run = runtime.run_batch(&mut partition_data, prior_state.as_deref());
             #[cfg(feature = "tracing")]
             let run = tracing::Instrument::instrument(run, run_span.clone());
             let outcome = tokio::select! {
@@ -395,7 +396,7 @@ where
             #[cfg(feature = "tracing")]
             drop(run_span);
 
-            let run_result: SaciResult<Option<Vec<u8>>> = match outcome {
+            let run_result: SaciResult<RuntimeOutput> = match outcome {
                 RunOutcome::Ran(r) => r,
                 RunOutcome::RenewalFailed => {
                     crate::metrics::instruments().workflow_error(&self.config.workflow_id);
@@ -405,7 +406,7 @@ where
             };
 
             let (next_state, mut run_error) = match run_result {
-                Ok(blob) => (blob, None),
+                Ok(out) => (out.state, None),
                 Err(e) => (None, Some(e)),
             };
             let mut claim_released = false;

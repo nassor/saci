@@ -37,10 +37,9 @@ use tokio_util::sync::CancellationToken;
 
 use saci::service::builder::{ServiceBuilder, rebuild_blocker};
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::http::{ServiceModeLabel, ServiceState, build_router};
 use saci::service::lifecycle::{LifecycleRegistryBuilder, PauseHandle, RunControl};
-use saci::service::standalone::StandaloneStats;
+use saci::service::standalone::WorkflowStats;
 use saci::service::{run_standalone, run_supervised};
 
 /// How long a state poll waits before it gives up and fails the test.
@@ -254,12 +253,12 @@ impl Harness {
     /// start one supervisor per workflow.
     ///
     /// Must be called inside a [`LocalSet`]: a supervisor owns a
-    /// `BuiltService`, so its future is not `Send`.
+    /// `BuiltWorkflow`, so its future is not `Send`.
     async fn start(config_path: &std::path::Path) -> Self {
         saci::service::install_ring_provider();
         let config = ServiceConfig::load(config_path).expect("config loads");
 
-        let mut factory = register_builtin_factories(ServiceBuilder::new()).into_factory(&config);
+        let mut factory = ServiceBuilder::new().into_factory(&config);
         let mut built = Vec::with_capacity(config.workflows.len());
         for workflow in &config.workflows {
             built.push(factory.build(workflow).expect("workflow builds"));
@@ -279,12 +278,12 @@ impl Harness {
             .collect();
         let registry = Arc::new(registry_builder.build());
 
-        let stats: Vec<(String, Arc<RwLock<StandaloneStats>>)> = built
+        let stats: Vec<(String, Arc<RwLock<WorkflowStats>>)> = built
             .iter()
             .map(|b| {
                 (
                     b.workflow_id.clone(),
-                    Arc::new(RwLock::new(StandaloneStats::default())),
+                    Arc::new(RwLock::new(WorkflowStats::default())),
                 )
             })
             .collect();
@@ -297,7 +296,6 @@ impl Harness {
             prometheus_registry: Arc::new(prometheus::Registry::new()),
             liveness: Arc::new(AtomicU64::new(0)),
             ready: Arc::new(AtomicBool::new(true)),
-            cluster_probe: None,
             standalone_stats: Some(stats.clone()),
             inspector: None,
             lifecycle: config.http.control.then_some(registry),
@@ -440,12 +438,12 @@ async fn pause_parks_the_runner_and_resume_releases_it() {
     });
 
     let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .build(&config)
         .expect("the file workflow builds")
         .remove(0);
 
-    let live = Arc::new(RwLock::new(StandaloneStats::default()));
+    let live = Arc::new(RwLock::new(WorkflowStats::default()));
     let cancel = CancellationToken::new();
     let (handle, gate) = PauseHandle::new();
     let mut parked = handle.parked();

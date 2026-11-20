@@ -13,10 +13,10 @@
 //! |---|---|
 //! | [`InspectorLayer`] | [`init_logging`](crate::service::logging::init_logging), as one more layer on the existing registry |
 //! | [`InMemoryMetricExporter`] | `saci-service serve`, as a second `PeriodicReader` on the shared `SdkMeterProvider` |
-//! | [`Topology`] | [`ServiceBuilder::build_all`](crate::service::builder::ServiceBuilder::build_all), once, through [`Inspector::set_topology`] |
+//! | [`Topology`] | [`ServiceBuilder::build`](crate::service::builder::ServiceBuilder::build), once, through [`Inspector::set_topology`] |
 //! | [`FlowDecision`] | the standalone and stream runners, through [`Inspector::record_flow_decision`], on each pass a source's admission target moved |
 //!
-//! Unlike [`crate::metrics::Instruments`] this type is **not** process-global:
+//! Unlike the `crate::metrics::Instruments` set, this type is **not** process-global:
 //! the router needs a handle and tests need isolated instances, so it is cloned
 //! (every field is an `Arc`) and threaded explicitly.
 //!
@@ -654,7 +654,7 @@ fn attributed_rate_branch(
 
 /// One sink's own throughput, in rows.
 ///
-/// [`Instruments::sink_write`](crate::metrics::Instruments::sink_write)
+/// `Instruments::sink_write`
 /// records `saci_sink_batches_written_total` and
 /// `saci_sink_rows_written_total` on the same write, and a zero-row write
 /// still registers the rows series, so there is no state in which a sink has

@@ -36,7 +36,6 @@ use saci::codec::csv::CsvCodec;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
@@ -209,17 +208,15 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
     let (sink_url, sink_server) = serve(1, Vec::new());
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(&source_url, &sink_url, &config_path_text(dir.path())),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &source_url,
+        &sink_url,
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("both http halves resolve through the registry")
         .remove(0);
 
@@ -261,10 +258,9 @@ mod listen {
     use saci::codec::ndjson::NdjsonCodec;
     use saci::service::builder::ServiceBuilder;
     use saci::service::config::ServiceConfig;
-    use saci::service::factories::register_builtin_factories;
     use saci::service::install_ring_provider;
     use saci::service::run_standalone;
-    use saci::service::standalone::StandaloneStats;
+    use saci::service::standalone::WorkflowStats;
 
     use super::{COMPONENT, build_pipeline, column, config_path_text, schema, serve};
 
@@ -351,21 +347,16 @@ observability log_level="warn"
     ///
     /// The listener is already bound by the factory, so a POST issued before
     /// the accept loop starts waits in the backlog instead of being refused.
-    async fn drive(dir: &std::path::Path) -> (StandaloneStats, Vec<Vec<u8>>) {
+    async fn drive(dir: &std::path::Path) -> (WorkflowStats, Vec<Vec<u8>>) {
         let bind_addr = format!("127.0.0.1:{}", reserved_port());
         let (sink_url, sink_server) = serve(documents().len(), Vec::new());
 
-        let config_path = dir.join("service.kdl");
-        std::fs::write(
-            &config_path,
-            config_kdl(&bind_addr, &sink_url, &config_path_text(dir)),
-        )
-        .expect("write config");
-
-        let config = ServiceConfig::load(&config_path).expect("config loads");
-        let built = register_builtin_factories(ServiceBuilder::new())
-            .with_runtime("relay", Box::new(build_pipeline()))
-            .build_all(&config)
+        let config =
+            ServiceConfig::from_kdl(&config_kdl(&bind_addr, &sink_url, &config_path_text(dir)))
+                .expect("config loads");
+        let built = ServiceBuilder::new()
+            .runtime("relay", build_pipeline())
+            .build(&config)
             .expect("the listen source and the sink resolve through the registry")
             .remove(0);
 

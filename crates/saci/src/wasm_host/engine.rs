@@ -7,9 +7,10 @@ use wasmtime::component::{Component, HasSelf, Linker};
 
 use super::bindings::{SaciPipeline, SaciPipelinePre};
 use super::host_impl::HostState;
+use crate::{SaciError, SaciResult};
 
 /// Epoch tick interval for processor deadline enforcement.
-const EPOCH_TICK: Duration = Duration::from_millis(100);
+pub(super) const EPOCH_TICK: Duration = Duration::from_millis(100);
 
 /// Concurrent processor calls the instance pool is sized for.
 ///
@@ -50,7 +51,7 @@ const POOL_CALLS: u32 = 128;
 // TiB at these values. That reservation is virtual, never committed, but it
 // still bounds how many engines one process can hold, since address space is
 // finite. Real code builds one engine per service: `ServiceBuilder` caches it
-// and `with_wasm_engine` shares it, so 1 TiB is ample. If `WasmEngine::new`
+// and `wasm_engine` shares it, so 1 TiB is ample. If `WasmEngine::new`
 // starts failing, the process's live address-space reservation is what to
 // check.
 
@@ -103,7 +104,7 @@ type CachedProgram = (Vec<u8>, SaciPipelinePre<HostState>);
 /// so processors past their deadline are interrupted cleanly; the task stops
 /// when the last clone drops. Create one with [`WasmEngine::new`] at service
 /// startup and share it, through
-/// [`ServiceBuilder::with_wasm_engine`](crate::service::builder::ServiceBuilder::with_wasm_engine)
+/// [`ServiceBuilder::wasm_engine`](crate::service::builder::ServiceBuilder::wasm_engine)
 /// when several builders are assembled in one process.
 #[derive(Clone)]
 pub struct WasmEngine {
@@ -141,13 +142,15 @@ impl WasmEngine {
     ///
     /// # Errors
     ///
-    /// Returns whatever [`Engine::new`] rejects about the configuration.
+    /// Returns [`SaciError::Configuration`] when wasmtime rejects the engine
+    /// configuration, including a refused address-space reservation for the
+    /// instance pool.
     ///
     /// # Panics
     ///
     /// Panics if called outside a tokio runtime: the ticker is a
     /// `tokio::spawn`.
-    pub fn new() -> wasmtime::Result<Self> {
+    pub fn new() -> SaciResult<Self> {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         config.wasm_component_model_async(true);
@@ -170,7 +173,8 @@ impl WasmEngine {
         pool.table_keep_resident(POOL_KEEP_RESIDENT);
         config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pool));
 
-        let engine = Engine::new(&config)?;
+        let engine = Engine::new(&config)
+            .map_err(|e| SaciError::configuration(format!("wasm engine: {e}")))?;
         let ticker = Self::spawn_ticker(engine.clone());
         Ok(Self {
             engine,

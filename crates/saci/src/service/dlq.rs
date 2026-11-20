@@ -1,7 +1,7 @@
 //! The dead letter queue: what happens to a batch a sink refused.
 //!
 //! Without a `dlq` block a refused batch is logged, counted in
-//! [`StandaloneStats::iteration_errors`](super::standalone::StandaloneStats)
+//! [`WorkflowStats::iteration_errors`](super::standalone::WorkflowStats)
 //! and dropped. With one, the runner hands it to [`DeadLetterQueue`]'s
 //! `record`, which stores it as one row of a fixed envelope schema in a store
 //! the workflow named, and its `replay` reads those rows back and
@@ -70,7 +70,7 @@ use super::config::{DlqBlock, DlqReplayPoint, RetryConfig, ServiceConfig, Workfl
 use super::heal::{HealSettings, Rebuilder};
 use super::registry::Registry;
 use super::sampling::DLQ_TARGET;
-use super::standalone::{NodeRunStats, StandaloneStats};
+use super::standalone::{NodeStats, WorkflowStats};
 
 /// One store the `dlq` block may name.
 pub(crate) struct DlqStoreKind {
@@ -584,9 +584,9 @@ pub(crate) struct ReplayCtx<'a> {
     /// Every sink node's recovered flag, when it is healed.
     pub(crate) recovered: &'a [Option<Arc<AtomicBool>>],
     /// Per-node counters a delivered letter lands in.
-    pub(crate) node_stats: &'a mut [NodeRunStats],
+    pub(crate) node_stats: &'a mut [NodeStats],
     /// The run's counters.
-    pub(crate) stats: &'a mut StandaloneStats,
+    pub(crate) stats: &'a mut WorkflowStats,
     /// Shutdown, which ends a drain like an error does.
     pub(crate) cancel: &'a CancellationToken,
 }
@@ -742,7 +742,7 @@ impl DeadLetterQueue {
         sink: &str,
         component: &str,
         error: &SaciError,
-        stats: &mut StandaloneStats,
+        stats: &mut WorkflowStats,
     ) {
         let rows = batch.num_rows() as u64;
         if self.sink.is_none() && !self.rebuild_record_half() {
@@ -1838,8 +1838,8 @@ mod tests {
         sinks: Vec<Option<Box<dyn Sink>>>,
         ids: Vec<String>,
         recovered: Vec<Option<Arc<AtomicBool>>>,
-        node_stats: Vec<NodeRunStats>,
-        stats: StandaloneStats,
+        node_stats: Vec<NodeStats>,
+        stats: WorkflowStats,
         cancel: CancellationToken,
     }
 
@@ -1850,8 +1850,8 @@ mod tests {
                 sinks: vec![Some(Box::new(sink))],
                 ids: vec!["out".to_string()],
                 recovered: vec![None],
-                node_stats: vec![NodeRunStats::default()],
-                stats: StandaloneStats::default(),
+                node_stats: vec![NodeStats::default()],
+                stats: WorkflowStats::default(),
                 cancel,
             }
         }
@@ -1874,21 +1874,21 @@ mod tests {
         dir: &Path,
         shared: &Arc<DlqShared>,
         block: DlqBlock,
-    ) -> (DeadLetterQueue, StandaloneStats) {
+    ) -> (DeadLetterQueue, WorkflowStats) {
         let mut registry = Registry::new();
         registry.register_sink(crate::connector::redb::RedbSinkFactory);
         registry.register_source(crate::connector::redb::RedbSourceFactory);
         let spec = spec_with(block);
         let queue = DeadLetterQueue::build(&spec, dir, &Arc::new(registry), Arc::clone(shared))
             .expect("the redb store opens");
-        (queue, StandaloneStats::default())
+        (queue, WorkflowStats::default())
     }
 
     /// Record one letter for sink `out`, carrying `batch`.
     #[cfg(feature = "connector-redb")]
     async fn record_batch(
         queue: &mut DeadLetterQueue,
-        stats: &mut StandaloneStats,
+        stats: &mut WorkflowStats,
         batch: &RecordBatch,
     ) {
         queue
@@ -1904,7 +1904,7 @@ mod tests {
 
     /// Record one two-row letter for sink `out`.
     #[cfg(feature = "connector-redb")]
-    async fn record_one(queue: &mut DeadLetterQueue, stats: &mut StandaloneStats) {
+    async fn record_one(queue: &mut DeadLetterQueue, stats: &mut WorkflowStats) {
         record_batch(queue, stats, &payload_batch()).await;
     }
 

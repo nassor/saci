@@ -236,7 +236,6 @@ workflow "plain" {
             prometheus_registry: Arc::new(prometheus::Registry::new()),
             liveness: Arc::new(AtomicU64::new(0)),
             ready: Arc::new(AtomicBool::new(true)),
-            cluster_probe: None,
             standalone_stats: None,
             inspector: None,
             lifecycle: None,

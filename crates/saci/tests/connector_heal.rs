@@ -27,7 +27,6 @@ use saci::error::SaciError;
 use saci::io::Source;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::registry::SourceFactory;
 use saci::service::run_standalone;
 
@@ -180,18 +179,15 @@ async fn a_tcp_sink_whose_peer_disappears_is_rebuilt_and_resumes_writing() {
     let addr = listener.local_addr().expect("addr");
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(&addr.to_string(), &config_path_text(dir.path())),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &addr.to_string(),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
     let source_builds = Arc::new(AtomicUsize::new(0));
-    let built = register_builtin_factories(ServiceBuilder::new())
+    let built = ServiceBuilder::new()
         .register_source(TickSourceFactory(Arc::clone(&source_builds)))
-        .build_all(&config)
+        .build(&config)
         .expect("the workflow builds")
         .remove(0);
 

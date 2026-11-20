@@ -22,10 +22,10 @@
 //!
 //! ## Quick start
 //!
-//! 1. Build your [`Pipeline`](crate::Pipeline) or `Box<dyn PipelineRuntime>`.
-//! 2. Create a [`builder::ServiceBuilder`], call `with_runtime(...)`, and register IO factories.
+//! 1. Build your [`Pipeline`](crate::Pipeline) or another `PipelineRuntime`.
+//! 2. Create a [`builder::ServiceBuilder`] (`new` registers every compiled-in connector and codec) and call `runtime(...)`.
 //! 3. Load a [`config::ServiceConfig`] from KDL.
-//! 4. Call [`builder::ServiceBuilder::build_all`] to get one [`builder::BuiltService`] per
+//! 4. Call [`builder::ServiceBuilder::build`] to get one [`builder::BuiltWorkflow`] per
 //!    declared workflow.
 
 #[cfg(feature = "service")]
@@ -108,7 +108,7 @@ pub mod windowing;
 #[cfg(feature = "service")]
 pub use crate::connector::{ChannelBridge, ConnectorContext};
 #[cfg(feature = "service")]
-pub use builder::{BuiltNode, BuiltNodeKind, BuiltService, ServiceBuilder};
+pub use builder::{BuiltNode, BuiltNodeKind, BuiltWorkflow, ServiceBuilder};
 #[cfg(feature = "service-cluster")]
 pub use cluster::{ClusterStats, run_cluster};
 #[cfg(feature = "service")]
@@ -121,8 +121,6 @@ pub use config::{
 #[cfg(feature = "service")]
 pub use dlq::{DeadLetterQueue, DlqError, DlqRegistry, DlqShared, ReplayFilter};
 #[cfg(feature = "service")]
-pub use factories::register_builtin_factories;
-#[cfg(feature = "service")]
 pub use flow::{
     FlowAdjustment, FlowCause, FlowController, FlowMove, FlowOutcome, FlowPlan, FlowSample,
     FlowSettings,
@@ -130,10 +128,7 @@ pub use flow::{
 #[cfg(feature = "service")]
 pub use heal::{HealSettings, HealingSink, HealingSource};
 #[cfg(feature = "service")]
-pub use http::{
-    ClusterProbe, ClusterProbeSnapshot, ServiceModeLabel, ServiceState, build_router, serve_http,
-    spawn_watchdog,
-};
+pub use http::{ServiceModeLabel, ServiceState, build_router, serve_http, spawn_watchdog};
 #[cfg(feature = "service")]
 pub use lifecycle::{
     LIFECYCLE_ACK_BUDGET, LifecycleError, LifecycleRegistry, LifecycleRegistryBuilder, PauseGate,
@@ -154,7 +149,7 @@ pub use shutdown::ShutdownCoordinator;
 #[cfg(feature = "service")]
 pub use span_metrics::SpanMetricsLayer;
 #[cfg(feature = "service")]
-pub use standalone::{StandaloneStats, run_standalone};
+pub use standalone::{WorkflowStats, run_standalone};
 #[cfg(feature = "service")]
 pub use stream::run_stream;
 #[cfg(feature = "service")]

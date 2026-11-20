@@ -44,7 +44,7 @@ use saci::service::{build_router, build_topology};
 ///
 /// Neither connector is built here: the topology comes from a hand-assembled
 /// `BuiltNode` list, matching this shape, plus the parsed config, which is
-/// exactly what `ServiceBuilder::build_all` assembles for real.
+/// exactly what `ServiceBuilder::build` assembles for real.
 const FIXTURE: &str = r#"
 mode "standalone"
 
@@ -129,7 +129,6 @@ fn state_with(inspector: Option<Inspector>) -> ServiceState {
         prometheus_registry: Arc::new(prometheus::Registry::new()),
         liveness: Arc::new(AtomicU64::new(0)),
         ready: Arc::new(AtomicBool::new(true)),
-        cluster_probe: None,
         standalone_stats: None,
         inspector,
         lifecycle: None,
@@ -187,7 +186,7 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
         .system(Scale);
 
     // A `BuiltNode` list matching `FIXTURE`'s shape, standing in for what
-    // `ServiceBuilder::build_all` would assemble from real connectors. The
+    // `ServiceBuilder::build` would assemble from real connectors. The
     // processor node owns a second, identically-built `Pipeline`: `build_topology`
     // takes ownership through `BuiltNode`, so the instance actually driven
     // below by `run_on` has to be a separate one.

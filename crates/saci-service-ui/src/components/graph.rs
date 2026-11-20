@@ -640,7 +640,7 @@ pub fn PipelinesView(
         topology.get().map(|topo| {
             if topo.workflows.is_empty() {
                 // A default `Topology` has no workflows, which is what
-                // `/api/topology` returns before `build_all` publishes one.
+                // `/api/topology` returns before `build` publishes one.
                 return view! {
                     <div class="rounded-xl border border-dashed border-border px-4 py-8">
                         <p class="text-sm text-muted-foreground">

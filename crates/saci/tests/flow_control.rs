@@ -32,15 +32,15 @@ use tokio_util::sync::CancellationToken;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::error::SaciError;
 use saci::io::Source;
-use saci::runtime::PipelineRuntime;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::runtime::{PipelineRuntime, RuntimeOutput};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
 use saci::service::config::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WorkflowSpec,
 };
 use saci::service::flow::FlowPlan;
 use saci::service::registry::Registry;
-use saci::service::standalone::{StandaloneStats, run_standalone};
+use saci::service::standalone::{WorkflowStats, run_standalone};
 use saci::service::stream::run_stream;
 use saci::{Dataset, SaciResult};
 
@@ -70,17 +70,13 @@ impl PipelineRuntime for FixedCostRuntime {
         "fixed-cost"
     }
 
-    async fn run_on(&self, _data: &mut Dataset) -> SaciResult<()> {
-        tokio::time::sleep(self.per_pass).await;
-        Ok(())
-    }
-
-    async fn run_on_with_state(
+    async fn run_batch(
         &self,
-        data: &mut Dataset,
+        _data: &mut Dataset,
         _prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
-        self.run_on(data).await.map(|()| None)
+    ) -> SaciResult<RuntimeOutput> {
+        tokio::time::sleep(self.per_pass).await;
+        Ok(RuntimeOutput::default())
     }
 
     fn declared_components(&self) -> Vec<&str> {
@@ -134,7 +130,7 @@ fn service_with(
     source: Box<dyn Source>,
     schema: Arc<Schema>,
     per_pass: Duration,
-) -> (BuiltService, mpsc::Receiver<RecordBatch>) {
+) -> (BuiltWorkflow, mpsc::Receiver<RecordBatch>) {
     let (sink, rx) = ChannelSink::new(Arc::clone(&schema), 4_096);
     let nodes = vec![
         BuiltNode {
@@ -187,7 +183,7 @@ fn service_with(
         },
     ];
     (
-        BuiltService {
+        BuiltWorkflow {
             workflow_id: "flow".to_string(),
             workflow_name: None,
             nodes,
@@ -293,11 +289,11 @@ fn values(chunks: &[RecordBatch]) -> Vec<i64> {
 /// A `PipelineRuntime` future is `?Send`, so the runner runs on a `LocalSet`
 /// exactly as the stream-mode tests drive it.
 async fn run_until_rows(
-    service: BuiltService,
+    service: BuiltWorkflow,
     config: ServiceConfig,
     rx: &mut mpsc::Receiver<RecordBatch>,
     total: usize,
-) -> (StandaloneStats, Vec<RecordBatch>) {
+) -> (WorkflowStats, Vec<RecordBatch>) {
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
     let local = LocalSet::new();
@@ -717,7 +713,7 @@ async fn a_stream_tail_is_finished_before_a_sibling_source_is_polled() {
     drop(tx);
 
     let (sink, rx) = ChannelSink::new(Arc::clone(&schema), 4_096);
-    let service = BuiltService {
+    let service = BuiltWorkflow {
         workflow_id: "flow".to_string(),
         workflow_name: None,
         nodes: vec![
@@ -946,15 +942,11 @@ mod windowed {
             "windowing"
         }
 
-        async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-            self.run_on_with_state(data, None).await.map(|_| ())
-        }
-
-        async fn run_on_with_state(
+        async fn run_batch(
             &self,
             data: &mut Dataset,
             prior: Option<&[u8]>,
-        ) -> SaciResult<Option<Vec<u8>>> {
+        ) -> SaciResult<RuntimeOutput> {
             let mut state: WindowState = match prior {
                 Some(blob) => serde_json::from_slice(blob)
                     .map_err(|e| SaciError::generic(format!("window state decode: {e}")))?,
@@ -1064,7 +1056,10 @@ mod windowed {
 
             let blob = serde_json::to_vec(&state)
                 .map_err(|e| SaciError::generic(format!("window state encode: {e}")))?;
-            Ok(Some(blob))
+            Ok(RuntimeOutput {
+                state: Some(blob),
+                routes: None,
+            })
         }
 
         fn declared_components(&self) -> Vec<&str> {
@@ -1232,7 +1227,7 @@ mod windowed {
     /// is what makes it a windowed node to the runner.
     fn windowed_service(
         sources: Vec<Box<dyn Source>>,
-    ) -> (BuiltService, mpsc::Receiver<RecordBatch>) {
+    ) -> (BuiltWorkflow, mpsc::Receiver<RecordBatch>) {
         let in_schema = sale_schema();
         let out_schema = total_schema();
         let (sink, rx) = ChannelSink::new(Arc::clone(&out_schema), 4_096);
@@ -1292,7 +1287,7 @@ mod windowed {
             heal_recovered: None,
         });
         (
-            BuiltService {
+            BuiltWorkflow {
                 workflow_id: "flow".to_string(),
                 workflow_name: None,
                 nodes,
@@ -1352,7 +1347,7 @@ mod windowed {
     /// The last drain happens after the runner has returned, so a batch the
     /// cancellation path flushed still counts.
     async fn emitted_rows(
-        service: BuiltService,
+        service: BuiltWorkflow,
         config: ServiceConfig,
         mut rx: mpsc::Receiver<RecordBatch>,
     ) -> Vec<WindowRow> {

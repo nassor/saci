@@ -35,7 +35,6 @@ use saci::codec::ndjson::NdjsonCodec;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::dlq::DlqRegistry;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
@@ -235,17 +234,18 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(
-        &path,
-        config_kdl(&url, &in_stream, &out_stream, &out_subject, &data_dir, true),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &url,
+        &in_stream,
+        &out_stream,
+        &out_subject,
+        &data_dir,
+        true,
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
@@ -307,7 +307,6 @@ fn the_pipeline_declares_the_component_the_config_names() {
 fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
 
     let live = config_kdl(
         "nats://127.0.0.1:4222",
@@ -317,15 +316,13 @@ fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
         &data_dir,
         false,
     );
-    std::fs::write(&path, &live).expect("write config");
-    let err = ServiceConfig::load(&path).expect_err("a live source cannot run one_shot");
+    let err = ServiceConfig::from_kdl(&live).expect_err("a live source cannot run one_shot");
     assert_eq!(err.category(), "configuration");
     assert!(err.message().contains("never reaches EOF"), "got: {err}");
     assert!(err.message().contains("NatsSource"), "got: {err}");
 
     let bounded = live.replace("stop_at_end #false", "stop_at_end #true");
-    std::fs::write(&path, bounded).expect("write config");
-    ServiceConfig::load(&path).expect("stop_at_end makes the source drivable by one_shot");
+    ServiceConfig::from_kdl(&bounded).expect("stop_at_end makes the source drivable by one_shot");
 }
 
 /// The shipped `examples/configs/nats.kdl` must parse and its two IO tables
@@ -333,7 +330,7 @@ fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
 ///
 /// Gated on `wasm` because the example declares a `wasm` node, which the
 /// config parser only knows about with that feature on. The factories are
-/// driven directly rather than through `ServiceBuilder::build_all`, which would also
+/// driven directly rather than through `ServiceBuilder::build`, which would also
 /// try to load the module the example points at. No daemon needed: both
 /// factories open no connection.
 #[cfg(feature = "wasm-host")]
@@ -539,20 +536,16 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
     let data_dir = dir.path().display().to_string().replace('\\', "/");
     let refused = dead_url();
 
-    /// Load `kdl` and run it once, sharing `registry` when there is one.
+    /// Parse `kdl` and run it once, sharing `registry` when there is one.
     async fn run_once(
-        dir: &std::path::Path,
-        name: &str,
         kdl: String,
         registry: Option<Arc<DlqRegistry>>,
-    ) -> (saci::service::standalone::StandaloneStats, Arc<DlqRegistry>) {
-        let path = dir.join(name);
-        std::fs::write(&path, kdl).expect("write config");
-        let config = ServiceConfig::load(&path).expect("config loads");
+    ) -> (saci::service::standalone::WorkflowStats, Arc<DlqRegistry>) {
+        let config = ServiceConfig::from_kdl(&kdl).expect("config loads");
         let registry = registry.unwrap_or_else(|| Arc::new(DlqRegistry::from_config(&config)));
-        let built = register_builtin_factories(ServiceBuilder::new())
-            .with_dlq_registry(Arc::clone(&registry))
-            .build_all(&config)
+        let built = ServiceBuilder::new()
+            .dlq_registry(Arc::clone(&registry))
+            .build(&config)
             .expect("service builds")
             .remove(0);
         let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
@@ -563,8 +556,6 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
 
     // Run 1: the endpoint refuses the connection, so the batch is stored.
     let (stats, registry) = run_once(
-        dir.path(),
-        "run1.kdl",
         dlq_config_kdl(
             &url,
             &in_stream,
@@ -591,8 +582,6 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
     // Run 2: a live endpoint, and the startup replay delivers the letter.
     let (accepted, collector) = collect(1);
     let (stats, registry) = run_once(
-        dir.path(),
-        "run2.kdl",
         dlq_config_kdl(
             &url,
             &in_stream,
@@ -625,8 +614,6 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
 
     // Run 3: the stream is drained, so the replay dials nothing.
     let (stats, _) = run_once(
-        dir.path(),
-        "run3.kdl",
         dlq_config_kdl(
             &url,
             &in_stream,

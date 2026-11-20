@@ -15,7 +15,7 @@
 //! ```text
 //! PartitionSource  ─────────────────────────────►  claim row-ranges
 //! CheckpointStore  ─────────────────────────────►  persist IPC snapshots
-//! DistributedRunner ─ claim → run_on_with_state → checkpoint → ack
+//! DistributedRunner ─ claim → run_batch → checkpoint → ack
 //! RedbSharedStore  ─ single-node or multi-node (via Raft channel)
 //! consensus/            ─ state machine, log store, snapshot, driver, transport
 //! ```

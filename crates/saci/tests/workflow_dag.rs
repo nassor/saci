@@ -26,7 +26,6 @@ use saci::connector::file::{FileSource, FileSourceConfig};
 use saci::io::Source;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 use tokio_util::sync::CancellationToken;
 
@@ -104,21 +103,15 @@ async fn a_two_processor_link_runs_two_real_wasmtime_instances() {
     std::fs::write(&input_path, "seq\n0\n1\n2\n3\n").expect("write csv fixture");
     let output_path = dir.path().join("pings_out.csv");
 
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(
-            &config_path_text(&wasm_path),
-            &config_path_text(&input_path),
-            &config_path_text(&output_path),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &config_path_text(&wasm_path),
+        &config_path_text(&input_path),
+        &config_path_text(&output_path),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .build(&config)
         .expect("both wasm nodes load as real wasmtime components")
         .remove(0);
     assert_eq!(built.nodes.len(), 4, "source, two processors, sink");

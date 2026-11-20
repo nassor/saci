@@ -13,7 +13,6 @@ use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::GenericImage;
@@ -153,13 +152,11 @@ observability log_level="warn"
 fn test_clickhouse_service_config_builds_without_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(&path, config_kdl("http://127.0.0.1:8123", &data_dir)).expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config);
+    let config = ServiceConfig::from_kdl(&config_kdl("http://127.0.0.1:8123", &data_dir))
+        .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config);
     assert!(
         built.is_ok(),
         "ClickHouse service config builds cleanly without database connection"
@@ -170,13 +167,11 @@ fn test_clickhouse_service_config_builds_without_error() {
 fn test_clickhouse_service_config_invalid_url_is_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(&path, config_kdl("tcp://127.0.0.1:9000", &data_dir)).expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config);
+    let config = ServiceConfig::from_kdl(&config_kdl("tcp://127.0.0.1:9000", &data_dir))
+        .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config);
     assert!(
         built.is_err(),
         "ClickHouse service config with invalid url must be rejected at build time"
@@ -232,13 +227,10 @@ async fn a_clickhouse_source_and_sink_move_rows_through_the_standalone_runner() 
 
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(&path, config_kdl(&url, &data_dir)).expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(&url, &data_dir)).expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 

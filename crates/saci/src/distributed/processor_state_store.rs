@@ -20,9 +20,9 @@
 //! ## Payload format
 //!
 //! The host defines none. The bytes are exactly what
-//! [`PipelineRuntime::run_on_with_state`](crate::runtime::PipelineRuntime::run_on_with_state)
-//! returned, handed back verbatim as the next call's `prior`. For a WASM processor built
-//! whose pipeline declares `.state::<C>()` they are a single-component
+//! [`PipelineRuntime::run_batch`](crate::runtime::PipelineRuntime::run_batch)
+//! returned as its state, handed back verbatim as the next call's `prior`. For a WASM
+//! processor built whose pipeline declares `.state::<C>()` they are a single-component
 //! Arrow IPC stream, but nothing here depends on that.
 
 use uuid::Uuid;

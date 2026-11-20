@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::SaciResult;
 use crate::error::SaciError;
@@ -103,26 +104,26 @@ impl ModuleResolver for LocalModuleResolver {
 pub struct PipelineRuntimeLoader<R = LocalModuleResolver> {
     engine: WasmEngine,
     resolver: R,
-    /// Epoch ticks before a single WASM call is interrupted.
-    epoch_deadline: u64,
+    /// Longest a single WASM call may run before it is interrupted.
+    timeout: Duration,
 }
 
 impl<R: ModuleResolver> PipelineRuntimeLoader<R> {
-    /// Default epoch deadline (100 ticks × 100 ms/tick = 10 s).
-    const DEFAULT_EPOCH_DEADLINE: u64 = 100;
+    /// Default call timeout.
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// Create a loader with the given engine and resolver.
     pub fn new(engine: WasmEngine, resolver: R) -> Self {
         Self {
             engine,
             resolver,
-            epoch_deadline: Self::DEFAULT_EPOCH_DEADLINE,
+            timeout: Self::DEFAULT_TIMEOUT,
         }
     }
 
-    /// Override the epoch deadline (in ticks) for timeout enforcement.
-    pub fn with_epoch_deadline(mut self, ticks: u64) -> Self {
-        self.epoch_deadline = ticks;
+    /// Override how long a single WASM call may run before it is interrupted.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -140,7 +141,7 @@ impl<R: ModuleResolver> PipelineRuntimeLoader<R> {
         let module = spec.module.as_deref().ok_or_else(|| {
             SaciError::configuration(format!(
                 "wasm node '{pipeline_name}' declares no 'module'; supply a runtime through \
-                 ServiceBuilder::with_runtime instead"
+                 ServiceBuilder::runtime instead"
             ))
         })?;
         let bytes = self.resolver.resolve(module)?;
@@ -155,7 +156,7 @@ impl<R: ModuleResolver> PipelineRuntimeLoader<R> {
             pipeline_name.to_string(),
             &bytes,
             config,
-            self.epoch_deadline,
+            self.timeout,
         )?;
 
         // describe() eagerly, to populate the component-name cache and surface
@@ -230,7 +231,7 @@ mod tests {
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("'p'"), "unexpected error: {err}");
         assert!(
-            err.to_string().contains("with_runtime"),
+            err.to_string().contains("ServiceBuilder::runtime"),
             "unexpected error: {err}"
         );
     }

@@ -30,8 +30,8 @@ use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::connector::tcp::{TcpSource, TcpSourceConfig};
 use saci::error::SaciError;
 use saci::io::Source;
-use saci::runtime::PipelineRuntime;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::runtime::{PipelineRuntime, RuntimeOutput};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
 use saci::service::config::{
     HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
     StandaloneConfig, WorkflowSpec,
@@ -85,21 +85,20 @@ impl PipelineRuntime for CounterRuntime {
         "counter"
     }
 
-    async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-        self.run_on_with_state(data, None).await.map(|_| ())
-    }
-
-    async fn run_on_with_state(
+    async fn run_batch(
         &self,
         _data: &mut Dataset,
         prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
+    ) -> SaciResult<RuntimeOutput> {
         self.seen_priors
             .lock()
             .unwrap()
             .push(prior.map(<[u8]>::to_vec));
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Some((Self::decode(prior) + 1).to_le_bytes().to_vec()))
+        Ok(RuntimeOutput {
+            state: Some((Self::decode(prior) + 1).to_le_bytes().to_vec()),
+            routes: None,
+        })
     }
 
     fn declared_components(&self) -> Vec<&str> {
@@ -115,7 +114,7 @@ impl PipelineRuntime for CounterRuntime {
     }
 }
 
-/// Assemble a [`BuiltService`] with `sources` first, one `CounterRuntime`
+/// Assemble a [`BuiltWorkflow`] with `sources` first, one `CounterRuntime`
 /// processor next, then `sinks`, matching the topological order every runner
 /// requires. The processor links every source to itself and itself to every
 /// sink.
@@ -123,7 +122,7 @@ fn built_service(
     sources: Vec<BuiltNode>,
     sinks: Vec<BuiltNode>,
     schema: Arc<Schema>,
-) -> (BuiltService, SeenPriors) {
+) -> (BuiltWorkflow, SeenPriors) {
     let (runtime, seen) = CounterRuntime::new(schema);
     let source_count = sources.len();
     let mut nodes = sources;
@@ -155,7 +154,7 @@ fn built_service(
         .map(|node| BuiltEdge { node, branch: None })
         .collect();
     (
-        BuiltService {
+        BuiltWorkflow {
             workflow_id: "test".to_string(),
             workflow_name: None,
             nodes,
@@ -213,8 +212,8 @@ fn channel_sink(schema: Arc<Schema>, buffer: usize) -> (BuiltNode, mpsc::Receive
     )
 }
 
-/// Stream mode chains `run_on_with_state` output into the next item's `prior`.
-/// The batch loop calls `run_on` and drops processor state.
+/// Stream mode chains the state `run_batch` returns into the next item's `prior`.
+/// The batch loop without `batch_resume` passes no prior and drops processor state.
 #[tokio::test]
 async fn stream_carries_runtime_state_across_items() {
     let schema = test_schema();
@@ -371,9 +370,13 @@ async fn stream_rotates_round_robin_across_two_sources() {
         fn name(&self) -> &str {
             "row-taker"
         }
-        async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
+        async fn run_batch(
+            &self,
+            data: &mut Dataset,
+            _prior: Option<&[u8]>,
+        ) -> SaciResult<RuntimeOutput> {
             self.seen.lock().unwrap().push(data.rows() as u64);
-            Ok(())
+            Ok(RuntimeOutput::default())
         }
         fn declared_components(&self) -> Vec<&str> {
             vec![COMP]
@@ -406,7 +409,7 @@ async fn stream_rotates_round_robin_across_two_sources() {
             heal_recovered: None,
         },
     ];
-    let built = BuiltService {
+    let built = BuiltWorkflow {
         workflow_id: "test".to_string(),
         workflow_name: None,
         nodes,
@@ -800,18 +803,12 @@ impl PipelineRuntime for BranchRuntime {
         "branch"
     }
 
-    async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-        self.run_on_with_state_and_routes(data, None)
-            .await
-            .map(|_| ())
-    }
-
-    async fn run_on_with_state_and_routes(
+    async fn run_batch(
         &self,
         _data: &mut Dataset,
         _prior: Option<&[u8]>,
-    ) -> SaciResult<saci::runtime::RuntimeOutput> {
-        Ok(saci::runtime::RuntimeOutput {
+    ) -> SaciResult<RuntimeOutput> {
+        Ok(RuntimeOutput {
             state: None,
             routes: self.routes.clone(),
         })
@@ -870,7 +867,7 @@ async fn stream_routing_processor_delivers_to_the_selected_branch() {
         sink_a,
         sink_b,
     ];
-    let built = BuiltService {
+    let built = BuiltWorkflow {
         workflow_id: "test".to_string(),
         workflow_name: None,
         nodes,
@@ -936,11 +933,15 @@ async fn stream_windowed_processor_tracks_watermark_across_items() {
         fn name(&self) -> &str {
             "stream-watermark-reader"
         }
-        async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
+        async fn run_batch(
+            &self,
+            data: &mut Dataset,
+            _prior: Option<&[u8]>,
+        ) -> SaciResult<RuntimeOutput> {
             if let Some(watermark) = data.get_resource::<WindowWatermark>() {
                 self.seen.lock().unwrap().push(watermark.as_ms());
             }
-            Ok(())
+            Ok(RuntimeOutput::default())
         }
         fn declared_components(&self) -> Vec<&str> {
             vec![COMP]
@@ -979,7 +980,7 @@ async fn stream_windowed_processor_tracks_watermark_across_items() {
             heal_recovered: None,
         },
     ];
-    let built = BuiltService {
+    let built = BuiltWorkflow {
         workflow_id: "test".to_string(),
         workflow_name: None,
         nodes,

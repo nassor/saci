@@ -21,7 +21,7 @@ use saci::connector::channel::{ChannelSink, ChannelSource};
 use tokio_util::sync::CancellationToken;
 
 use saci::prelude::*;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
 use saci::service::config::{
     HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
     StandaloneConfig, WorkflowSpec,
@@ -262,7 +262,7 @@ async fn main() -> Result<(), SaciError> {
         variables: std::collections::HashMap::new(),
     };
 
-    let built = BuiltService {
+    let built = BuiltWorkflow {
         workflow_id: "windowed-fan-in".to_string(),
         workflow_name: Some("Two streams, one windowed processor".to_string()),
         nodes,

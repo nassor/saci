@@ -2,10 +2,11 @@
 //!
 //! A host (standalone runner, `DistributedRunner`, service builder) holds
 //! `Box<dyn PipelineRuntime>` instead of a concrete [`Pipeline`]. Three impls exist:
-//! [`Pipeline`] in this crate wraps [`Pipeline::run_on`], and in the host
-//! `WasmPipelineRuntime` serializes the dataset to Arrow IPC and calls a processor
-//! component's `run-batch` export through wasmtime, while `NativePluginRuntime`
-//! calls the `run_batch` slot of a dlopened cdylib's `crate::plugin_abi` vtable.
+//! [`Pipeline`] in this crate restores its state, runs [`Pipeline::run_on`] and
+//! captures its state again, and in the host `WasmPipelineRuntime` serializes the
+//! dataset to Arrow IPC and calls a processor component's `run-batch` export
+//! through wasmtime, while `NativePluginRuntime` calls the `run_batch` slot of a
+//! dlopened cdylib's `crate::plugin_abi` vtable.
 //!
 //! The trait only exists when the `engine` feature is enabled. Processor builds
 //! (`--no-default-features --features processor`) use [`Pipeline`] directly through
@@ -13,6 +14,7 @@
 
 use async_trait::async_trait;
 
+use crate::sdk::RouteDecision;
 use crate::{Dataset, Pipeline, SaciResult};
 
 /// What a runtime reports about itself beyond [`PipelineRuntime::name`].
@@ -45,11 +47,11 @@ pub struct RuntimeDescriptorInfo {
     pub schema_fingerprint: String,
 }
 
-/// What a [`PipelineRuntime::run_on_with_state_and_routes`] call produced.
+/// What a [`PipelineRuntime::run_batch`] call produced.
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeOutput {
-    /// Opaque state blob, persisted verbatim — the value
-    /// [`run_on_with_state`](PipelineRuntime::run_on_with_state) returns.
+    /// Opaque state blob, persisted verbatim and handed back as the next
+    /// call's `prior`.
     pub state: Option<Vec<u8>>,
     /// Branch names this batch's output is delivered to. `None` preserves
     /// legacy behaviour: the host multicasts to every downstream link.
@@ -63,7 +65,7 @@ pub struct RuntimeOutput {
 /// native [`Pipeline`] or a WASM processor module through the same call site.
 ///
 /// Implementations must be `Send` so the box can move between threads. Futures
-/// produced by `run_on` need not be `Send`: the host always drives them to
+/// produced by `run_batch` need not be `Send`: the host always drives them to
 /// completion from the task that owns the runtime, and `Pipeline` holds
 /// `Box<dyn Sink>` which may not be `Sync`, so `Send` futures would require
 /// `Pipeline: Sync`.
@@ -72,54 +74,30 @@ pub trait PipelineRuntime: Send {
     /// Human-readable name for logging, metrics, and status endpoints.
     fn name(&self) -> &str;
 
-    /// Execute all systems against the provided dataset.
+    /// Execute all systems against the provided dataset, carrying opaque
+    /// runtime-internal state, and return the batch's state and routing
+    /// decision.
     ///
     /// `data` is owned by the caller. Sources and sinks are **not** drained
     /// here; the host layer handles IO before and after this call.
-    async fn run_on(&self, data: &mut Dataset) -> SaciResult<()>;
-
-    /// Execute against `data`, carrying opaque runtime-internal state.
     ///
-    /// `prior` is the blob this runtime returned from the previous call for the
-    /// same logical partition, or `None` on first run. The returned blob is
-    /// persisted verbatim by the host and handed back as the next `prior`. Hosts
-    /// must treat it as opaque; only the runtime knows the layout.
-    ///
-    /// The default implementation ignores `prior`, delegates to
-    /// [`run_on`](Self::run_on), and returns `Ok(None)`, which is correct for any
-    /// runtime whose state lives entirely in the `Dataset`.
-    async fn run_on_with_state(
+    /// `prior` is the blob this runtime returned in [`RuntimeOutput::state`]
+    /// from the previous call for the same logical partition, or `None` on
+    /// first run. The host persists the returned blob verbatim and hands it
+    /// back as the next `prior`; only the runtime knows the layout. A runtime
+    /// whose state lives entirely in the `Dataset` ignores `prior` and returns
+    /// [`RuntimeOutput::default`], which carries no state and no routes.
+    async fn run_batch(
         &self,
         data: &mut Dataset,
         prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
-        let _ = prior;
-        self.run_on(data).await?;
-        Ok(None)
-    }
-
-    /// Execute against `data`, carrying opaque state, and return the batch's
-    /// routing decision alongside it.
-    ///
-    /// The default implementation delegates to [`run_on_with_state`](Self::run_on_with_state)
-    /// and reports no routes, which is correct for any runtime that cannot route.
-    async fn run_on_with_state_and_routes(
-        &self,
-        data: &mut Dataset,
-        prior: Option<&[u8]>,
-    ) -> SaciResult<RuntimeOutput> {
-        let state = self.run_on_with_state(data, prior).await?;
-        Ok(RuntimeOutput {
-            state,
-            routes: None,
-        })
-    }
+    ) -> SaciResult<RuntimeOutput>;
 
     /// Component names this runtime expects to find in the dataset.
     ///
     /// Called at load and validation time only. Hosts use the list to check the
     /// `component` a source or sink node declares in the config file against
-    /// the components the runtime handles, before the first `run_on` call.
+    /// the components the runtime handles, before the first `run_batch` call.
     ///
     /// The default returns an empty slice, which suffices for runtimes that
     /// validate internally.
@@ -155,8 +133,18 @@ impl PipelineRuntime for Pipeline {
         Pipeline::name(self)
     }
 
-    async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-        Pipeline::run_on(self, data).await.map(|_| ())
+    async fn run_batch(
+        &self,
+        data: &mut Dataset,
+        prior: Option<&[u8]>,
+    ) -> SaciResult<RuntimeOutput> {
+        self.restore_state(data, prior)?;
+        Pipeline::run_on(self, data).await?;
+        let state = self.capture_state(data)?;
+        let routes = data
+            .take_resource::<RouteDecision>()
+            .map(RouteDecision::into_branches);
+        Ok(RuntimeOutput { state, routes })
     }
 
     fn declared_components(&self) -> Vec<&str> {
@@ -239,11 +227,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_on_dispatches_through_trait_object() {
+    async fn run_batch_dispatches_through_trait_object() {
         let p = Pipeline::new("empty");
         let rt: Box<dyn PipelineRuntime> = Box::new(p);
         let mut data = Dataset::new();
-        rt.run_on(&mut data).await.unwrap();
+        let out = rt.run_batch(&mut data, None).await.unwrap();
+        assert!(out.state.is_none());
+        assert!(out.routes.is_none());
+    }
+
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
+    struct Counter {
+        n: i64,
+    }
+    impl Component for Counter {
+        fn name() -> &'static str {
+            "Counter"
+        }
+        fn schema() -> Arc<Schema> {
+            Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]))
+        }
+    }
+
+    /// Counts batches in its declared state and routes every even batch to
+    /// the `even` branch.
+    fn counting_pipeline() -> Pipeline {
+        use crate::sdk::State;
+        use crate::{SystemMeta, system_fn};
+
+        Pipeline::new("counting")
+            .state::<Counter>()
+            .system(system_fn(
+                SystemMeta::new("count").writes_resource::<State<Counter>>(),
+                |data| {
+                    let n = {
+                        let counter = State::<Counter>::get_or_insert_default(data)?;
+                        counter.n += 1;
+                        counter.n
+                    };
+                    if n % 2 == 0 {
+                        data.insert_resource(RouteDecision::to(["even"]));
+                    }
+                    Ok(())
+                },
+            ))
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_batch_threads_state_and_reports_the_route_decision() {
+        let rt: Box<dyn PipelineRuntime> = Box::new(counting_pipeline());
+
+        let mut first = Dataset::new();
+        let out = rt.run_batch(&mut first, None).await.unwrap();
+        let blob = out.state.expect("a stateful pipeline checkpoints");
+        assert_eq!(out.routes, None, "no decision on the first batch");
+
+        let mut second = Dataset::new();
+        let out = rt.run_batch(&mut second, Some(&blob)).await.unwrap();
+        assert_eq!(out.routes, Some(vec!["even".to_string()]));
+        assert!(
+            second.take_resource::<RouteDecision>().is_none(),
+            "the decision leaves the dataset with the output"
+        );
+
+        let reader = counting_pipeline();
+        let mut restored = Dataset::new();
+        reader
+            .restore_state(&mut restored, out.state.as_deref())
+            .unwrap();
+        let counter = restored
+            .resource::<crate::sdk::State<Counter>>()
+            .unwrap()
+            .rows
+            .first()
+            .map(|c| c.n);
+        assert_eq!(
+            counter,
+            Some(2),
+            "the checkpoint carries the second batch's count"
+        );
     }
 
     #[test]

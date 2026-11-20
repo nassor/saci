@@ -25,7 +25,7 @@ use std::sync::Arc;
 use arrow_array::{Array, RecordBatch, UInt64Array};
 use saci::component::Component as _;
 use saci::connector::channel::{ChannelSink, ChannelSource};
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
 use saci::service::config::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WorkflowSpec,
@@ -78,7 +78,7 @@ fn config(run_mode: RunMode) -> ServiceConfig {
 fn branching_built(
     config_map: HashMap<String, String>,
 ) -> (
-    BuiltService,
+    BuiltWorkflow,
     mpsc::Sender<RecordBatch>,
     mpsc::Receiver<RecordBatch>,
     mpsc::Receiver<RecordBatch>,
@@ -152,7 +152,7 @@ fn branching_built(
         },
     ];
     (
-        BuiltService {
+        BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes,

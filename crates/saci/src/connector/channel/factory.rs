@@ -75,7 +75,7 @@ impl SourceFactory for ChannelSourceFactory {
         let bridge = ctx.channels().ok_or_else(|| {
             SaciError::configuration(
                 "ChannelSource requires a channel bridge; register one via \
-                 ServiceBuilder::with_channel_bridge",
+                 ServiceBuilder::channels",
             )
         })?;
         let cfg = ChannelConfig::read(config, "ChannelSource")?;
@@ -114,7 +114,7 @@ impl SinkFactory for ChannelSinkFactory {
         let bridge = ctx.channels().ok_or_else(|| {
             SaciError::configuration(
                 "ChannelSink requires a channel bridge; register one via \
-                 ServiceBuilder::with_channel_bridge",
+                 ServiceBuilder::channels",
             )
         })?;
         let cfg = ChannelConfig::read(config, "ChannelSink")?;

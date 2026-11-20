@@ -1,6 +1,6 @@
 //! OpenTelemetry instruments for the service's own metric series.
 //!
-//! [`Instruments`] has the same method surface whether or not the `metrics`
+//! `Instruments` has the same method surface whether or not the `metrics`
 //! feature is on, so no call site carries a `#[cfg]`. With the feature off
 //! every method is an empty inline body and the type is zero-sized.
 //!
@@ -108,7 +108,7 @@ pub(crate) const MAX_PROCESSOR_METRIC_NAMES: usize = 256;
 /// Every service-owned counter, histogram and gauge, built up front.
 #[cfg(feature = "metrics")]
 #[allow(dead_code, reason = "which writers exist depends on the feature set")]
-pub struct Instruments {
+pub(crate) struct Instruments {
     workflow_runs: opentelemetry::metrics::Counter<u64>,
     workflow_errors: opentelemetry::metrics::Counter<u64>,
     stage_duration: opentelemetry::metrics::Histogram<f64>,
@@ -149,7 +149,7 @@ pub struct Instruments {
 
 /// Zero-sized stand-in used when the `metrics` feature is off.
 #[cfg(not(feature = "metrics"))]
-pub struct Instruments;
+pub(crate) struct Instruments;
 
 /// A Prometheus registry the whole lib test binary shares.
 ///

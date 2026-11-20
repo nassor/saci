@@ -36,12 +36,12 @@ struct Entry {
 /// Name-keyed registry resolving each channel name's `ChannelSink` and
 /// `ChannelSource` to the two ends of one shared `mpsc` pair.
 ///
-/// Register one instance with [`ServiceBuilder::with_channel_bridge`]
+/// Register one instance with [`ServiceBuilder::channels`]
 /// (under the service, `connector-channel` registers a default instance
 /// automatically); the channel factories reach it through
 /// [`ConnectorContext::channels`](crate::connector::ConnectorContext::channels).
 ///
-/// [`ServiceBuilder::with_channel_bridge`]: crate::service::builder::ServiceBuilder::with_channel_bridge
+/// [`ServiceBuilder::channels`]: crate::service::builder::ServiceBuilder::channels
 #[derive(Default)]
 pub struct ChannelRegistry {
     entries: Mutex<HashMap<String, Entry>>,

@@ -145,7 +145,7 @@ use super::sampling::WINDOWING_TARGET;
 /// `trackers[i]` is `Some` exactly for a node whose config declares a
 /// `window` block, and `downstream[i]` holds that node's outbound edges.
 /// `BuiltEdge::node` always exceeds the owning node's index, because
-/// `BuiltService::nodes` is in topological order, so one reverse pass
+/// `BuiltWorkflow::nodes` is in topological order, so one reverse pass
 /// resolves the whole reachability relation.
 ///
 /// The runners read the source entries: a `true` source keeps its arrivals
@@ -174,7 +174,7 @@ pub(super) fn reaches_windowed_node(
                 // runners would then slice.
                 debug_assert!(
                     edge.node > i,
-                    "BuiltService::nodes must be topologically ordered, but node {i} \
+                    "BuiltWorkflow::nodes must be topologically ordered, but node {i} \
                      links back to {}",
                     edge.node
                 );
@@ -833,7 +833,7 @@ mod tests {
     }
 
     /// One edge per `(from, to)` pair, in the topological shape
-    /// `BuiltService::nodes` guarantees.
+    /// `BuiltWorkflow::nodes` guarantees.
     fn edges(pairs: &[(usize, usize)], n: usize) -> Vec<Vec<BuiltEdge>> {
         let mut out = vec![Vec::new(); n];
         for &(from, to) in pairs {

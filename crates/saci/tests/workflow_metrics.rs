@@ -51,7 +51,10 @@ async fn two_linked_processors_write_independent_attributed_series() {
     let second = load_runtime(HashMap::new()).with_identity("wf".to_string(), "second".to_string());
 
     let mut first_data = seeded_dataset(&first, 4);
-    first.run_on(&mut first_data).await.expect("first run");
+    first
+        .run_batch(&mut first_data, None)
+        .await
+        .expect("first run");
 
     // `first`'s output becomes `second`'s input: `Ping` has no system, so the
     // batch passes through byte-identical, matching a real link with no
@@ -64,7 +67,10 @@ async fn two_linked_processors_write_independent_attributed_series() {
     second_data
         .append_record_batch("Ping", ping_batch)
         .expect("hand first's output to second");
-    second.run_on(&mut second_data).await.expect("second run");
+    second
+        .run_batch(&mut second_data, None)
+        .await
+        .expect("second run");
 
     let text = TextEncoder::new()
         .encode_to_string(&registry.gather())

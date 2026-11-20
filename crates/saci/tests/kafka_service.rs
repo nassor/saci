@@ -36,7 +36,6 @@ use saci::codec::ndjson::NdjsonCodec;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::dlq::DlqRegistry;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
@@ -233,17 +232,16 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(
-        &path,
-        config_kdl(&brokers, &input_topic, &output_topic, &data_dir),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &brokers,
+        &input_topic,
+        &output_topic,
+        &data_dir,
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
@@ -469,20 +467,16 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     let refused = dead_url();
     let mut shared: Option<Arc<DlqRegistry>> = None;
 
-    /// Load `kdl` and run it once, sharing `registry` when there is one.
+    /// Parse `kdl` and run it once, sharing `registry` when there is one.
     async fn run_once(
-        dir: &std::path::Path,
-        name: &str,
         kdl: String,
         registry: Option<Arc<DlqRegistry>>,
-    ) -> (saci::service::standalone::StandaloneStats, Arc<DlqRegistry>) {
-        let path = dir.join(name);
-        std::fs::write(&path, kdl).expect("write config");
-        let config = ServiceConfig::load(&path).expect("config loads");
+    ) -> (saci::service::standalone::WorkflowStats, Arc<DlqRegistry>) {
+        let config = ServiceConfig::from_kdl(&kdl).expect("config loads");
         let registry = registry.unwrap_or_else(|| Arc::new(DlqRegistry::from_config(&config)));
-        let built = register_builtin_factories(ServiceBuilder::new())
-            .with_dlq_registry(Arc::clone(&registry))
-            .build_all(&config)
+        let built = ServiceBuilder::new()
+            .dlq_registry(Arc::clone(&registry))
+            .build(&config)
             .expect("service builds")
             .remove(0);
         let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
@@ -493,8 +487,6 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
 
     // Run 1: the endpoint refuses the connection, so the batch is stored.
     let (stats, registry) = run_once(
-        dir.path(),
-        "run1.kdl",
         dlq_config_kdl(&brokers, &input_topic, &dlq_topic, &refused, &data_dir),
         shared.take(),
     )
@@ -515,8 +507,6 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     // input topic is drained under the same group, so nothing new arrives.
     let (accepted, collector) = collect(1);
     let (stats, registry) = run_once(
-        dir.path(),
-        "run2.kdl",
         dlq_config_kdl(&brokers, &input_topic, &dlq_topic, &accepted, &data_dir),
         Some(registry),
     )
@@ -538,8 +528,6 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     // Run 3: the store is empty, so the replay makes no connection attempt
     // and the refused address is never dialed again.
     let (stats, _) = run_once(
-        dir.path(),
-        "run3.kdl",
         dlq_config_kdl(&brokers, &input_topic, &dlq_topic, &refused, &data_dir),
         Some(registry),
     )

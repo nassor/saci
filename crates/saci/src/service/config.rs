@@ -668,7 +668,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
 ///
 /// `module` is optional: a node declared with no `module` key is a processor
 /// whose runtime is supplied programmatically through
-/// [`ServiceBuilder::with_runtime`](crate::service::builder::ServiceBuilder::with_runtime),
+/// [`ServiceBuilder::runtime`](crate::service::builder::ServiceBuilder::runtime),
 /// looked up by this node's `id`. Building a workflow where such a node has
 /// neither a `module` nor a matching registered runtime is a build-time
 /// error.
@@ -684,7 +684,7 @@ pub struct WasmSpec {
     #[serde(default)]
     pub name: Option<String>,
     /// Path to the `.wasm` component file (relative or absolute). Absent for
-    /// a node whose runtime is supplied through `with_runtime`.
+    /// a node whose runtime is supplied through `runtime`.
     #[serde(default)]
     pub module: Option<String>,
     /// Optional expected SHA3-256 hex digest of the module bytes. Validation
@@ -718,7 +718,7 @@ pub struct WasmSpec {
 /// library the host loads with `dlopen`. It is optional for the same reason
 /// [`WasmSpec::module`] is: a node with no `library` relies on a runtime
 /// registered under this node's `id` through
-/// [`ServiceBuilder::with_runtime`](crate::service::builder::ServiceBuilder::with_runtime).
+/// [`ServiceBuilder::runtime`](crate::service::builder::ServiceBuilder::runtime).
 ///
 /// Unknown keys are rejected: a key the service cannot honour is a
 /// configuration error, not something to ignore silently.
@@ -731,7 +731,7 @@ pub struct PluginSpec {
     #[serde(default)]
     pub name: Option<String>,
     /// Path to the shared library file (relative or absolute). Absent for a
-    /// node whose runtime is supplied through `with_runtime`.
+    /// node whose runtime is supplied through `runtime`.
     #[serde(default)]
     pub library: Option<String>,
     /// Optional expected SHA3-256 hex digest of the library file bytes.
@@ -2221,9 +2221,7 @@ fn extract_declared_variables(value: &ConfigValue) -> SaciResult<HashMap<String,
 impl ServiceConfig {
     /// Load a [`ServiceConfig`] from a KDL file at `path`.
     ///
-    /// The file is read, its declared `variables` and env-var placeholders
-    /// are substituted (declared names win over same-named env vars), the
-    /// KDL is parsed, and semantic validation is applied before returning.
+    /// The file is read and its text handed to [`from_kdl`](Self::from_kdl).
     ///
     /// # Errors
     ///
@@ -2236,9 +2234,23 @@ impl ServiceConfig {
                 path.as_ref().display()
             ))
         })?;
-        let value_pre = crate::config::from_kdl_str(&raw)?;
+        Self::from_kdl(&raw)
+    }
+
+    /// Parse a [`ServiceConfig`] from KDL text.
+    ///
+    /// The text's declared `variables` and env-var placeholders are
+    /// substituted (declared names win over same-named env vars), the KDL is
+    /// parsed, and semantic validation is applied before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Configuration`] for parse errors or any validation
+    /// constraint violation.
+    pub fn from_kdl(text: &str) -> SaciResult<Self> {
+        let value_pre = crate::config::from_kdl_str(text)?;
         let declared = extract_declared_variables(&value_pre)?;
-        let value = crate::config::from_kdl_str_with_vars(&raw, &declared)?;
+        let value = crate::config::from_kdl_str_with_vars(text, &declared)?;
         let config = ServiceConfig::deserialize(value)
             .map_err(|e| SaciError::configuration(format!("parsing config: {e}")))?;
         config.validate()?;
@@ -2494,6 +2506,15 @@ impl ServiceConfig {
             ));
         }
         Ok(())
+    }
+}
+
+impl FromStr for ServiceConfig {
+    type Err = SaciError;
+
+    /// Parse KDL text with [`ServiceConfig::from_kdl`].
+    fn from_str(text: &str) -> SaciResult<Self> {
+        Self::from_kdl(text)
     }
 }
 
@@ -3149,12 +3170,24 @@ peer id=1 addr="127.0.0.1:9000"
     }
 
     #[test]
-    fn test_load_rejects_a_malformed_document_naming_the_position() {
+    fn from_kdl_matches_load_of_a_file_holding_the_same_text() {
+        let text = minimal_standalone_kdl();
         let mut file = NamedTempFile::new().expect("tempfile");
-        file.write_all(b"mode \"standalone\nnode id=1\n")
-            .expect("write");
+        file.write_all(text.as_bytes()).expect("write");
 
-        let err = ServiceConfig::load(file.path()).expect_err("unterminated string");
+        let from_text = ServiceConfig::from_kdl(&text).expect("from_kdl");
+        let from_file = ServiceConfig::load(file.path()).expect("load");
+        let parsed: ServiceConfig = text.parse().expect("FromStr");
+
+        let as_json = |cfg: &ServiceConfig| serde_json::to_value(cfg).expect("serialize");
+        assert_eq!(as_json(&from_text), as_json(&from_file));
+        assert_eq!(as_json(&parsed), as_json(&from_file));
+    }
+
+    #[test]
+    fn test_load_rejects_a_malformed_document_naming_the_position() {
+        let err = ServiceConfig::from_kdl("mode \"standalone\nnode id=1\n")
+            .expect_err("unterminated string");
         assert_eq!(err.category(), "configuration");
         assert!(
             err.message().starts_with("parsing KDL: 1:"),
@@ -5151,11 +5184,7 @@ workflow "w" {
 
     #[test]
     fn declared_variables_substitute_into_wasm_module_paths() {
-        let mut file = NamedTempFile::new().expect("tempfile");
-        file.write_all(VARIABLES_WORKFLOW.as_bytes())
-            .expect("write");
-
-        let cfg = ServiceConfig::load(file.path()).expect("load");
+        let cfg = ServiceConfig::from_kdl(VARIABLES_WORKFLOW).expect("load");
         assert_eq!(
             cfg.variables.get("mod_dir").map(String::as_str),
             Some("/tmp/saci-modules")
@@ -5186,10 +5215,7 @@ workflow "w" {{
 "#,
             name = "SACI_TEST_LOAD_SHADOW"
         );
-        let mut file = NamedTempFile::new().expect("tempfile");
-        file.write_all(raw.as_bytes()).expect("write");
-
-        let cfg = ServiceConfig::load(file.path()).expect("load");
+        let cfg = ServiceConfig::from_kdl(&raw).expect("load");
         assert_eq!(
             cfg.variables
                 .get("SACI_TEST_LOAD_SHADOW")
@@ -5215,10 +5241,7 @@ workflow "w" {
     wasm "p" module="${SACI_TEST_UNDECLARED_NOPE}/p.wasm"
 }
 "#;
-        let mut file = NamedTempFile::new().expect("tempfile");
-        file.write_all(raw.as_bytes()).expect("write");
-
-        let err = ServiceConfig::load(file.path()).expect_err("undeclared variable");
+        let err = ServiceConfig::from_kdl(raw).expect_err("undeclared variable");
         assert_eq!(err.category(), "configuration");
         assert!(
             err.message()

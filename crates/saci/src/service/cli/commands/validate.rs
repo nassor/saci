@@ -69,7 +69,7 @@
 use crate::SaciError;
 use crate::service::ServiceBuilder;
 use crate::service::config::{ServiceConfig, ServiceMode};
-use crate::service::factories::{builtin_feature, register_builtin_factories};
+use crate::service::factories::builtin_feature;
 use crate::service::validation::validate_build_capabilities;
 
 use crate::service::cli::{GlobalOpts, ValidateArgs};
@@ -85,7 +85,7 @@ pub async fn run(
 ) -> Result<(), SaciError> {
     let config = ServiceConfig::load(&global.config)?;
     validate_build_capabilities(&config)?;
-    let builder = customize(register_builtin_factories(ServiceBuilder::new()));
+    let builder = customize(ServiceBuilder::new());
 
     if args.connectors_only {
         return run_connectors_only(builder, &config, args);
@@ -94,7 +94,7 @@ pub async fn run(
     // Building with the built-in registry also compiles any WASM module,
     // verifies its WIT world, and validates the workflow graph. Unknown type
     // names surface as configuration errors naming the missing factory.
-    let build_result = builder.build_all(&config);
+    let build_result = builder.build(&config);
 
     // Unknown-type errors become warnings; every other error is fatal
     // regardless of --strict.
@@ -239,7 +239,7 @@ fn report_unknown_warnings(
 /// rather than a guess. The producing end of that contract is pinned by
 /// `factories::tests::the_feature_hint_keeps_the_classified_prefix`, which
 /// covers the arm a build with every connector cannot reach through
-/// `build_all`; the reading end by
+/// `build`; the reading end by
 /// `declared_type_reads_a_real_builder_message` below.
 fn declared_type(message: &str) -> Option<&str> {
     let (_, after) = message.split_once("for type '")?;
@@ -250,7 +250,7 @@ fn declared_type(message: &str) -> Option<&str> {
 /// Returns `true` if the error is specifically a missing factory registration
 /// (as opposed to a factory build failure or schema error).
 fn is_unknown_factory_error(e: &SaciError) -> bool {
-    // ServiceBuilder::build_all formats missing-factory errors as
+    // ServiceBuilder::build formats missing-factory errors as
     // "no source/sink factory registered for type '...'".
     e.category() == "configuration"
         && (e.message().contains("no source factory registered")
@@ -314,8 +314,8 @@ mod tests {
     #[test]
     fn test_builtin_only_config_validates_cleanly() {
         let config = make_config(vec![], vec![]);
-        let builder = register_builtin_factories(ServiceBuilder::new());
-        let result = builder.build_all(&config);
+        let builder = ServiceBuilder::new();
+        let result = builder.build(&config);
         assert!(
             result.is_ok(),
             "empty config should build cleanly: {:?}",
@@ -338,8 +338,8 @@ mod tests {
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
         );
-        let builder = register_builtin_factories(ServiceBuilder::new());
-        let err = builder.build_all(&config).unwrap_err();
+        let builder = ServiceBuilder::new();
+        let err = builder.build(&config).unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(
             is_unknown_factory_error(&err),
@@ -363,8 +363,8 @@ mod tests {
             }],
             vec![],
         );
-        let builder = register_builtin_factories(ServiceBuilder::new());
-        let err = builder.build_all(&config).unwrap_err();
+        let builder = ServiceBuilder::new();
+        let err = builder.build(&config).unwrap_err();
         assert!(
             is_unknown_factory_error(&err),
             "MongoSource should be classified as unknown factory: {err}"
@@ -406,8 +406,8 @@ mod tests {
             }],
             vec![],
         );
-        let builder = register_builtin_factories(ServiceBuilder::new());
-        let err = builder.build_all(&config).unwrap_err();
+        let builder = ServiceBuilder::new();
+        let err = builder.build(&config).unwrap_err();
         assert_eq!(declared_type(&err.message()), Some("MongoSource"));
     }
 

@@ -5,8 +5,8 @@
 // its own failure counter through `run-batch`'s state blob. The runner sees only
 // a `SaciError`, so the release-not-ack path is identical either way.
 //
-// The mock keeps `PipelineRuntime`'s default `run_on_with_state`, so these tests
-// also cover the stateless path: `prior` is ignored and no state blob is written.
+// The mock returns `RuntimeOutput::default()`, so these tests also cover the
+// stateless path: `prior` is ignored and no state blob is written.
 
 #![cfg(feature = "distributed")]
 
@@ -22,7 +22,7 @@ use saci::distributed::checkpoint::{Checkpoint, CheckpointStore};
 use saci::distributed::partition::{BatchClaim, PartitionSource};
 use saci::distributed::runner::{DistributedRunner, RunnerConfig};
 use saci::distributed::strategy::CheckpointStrategy;
-use saci::runtime::PipelineRuntime;
+use saci::runtime::{PipelineRuntime, RuntimeOutput};
 use saci::{Dataset, SaciError, SaciResult};
 use uuid::Uuid;
 
@@ -53,14 +53,18 @@ impl PipelineRuntime for MockTrapRuntime {
         "mock-trap"
     }
 
-    async fn run_on(&self, _data: &mut Dataset) -> SaciResult<()> {
+    async fn run_batch(
+        &self,
+        _data: &mut Dataset,
+        _prior: Option<&[u8]>,
+    ) -> SaciResult<RuntimeOutput> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
         if n == self.trap_on_call {
             return Err(SaciError::SystemExecution(
                 "processor trap (run-batch): unreachable executed".to_string(),
             ));
         }
-        Ok(())
+        Ok(RuntimeOutput::default())
     }
 
     fn template_dataset(&self) -> Dataset {

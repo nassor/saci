@@ -19,7 +19,6 @@ use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
 use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -208,9 +207,9 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
     std::fs::write(&path, config_kdl(&dsn, &data_dir)).expect("write config");
 
     let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
@@ -243,9 +242,9 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
     // the documented at-least-once contract, and `write_mode = "upsert"` is
     // what makes the replay harmless.
     let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
     let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
@@ -274,9 +273,9 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
     source_only.workflows[0]
         .links
         .retain(|l| l.from != "orders_out" && l.to != "orders_out");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&source_only)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&source_only)
         .expect("service builds")
         .remove(0);
     let mut source = built
@@ -300,9 +299,9 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
     assert_eq!(second, 0, "the second cycle is caught up");
 
     let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
     let stats = run_standalone(built, &config, CancellationToken::new(), None, None)

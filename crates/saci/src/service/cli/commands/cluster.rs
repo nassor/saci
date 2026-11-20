@@ -126,8 +126,7 @@ async fn cmd_leave(_global: &GlobalOpts) -> Result<(), SaciError> {
 
 /// Show cluster status from the running node's HTTP API.
 ///
-/// Queries `/status` and extracts the `cluster` field, which is null when the
-/// node has no cluster probe wired.
+/// Queries `/status` and prints the node's identity line.
 #[cfg(feature = "service-cluster")]
 async fn cmd_status(global: &GlobalOpts) -> Result<(), SaciError> {
     let addr = global.addr.as_ref().ok_or_else(|| {
@@ -166,22 +165,7 @@ async fn cmd_status(global: &GlobalOpts) -> Result<(), SaciError> {
         return Ok(());
     }
 
-    match body.get("cluster") {
-        Some(cluster) if !cluster.is_null() => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(cluster).unwrap_or_else(|_| cluster.to_string())
-            );
-        }
-        _ => {
-            // The serve command wires no cluster probe.
-            println!("node {node_id}  mode=cluster");
-            println!(
-                "Note: cluster details are not available in v1. \
-                 Full Raft metrics integration is planned for v1.1."
-            );
-        }
-    }
+    println!("node {node_id}  mode=cluster");
 
     Ok(())
 }

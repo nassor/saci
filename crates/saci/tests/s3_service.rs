@@ -35,7 +35,6 @@ use tokio_util::sync::CancellationToken;
 use saci::codec::ndjson::NdjsonCodec;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
@@ -142,12 +141,10 @@ async fn the_s3_factories_build_without_reaching_the_endpoint() {
         ..Default::default()
     };
     let raw = config_kdl(&connection, "in", "out");
-    let path = tempfile::NamedTempFile::new().expect("temp config");
-    std::fs::write(path.path(), &raw).expect("write config");
-    let config = ServiceConfig::load(path.path()).expect("config loads");
-    register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&raw).expect("config loads");
+    ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds without reaching the endpoint");
 }
 
@@ -289,16 +286,11 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
         seed_sink.finish().await.expect("seed finish");
     }
 
-    let path = tempfile::NamedTempFile::new().expect("temp config");
-    std::fs::write(
-        path.path(),
-        config_kdl(&connection, &in_prefix, &out_prefix),
-    )
-    .expect("write config");
-    let config = ServiceConfig::load(path.path()).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(&connection, &in_prefix, &out_prefix))
+        .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 

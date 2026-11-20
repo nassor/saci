@@ -3,7 +3,7 @@
 //! The native half drives a one-system `Pipeline` through
 //! [`service::stream::run_stream`] over a `ChannelSource`/`ChannelSink` pair,
 //! timing each single-row batch out and back. The WASM half (`--features
-//! wasm`) times `WasmPipelineRuntime::run_on_with_state` on a one-row dataset,
+//! wasm`) times `WasmPipelineRuntime::run_batch` on a one-row dataset,
 //! which isolates the host/processor boundary: store creation, instantiation from
 //! the pre-linked `InstancePre`, IPC in, IPC out.
 //!
@@ -26,7 +26,7 @@ use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
 use saci::connector::channel::{ChannelSink, ChannelSource};
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
 use saci::service::flow::FlowPlan;
 use saci::service::registry::Registry;
 use saci::service::stream::run_stream;
@@ -95,7 +95,7 @@ async fn native_latency() -> Vec<u64> {
     let (source, tx) = ChannelSource::new(Arc::clone(&schema), 1);
     let (sink, mut rx) = ChannelSink::new(Arc::clone(&schema), 1);
 
-    let service = BuiltService {
+    let service = BuiltWorkflow {
         workflow_id: "stream-latency".to_string(),
         workflow_name: None,
         nodes: vec![
@@ -266,9 +266,14 @@ mod wasm_probe {
 
         let bytes = std::fs::read(&path).expect("read smoketest wasm");
         let engine = WasmEngine::new().expect("WasmEngine init");
-        let runtime =
-            WasmPipelineRuntime::from_bytes(engine, "smoketest", &bytes, HashMap::new(), 60)
-                .expect("load smoketest component");
+        let runtime = WasmPipelineRuntime::from_bytes(
+            engine,
+            "smoketest",
+            &bytes,
+            HashMap::new(),
+            Duration::from_secs(6),
+        )
+        .expect("load smoketest component");
 
         let mut dataset = runtime.template_dataset();
         dataset
@@ -279,18 +284,20 @@ mod wasm_probe {
         let mut prior = None;
         for _ in 0..32 {
             prior = runtime
-                .run_on_with_state(&mut dataset, prior.as_deref())
+                .run_batch(&mut dataset, prior.as_deref())
                 .await
-                .expect("warm-up processor call");
+                .expect("warm-up processor call")
+                .state;
         }
 
         let mut samples = Vec::with_capacity(WASM_CALLS);
         for _ in 0..WASM_CALLS {
             let started = Instant::now();
             prior = runtime
-                .run_on_with_state(&mut dataset, prior.as_deref())
+                .run_batch(&mut dataset, prior.as_deref())
                 .await
-                .expect("processor call");
+                .expect("processor call")
+                .state;
             samples.push(started.elapsed().as_micros() as u64);
         }
 
@@ -307,7 +314,7 @@ async fn main() {
 
     #[cfg(feature = "wasm-host")]
     if let Some(samples) = wasm_probe::processor_call_latency().await {
-        report("wasm run_on_with_state", samples);
+        report("wasm run_batch", samples);
     }
 
     #[cfg(not(feature = "wasm-host"))]

@@ -29,8 +29,8 @@
 //! - `codec-ndjson`: [`NdjsonCodecFactory`]
 //! - `codec-parquet`: [`ParquetCodecFactory`]
 //!
-//! [`register_builtin_factories`] adds every enabled factory to a
-//! [`ServiceBuilder`] in one call. [`BUILTIN_CONNECTOR_FEATURES`] names every
+//! [`ServiceBuilder::new`] adds every enabled factory to the builder in one
+//! call. [`BUILTIN_CONNECTOR_FEATURES`] names every
 //! connector type name and [`BUILTIN_CODEC_FEATURES`] every format name
 //! the crate carries, whether or not the feature is on, so a lookup that
 //! misses can still say which feature to build with.
@@ -334,24 +334,13 @@ pub fn missing_cluster_host_error() -> SaciError {
 }
 
 /// Register every enabled connector's and codec's factories into
-/// `builder`.
+/// `builder`. [`ServiceBuilder::new`] is this applied to
+/// [`ServiceBuilder::empty`].
 ///
 /// A crate reaches the registry only when its feature is on. Supply the runtime
-/// separately through [`ServiceBuilder::with_runtime`] or `pipeline.wasm` in the
+/// separately through [`ServiceBuilder::runtime`] or `pipeline.wasm` in the
 /// config.
-///
-/// # Example
-///
-/// ```rust
-/// # #[cfg(feature = "service")]
-/// # {
-/// use saci::service::builder::ServiceBuilder;
-/// use saci::service::factories::register_builtin_factories;
-///
-/// let builder = register_builtin_factories(ServiceBuilder::new());
-/// # }
-/// ```
-pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
+pub(crate) fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
     // Codecs first: a connector factory resolves its `format` key against
     // the registry, so the format has to be in it by the time config is built.
     #[cfg(feature = "codec-arrow-ipc")]
@@ -373,7 +362,7 @@ pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
     let builder = builder
         .register_source(ChannelSourceFactory)
         .register_sink(ChannelSinkFactory)
-        .with_channel_bridge(std::sync::Arc::new(
+        .channels(std::sync::Arc::new(
             crate::connector::channel::ChannelRegistry::default(),
         ));
 
@@ -458,7 +447,7 @@ mod tests {
     /// The hint arm must not disturb the opening the binary's `validate`
     /// classifies a missing-factory error by.
     ///
-    /// `build_all` cannot produce this message in a build that has every
+    /// `build` cannot produce this message in a build that has every
     /// connector, which is the build the suite runs, so the producer is called
     /// directly. Without this, appending the hint could silently break
     /// `is_unknown_factory_error` and turn a warning into a hard failure with
@@ -506,7 +495,7 @@ mod tests {
     #[cfg(feature = "all")]
     #[test]
     fn builtin_connector_table_matches_the_registry() {
-        let builder = register_builtin_factories(ServiceBuilder::new());
+        let builder = ServiceBuilder::new();
         let registry = builder.registry();
 
         let mut registered = registry.source_names();
@@ -533,7 +522,7 @@ mod tests {
     /// A format this crate carries but was compiled out names its feature.
     ///
     /// A build with every codec cannot reach this arm through
-    /// `build_all`, so the producer is called directly. The opening is pinned
+    /// `build`, so the producer is called directly. The opening is pinned
     /// too: it is what an operator greps for and what any future classifier
     /// would match on.
     #[test]
@@ -582,7 +571,7 @@ mod tests {
     #[cfg(feature = "all")]
     #[test]
     fn builtin_codec_table_matches_the_registry() {
-        let builder = register_builtin_factories(ServiceBuilder::new());
+        let builder = ServiceBuilder::new();
         let registered = builder.registry().codecs().names();
 
         let mut tabled: Vec<&str> = BUILTIN_CODEC_FEATURES
@@ -602,7 +591,7 @@ mod tests {
 
     /// The four capability refusals name their feature and read alike.
     ///
-    /// None of them is reachable through `build_all` or
+    /// None of them is reachable through `build` or
     /// `validate_build_capabilities` in a build that carries every host,
     /// which is the build the suite runs, so the producers are called
     /// directly, the same reason

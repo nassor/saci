@@ -59,7 +59,7 @@ pub fn load_plugin_runtime(
     let library = spec.library.as_deref().ok_or_else(|| {
         SaciError::configuration(format!(
             "plugin node '{}' declares no 'library'; supply a runtime through \
-             ServiceBuilder::with_runtime instead",
+             ServiceBuilder::runtime instead",
             spec.id
         ))
     })?;
@@ -117,7 +117,7 @@ mod tests {
         let err = load_plugin_runtime(&missing, None).unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("'p'"), "{err}");
-        assert!(err.to_string().contains("with_runtime"), "{err}");
+        assert!(err.to_string().contains("ServiceBuilder::runtime"), "{err}");
     }
 
     #[test]

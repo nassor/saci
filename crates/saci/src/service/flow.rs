@@ -1164,7 +1164,7 @@ impl FlowPlan {
     ///
     /// [`Default`] is the batch policy, which carries no latency objective, so
     /// it is the wrong plan to hand [`run_stream`](super::stream::run_stream).
-    /// The run mode is not recoverable from a [`BuiltService`](super::builder::BuiltService),
+    /// The run mode is not recoverable from a [`BuiltWorkflow`](super::builder::BuiltWorkflow),
     /// so the caller names the policy instead: this constructor for a direct
     /// call, [`from_config`](Self::from_config) for a config-driven one, which
     /// resolves the same defaults from `run_mode`.

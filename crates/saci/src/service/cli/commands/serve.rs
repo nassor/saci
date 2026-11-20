@@ -6,8 +6,7 @@
 //! before draining all tasks within the 30-second shutdown budget.
 //!
 //! The `ready` flag flips as soon as the runner is spawned, not after the first
-//! successful pipeline iteration. In cluster mode `cluster_probe` is `None`, so
-//! `/status` reports `"cluster": null`.
+//! successful pipeline iteration.
 
 use std::sync::{
     Arc,
@@ -24,10 +23,9 @@ use crate::service::RedbStateClient;
 use crate::service::builder::rebuild_blocker;
 use crate::service::config::{LogFormat, ServiceConfig, ServiceMode};
 use crate::service::dlq::DlqRegistry;
-use crate::service::factories::register_builtin_factories;
 use crate::service::http::{ServiceModeLabel, ServiceState};
 use crate::service::lifecycle::{LifecycleRegistryBuilder, SupervisorChannels, run_supervised};
-use crate::service::standalone::StandaloneStats;
+use crate::service::standalone::WorkflowStats;
 use crate::service::{ServiceBuilder, ShutdownCoordinator, serve_http, spawn_watchdog};
 
 use crate::service::cli::{GlobalOpts, LogFormatArg, ServeArgs};
@@ -137,12 +135,11 @@ pub async fn run(
     // One shared half per declared queue, built before the workflows so the
     // runner and the control plane are two views of the same state.
     let dlq_registry = Arc::new(DlqRegistry::from_config(&config));
-    let builder = customize(register_builtin_factories(ServiceBuilder::new()))
-        .with_dlq_registry(dlq_registry.clone());
+    let builder = customize(ServiceBuilder::new()).dlq_registry(dlq_registry.clone());
     // The builder publishes the topology into the inspector once it knows the
     // runtime and the source/sink sets.
     let builder = match inspector.clone() {
-        Some(inspector) => builder.with_inspector(inspector),
+        Some(inspector) => builder.inspector(inspector),
         None => builder,
     };
     // Building every workflow up front keeps a bad config a startup failure,
@@ -166,14 +163,14 @@ pub async fn run(
         ServiceMode::Standalone { .. } => ServiceModeLabel::Standalone,
         ServiceMode::Cluster { .. } => ServiceModeLabel::Cluster,
     };
-    let standalone_stats: Option<Vec<(String, Arc<RwLock<StandaloneStats>>)>> = match &config.mode {
+    let standalone_stats: Option<Vec<(String, Arc<RwLock<WorkflowStats>>)>> = match &config.mode {
         ServiceMode::Standalone { .. } => Some(
             built
                 .iter()
                 .map(|b| {
                     (
                         b.workflow_id.clone(),
-                        Arc::new(RwLock::new(StandaloneStats::default())),
+                        Arc::new(RwLock::new(WorkflowStats::default())),
                     )
                 })
                 .collect(),
@@ -210,8 +207,6 @@ pub async fn run(
         prometheus_registry,
         liveness: liveness.clone(),
         ready: ready.clone(),
-        // No cluster probe: in cluster mode /status reports "cluster": null.
-        cluster_probe: None,
         standalone_stats: standalone_stats.clone(),
         inspector,
         lifecycle,
@@ -268,7 +263,7 @@ pub async fn run(
     // iteration completes.
     ready.store(true, Ordering::Relaxed);
 
-    // The runner runs inline rather than under tokio::spawn: BuiltService holds
+    // The runner runs inline rather than under tokio::spawn: BuiltWorkflow holds
     // a Box<dyn Sink> that is Send but not Sync, and running inline avoids the
     // Future: Send bound.
     //

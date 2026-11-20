@@ -3,7 +3,7 @@
 //! One [`Case`] is one `{source connector, sink connector, byte format,
 //! processor runtime}` tuple. [`run_case`] turns it into a KDL config, loads it
 //! through [`ServiceConfig::load`], assembles it with
-//! [`ServiceBuilder::build_all`], runs it through the real standalone or stream
+//! [`ServiceBuilder::build`], runs it through the real standalone or stream
 //! runner, and asserts the exact rows arrive at the sink. [`Report`] collects
 //! every case's outcome and renders the matrix.
 //!
@@ -19,7 +19,7 @@
 //!   natively (`channel`, `postgresql`, `mariadb`, `turso`, `saci`,
 //!   `clickhouse`, `opentelemetry`).
 //! - **Processor runtimes**: a native [`Pipeline`] registered through
-//!   [`ServiceBuilder::with_runtime`], the `saci-processor-smoketest`
+//!   [`ServiceBuilder::runtime`], the `saci-processor-smoketest`
 //!   WebAssembly component loaded from `module`, and the
 //!   `saci-plugin-smoketest` cdylib loaded from `library`.
 //!
@@ -161,7 +161,7 @@
 //! re-attempts the same object and raises the same error rather than finding
 //! an empty listing and reporting EOF.
 //!
-//! [`StandaloneStats`] counts non-fatal errors without keeping their text, so
+//! [`WorkflowStats`] counts non-fatal errors without keeping their text, so
 //! a [`Site::Run`] refusal that names a message fragment is asserted against a
 //! second, direct build of the same source. See [`SourceProbe`].
 //!
@@ -236,7 +236,7 @@
 //!   that a connector pair can carry rows through it.
 //! - **Where a build refusal went.** [`execute`] derives `build_only` from
 //!   [`Case::expect`], so a [`Site::Build`] case resolves placeholder
-//!   endpoints, seeds nothing and returns as soon as `build_all` succeeds. It
+//!   endpoints, seeds nothing and returns as soon as `build` succeeds. It
 //!   reports that the refusal is gone and cannot distinguish a combination
 //!   that is now supported from one that is now refused at run. The other
 //!   direction is exact: a [`Site::Run`] case whose build fails reports the
@@ -250,7 +250,7 @@
 //! workflow that feeds it from an ndjson file, and a `channel` sink with a
 //! second workflow that drains it into one; those are the bytes the case is
 //! seeded from and read back through. Both are declared in the same config and
-//! run as their own `BuiltService` alongside the case's, exactly as
+//! run as their own `BuiltWorkflow` alongside the case's, exactly as
 //! `channel_bridge.rs` does.
 //!
 //! # What the maximal workflow cannot do
@@ -316,8 +316,7 @@ use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::standalone::{StandaloneStats, run_standalone};
+use saci::service::standalone::{WorkflowStats, run_standalone};
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
 
@@ -579,7 +578,7 @@ impl Format {
 /// One processor runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessorKind {
-    /// A native [`Pipeline`] injected with [`ServiceBuilder::with_runtime`].
+    /// A native [`Pipeline`] injected with [`ServiceBuilder::runtime`].
     Native,
     /// The `saci-processor-smoketest` component, loaded from `module`.
     Wasm,
@@ -938,7 +937,7 @@ impl RowKind {
 /// a capability, so it gets fixed rather than a site of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {
-    /// `ServiceConfig::load` or `ServiceBuilder::build_all` returns an error.
+    /// `ServiceConfig::load` or `ServiceBuilder::build` returns an error.
     Build,
     /// The service builds and the runner reports a non-fatal error; no row
     /// reaches the sink.
@@ -960,7 +959,7 @@ pub enum Expect {
     /// Build, run, and deliver exactly the expected rows.
     Supported,
     /// Be refused at `site`. A non-empty `fragment` must appear in the
-    /// message: at [`Site::Build`] in the error `build_all` returns, at
+    /// message: at [`Site::Build`] in the error `build` returns, at
     /// [`Site::Run`] in what the source's own connector reports through
     /// [`SourceProbe`], because the runner keeps only a count. Empty means the
     /// site alone is the assertion.
@@ -1034,7 +1033,7 @@ impl Case {
     /// What this combination must do, derived from the capability table.
     ///
     /// The order matters, because it is the order the service checks in:
-    /// `build_all` parses and builds every node in topological order (the
+    /// `build` parses and builds every node in topological order (the
     /// source before the sink), then runs `validate_workflow_graph` over the
     /// finished nodes, and only then does the runner drain the source and
     /// write the sink.
@@ -1748,7 +1747,7 @@ pub struct Fixtures {
     /// The `saci-plugin-smoketest` cdylib under the running profile.
     pub plugin: PathBuf,
     /// Shared by every case of a slice through
-    /// [`ServiceBuilder::with_wasm_engine`], so the 4 MB component is
+    /// [`ServiceBuilder::wasm_engine`], so the 4 MB component is
     /// Cranelift-compiled once per slice instead of once per case.
     ///
     /// That compile is synchronous: about 1.7 s on one fast core, and well
@@ -1824,7 +1823,7 @@ impl Fixtures {
             "precompile",
             &bytes,
             std::collections::HashMap::new(),
-            1,
+            std::time::Duration::from_millis(100),
         )
         .map(drop)
         .map_err(|e| format!("compiling {}: {e}", self.wasm.display()))
@@ -2533,7 +2532,7 @@ struct SourceSide {
     /// the listener answers it `200` rather than `202`.
     otlp: Option<(String, Vec<Vec<u8>>)>,
     /// How to build this source again outside the service, so a run-time
-    /// refusal can be asserted on its own message. `StandaloneStats` counts
+    /// refusal can be asserted on its own message. `WorkflowStats` counts
     /// non-fatal errors without keeping their text, so the runner alone can
     /// only say that something failed.
     probe: Option<SourceProbe>,
@@ -4225,7 +4224,7 @@ fn processor_kdl(case: Case, fixtures: &Fixtures) -> String {
 /// The whole config for one case.
 ///
 /// `feeder` and `drainer` are the paired-channel workflows, declared around
-/// the case's own so `build_all` builds them in that order: a build failure
+/// the case's own so `build` builds them in that order: a build failure
 /// inside the case's workflow is then the first one reported.
 fn case_kdl(
     case: Case,
@@ -4375,26 +4374,22 @@ async fn execute(
     let processor = processor_kdl(case, fixtures);
     let raw = case_kdl(case, &source, &sink, &processor, dir.path());
 
-    let config_path = dir.path().join("matrix.kdl");
-    std::fs::write(&config_path, &raw).map_err(|e| format!("write config: {e}"))?;
-
     // 1. Config parse, `WorkflowSpec::validate` and `ServiceConfig::validate`.
-    let config = match ServiceConfig::load(&config_path) {
+    let config = match ServiceConfig::from_kdl(&raw) {
         Ok(config) => config,
         Err(e) => return check_build_refusal(expect, &e.to_string(), &raw),
     };
 
     // 2. Factory assembly plus `validate_workflow_graph`. The channel factories
-    //    reach the default `ChannelRegistry` that `register_builtin_factories`
+    //    reach the default `ChannelRegistry` that `ServiceBuilder::new`
     //    attaches, so the paired halves meet inside this builder alone. The
     //    engine is the run's one engine, so a wasm case instantiates an
     //    already compiled component instead of compiling its own.
-    let mut builder =
-        register_builtin_factories(ServiceBuilder::new()).with_wasm_engine(fixtures.engine.clone());
+    let mut builder = ServiceBuilder::new().wasm_engine(fixtures.engine.clone());
     if case.processor == ProcessorKind::Native {
-        builder = builder.with_runtime("proc", Box::new(row.native_pipeline()));
+        builder = builder.runtime("proc", row.native_pipeline());
     }
-    let mut services = match builder.build_all(&config) {
+    let mut services = match builder.build(&config) {
         Ok(services) => services,
         Err(e) => return check_build_refusal(expect, &e.to_string(), &raw),
     };
@@ -4403,11 +4398,11 @@ async fn execute(
             "expected a build-time refusal, but the service built\n--- config ---\n{raw}"
         ));
     }
-    // `build_all` preserves declaration order: the feeder, then the case, then
+    // `build` preserves declaration order: the feeder, then the case, then
     // the drainer.
     let case_index = usize::from(source.paired.is_some());
     if case_index >= services.len() {
-        return Err(format!("build_all returned {} service(s)", services.len()));
+        return Err(format!("build returned {} service(s)", services.len()));
     }
     let built = services.remove(case_index);
 
@@ -4416,7 +4411,7 @@ async fn execute(
     //    its `ChannelSink`, so cancelling both at once would race the drain.
     let cancel = CancellationToken::new();
     let helper_cancel = CancellationToken::new();
-    let live = Arc::new(RwLock::new(StandaloneStats::default()));
+    let live = Arc::new(RwLock::new(WorkflowStats::default()));
     let helpers = futures::future::join_all(
         services
             .into_iter()
@@ -4604,7 +4599,7 @@ struct StreamTargets {
 }
 
 impl StreamTargets {
-    fn met(&self, stats: &StandaloneStats) -> bool {
+    fn met(&self, stats: &WorkflowStats) -> bool {
         stats.rows_processed >= self.rows
             && stats.sink_batches_written >= self.batches
             && stats.iteration_errors >= self.errors
@@ -4615,9 +4610,9 @@ impl StreamTargets {
 /// elapses. Timing out is not an error here: what the runner did or did not
 /// report is the case's own answer.
 async fn await_stats(
-    live: &Arc<RwLock<StandaloneStats>>,
+    live: &Arc<RwLock<WorkflowStats>>,
     budget: Duration,
-    predicate: impl Fn(&StandaloneStats) -> bool,
+    predicate: impl Fn(&WorkflowStats) -> bool,
 ) {
     let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
@@ -4647,7 +4642,7 @@ async fn await_stats(
 async fn drive_tcp_stream(
     bind: String,
     frames: Vec<Vec<u8>>,
-    live: Arc<RwLock<StandaloneStats>>,
+    live: Arc<RwLock<WorkflowStats>>,
     targets: StreamTargets,
     cancel: CancellationToken,
 ) -> Result<(), String> {
@@ -4733,7 +4728,7 @@ impl Feed {
 
     async fn drive(
         self,
-        live: Arc<RwLock<StandaloneStats>>,
+        live: Arc<RwLock<WorkflowStats>>,
         targets: StreamTargets,
         cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -4785,7 +4780,7 @@ impl Feed {
 async fn drive_udp_stream(
     bind: String,
     datagrams: Vec<Vec<u8>>,
-    live: Arc<RwLock<StandaloneStats>>,
+    live: Arc<RwLock<WorkflowStats>>,
     targets: StreamTargets,
     cancel: CancellationToken,
 ) -> Result<(), String> {
@@ -4826,7 +4821,7 @@ async fn drive_push_stream(
     url: String,
     bodies: Vec<Vec<u8>>,
     expected_status: Option<u16>,
-    live: Arc<RwLock<StandaloneStats>>,
+    live: Arc<RwLock<WorkflowStats>>,
     targets: StreamTargets,
     cancel: CancellationToken,
 ) -> Result<(), String> {
@@ -5194,23 +5189,20 @@ observability log_level="error"
             .collect::<String>(),
     );
 
-    let config_path = dir.path().join("maximal.kdl");
-    std::fs::write(&config_path, &raw).map_err(|e| format!("write config: {e}"))?;
-    let config = ServiceConfig::load(&config_path)
+    let config = ServiceConfig::from_kdl(&raw)
         .map_err(|e| format!("the maximal config must validate: {e}\n--- config ---\n{raw}"))?;
 
-    let mut builder =
-        register_builtin_factories(ServiceBuilder::new()).with_wasm_engine(fixtures.engine.clone());
+    let mut builder = ServiceBuilder::new().wasm_engine(fixtures.engine.clone());
     for node in &nodes {
         if node.kdl.contains("name=\"native-pipeline\"") {
-            builder = builder.with_runtime(
+            builder = builder.runtime(
                 node.id.clone(),
-                Box::new(ProcessorKind::Native.row().native_pipeline()),
+                ProcessorKind::Native.row().native_pipeline(),
             );
         }
     }
     let mut services = builder
-        .build_all(&config)
+        .build(&config)
         .map_err(|e| format!("the maximal workflow must build: {e}\n--- config ---\n{raw}"))?;
     // The maximal workflow is declared first, so it is the first service.
     let built = services.remove(0);
@@ -5218,7 +5210,7 @@ observability log_level="error"
 
     let cancel = CancellationToken::new();
     let helper_cancel = CancellationToken::new();
-    let live = Arc::new(RwLock::new(StandaloneStats::default()));
+    let live = Arc::new(RwLock::new(WorkflowStats::default()));
     let helpers = futures::future::join_all(
         services
             .into_iter()

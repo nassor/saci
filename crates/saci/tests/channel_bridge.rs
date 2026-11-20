@@ -1,6 +1,6 @@
 //! End-to-end proof that a `ChannelSink` in one workflow and a
-//! `ChannelSource` in another meet on one shared channel: `ServiceBuilder::
-//! build_all` builds both workflows from one config, sharing the default
+//! `ChannelSource` in another meet on one shared channel: `ServiceBuilder::build`
+//! builds both workflows from one config, sharing the default
 //! channel registry, and running them concurrently moves a row from the
 //! producer's `FileSource` through the bridge to the consumer's `FileSink`.
 
@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 
 /// A quoted KDL string reads backslashes as escapes, so a Windows path has to
@@ -27,7 +26,7 @@ fn config_path_text(path: &std::path::Path) -> String {
 /// Two workflows in one config: `producer` reads a CSV file and writes into
 /// the `bridge` channel; `consumer` reads the `bridge` channel and writes a
 /// CSV file. Neither workflow names the other; they meet by declared channel
-/// `name` alone, through the registry `register_builtin_factories` attaches.
+/// `name` alone, through the registry `ServiceBuilder::new` attaches.
 /// Every declared id, including a `transformer`'s, is unique across the whole
 /// config (`ServiceConfig::validate`), so each workflow names its own
 /// `transformer` id even though both declare the same `format`.
@@ -101,23 +100,17 @@ async fn a_channel_sink_in_one_workflow_bridges_to_a_channel_source_in_another()
 
     std::fs::write(&input_path, "id,total\n1,10.5\n").expect("write the csv fixture");
 
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(
-            &config_path_text(&input_path),
-            &config_path_text(&output_path),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let mut built = register_builtin_factories(ServiceBuilder::new())
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &config_path_text(&input_path),
+        &config_path_text(&output_path),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let mut built = ServiceBuilder::new()
+        .build(&config)
         .expect("both workflows build, sharing one default channel registry");
-    assert_eq!(built.len(), 2, "one BuiltService per declared workflow");
-    // `build_all` builds in declaration order: `producer` then `consumer`.
+    assert_eq!(built.len(), 2, "one BuiltWorkflow per declared workflow");
+    // `build` builds in declaration order: `producer` then `consumer`.
     let consumer = built.remove(1);
     let producer = built.remove(0);
 

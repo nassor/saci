@@ -184,7 +184,10 @@ async fn one_batch_round_trips_and_mutates() {
     let runtime = load_runtime(HashMap::new());
     let mut dataset = seeded_dataset(&runtime, &[10, 20, 30]);
 
-    runtime.run_on(&mut dataset).await.expect("run_on");
+    runtime
+        .run_batch(&mut dataset, None)
+        .await
+        .expect("run_batch");
 
     assert_eq!(dataset.rows(), 3, "row count survives the round-trip");
     assert_eq!(
@@ -209,17 +212,19 @@ async fn state_survives_across_batches_through_the_checkpoint() {
 
     let mut first = seeded_dataset(&runtime, &[10, 20, 30]);
     let checkpoint = runtime
-        .run_on_with_state(&mut first, None)
+        .run_batch(&mut first, None)
         .await
         .expect("first batch")
+        .state
         .expect("a stateful plugin returns a checkpoint");
     assert_eq!(column(&first, "seen"), vec![1, 2, 3]);
 
     let mut second = seeded_dataset(&runtime, &[40, 50, 60]);
     let next = runtime
-        .run_on_with_state(&mut second, Some(&checkpoint))
+        .run_batch(&mut second, Some(&checkpoint))
         .await
-        .expect("second batch");
+        .expect("second batch")
+        .state;
 
     assert_eq!(column(&second, "seen"), vec![4, 5, 6]);
     assert!(next.is_some(), "the plugin keeps checkpointing");
@@ -232,13 +237,13 @@ async fn state_resets_when_the_checkpoint_is_dropped() {
 
     let mut first = seeded_dataset(&runtime, &[10, 20, 30]);
     runtime
-        .run_on_with_state(&mut first, None)
+        .run_batch(&mut first, None)
         .await
         .expect("first batch");
 
     let mut second = seeded_dataset(&runtime, &[40, 50, 60]);
     runtime
-        .run_on_with_state(&mut second, None)
+        .run_batch(&mut second, None)
         .await
         .expect("second batch");
 
@@ -252,7 +257,10 @@ async fn config_reaches_the_plugin() {
     let runtime = load_runtime(multiplier_config("10"));
     let mut dataset = seeded_dataset(&runtime, &[10, 20, 30]);
 
-    runtime.run_on(&mut dataset).await.expect("run_on");
+    runtime
+        .run_batch(&mut dataset, None)
+        .await
+        .expect("run_batch");
 
     assert_eq!(column(&dataset, "seen"), vec![10, 20, 30]);
 }
@@ -264,7 +272,10 @@ async fn the_plugin_reports_batch_metrics() {
     assert_eq!(runtime.last_batch_metrics(), None, "no batch has run yet");
 
     let mut dataset = seeded_dataset(&runtime, &[10, 20, 30]);
-    runtime.run_on(&mut dataset).await.expect("run_on");
+    runtime
+        .run_batch(&mut dataset, None)
+        .await
+        .expect("run_batch");
 
     let metrics = runtime
         .last_batch_metrics()

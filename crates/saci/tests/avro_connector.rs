@@ -24,7 +24,6 @@ use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
@@ -106,21 +105,15 @@ async fn a_csv_source_and_an_avro_sink_share_one_file_connector() {
     std::fs::write(&input_path, "id,total\n1,10.5\n2,20.25\n3,30.75\n4,40.0\n")
         .expect("write the csv fixture");
 
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(
-            &config_path_text(&input_path),
-            &config_path_text(&output_path),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &config_path_text(&input_path),
+        &config_path_text(&output_path),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("both formats resolve through the codec registry")
         .remove(0);
 

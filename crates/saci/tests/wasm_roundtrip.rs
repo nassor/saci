@@ -106,9 +106,9 @@ async fn smoketest_arrow_ipc_round_trip_is_byte_exact() {
     // No system touches Ping and the counter lives in a resource, so the run is
     // an identity pass over the whole dataset.
     runtime
-        .run_on(&mut dataset)
+        .run_batch(&mut dataset, None)
         .await
-        .expect("processor run_on success");
+        .expect("processor run_batch success");
 
     let mut after: Vec<u8> = Vec::new();
     dataset.write_ipc(&mut after).expect("write_ipc after");
@@ -160,9 +160,10 @@ async fn processor_state_survives_across_batches() {
         let mut dataset = seeded_dataset(&runtime, 4);
 
         let next = runtime
-            .run_on_with_state(&mut dataset, prior.as_deref())
+            .run_batch(&mut dataset, prior.as_deref())
             .await
-            .expect("processor run_on_with_state success")
+            .expect("processor run_batch success")
+            .state
             .expect("a stateful processor must return a checkpoint blob");
 
         assert_eq!(
@@ -189,9 +190,10 @@ async fn processor_state_resets_when_prior_is_dropped() {
     for _ in 0..3 {
         let mut dataset = seeded_dataset(&runtime, 4);
         let blob = runtime
-            .run_on_with_state(&mut dataset, None)
+            .run_batch(&mut dataset, None)
             .await
-            .expect("processor run_on_with_state success")
+            .expect("processor run_batch success")
+            .state
             .expect("a stateful processor must return a checkpoint blob");
         assert_eq!(
             counter_in_blob(&blob),
@@ -213,9 +215,10 @@ async fn a_warm_instance_keeps_processor_memory_between_calls() {
         for (runtime, want, label) in [(&warm, expected, "warm"), (&cold, 1, "cold")] {
             let mut dataset = seeded_dataset(runtime, 4);
             let blob = runtime
-                .run_on_with_state(&mut dataset, None)
+                .run_batch(&mut dataset, None)
                 .await
-                .expect("processor run_on_with_state success")
+                .expect("processor run_batch success")
+                .state
                 .expect("a stateful processor must return a checkpoint blob");
             assert_eq!(
                 counter_in_blob(&blob),
@@ -226,25 +229,25 @@ async fn a_warm_instance_keeps_processor_memory_between_calls() {
     }
 }
 
-/// `run_on` must survive being awaited on a **multi-threaded** tokio runtime,
+/// `run_batch` must survive being awaited on a **multi-threaded** tokio runtime,
 /// which is what `#[tokio::main]` gives `saci-service`.
 ///
 /// The processor is linked against the synchronous WASI implementation
 /// (`add_to_linker_sync`), so every WASI import the processor touches funnels into
 /// `wasmtime_wasi::runtime::in_tokio` and then `Handle::block_on`. Called from a
 /// thread that is already driving a tokio runtime, that panics with "Cannot start
-/// a runtime from within a runtime", so `WasmPipelineRuntime::run_on_with_state`
+/// a runtime from within a runtime", so `WasmPipelineRuntime::run_batch`
 /// hands the call to `spawn_blocking`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn run_on_works_on_a_multi_thread_runtime() {
+async fn run_batch_works_on_a_multi_thread_runtime() {
     let runtime = load_runtime(HashMap::new());
     let mut dataset = seeded_dataset(&runtime, 3);
     let before = dataset.rows();
 
     runtime
-        .run_on(&mut dataset)
+        .run_batch(&mut dataset, None)
         .await
-        .expect("run_on must not panic or fail on a multi-thread runtime");
+        .expect("run_batch must not panic or fail on a multi-thread runtime");
 
     assert_eq!(
         dataset.rows(),
@@ -325,12 +328,12 @@ async fn the_pools_documented_concurrency_ceiling_holds() {
     let results = futures::future::join_all(
         datasets
             .iter_mut()
-            .map(|dataset| runtime.run_on_with_state(dataset, None)),
+            .map(|dataset| runtime.run_batch(dataset, None)),
     )
     .await;
 
     for (i, (result, dataset)) in results.iter().zip(datasets.iter()).enumerate() {
-        let state = result.as_ref().unwrap_or_else(|e| {
+        let output = result.as_ref().unwrap_or_else(|e| {
             panic!(
                 "call {i} of {POOL_CALLS} concurrent calls failed: {e}\n\
                  a `PoolConcurrencyLimitError` here means one call now needs more pooled \
@@ -338,7 +341,7 @@ async fn the_pools_documented_concurrency_ceiling_holds() {
                  below the number this test drives"
             )
         });
-        let blob = state.as_deref().unwrap_or_else(|| {
+        let blob = output.state.as_deref().unwrap_or_else(|| {
             panic!("call {i} returned no checkpoint; the smoketest is stateful")
         });
         // Every call started from `prior = None`, so each must have counted

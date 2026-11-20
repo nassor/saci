@@ -35,10 +35,10 @@ use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SaciError;
-use crate::service::builder::{BuiltService, ServiceFactory};
+use crate::service::builder::{BuiltWorkflow, WorkflowFactory};
 use crate::service::config::{ServiceConfig, WorkflowSpec};
 use crate::service::redb_state::RedbStateClient;
-use crate::service::standalone::{StandaloneStats, run_standalone};
+use crate::service::standalone::{WorkflowStats, run_standalone};
 
 /// How long a control request waits for the transition to settle before it is
 /// reported as still in progress.
@@ -627,7 +627,7 @@ impl Publisher {
 /// `run_standalone` counts from zero on every start, so the supervised total
 /// is what survives a restart; `nodes` is the latest run's breakdown, because
 /// summing per-node counters across two different builds says nothing.
-fn accumulate(total: &mut StandaloneStats, run: StandaloneStats) {
+fn accumulate(total: &mut WorkflowStats, run: WorkflowStats) {
     total.iterations += run.iterations;
     total.source_batches_drained += run.source_batches_drained;
     total.rows_processed += run.rows_processed;
@@ -659,7 +659,7 @@ async fn next_command(
 ///
 /// `factory` is shared by every supervisor in the process: they are polled by
 /// one `join_all` on one task, so a `RefCell` is enough and the borrow is held
-/// only across the synchronous [`ServiceFactory::build`] call.
+/// only across the synchronous [`WorkflowFactory::build`] call.
 ///
 /// # Errors
 ///
@@ -669,15 +669,15 @@ async fn next_command(
 /// restart it.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
-    initial: BuiltService,
+    initial: BuiltWorkflow,
     workflow: &WorkflowSpec,
     config: &ServiceConfig,
     cancel: CancellationToken,
-    live_stats: Option<Arc<RwLock<StandaloneStats>>>,
+    live_stats: Option<Arc<RwLock<WorkflowStats>>>,
     state: Option<Arc<RedbStateClient>>,
-    factory: &RefCell<ServiceFactory>,
+    factory: &RefCell<WorkflowFactory>,
     control: Option<SupervisorChannels>,
-) -> Result<StandaloneStats, SaciError> {
+) -> Result<WorkflowStats, SaciError> {
     let (mut commands, status) = match control {
         Some(channels) => (Some(channels.commands), Some(channels.status)),
         None => (None, None),
@@ -702,7 +702,7 @@ pub async fn run_supervised(
         pending: None,
     };
 
-    let mut total = StandaloneStats::default();
+    let mut total = WorkflowStats::default();
     let mut initial = Some(initial);
     let mut run_now = true;
     let mut cancelled = false;
@@ -768,7 +768,7 @@ pub async fn run_supervised(
         let mut after: Option<AfterRun> = None;
         let mut commands_open = controlled;
 
-        // The runner owns the `BuiltService` and every exclusive resource its
+        // The runner owns the `BuiltWorkflow` and every exclusive resource its
         // connectors hold, so it is dropped at the end of this block, before
         // the next iteration can build the same workflow again.
         let outcome = {

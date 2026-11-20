@@ -32,7 +32,7 @@ pub use crate::connector::{SinkFactory, SourceFactory};
 ///
 /// Factories are registered at startup, before any config is loaded, and
 /// looked up by the `type_name` string from the config. The runtime is
-/// supplied separately through [`ServiceBuilder::with_runtime`](super::ServiceBuilder::with_runtime) or loaded from
+/// supplied separately through [`ServiceBuilder::runtime`](super::ServiceBuilder::runtime) or loaded from
 /// a WASM module.
 ///
 /// ## Example

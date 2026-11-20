@@ -1,6 +1,6 @@
-//! Standalone runner for [`BuiltService`].
+//! Standalone runner for [`BuiltWorkflow`].
 //!
-//! [`run_standalone`] drives a [`BuiltService`] through repeated processing
+//! [`run_standalone`] drives a [`BuiltWorkflow`] through repeated processing
 //! iterations in a single process with no distributed coordination, walking
 //! every declared node in topological order each pass. It handles
 //! cancellation, transient per-node errors, and run-mode pacing (one-shot,
@@ -8,12 +8,12 @@
 //!
 //! ## Store-per-call semantics (WASM runtimes)
 //!
-//! A `WasmPipelineRuntime` creates a fresh wasmtime `Store` for every `run_on` call and
+//! A `WasmPipelineRuntime` creates a fresh wasmtime `Store` for every `run_batch` call and
 //! resets processor linear memory, unless its embedder opted in with `with_warm_instances`;
 //! the service builder never does. In-processor state that must
 //! survive iterations (accumulators, window buffers, caches) has to travel
 //! through the host as the `prior`/`run-result.checkpoint` blob
-//! `run_on_with_state` threads, or it is silently lost.
+//! `run_batch` threads, or it is silently lost.
 //!
 //! Interval/one-shot state carry across iterations is opt-in: with
 //! `store "redb" { batch_resume #true }` the runner threads the processor
@@ -118,8 +118,8 @@
 //! # #[cfg(feature = "service")]
 //! # {
 //! use tokio_util::sync::CancellationToken;
-//! use saci::service::standalone::{run_standalone, StandaloneStats};
-//! // Build a BuiltService (via ServiceBuilder::build_all) then:
+//! use saci::service::standalone::{run_standalone, WorkflowStats};
+//! // Build a BuiltWorkflow (via ServiceBuilder::build) then:
 //! // let stats = run_standalone(built, &config, cancel, None, None).await?;
 //! # }
 //! ```
@@ -140,7 +140,7 @@ use crate::inspector_wire::{FlowDecision, FlowDecisionKind};
 use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
-use super::builder::{BuiltNodeKind, BuiltService};
+use super::builder::{BuiltNodeKind, BuiltWorkflow};
 use super::config::StoreConfig;
 use super::config::{RunMode, ServiceConfig, ServiceMode};
 use super::dlq::{DeadLetterQueue, ReplayCtx};
@@ -174,7 +174,7 @@ impl NodeRunKind {
 
 /// Cumulative counters for one workflow node, across every iteration.
 #[derive(Debug, Default, Clone, Serialize)]
-pub struct NodeRunStats {
+pub struct NodeStats {
     /// The node's declared id.
     pub id: String,
     /// `"source"`, `"processor"` or `"sink"`.
@@ -193,9 +193,9 @@ pub struct NodeRunStats {
 /// Diagnostic counters accumulated over a [`run_standalone`] call.
 ///
 /// Fields are public so the HTTP control plane can expose them via `/metrics`
-/// by reading from a shared `Arc<RwLock<StandaloneStats>>`.
+/// by reading from a shared `Arc<RwLock<WorkflowStats>>`.
 #[derive(Debug, Default, Clone)]
-pub struct StandaloneStats {
+pub struct WorkflowStats {
     /// Total number of completed workflow passes.
     ///
     /// Under an admission credit a pass is one credit-sized admission rather
@@ -232,7 +232,7 @@ pub struct StandaloneStats {
     pub dead_letters_replayed: u64,
     /// Per-node breakdown of the flat counters above, one entry per declared
     /// workflow node, in topological order.
-    pub nodes: Vec<NodeRunStats>,
+    pub nodes: Vec<NodeStats>,
 }
 
 /// What the last recorded decision for one source was, plus the two totals the
@@ -473,8 +473,8 @@ async fn write_staged(
     id: &str,
     component: &str,
     workflow_id: &str,
-    node_stat: &mut NodeRunStats,
-    stats: &mut StandaloneStats,
+    node_stat: &mut NodeStats,
+    stats: &mut WorkflowStats,
     mut dlq: Option<&mut DeadLetterQueue>,
 ) {
     for batch in staged.drain(..) {
@@ -511,8 +511,8 @@ async fn finish_sink(
     sink: &mut dyn Sink,
     id: &str,
     workflow_id: &str,
-    node_stat: &mut NodeRunStats,
-    stats: &mut StandaloneStats,
+    node_stat: &mut NodeStats,
+    stats: &mut WorkflowStats,
 ) {
     if let Err(_e) = sink.finish().await {
         #[cfg(feature = "tracing")]
@@ -540,8 +540,8 @@ async fn flush_and_finish_all(
     ids: &[String],
     components: &[Option<&'static str>],
     workflow_id: &str,
-    node_stats: &mut [NodeRunStats],
-    stats: &mut StandaloneStats,
+    node_stats: &mut [NodeStats],
+    stats: &mut WorkflowStats,
     mut dlq: Option<&mut DeadLetterQueue>,
 ) {
     for i in 0..sinks.len() {
@@ -580,8 +580,8 @@ pub(super) async fn finish_all_sources(
     sources: &mut [Option<Box<dyn Source>>],
     ids: &[String],
     workflow_id: &str,
-    node_stats: &mut [NodeRunStats],
-    stats: &mut StandaloneStats,
+    node_stats: &mut [NodeStats],
+    stats: &mut WorkflowStats,
 ) {
     for i in 0..sources.len() {
         let Some(source) = sources[i].as_mut() else {
@@ -603,9 +603,9 @@ pub(super) async fn finish_all_sources(
     let _ = (ids, workflow_id);
 }
 
-/// Drive a [`BuiltService`] through repeated processing iterations.
+/// Drive a [`BuiltWorkflow`] through repeated processing iterations.
 ///
-/// Returns [`StandaloneStats`] on success, including on cancellation, which is
+/// Returns [`WorkflowStats`] on success, including on cancellation, which is
 /// a clean exit. `Err` is reserved for unrecoverable conditions such as an
 /// internal invariant violation.
 ///
@@ -630,12 +630,12 @@ pub(super) async fn finish_all_sources(
 /// [`CancellationToken`](tokio_util::sync::CancellationToken) converts into
 /// one whose gate never parks, which is what an uncontrolled call site passes.
 pub async fn run_standalone(
-    built: BuiltService,
+    built: BuiltWorkflow,
     config: &ServiceConfig,
     control: impl Into<RunControl>,
-    live_stats: Option<Arc<RwLock<StandaloneStats>>>,
+    live_stats: Option<Arc<RwLock<WorkflowStats>>>,
     state: Option<Arc<RedbStateClient>>,
-) -> Result<StandaloneStats, SaciError> {
+) -> Result<WorkflowStats, SaciError> {
     let RunControl { cancel, pause } = control.into();
     let run_mode = match &config.mode {
         ServiceMode::Standalone { config: sc } => sc.run_mode.clone(),
@@ -660,7 +660,7 @@ pub async fn run_standalone(
         .await;
     }
 
-    let BuiltService {
+    let BuiltWorkflow {
         workflow_id,
         nodes,
         inspector,
@@ -684,7 +684,7 @@ pub async fn run_standalone(
     let mut runtimes: Vec<Option<Box<dyn PipelineRuntime>>> = Vec::with_capacity(n);
     let mut datasets: Vec<Option<Dataset>> = Vec::with_capacity(n);
     let mut sinks: Vec<Option<Box<dyn Sink>>> = Vec::with_capacity(n);
-    let mut node_stats: Vec<NodeRunStats> = Vec::with_capacity(n);
+    let mut node_stats: Vec<NodeStats> = Vec::with_capacity(n);
     // One flag per healed sink node, `None` elsewhere. A sink that just came
     // back is when a dead letter replay is most likely to land.
     let mut recovered: Vec<Option<Arc<std::sync::atomic::AtomicBool>>> = Vec::with_capacity(n);
@@ -722,7 +722,7 @@ pub async fn run_standalone(
         runtimes.push(runtime);
         datasets.push(dataset);
         sinks.push(sink);
-        node_stats.push(NodeRunStats {
+        node_stats.push(NodeStats {
             id: ids.last().expect("just pushed").clone(),
             kind: kind.as_str().to_string(),
             rows: 0,
@@ -733,7 +733,7 @@ pub async fn run_standalone(
 
     let mut staged: Vec<Vec<RecordBatch>> = vec![Vec::new(); n];
 
-    let mut stats = StandaloneStats::default();
+    let mut stats = WorkflowStats::default();
     let start = Instant::now();
 
     #[cfg(feature = "tracing")]
@@ -1172,7 +1172,7 @@ pub async fn run_standalone(
                     } else {
                         None
                     };
-                    let run = runtime.run_on_with_state_and_routes(dataset, prior_blob);
+                    let run = runtime.run_batch(dataset, prior_blob);
                     #[cfg(feature = "tracing")]
                     let run = run.instrument(run_span.clone());
                     let run_result = tokio::select! {
@@ -1694,7 +1694,7 @@ mod tests {
     use crate::SaciResult;
     use crate::connector::channel::{ChannelSink, ChannelSource};
     use crate::pipeline::Pipeline;
-    use crate::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+    use crate::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
     use crate::service::config::{
         HttpConfig, NodeConfig, ObservabilityConfig, RunMode as CfgRunMode,
         ServiceMode as CfgServiceMode, StandaloneConfig,
@@ -1782,7 +1782,7 @@ mod tests {
                 heal_recovered: None,
             },
         ];
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes,
@@ -1865,7 +1865,7 @@ mod tests {
                 heal_recovered: None,
             },
         ];
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes,
@@ -1918,13 +1918,7 @@ mod tests {
             "routing"
         }
 
-        async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-            self.run_on_with_state_and_routes(data, None)
-                .await
-                .map(|_| ())
-        }
-
-        async fn run_on_with_state_and_routes(
+        async fn run_batch(
             &self,
             data: &mut Dataset,
             _prior: Option<&[u8]>,
@@ -1947,7 +1941,7 @@ mod tests {
     fn routing_built(
         routes: Option<Vec<String>>,
     ) -> (
-        BuiltService,
+        BuiltWorkflow,
         tokio::sync::mpsc::Receiver<RecordBatch>,
         tokio::sync::mpsc::Receiver<RecordBatch>,
     ) {
@@ -2004,7 +1998,7 @@ mod tests {
             },
         ];
         (
-            BuiltService {
+            BuiltWorkflow {
                 workflow_id: "w".to_string(),
                 workflow_name: None,
                 nodes,
@@ -2087,9 +2081,13 @@ mod tests {
             "row-counter"
         }
 
-        async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
+        async fn run_batch(
+            &self,
+            data: &mut Dataset,
+            _prior: Option<&[u8]>,
+        ) -> SaciResult<crate::runtime::RuntimeOutput> {
             *self.rows_seen.lock().unwrap() += data.rows() as u64;
-            Ok(())
+            Ok(crate::runtime::RuntimeOutput::default())
         }
 
         fn template_dataset(&self) -> Dataset {
@@ -2172,7 +2170,7 @@ mod tests {
                 heal_recovered: None,
             },
         ];
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes,
@@ -2221,9 +2219,13 @@ mod tests {
             fn name(&self) -> &str {
                 "producer"
             }
-            async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
+            async fn run_batch(
+                &self,
+                data: &mut Dataset,
+                _prior: Option<&[u8]>,
+            ) -> SaciResult<crate::runtime::RuntimeOutput> {
                 data.append::<V>(&[V { v: 9 }, V { v: 10 }, V { v: 11 }])?;
-                Ok(())
+                Ok(crate::runtime::RuntimeOutput::default())
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();
@@ -2284,7 +2286,7 @@ mod tests {
                 heal_recovered: None,
             },
         ];
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes,
@@ -2340,11 +2342,15 @@ mod tests {
             fn name(&self) -> &str {
                 "watermark-reader"
             }
-            async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
+            async fn run_batch(
+                &self,
+                data: &mut Dataset,
+                _prior: Option<&[u8]>,
+            ) -> SaciResult<crate::runtime::RuntimeOutput> {
                 if let Some(watermark) = data.get_resource::<WindowWatermark>() {
                     *self.seen.lock().unwrap() = watermark.as_ms();
                 }
-                Ok(())
+                Ok(crate::runtime::RuntimeOutput::default())
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();
@@ -2422,7 +2428,7 @@ mod tests {
                 heal_recovered: None,
             },
         ];
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes,
@@ -2476,7 +2482,7 @@ mod tests {
             tx.send(batch).await.unwrap();
             drop(tx);
 
-            let built = BuiltService {
+            let built = BuiltWorkflow {
                 workflow_id: "w".to_string(),
                 workflow_name: None,
                 nodes: vec![
@@ -2609,7 +2615,7 @@ mod tests {
         tx.send(batch).await.unwrap();
         drop(tx);
 
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -2703,7 +2709,7 @@ mod tests {
     /// [`reaches_windowed_node`](crate::service::windowing::reaches_windowed_node),
     /// which is what both flow-target tests below turn on.
     #[cfg(all(feature = "metrics", feature = "windows"))]
-    fn windowed_service(source_id: &str, source: ChannelSource) -> BuiltService {
+    fn windowed_service(source_id: &str, source: ChannelSource) -> BuiltWorkflow {
         use crate::window::WindowSpec;
 
         struct PassThrough;
@@ -2712,8 +2718,12 @@ mod tests {
             fn name(&self) -> &str {
                 "pass-through"
             }
-            async fn run_on(&self, _data: &mut Dataset) -> SaciResult<()> {
-                Ok(())
+            async fn run_batch(
+                &self,
+                _data: &mut Dataset,
+                _prior: Option<&[u8]>,
+            ) -> SaciResult<crate::runtime::RuntimeOutput> {
+                Ok(crate::runtime::RuntimeOutput::default())
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();
@@ -2722,7 +2732,7 @@ mod tests {
             }
         }
 
-        BuiltService {
+        BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -2910,7 +2920,7 @@ mod tests {
     }
 
     #[cfg(feature = "metrics")]
-    async fn run_until_cancelled(built: BuiltService, cfg: &ServiceConfig, millis: u64) {
+    async fn run_until_cancelled(built: BuiltWorkflow, cfg: &ServiceConfig, millis: u64) {
         let cancel = CancellationToken::new();
         let stopper = {
             let cancel = cancel.clone();
@@ -3049,7 +3059,7 @@ mod tests {
         tx.send(batch).await.unwrap();
         drop(tx);
 
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3092,7 +3102,7 @@ mod tests {
     #[tokio::test]
     async fn a_guard_trip_at_min_rows_is_still_counted_as_a_back_off() {
         let (sink, _rx) = ChannelSink::new(schema(), 8);
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3139,7 +3149,7 @@ mod tests {
         const ROWS: i32 = 5_000;
 
         let (sink, delivered) = ProbeSink::new(SinkBehaviour::Quiet);
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3209,7 +3219,7 @@ mod tests {
         drop(tx_right);
 
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::Failing);
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3251,7 +3261,7 @@ mod tests {
     #[tokio::test]
     async fn a_growing_sink_backlog_backs_the_source_off() {
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::GrowingBacklog);
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3313,7 +3323,7 @@ mod tests {
     async fn a_backlog_back_off_is_recorded_with_its_rows_and_its_cause() {
         let inspector = Inspector::new(&crate::inspector::InspectorConfig::default());
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::GrowingBacklog);
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3567,7 +3577,7 @@ mod tests {
     #[tokio::test]
     async fn a_chunk_that_really_exceeds_the_byte_ceiling_backs_the_source_off() {
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::Quiet);
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3647,7 +3657,7 @@ mod tests {
         async fn pass(
             behaviour: SinkBehaviour,
             queue: DeadLetterQueue,
-        ) -> (StandaloneStats, Arc<std::sync::atomic::AtomicU64>) {
+        ) -> (WorkflowStats, Arc<std::sync::atomic::AtomicU64>) {
             let (source, tx) = ChannelSource::new(schema(), 4);
             let batch = RecordBatch::try_new(
                 schema(),
@@ -3658,7 +3668,7 @@ mod tests {
             drop(tx);
 
             let (sink, delivered) = ProbeSink::new(behaviour);
-            let built = BuiltService {
+            let built = BuiltWorkflow {
                 workflow_id: "dlqwf".to_string(),
                 workflow_name: None,
                 nodes: vec![
@@ -3866,7 +3876,7 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3911,7 +3921,7 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -3955,7 +3965,7 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -4010,7 +4020,7 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![
@@ -4065,7 +4075,7 @@ mod tests {
         let (source, source_finishes) = LoggingSource::failing(chan_source, Arc::clone(&log));
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltService {
+        let built = BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes: vec![

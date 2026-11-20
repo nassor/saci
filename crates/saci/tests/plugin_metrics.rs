@@ -116,9 +116,9 @@ async fn plugin_run_metrics_reach_prometheus() {
     let mut dataset = seeded_dataset(&runtime, &[10, 20, 30]);
 
     runtime
-        .run_on(&mut dataset)
+        .run_batch(&mut dataset, None)
         .await
-        .expect("plugin run_on success");
+        .expect("plugin run_batch success");
 
     let text = TextEncoder::new()
         .encode_to_string(&registry.gather())

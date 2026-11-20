@@ -4,7 +4,7 @@
 //! ## One node per declared workflow node
 //!
 //! One [`TopoNode`] per [`BuiltNode`], in the topological order
-//! `ServiceBuilder::build_all` produced, and one [`TopoEdge`] per entry of that
+//! `ServiceBuilder::build` produced, and one [`TopoEdge`] per entry of that
 //! node's `downstream` list, which mirrors the config's `link` declarations. Cross-workflow
 //! channel bridges are reported separately as [`BridgeEdge`]s, because their
 //! two endpoints live in different workflows and belong to no one workflow's
@@ -308,7 +308,7 @@ fn window_info(config: &crate::service::config::WindowConfig) -> WindowInfo {
 }
 
 /// One workflow's `(TopoNode, TopoEdge)` contribution: `nodes` must be in the
-/// topological order `ServiceBuilder::build_all` produced for that workflow,
+/// topological order `ServiceBuilder::build` produced for that workflow,
 /// so a `BuiltEdge::node` index resolves within this same slice.
 fn workflow_topo_parts(
     config: &ServiceConfig,
@@ -331,7 +331,7 @@ fn workflow_topo_parts(
 }
 
 /// One [`BridgeEdge`] per channel name with both a `ChannelSink` and a
-/// `ChannelSource` declared, so the bridge `ServiceBuilder::build_all` wires
+/// `ChannelSource` declared, so the bridge `ServiceBuilder::build` wires
 /// through the channel registry is visible to the dashboard without belonging
 /// to either workflow's edge list.
 ///
@@ -374,7 +374,7 @@ fn channel_bridge_edges(config: &ServiceConfig) -> Vec<BridgeEdge> {
 /// Build the topology for every workflow this process runs.
 ///
 /// `workflow_nodes` holds one entry per declared workflow, each the
-/// [`BuiltNode`]s `ServiceBuilder::build_all` produced for it, in topological
+/// [`BuiltNode`]s `ServiceBuilder::build` produced for it, in topological
 /// order, the order the dashboard's depth layout expects within each
 /// workflow. The result carries one [`WorkflowTopology`] per declared
 /// workflow, zipped from `config.workflows` in declaration order, so each
@@ -507,7 +507,7 @@ connection url="nats://localhost:4222" password="hunter2"
 
     // ── `build_topology`, against a hand-assembled node list ────────────────
     //
-    // A real `ServiceBuilder::build_all` needs every connector to construct
+    // A real `ServiceBuilder::build` needs every connector to construct
     // successfully (real broker DSNs, a real wasm artifact, ...), which is
     // exactly what `build_topology` itself must not depend on: it only reads
     // `BuiltNode` identity/kind plus each node's *declared* config for detail.

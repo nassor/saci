@@ -23,7 +23,7 @@ use arrow_schema::{DataType, Field, Schema};
 use saci::component::Component;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::plugin_host::NativePluginRuntime;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
 use saci::service::config::{
     HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
     StandaloneConfig, WorkflowSpec,
@@ -124,7 +124,7 @@ fn config() -> ServiceConfig {
 fn branching_built(
     config_map: HashMap<String, String>,
 ) -> (
-    BuiltService,
+    BuiltWorkflow,
     mpsc::Sender<RecordBatch>,
     mpsc::Receiver<RecordBatch>,
     mpsc::Receiver<RecordBatch>,
@@ -198,7 +198,7 @@ fn branching_built(
         },
     ];
     (
-        BuiltService {
+        BuiltWorkflow {
             workflow_id: "w".to_string(),
             workflow_name: None,
             nodes,

@@ -23,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use saci::error::SaciError;
 use saci::io::Source;
-use saci::runtime::PipelineRuntime;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
+use saci::runtime::{PipelineRuntime, RuntimeOutput};
+use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
 use saci::service::config::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WindowConfig, WorkflowSpec,
@@ -139,16 +139,12 @@ impl PipelineRuntime for PassThrough {
         "pass-through"
     }
 
-    async fn run_on(&self, _data: &mut Dataset) -> SaciResult<()> {
-        Ok(())
-    }
-
-    async fn run_on_with_state(
+    async fn run_batch(
         &self,
         _data: &mut Dataset,
         _prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
-        Ok(None)
+    ) -> SaciResult<RuntimeOutput> {
+        Ok(RuntimeOutput::default())
     }
 
     fn declared_components(&self) -> Vec<&str> {
@@ -183,7 +179,7 @@ fn window_config() -> WindowConfig {
 /// One workflow rather than two runs, so both sources meet the same runner,
 /// the same controller settings and the same schedule: the only difference
 /// between them is what their branch ends in.
-fn two_branch_service() -> (BuiltService, Arc<Mutex<SourceLog>>, Arc<Mutex<SourceLog>>) {
+fn two_branch_service() -> (BuiltWorkflow, Arc<Mutex<SourceLog>>, Arc<Mutex<SourceLog>>) {
     let schema = sale_schema();
     let (windowed_source, windowed_log) = RecordingSource::new(&schema);
     let (plain_source, plain_log) = RecordingSource::new(&schema);
@@ -227,7 +223,7 @@ fn two_branch_service() -> (BuiltService, Arc<Mutex<SourceLog>>, Arc<Mutex<Sourc
     ];
 
     (
-        BuiltService {
+        BuiltWorkflow {
             workflow_id: "hint".to_string(),
             workflow_name: None,
             nodes,

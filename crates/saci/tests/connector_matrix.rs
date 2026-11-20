@@ -55,7 +55,6 @@ use arrow_schema::{DataType, Field, Schema};
 use saci::codec::{ConfigMap, ConfigValue, unsupported};
 use saci::error::SaciError;
 use saci::service::builder::ServiceBuilder;
-use saci::service::factories::register_builtin_factories;
 
 #[path = "common/matrix.rs"]
 mod matrix;
@@ -267,7 +266,7 @@ fn every_slice_has_a_test() {
     );
 }
 
-/// The registered factories `register_builtin_factories` wires up must match
+/// The registered factories `ServiceBuilder::new` wires up must match
 /// this file's own [`CONNECTORS`]/[`FORMATS`] dimension lists exactly.
 ///
 /// The two connector dimensions are not the same list: `HttpPushSource`
@@ -296,7 +295,7 @@ fn every_slice_has_a_test() {
 /// [`CodecRegistry::names`]: saci::codec::CodecRegistry::names
 #[test]
 fn dimensions_cover_the_registry() {
-    let builder = register_builtin_factories(ServiceBuilder::new());
+    let builder = ServiceBuilder::new();
     let registry = builder.registry();
 
     let source_names = registry.source_names();
@@ -315,7 +314,7 @@ fn dimensions_cover_the_registry() {
     expected_sinks.sort_unstable();
     assert_eq!(
         source_names, expected_sources,
-        "register_builtin_factories registered source factories {source_names:?} but \
+        "ServiceBuilder::new registered source factories {source_names:?} but \
          common/matrix.rs's CONNECTORS names {expected_sources:?}; every entry counts here, \
          the sink-less http-push included, which is why this expectation and the sink one \
          below are not the same list; a source connector was registered outside that array \
@@ -324,7 +323,7 @@ fn dimensions_cover_the_registry() {
     );
     assert_eq!(
         sink_names, expected_sinks,
-        "register_builtin_factories registered sink factories {sink_names:?} but \
+        "ServiceBuilder::new registered sink factories {sink_names:?} but \
          common/matrix.rs's CONNECTORS names {expected_sinks:?} with a sink half; the sink \
          dimension is CONNECTORS through Connector::sink_type, because HttpPushSource \
          registers a source and no sink, so a sink connector was registered outside that \
@@ -342,7 +341,7 @@ fn dimensions_cover_the_registry() {
     let actual_formats = registry.codecs().names();
     assert_eq!(
         actual_formats, expected_formats,
-        "register_builtin_factories registered codec formats {actual_formats:?} but \
+        "ServiceBuilder::new registered codec formats {actual_formats:?} but \
          common/matrix.rs's FORMATS names {expected_formats:?}; add the missing format's key to \
          FORMATS (or drop a stale entry) so the matrix covers every registered format",
     );
@@ -398,7 +397,7 @@ fn refuses(err: &SaciError, format: &str, capability: &str) -> bool {
 /// [`unsupported`]: saci::codec::unsupported
 #[test]
 fn message_shape_agrees_with_the_message_surface() {
-    let builder = register_builtin_factories(ServiceBuilder::new());
+    let builder = ServiceBuilder::new();
     let codecs = builder.registry().codecs();
     let batch = probe_batch();
 

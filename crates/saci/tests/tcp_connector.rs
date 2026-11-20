@@ -23,7 +23,6 @@ use saci::codec::arrow_ipc::ArrowIpcCodec;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
 
 const COMPONENT: &str = "Tick";
@@ -157,21 +156,15 @@ async fn frames_pushed_into_the_tcp_source_come_back_out_of_the_tcp_sink() {
     let bind_addr = format!("127.0.0.1:{}", reserved_port());
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(
-            &bind_addr,
-            &collector_addr.to_string(),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("relay", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &bind_addr,
+        &collector_addr.to_string(),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("relay", build_pipeline())
+        .build(&config)
         .expect("both tcp halves resolve through the registry")
         .remove(0);
 
@@ -235,41 +228,29 @@ workflow "w" {{
     )
 }
 
-fn load_from_text(dir: &tempfile::TempDir, name: &str, text: &str) -> saci::SaciResult<()> {
-    let path = dir.path().join(name);
-    std::fs::write(&path, text).expect("write config");
-    ServiceConfig::load(&path).map(|_| ())
+fn load_from_text(text: &str) -> saci::SaciResult<()> {
+    ServiceConfig::from_kdl(text).map(|_| ())
 }
 
 /// The no-EOF rule reads `source` nodes, so a `tcp` sink is legal in every run
 /// mode even though a `tcp` source is stream-only.
 #[test]
 fn a_tcp_sink_is_accepted_outside_stream_mode() {
-    let dir = tempfile::tempdir().expect("tempdir");
     for run_mode in [
         r#"kind="one_shot""#,
         r#"kind="interval" interval_ms=1000"#,
         r#"kind="stream""#,
     ] {
-        load_from_text(
-            &dir,
-            "sink_only.kdl",
-            &validation_kdl(run_mode, "NoopSource"),
-        )
-        .unwrap_or_else(|e| panic!("a tcp sink under {run_mode} must validate: {e}"));
+        load_from_text(&validation_kdl(run_mode, "NoopSource"))
+            .unwrap_or_else(|e| panic!("a tcp sink under {run_mode} must validate: {e}"));
     }
 }
 
 /// The mirror of the rule above: the source half is still stream-only.
 #[test]
 fn a_tcp_source_is_still_rejected_outside_stream_mode() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let err = load_from_text(
-        &dir,
-        "source_one_shot.kdl",
-        &validation_kdl(r#"kind="one_shot""#, "tcp"),
-    )
-    .expect_err("a tcp source outside stream mode must fail");
+    let err = load_from_text(&validation_kdl(r#"kind="one_shot""#, "tcp"))
+        .expect_err("a tcp source outside stream mode must fail");
     assert_eq!(err.category(), "configuration", "got: {err}");
     assert!(err.to_string().contains("never reaches EOF"), "got: {err}");
 }

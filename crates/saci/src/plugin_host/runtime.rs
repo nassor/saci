@@ -195,7 +195,7 @@ impl NativePluginRuntime {
 
     /// What the plugin reported about its most recent batch.
     ///
-    /// `None` until the first `run_on` or `run_on_with_state` returns.
+    /// `None` until the first `run_batch` returns.
     #[must_use]
     pub fn last_batch_metrics(&self) -> Option<PluginBatchMetrics> {
         match self.last_metrics.lock() {
@@ -229,6 +229,13 @@ impl NativePluginRuntime {
             Ok(mut guard) => *guard = Some(metrics),
             Err(poisoned) => *poisoned.into_inner() = Some(metrics),
         }
+    }
+}
+
+#[async_trait(?Send)]
+impl crate::runtime::PipelineRuntime for NativePluginRuntime {
+    fn name(&self) -> &str {
+        &self.manifest.name
     }
 
     /// Serialise, call the plugin, and read the result back, carrying the
@@ -369,33 +376,6 @@ impl NativePluginRuntime {
             routes,
         })
     }
-}
-
-#[async_trait(?Send)]
-impl crate::runtime::PipelineRuntime for NativePluginRuntime {
-    fn name(&self) -> &str {
-        &self.manifest.name
-    }
-
-    async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-        self.run_batch(data, None).await.map(|_| ())
-    }
-
-    async fn run_on_with_state(
-        &self,
-        data: &mut Dataset,
-        prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
-        self.run_batch(data, prior).await.map(|out| out.state)
-    }
-
-    async fn run_on_with_state_and_routes(
-        &self,
-        data: &mut Dataset,
-        prior: Option<&[u8]>,
-    ) -> SaciResult<RuntimeOutput> {
-        self.run_batch(data, prior).await
-    }
 
     fn declared_components(&self) -> Vec<&str> {
         self.components
@@ -435,7 +415,7 @@ fn describe(plugin: &LoadedPlugin, path: &Path) -> SaciResult<Vec<u8>> {
 
     // SAFETY: both out-parameters are live and the plugin writes each at most
     // once. `manifest`/`err` are not read in the panic arm below; see the
-    // `run_on_with_state` call site for the same reasoning.
+    // `run_batch` call site for the same reasoning.
     let status = match catch_ffi_panic(|| unsafe {
         (plugin.describe_fn())(plugin.instance(), &mut manifest, &mut err)
     }) {

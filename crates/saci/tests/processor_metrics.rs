@@ -42,9 +42,9 @@ async fn processor_run_metrics_reach_prometheus() {
     let mut dataset = seeded_dataset(&runtime, 16);
 
     runtime
-        .run_on(&mut dataset)
+        .run_batch(&mut dataset, None)
         .await
-        .expect("processor run_on success");
+        .expect("processor run_batch success");
 
     let text = TextEncoder::new()
         .encode_to_string(&registry.gather())

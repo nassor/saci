@@ -8,7 +8,7 @@
 //! | `GET /health`  | Liveness probe: checks watchdog counter freshness |
 //! | `GET /ready`   | Readiness probe: checks the `ready` flag |
 //! | `GET /metrics` | Prometheus metrics exposition |
-//! | `GET /status`  | Rich JSON status including cluster/standalone stats |
+//! | `GET /status`  | Rich JSON status: node identity, uptime, build and standalone stats |
 //!
 //! Plus, when the inspector is enabled, the JSON API and dashboard from
 //! [`inspector_api`](super::inspector_api), and when standalone-mode lifecycle
@@ -50,7 +50,6 @@
 //!         prometheus_registry: registry,
 //!         liveness: Arc::new(AtomicU64::new(0)),
 //!         ready: Arc::new(AtomicBool::new(false)),
-//!         cluster_probe: None,
 //!         standalone_stats: None,
 //!         inspector: None,
 //!         lifecycle: None,
@@ -89,54 +88,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::{SaciError, SaciResult};
 use crate::service::config::HttpConfig;
-use crate::service::standalone::StandaloneStats;
-
-/// A snapshot of cluster state at a point in time.
-///
-/// Populated by the cluster runner and handed into [`ServiceState`].
-/// Fields mirror the Raft state machine and batch-processing counters.
-#[derive(Debug, Clone, Serialize)]
-pub struct ClusterProbeSnapshot {
-    /// Raft role: `"leader"`, `"follower"`, `"candidate"`, or `"learner"`.
-    pub role: &'static str,
-    /// Overall cluster health: `"healthy"`, `"degraded"`, or `"offline"`.
-    pub cluster_health: &'static str,
-    /// Node ID of the current Raft leader, if known.
-    pub current_leader: Option<u64>,
-    /// Current Raft term.
-    pub raft_term: u64,
-    /// Index of the last log entry.
-    pub last_log_index: u64,
-    /// Index of the last committed log entry.
-    pub commit_index: u64,
-    /// Index of the last applied log entry.
-    pub last_applied: u64,
-    /// Last applied index included in a snapshot (if any).
-    pub snapshot_last_applied: Option<u64>,
-    /// All cluster members as `(node_id, address)` pairs.
-    pub membership: Vec<(u64, String)>,
-    /// Node IDs with voting rights.
-    pub voters: Vec<u64>,
-    /// Non-voting learner node IDs.
-    pub learners: Vec<u64>,
-    /// Cumulative number of batches processed successfully.
-    pub batches_processed_total: u64,
-    /// Cumulative number of batch processing failures.
-    pub batches_failed_total: u64,
-}
-
-/// Abstract cluster-status probe.
-///
-/// Implemented by the cluster runner and stored in
-/// [`ServiceState::cluster_probe`]. Using a trait object means the HTTP layer
-/// has no compile-time dependency on `src/distributed/`.
-///
-/// If the cluster runner is not yet started, `cluster_probe` is `None` and
-/// `/status` returns `"cluster": null` even in cluster mode.
-pub trait ClusterProbe: Send + Sync {
-    /// Capture a point-in-time snapshot of cluster state.
-    fn snapshot(&self) -> ClusterProbeSnapshot;
-}
+use crate::service::standalone::WorkflowStats;
 
 /// Which mode the service is running in, as reported by `/status`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -175,11 +127,9 @@ pub struct ServiceState {
     /// Cluster: flipped after Raft convergence and first successful
     ///   claim (or no-claims-available signal).
     pub ready: Arc<AtomicBool>,
-    /// Optional cluster-status probe supplied by the cluster runner.
-    pub cluster_probe: Option<Arc<dyn ClusterProbe>>,
     /// Per-workflow standalone statistics supplied by the standalone runner,
     /// keyed by workflow id. `None` in cluster mode.
-    pub standalone_stats: Option<Vec<(String, Arc<RwLock<StandaloneStats>>)>>,
+    pub standalone_stats: Option<Vec<(String, Arc<RwLock<WorkflowStats>>)>>,
     /// The in-process inspector, when telemetry capture is enabled.
     ///
     /// `None` disables `/api/*` and `/ui` entirely: the router does not merge
@@ -412,29 +362,6 @@ struct BuildInfo {
 }
 
 #[derive(Serialize)]
-struct MemberEntry {
-    id: u64,
-    addr: String,
-}
-
-#[derive(Serialize)]
-struct ClusterStatusBody {
-    role: &'static str,
-    health: &'static str,
-    current_leader: Option<u64>,
-    raft_term: u64,
-    last_log_index: u64,
-    commit_index: u64,
-    last_applied: u64,
-    snapshot_last_applied: Option<u64>,
-    membership: Vec<MemberEntry>,
-    voters: Vec<u64>,
-    learners: Vec<u64>,
-    batches_processed_total: u64,
-    batches_failed_total: u64,
-}
-
-#[derive(Serialize)]
 struct StandaloneStatusBody {
     workflow_id: String,
     /// Where the workflow's runner is, when lifecycle control is enabled.
@@ -460,43 +387,15 @@ struct StatusBody {
     mode: ServiceModeLabel,
     uptime_seconds: u64,
     build: BuildInfo,
-    cluster: Option<ClusterStatusBody>,
     standalone: Option<Vec<StandaloneStatusBody>>,
 }
 
 /// `GET /status`: rich operational status.
 ///
-/// Returns a JSON document with node identity, uptime, build info, and either
-/// cluster or standalone statistics depending on `state.mode`.
+/// Returns a JSON document with node identity, uptime and build info, plus
+/// per-workflow statistics in standalone mode.
 async fn handle_status(State(state): State<ServiceState>) -> impl IntoResponse {
     let uptime_seconds = state.started_at.elapsed().as_secs();
-
-    let cluster = if state.mode == ServiceModeLabel::Cluster {
-        state.cluster_probe.as_ref().map(|probe| {
-            let snap = probe.snapshot();
-            ClusterStatusBody {
-                role: snap.role,
-                health: snap.cluster_health,
-                current_leader: snap.current_leader,
-                raft_term: snap.raft_term,
-                last_log_index: snap.last_log_index,
-                commit_index: snap.commit_index,
-                last_applied: snap.last_applied,
-                snapshot_last_applied: snap.snapshot_last_applied,
-                membership: snap
-                    .membership
-                    .into_iter()
-                    .map(|(id, addr)| MemberEntry { id, addr })
-                    .collect(),
-                voters: snap.voters,
-                learners: snap.learners,
-                batches_processed_total: snap.batches_processed_total,
-                batches_failed_total: snap.batches_failed_total,
-            }
-        })
-    } else {
-        None
-    };
 
     let standalone = if state.mode == ServiceModeLabel::Standalone {
         match &state.standalone_stats {
@@ -539,7 +438,6 @@ async fn handle_status(State(state): State<ServiceState>) -> impl IntoResponse {
         build: BuildInfo {
             version: env!("CARGO_PKG_VERSION"),
         },
-        cluster,
         standalone,
     })
 }
@@ -609,7 +507,6 @@ mod tests {
             prometheus_registry: make_prometheus_registry(),
             liveness: Arc::new(AtomicU64::new(0)),
             ready: Arc::new(AtomicBool::new(false)),
-            cluster_probe: None,
             standalone_stats: None,
             inspector: None,
             lifecycle: None,
@@ -786,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_standalone_mode_returns_correct_json() {
-        let stats = Arc::new(RwLock::new(StandaloneStats {
+        let stats = Arc::new(RwLock::new(WorkflowStats {
             iterations: 42,
             rows_processed: 420_000,
             source_batches_drained: 120,
@@ -805,69 +702,11 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["node_id"], 1);
         assert_eq!(body["mode"], "standalone");
-        assert!(body["cluster"].is_null());
+        assert!(body.get("cluster").is_none());
         assert!(!body["standalone"].is_null());
         assert_eq!(body["standalone"][0]["workflow_id"], "w");
         assert_eq!(body["standalone"][0]["iterations"], 42);
         assert_eq!(body["standalone"][0]["rows_processed"], 420_000);
-
-        cancel.cancel();
-    }
-
-    #[tokio::test]
-    async fn test_status_cluster_mode_with_probe_returns_cluster_json() {
-        struct MockProbe;
-        impl ClusterProbe for MockProbe {
-            fn snapshot(&self) -> ClusterProbeSnapshot {
-                ClusterProbeSnapshot {
-                    role: "leader",
-                    cluster_health: "healthy",
-                    current_leader: Some(1),
-                    raft_term: 7,
-                    last_log_index: 12345,
-                    commit_index: 12345,
-                    last_applied: 12345,
-                    snapshot_last_applied: Some(12000),
-                    membership: vec![(1, "10.0.0.1:9000".to_string())],
-                    voters: vec![1, 2, 3],
-                    learners: vec![],
-                    batches_processed_total: 1234,
-                    batches_failed_total: 5,
-                }
-            }
-        }
-
-        let mut state = make_state(ServiceModeLabel::Cluster);
-        state.cluster_probe = Some(Arc::new(MockProbe));
-
-        let (addr, cancel, _handle) = bind_server(state).await;
-        let resp = reqwest::get(format!("http://{addr}/status")).await.unwrap();
-        assert_eq!(resp.status(), 200);
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["mode"], "cluster");
-        assert!(body["standalone"].is_null());
-        assert!(!body["cluster"].is_null());
-        assert_eq!(body["cluster"]["role"], "leader");
-        assert_eq!(body["cluster"]["health"], "healthy");
-        assert_eq!(body["cluster"]["raft_term"], 7);
-        assert_eq!(body["cluster"]["batches_processed_total"], 1234);
-
-        cancel.cancel();
-    }
-
-    #[tokio::test]
-    async fn test_status_cluster_mode_without_probe_returns_null_cluster() {
-        let state = make_state(ServiceModeLabel::Cluster);
-        // cluster_probe is None.
-
-        let (addr, cancel, _handle) = bind_server(state).await;
-        let resp = reqwest::get(format!("http://{addr}/status")).await.unwrap();
-        assert_eq!(resp.status(), 200);
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["mode"], "cluster");
-        assert!(body["cluster"].is_null());
 
         cancel.cancel();
     }
