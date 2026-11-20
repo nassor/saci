@@ -740,7 +740,9 @@ mod tests {
         ) -> Result<Box<dyn MessageDecoder>, SaciError> {
             Ok(Box::new(BufferingDecoder {
                 buf: Vec::new(),
-                inner: NdjsonCodec::new().infer_max(64).open_message_decoder(schema)?,
+                inner: NdjsonCodec::new()
+                    .infer_max(64)
+                    .open_message_decoder(schema)?,
             }))
         }
 

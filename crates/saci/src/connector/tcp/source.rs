@@ -343,8 +343,8 @@ mod tests {
             test_schema(),
             Arc::new(StreamOnly),
         )
-            .err()
-            .expect("a format with no message decoder must be refused");
+        .err()
+        .expect("a format with no message decoder must be refused");
         assert_eq!(err.category(), "configuration", "got: {err}");
         assert!(
             err.message()

@@ -47,6 +47,7 @@ use crate::error::SaciError;
 use crate::io::Sink;
 
 use crate::connector::udp::DATAGRAM_BUFFER_BYTES;
+use crate::connector::udp::UdpSinkConfig;
 use crate::connector::udp::probe::{self, Liveness, OnFailure, ProbeConfig};
 
 /// The largest payload an IPv4 datagram carries: 65535 bytes minus the 20 byte

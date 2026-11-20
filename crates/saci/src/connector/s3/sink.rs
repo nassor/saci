@@ -562,8 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_batch_after_finish_is_the_exact_error() {
-        let mut sink =
-            S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
+        let mut sink = S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
         sink.finish()
             .await
             .expect("finish on a fresh sink is a no-op");
@@ -577,8 +576,7 @@ mod tests {
     #[tokio::test]
     async fn finish_on_a_never_written_sink_issues_no_request() {
         // The endpoint is unreachable; any request would fail the test.
-        let mut sink =
-            S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
+        let mut sink = S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
         sink.finish().await.expect("finish issues no request");
         sink.finish().await.expect("finish is idempotent");
     }
