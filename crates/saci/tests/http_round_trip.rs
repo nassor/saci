@@ -30,6 +30,10 @@ use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
 
+use saci::codec::Codec;
+use saci::codec::csv::CsvCodec;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::codec::parquet::ParquetCodec;
 use saci::connector::http::{
     ContentEncoding, HttpPushOptions, HttpPushSource, HttpSink, HttpSinkOptions, HttpSource,
     HttpSourceOptions, HttpVersion, Pagination, ReadMode, SchemaFrom, ServerTls, TlsFiles, Window,

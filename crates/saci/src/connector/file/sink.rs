@@ -51,6 +51,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 
+use crate::codec::{BatchWriter, Codec};
 use crate::error::SaciError;
 use crate::io::Sink;
 

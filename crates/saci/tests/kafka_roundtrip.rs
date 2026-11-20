@@ -3,7 +3,7 @@
 //! Soft-skips without Docker; see `common::try_start`. Each test uses its own
 //! topic name so the whole suite can share the one broker.
 
-#![cfg(all(feature = "connector-kafka", feature = "transformer-arrow-ipc"))]
+#![cfg(all(feature = "connector-kafka", feature = "codec-arrow-ipc"))]
 
 #[path = "common/kafka.rs"]
 mod common;
@@ -20,15 +20,15 @@ use rdkafka::error::KafkaError;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
+use saci::codec::ndjson::NdjsonCodec;
 use saci::connector::kafka::{
     KafkaSink, KafkaSinkConfig, KafkaSource, KafkaSourceConfig, TopicProvision,
 };
 use saci::dataset::Dataset;
 use saci::io::Sink;
 use saci::io::{Source, read_all};
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
 
 const COMPONENT: &str = "TestRow";
 
@@ -51,14 +51,14 @@ const DRAINED_BOUND: Duration = Duration::from_secs(15);
 const LIVE_POLL_MS: u64 = 20_000;
 
 /// The payload format most of these tests use. The factories are handed the
-/// transformer the host resolved; a direct construction like these tests'
+/// codec the host resolved; a direct construction like these tests'
 /// builds it here.
-fn ndjson() -> Arc<dyn Transformer> {
-    Arc::new(NdjsonTransformer::default())
+fn ndjson() -> Arc<dyn Codec> {
+    Arc::new(NdjsonCodec::default())
 }
 
-fn arrow_ipc() -> Arc<dyn Transformer> {
-    Arc::new(ArrowIpcTransformer::new())
+fn arrow_ipc() -> Arc<dyn Codec> {
+    Arc::new(ArrowIpcCodec::new())
 }
 
 fn schema() -> Arc<Schema> {

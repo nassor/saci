@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase, TableDefinition, TableError};
 use tokio::sync::mpsc;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Source;
 

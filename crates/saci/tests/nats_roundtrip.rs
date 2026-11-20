@@ -3,7 +3,7 @@
 //! Soft-skips without Docker; see `common::try_start`. Each test uses its own
 //! subject and stream name so the whole suite can share the one server.
 
-#![cfg(all(feature = "connector-nats", feature = "transformer-arrow-ipc"))]
+#![cfg(all(feature = "connector-nats", feature = "codec-arrow-ipc"))]
 
 #[path = "common/nats.rs"]
 mod common;
@@ -16,6 +16,9 @@ use arrow_array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::StreamExt;
 
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
+use saci::codec::ndjson::NdjsonCodec;
 use saci::connector::nats::{
     ConnectionConfig, CoreSinkMode, CoreSourceMode, DeliverPolicyConfig, JetstreamSinkMode,
     JetstreamSourceMode, NatsSink, NatsSinkConfig, NatsSource, NatsSourceConfig, SinkMode,
@@ -24,20 +27,17 @@ use saci::connector::nats::{
 use saci::dataset::Dataset;
 use saci::io::Sink;
 use saci::io::{Source, read_all};
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
 
 const COMPONENT: &str = "TestRow";
 
 /// The default payload format. The factories resolve it from the registry; a
 /// direct construction like these tests' hands it over explicitly.
-fn ndjson() -> Arc<dyn Transformer> {
-    Arc::new(NdjsonTransformer::default())
+fn ndjson() -> Arc<dyn Codec> {
+    Arc::new(NdjsonCodec::default())
 }
 
-fn arrow_ipc() -> Arc<dyn Transformer> {
-    Arc::new(ArrowIpcTransformer::new())
+fn arrow_ipc() -> Arc<dyn Codec> {
+    Arc::new(ArrowIpcCodec::new())
 }
 
 fn schema() -> Arc<Schema> {

@@ -31,6 +31,8 @@ use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::Codec;
+use saci::codec::csv::CsvCodec;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
@@ -255,6 +257,8 @@ mod push {
     use tokio::task::LocalSet;
     use tokio_util::sync::CancellationToken;
 
+    use saci::codec::Codec;
+    use saci::codec::ndjson::NdjsonCodec;
     use saci::service::builder::ServiceBuilder;
     use saci::service::config::ServiceConfig;
     use saci::service::factories::register_builtin_factories;

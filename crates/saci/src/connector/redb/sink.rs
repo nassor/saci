@@ -16,6 +16,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 use redb::{Database, ReadableDatabase, TableDefinition, TableError};
 
+use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Sink;
 

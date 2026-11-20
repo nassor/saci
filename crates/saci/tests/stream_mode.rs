@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::arrow_ipc::ArrowIpcCodec;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::connector::tcp::TcpIngestSource;
 use saci::error::SaciError;

@@ -12,6 +12,7 @@ use rdkafka::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::util::Timeout;
 
+use crate::codec::{Codec, MessageShape};
 use crate::error::SaciError;
 use crate::io::Sink;
 

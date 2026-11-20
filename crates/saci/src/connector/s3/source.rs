@@ -20,6 +20,7 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Source;
 

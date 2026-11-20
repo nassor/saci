@@ -30,6 +30,8 @@ use tokio::net::UdpSocket;
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
 use saci::connector::udp::UdpSinkFactory;
 use saci::connector::{ConfigValue, ConnectorContext};
 use saci::error::SaciError;

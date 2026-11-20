@@ -38,6 +38,7 @@ use super::loader::{LocalModuleResolver, PipelineRuntimeLoader};
 #[cfg(feature = "plugin-host")]
 use super::plugin_loader::load_plugin_runtime;
 use super::registry::{CodecFactory, Registry, SinkFactory, SourceFactory};
+use crate::codec::Codec;
 use crate::connector::{ChannelBridge, NodeIdentity};
 use crate::inspector::Inspector;
 #[cfg(feature = "wasm-host")]

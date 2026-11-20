@@ -43,6 +43,16 @@
 //! and format hints already end with, so an operator meets one sentence
 //! whatever they declared.
 
+#[cfg(feature = "codec-arrow-ipc")]
+pub use crate::codec::arrow_ipc::ArrowIpcCodecFactory;
+#[cfg(feature = "codec-avro")]
+pub use crate::codec::avro::AvroCodecFactory;
+#[cfg(feature = "codec-csv")]
+pub use crate::codec::csv::CsvCodecFactory;
+#[cfg(feature = "codec-ndjson")]
+pub use crate::codec::ndjson::NdjsonCodecFactory;
+#[cfg(feature = "codec-parquet")]
+pub use crate::codec::parquet::ParquetCodecFactory;
 #[cfg(feature = "connector-channel")]
 pub use crate::connector::channel::{ChannelSinkFactory, ChannelSourceFactory};
 #[cfg(feature = "connector-clickhouse")]

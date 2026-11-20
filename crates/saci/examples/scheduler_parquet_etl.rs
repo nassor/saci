@@ -11,6 +11,7 @@ use std::sync::Arc;
 use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 
+use saci::codec::parquet::ParquetCodec;
 use saci::connector::file::{FileSink, FileSource};
 use saci::prelude::*;
 

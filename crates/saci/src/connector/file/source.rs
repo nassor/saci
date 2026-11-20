@@ -13,6 +13,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Source;
 

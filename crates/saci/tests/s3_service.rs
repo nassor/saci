@@ -14,7 +14,7 @@
 #![cfg(all(
     feature = "connector-s3",
     feature = "service",
-    feature = "transformer-ndjson"
+    feature = "codec-ndjson"
 ))]
 
 use std::sync::Arc;
@@ -32,11 +32,11 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::ndjson::NdjsonCodec;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
-use saci::transformer::ndjson::NdjsonTransformer;
 
 const COMPONENT: &str = "Order";
 
@@ -269,7 +269,7 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
             schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(
@@ -320,7 +320,7 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
             schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("readback source builds");
     let mut dataset = Dataset::new();

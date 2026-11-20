@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Sink;
 

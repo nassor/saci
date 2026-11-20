@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use arrow_array::UInt64Array;
+use saci::codec::csv::CsvCodec;
 use saci::component::Component;
 use saci::connector::file::FileSource;
 use saci::io::Source;

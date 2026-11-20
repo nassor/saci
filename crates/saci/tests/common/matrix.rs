@@ -309,6 +309,7 @@ use redb::ReadableDatabase as _;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::Codec;
 use saci::dataset::Dataset;
 use saci::io::Sink;
 use saci::io::Source;

@@ -31,6 +31,7 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use tokio::time::{Instant, timeout_at};
 
+use crate::codec::{Codec, MessageShape};
 use crate::error::SaciError;
 use crate::io::Source;
 

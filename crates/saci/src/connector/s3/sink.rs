@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
+use crate::codec::{BatchWriter, Codec};
 use crate::error::SaciError;
 use crate::io::Sink;
 

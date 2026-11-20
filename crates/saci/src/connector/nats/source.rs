@@ -45,6 +45,7 @@ use futures_util::StreamExt;
 use futures_util::stream::{SelectAll, select_all};
 use tokio::time::{Instant, timeout_at};
 
+use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Source;
 

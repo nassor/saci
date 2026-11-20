@@ -49,6 +49,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 use tokio::time::Instant;
 
+use crate::codec::Codec;
 use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity};
 use crate::error::SaciError;
 use crate::io::{RetryingSink, RetryingSource, Sink, Source};

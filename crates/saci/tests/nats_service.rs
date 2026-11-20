@@ -31,12 +31,12 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::ndjson::NdjsonCodec;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::dlq::DlqRegistry;
 use saci::service::factories::register_builtin_factories;
 use saci::service::run_standalone;
-use saci::transformer::ndjson::NdjsonTransformer;
 
 const COMPONENT: &str = "Order";
 
@@ -213,7 +213,7 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
             schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(
@@ -275,7 +275,7 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
             schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("readback source builds");
     let mut dataset = Dataset::new();
@@ -352,7 +352,7 @@ fn the_shipped_example_config_loads_and_its_io_tables_are_accepted() {
     assert_eq!(config.workflows[0].sources[0].type_name, "NatsSource");
     assert_eq!(config.workflows[0].sinks[0].type_name, "NatsSink");
 
-    let ctx = ConnectorContext::new(Some(Arc::new(NdjsonTransformer::default())));
+    let ctx = ConnectorContext::new(Some(Arc::new(NdjsonCodec::default())));
     let source = NatsSourceFactory
         .build(&config.workflows[0].sources[0].config, &ctx)
         .expect("the example source table must be accepted");
@@ -517,7 +517,7 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
             schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(

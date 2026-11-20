@@ -18,6 +18,7 @@ use arrow_array::{Float64Array, Int64Array};
 use arrow_schema::{DataType, Field, Schema};
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::parquet::ParquetCodec;
 use saci::connector::file::FileSource;
 use saci::io::Source;
 use saci::pipeline::Pipeline;

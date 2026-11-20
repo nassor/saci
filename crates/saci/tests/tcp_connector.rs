@@ -18,6 +18,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;

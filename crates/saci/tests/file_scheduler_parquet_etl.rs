@@ -14,6 +14,7 @@ use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 
 use saci::SaciError;
+use saci::codec::parquet::ParquetCodec;
 use saci::connector::file::{FileSink, FileSource};
 use saci::dataset::Dataset;
 use saci::io::Sink;

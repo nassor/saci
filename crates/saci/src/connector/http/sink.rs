@@ -22,6 +22,7 @@ use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
 
+use crate::codec::Codec;
 use crate::error::SaciError;
 use crate::io::Sink;
 

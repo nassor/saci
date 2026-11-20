@@ -59,6 +59,8 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::codec::Codec;
+use crate::codec::arrow_ipc::ArrowIpcCodec;
 use crate::connector::{ConfigMap, ConfigValue, parse_schema_fields};
 use crate::error::{SaciError, SaciResult};
 use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
