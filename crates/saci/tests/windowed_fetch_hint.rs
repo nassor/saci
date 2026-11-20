@@ -8,7 +8,7 @@
 //! withhold the hint there, exactly as they withhold the slice, and the
 //! connector keeps its declared fetch size.
 //!
-//! Both runners are covered: `run_standalone`'s drain loop, and `run_stream`'s
+//! Both runners are covered: the continuous drain loop, and the stream mode's
 //! prime phase and rotation.
 
 #![cfg(all(feature = "service", feature = "windows"))]
@@ -24,15 +24,12 @@ use tokio_util::sync::CancellationToken;
 use saci::error::SaciError;
 use saci::io::Source;
 use saci::runtime::{PipelineRuntime, RuntimeOutput};
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
+use saci::service::builder::BuiltWorkflow;
 use saci::service::config::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WindowConfig, WorkflowSpec,
 };
 use saci::service::flow::FlowPlan;
-use saci::service::registry::Registry;
-use saci::service::standalone::run_standalone;
-use saci::service::stream::run_stream;
 use saci::window::WindowSpec;
 use saci::{Dataset, SaciResult};
 
@@ -179,61 +176,38 @@ fn window_config() -> WindowConfig {
 /// One workflow rather than two runs, so both sources meet the same runner,
 /// the same controller settings and the same schedule: the only difference
 /// between them is what their branch ends in.
-fn two_branch_service() -> (BuiltWorkflow, Arc<Mutex<SourceLog>>, Arc<Mutex<SourceLog>>) {
+fn two_branch_service(
+    run_mode: RunMode,
+) -> (BuiltWorkflow, Arc<Mutex<SourceLog>>, Arc<Mutex<SourceLog>>) {
     let schema = sale_schema();
     let (windowed_source, windowed_log) = RecordingSource::new(&schema);
     let (plain_source, plain_log) = RecordingSource::new(&schema);
 
-    let source_node = |id: &str, source: RecordingSource, target: usize| BuiltNode {
-        id: id.to_string(),
-        name: None,
-        type_name: "RecordingSource".to_string(),
-        component: Some(SALE),
-        kind: BuiltNodeKind::Source(Box::new(source)),
-        downstream: vec![BuiltEdge {
-            node: target,
-            branch: None,
-        }],
-        artifact: None,
-        window: None,
-        heal_recovered: None,
-    };
-    let processor_node = |id: &str, window: Option<WindowConfig>| BuiltNode {
-        id: id.to_string(),
-        name: None,
-        type_name: "native".to_string(),
-        component: None,
-        kind: BuiltNodeKind::Processor {
-            runtime: Box::new(PassThrough {
+    let flow = FlowPlan::from_config(&pinned_config(run_mode.clone()));
+    let service = BuiltWorkflow::builder("hint")
+        .source("win_in", SALE, windowed_source)
+        .source("plain_in", SALE, plain_source)
+        .processor(
+            "win",
+            PassThrough {
                 schema: sale_schema(),
-            }),
-            kind: "native",
-        },
-        downstream: Vec::new(),
-        artifact: None,
-        window,
-        heal_recovered: None,
-    };
+            },
+        )
+        .processor(
+            "plain",
+            PassThrough {
+                schema: sale_schema(),
+            },
+        )
+        .window("win", window_config())
+        .link("win_in", "win")
+        .link("plain_in", "plain")
+        .run_mode(run_mode)
+        .flow(flow)
+        .build()
+        .expect("build workflow");
 
-    let nodes = vec![
-        source_node("win_in", windowed_source, 2),
-        source_node("plain_in", plain_source, 3),
-        processor_node("win", Some(window_config())),
-        processor_node("plain", None),
-    ];
-
-    (
-        BuiltWorkflow {
-            workflow_id: "hint".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(Registry::new()),
-            inspector: None,
-            dlq: None,
-        },
-        windowed_log,
-        plain_log,
-    )
+    (service, windowed_log, plain_log)
 }
 
 /// A config in `run_mode` whose every source resolves the top-level
@@ -308,18 +282,17 @@ fn assert_only_the_plain_branch_is_hinted(
     );
 }
 
-/// `run_standalone`'s drain loop.
+/// The continuous runner's drain loop.
 ///
 /// The windowed branch's source overshoots its 64-row credit by the tail of a
 /// 200-row arrival and is left to choose that size itself; the plain branch's
 /// source is asked for the credit before every fresh pull.
 #[tokio::test]
 async fn a_continuous_drain_hints_only_the_source_off_the_windowed_path() {
-    let (service, windowed_log, plain_log) = two_branch_service();
-    let config = pinned_config(RunMode::Continuous);
+    let (service, windowed_log, plain_log) = two_branch_service(RunMode::Continuous);
     let cancel = CancellationToken::new();
 
-    // `run_standalone`'s future is `?Send`, so it is joined in place rather
+    // The run future is `?Send`, so it is joined in place rather
     // than spawned. Every arrival is admitted in the first few backlogged
     // iterations, which skip pacing; the wait covers the drained iteration
     // that follows.
@@ -330,29 +303,24 @@ async fn a_continuous_drain_hints_only_the_source_off_the_windowed_path() {
             cancel.cancel();
         }
     };
-    let (stats, ()) = tokio::join!(
-        run_standalone(service, &config, cancel.clone(), None, None),
-        stop
-    );
+    let (stats, ()) = tokio::join!(service.run(cancel.clone()), stop);
     stats.expect("the continuous run succeeds");
 
     assert_only_the_plain_branch_is_hinted(&windowed_log, &plain_log, "continuous");
 }
 
-/// `run_stream`'s prime phase and rotation, the other two call sites.
+/// The stream runner's prime phase and rotation, the other two call sites.
 ///
 /// The prime hints every enabled source before the rotation starts, so a
 /// windowed-path source that leaked would leak there even if the rotation
 /// never polled it again.
 #[tokio::test]
 async fn a_stream_run_hints_only_the_source_off_the_windowed_path() {
-    let (service, windowed_log, plain_log) = two_branch_service();
-    let config = pinned_config(RunMode::Stream);
-    let flow = FlowPlan::from_config(&config);
+    let (service, windowed_log, plain_log) = two_branch_service(RunMode::Stream);
 
     tokio::time::timeout(
         Duration::from_secs(20),
-        run_stream(service, CancellationToken::new(), None, None, &flow),
+        service.run(CancellationToken::new()),
     )
     .await
     .expect("the stream run reaches EOF before the timeout")

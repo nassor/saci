@@ -26,7 +26,6 @@ use saci::connector::file::{FileSource, FileSourceConfig};
 use saci::io::Source;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::run_standalone;
 use tokio_util::sync::CancellationToken;
 
 #[path = "common/smoketest.rs"]
@@ -116,7 +115,8 @@ async fn a_two_processor_link_runs_two_real_wasmtime_instances() {
         .remove(0);
     assert_eq!(built.nodes.len(), 4, "source, two processors, sink");
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);

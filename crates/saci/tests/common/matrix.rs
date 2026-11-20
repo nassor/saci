@@ -314,9 +314,10 @@ use saci::dataset::Dataset;
 use saci::io::Sink;
 use saci::io::Source;
 use saci::pipeline::Pipeline;
+use saci::service::RunOptions;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::standalone::{WorkflowStats, run_standalone};
+use saci::service::standalone::WorkflowStats;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use saci::wasm_host::{WasmEngine, WasmPipelineRuntime};
 
@@ -4415,15 +4416,9 @@ async fn execute(
     let helpers = futures::future::join_all(
         services
             .into_iter()
-            .map(|service| run_standalone(service, &config, helper_cancel.clone(), None, None)),
+            .map(|service| service.run(helper_cancel.clone())),
     );
-    let runner = run_standalone(
-        built,
-        &config,
-        cancel.clone(),
-        Some(Arc::clone(&live)),
-        None,
-    );
+    let runner = built.run(RunOptions::new(cancel.clone()).live_stats(Arc::clone(&live)));
     let (result, helper_results) = if case.stream_mode() {
         let feed = match (
             source.tcp.clone(),
@@ -5214,15 +5209,9 @@ observability log_level="error"
     let helpers = futures::future::join_all(
         services
             .into_iter()
-            .map(|service| run_standalone(service, &config, helper_cancel.clone(), None, None)),
+            .map(|service| service.run(helper_cancel.clone())),
     );
-    let runner = run_standalone(
-        built,
-        &config,
-        cancel.clone(),
-        Some(Arc::clone(&live)),
-        None,
-    );
+    let runner = built.run(RunOptions::new(cancel.clone()).live_stats(Arc::clone(&live)));
     let driver = async {
         // Every producer stays open until the run is cancelled, the way
         // `drive_tcp_stream` holds its one socket. A `saci` source answers a

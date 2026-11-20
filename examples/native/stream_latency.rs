@@ -1,7 +1,7 @@
 //! Per-item latency for stream mode, timed end-to-end from the producer.
 //!
 //! The native half drives a one-system `Pipeline` through
-//! [`service::stream::run_stream`] over a `ChannelSource`/`ChannelSink` pair,
+//! [`BuiltWorkflow::run`] in stream mode over a `ChannelSource`/`ChannelSink` pair,
 //! timing each single-row batch out and back. The WASM half (`--features
 //! wasm`) times `WasmPipelineRuntime::run_batch` on a one-row dataset,
 //! which isolates the host/processor boundary: store creation, instantiation from
@@ -26,10 +26,8 @@ use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
 use saci::connector::channel::{ChannelSink, ChannelSource};
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
-use saci::service::flow::FlowPlan;
-use saci::service::registry::Registry;
-use saci::service::stream::run_stream;
+use saci::service::RunMode;
+use saci::service::builder::BuiltWorkflow;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use saci::{Pipeline, SaciError};
 
@@ -95,74 +93,22 @@ async fn native_latency() -> Vec<u64> {
     let (source, tx) = ChannelSource::new(Arc::clone(&schema), 1);
     let (sink, mut rx) = ChannelSink::new(Arc::clone(&schema), 1);
 
-    let service = BuiltWorkflow {
-        workflow_id: "stream-latency".to_string(),
-        workflow_name: None,
-        nodes: vec![
-            BuiltNode {
-                id: "in".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some(COMP),
-                kind: BuiltNodeKind::Source(Box::new(source)),
-                downstream: vec![BuiltEdge {
-                    node: 1,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "double".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(doubling_pipeline(Arc::clone(&schema))),
-                    kind: "native",
-                },
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "out".to_string(),
-                name: None,
-                type_name: "ChannelSink".to_string(),
-                component: Some(COMP),
-                kind: BuiltNodeKind::Sink(Box::new(sink)),
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ],
-        registry: Arc::new(Registry::new()),
-        inspector: None,
-        dlq: None,
-    };
+    let mut service = BuiltWorkflow::builder("stream-latency")
+        .source("in", COMP, source)
+        .processor("double", doubling_pipeline(Arc::clone(&schema)))
+        .sink("out", COMP, sink)
+        .link("in", "double")
+        .link("double", "out")
+        .run_mode(RunMode::Stream)
+        .build()
+        .expect("build workflow");
+    service.nodes[0].type_name = "ChannelSource".to_string();
+    service.nodes[2].type_name = "ChannelSink".to_string();
 
     let cancel = CancellationToken::new();
     let cancel_runner = cancel.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_stream(
-            service,
-            cancel_runner,
-            None,
-            None,
-            &FlowPlan::stream_default(),
-        )
-        .await
-    });
+    let handle = local.spawn_local(async move { service.run(cancel_runner).await });
 
     let samples = local
         .run_until(async move {

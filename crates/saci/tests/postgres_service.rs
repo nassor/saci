@@ -1,7 +1,7 @@
 //! The whole standalone service path over PostgreSQL: config file, factories,
 //! source drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this is
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this is
 //! the end to end proof that a `connector-postgresql` build moves rows from one
 //! table through a pipeline and into another. The runtime is a native
 //! [`Pipeline`] rather than a WASM processor, because `impl PipelineRuntime for
@@ -19,7 +19,6 @@ use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
 use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
 use saci::service::config::ServiceConfig;
-use saci::service::run_standalone;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -213,7 +212,8 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
         .expect("service builds")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -247,7 +247,8 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
         .build(&config)
         .expect("service builds")
         .remove(0);
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("second run");
     assert_eq!(
@@ -304,7 +305,8 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
         .build(&config)
         .expect("service builds")
         .remove(0);
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("third run");
     assert_eq!(

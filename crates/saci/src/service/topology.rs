@@ -417,6 +417,7 @@ pub fn build_topology(
 mod tests {
     use super::*;
     use crate::pipeline::Pipeline;
+    use crate::service::builder::{BuiltWorkflow, BuiltWorkflowBuilder};
     use crate::service::config::{
         HttpConfig, NodeConfig, ObservabilityConfig, RetryConfig, SinkSpec, SourceSpec,
         StandaloneConfig, WorkflowSpec,
@@ -602,53 +603,38 @@ connection url="nats://localhost:4222" password="hunter2"
     fn built_source(id: &str, type_name: &str) -> BuiltNode {
         use crate::connector::channel::ChannelSource;
         let (src, _tx) = ChannelSource::new(order_schema(), 1);
-        BuiltNode {
-            id: id.to_string(),
-            name: None,
-            type_name: type_name.to_string(),
-            component: Some("Order"),
-            kind: BuiltNodeKind::Source(Box::new(src)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        }
+        let mut node = lone_node(BuiltWorkflow::builder("w").source(id, "Order", src));
+        node.type_name = type_name.to_string();
+        node
     }
 
     fn built_sink(id: &str, type_name: &str) -> BuiltNode {
         use crate::connector::channel::ChannelSink;
         let (sink, _rx) = ChannelSink::new(order_schema(), 1);
-        BuiltNode {
-            id: id.to_string(),
-            name: None,
-            type_name: type_name.to_string(),
-            component: Some("Order"),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        }
+        let mut node = lone_node(BuiltWorkflow::builder("w").sink(id, "Order", sink));
+        node.type_name = type_name.to_string();
+        node
     }
 
     fn built_processor(id: &str, artifact: Option<&str>) -> BuiltNode {
-        BuiltNode {
-            id: id.to_string(),
-            name: Some("Validator".to_string()),
-            type_name: "wasm".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(Pipeline::new(id)),
-                kind: "wasm",
-            },
-            downstream: Vec::new(),
-            artifact: artifact.map(str::to_string),
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
+        let mut node = lone_node(BuiltWorkflow::builder("w").processor(id, Pipeline::new(id)));
+        node.name = Some("Validator".to_string());
+        node.type_name = "wasm".to_string();
+        if let BuiltNodeKind::Processor { kind, .. } = &mut node.kind {
+            *kind = "wasm";
         }
+        node.artifact = artifact.map(str::to_string);
+        node
+    }
+
+    /// The one node of a single-node workflow, so a test can edit its fields
+    /// and wire its `downstream` by hand.
+    fn lone_node(builder: BuiltWorkflowBuilder) -> BuiltNode {
+        builder
+            .build()
+            .expect("a one-node workflow assembles")
+            .nodes
+            .remove(0)
     }
 
     #[test]

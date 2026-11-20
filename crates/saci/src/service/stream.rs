@@ -1,6 +1,6 @@
 //! Stream runner for [`BuiltWorkflow`].
 //!
-//! [`run_stream`] drives a [`BuiltWorkflow`] one admitted chunk at a time: each
+//! [`BuiltWorkflow::run`] drives a [`BuiltWorkflow`] one admitted chunk at a time: each
 //! chunk of an arriving [`RecordBatch`] is appended
 //! to that source node's dataset slot, fanned out, and every remaining node
 //! runs in topological order before the next item is pulled. There is no
@@ -8,7 +8,7 @@
 //! pacing timer.
 //!
 //! Selected by `run_mode` `kind = "stream"` in standalone mode;
-//! [`run_standalone`](super::standalone::run_standalone) dispatches here.
+//! [`BuiltWorkflow::run`] dispatches here.
 //!
 //! ## Semantics
 //!
@@ -72,11 +72,11 @@ use crate::error::SaciError;
 use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
-use super::builder::{BuiltNodeKind, BuiltWorkflow};
+use super::builder::{BuiltNodeKind, BuiltWorkflow, RunOptions};
 use super::dlq::ReplayCtx;
-use super::flow::{Carry, FlowAdjustment, FlowController, FlowOutcome, FlowPlan, FlowSample};
+use super::flow::{Carry, FlowAdjustment, FlowController, FlowOutcome, FlowSample};
 use super::lifecycle::RunControl;
-use super::redb_state::{RedbStateClient, SourceCursorMeta};
+use super::redb_state::SourceCursorMeta;
 use super::sampling::FLOW_CONTROL_TARGET;
 use super::standalone::{
     FlowEpisode, NodeStats, WorkflowStats, finish_all_sources, log_flow_finish, log_flow_start,
@@ -139,7 +139,7 @@ fn wall_clock_ms() -> u64 {
 ///
 /// ## Error policy
 ///
-/// Mirrors [`run_standalone`](super::standalone::run_standalone): log, count in
+/// Mirrors [`standalone::run`](super::standalone): log, count in
 /// `iteration_errors`, continue with the next item. A source error
 /// additionally backs off for 10 ms (cancellable) to avoid a hot error loop.
 ///
@@ -149,22 +149,21 @@ fn wall_clock_ms() -> u64 {
 /// `workflow`, `iteration` and node rather than relying on a parent span's
 /// fields.
 ///
-/// `flow` carries the resolved flow-control policy per source node.
-/// [`FlowPlan::stream_default`] is this mode's on-by-default policy and is
-/// what a direct call should pass; [`FlowPlan::default`] is the batch policy
-/// and carries no latency objective.
+/// The workflow carries the resolved flow-control policy per source node:
+/// [`FlowPlan::stream_default`](super::flow::FlowPlan::stream_default) is this
+/// mode's on-by-default policy, which a hand-assembled workflow gets unless it
+/// names another.
 ///
-/// `control` is the runner's cancellation token plus its pause gate; a bare
-/// [`CancellationToken`](tokio_util::sync::CancellationToken) converts into
-/// one whose gate never parks.
-pub async fn run_stream(
+/// `options.control` is the runner's cancellation token plus its pause gate.
+pub(crate) async fn run(
     built: BuiltWorkflow,
-    control: impl Into<RunControl>,
-    live_stats: Option<Arc<RwLock<WorkflowStats>>>,
-    state: Option<Arc<RedbStateClient>>,
-    flow: &FlowPlan,
+    options: RunOptions,
 ) -> Result<WorkflowStats, SaciError> {
-    let RunControl { cancel, pause } = control.into();
+    let RunOptions {
+        control: RunControl { cancel, pause },
+        live_stats,
+        state,
+    } = options;
     let source_count = built
         .nodes
         .iter()
@@ -181,6 +180,7 @@ pub async fn run_stream(
         nodes,
         inspector,
         dlq,
+        flow,
         ..
     } = built;
     let mut dlq = dlq;
@@ -236,13 +236,12 @@ pub async fn run_stream(
         datasets.push(dataset);
         sinks.push(sink);
         node_stats.push(NodeStats {
-            id: ids.last().expect("just pushed").clone(),
+            id: Arc::from(ids.last().expect("just pushed").as_str()),
             kind: match kind {
                 NodeRunKind::Source => "source",
                 NodeRunKind::Processor => "processor",
                 NodeRunKind::Sink => "sink",
-            }
-            .to_string(),
+            },
             rows: 0,
             batches: 0,
             errors: 0,
@@ -556,7 +555,15 @@ pub async fn run_stream(
         // is `usize::MAX` here: its arrival is one item however large, and it
         // received no size hint either, so the item is the connector's own
         // batch.
-        let bytes_per_row = carried_weight.unwrap_or_else(|| Carry::weigh(&batch));
+        // Weighed only for a source a controller governs: the weight feeds
+        // its byte accounting and nothing else.
+        let bytes_per_row = carried_weight.unwrap_or_else(|| {
+            if controllers[source_index].is_some() {
+                Carry::weigh(&batch)
+            } else {
+                0.0
+            }
+        });
         let batch = if batch.num_rows() > target {
             pending[source_index] = Some(Carry {
                 batch: batch.slice(target, batch.num_rows() - target),
@@ -1036,8 +1043,8 @@ pub async fn run_stream(
         #[cfg(feature = "tracing")]
         drop(batch_span);
 
-        stats.nodes = node_stats.clone();
         if live_stats.is_some() && last_publish.elapsed() >= PUBLISH_INTERVAL {
+            stats.nodes = node_stats.clone();
             publish(&live_stats, &stats).await;
             last_publish = Instant::now();
         }
@@ -1118,8 +1125,8 @@ async fn publish(shared: &Option<Arc<RwLock<WorkflowStats>>>, stats: &WorkflowSt
 mod tests {
     use super::*;
     use crate::connector::channel::ChannelSource;
-    use crate::service::builder::{BuiltEdge, BuiltNode};
-    use crate::service::flow::FlowSettings;
+    use crate::service::config::RunMode;
+    use crate::service::flow::{FlowPlan, FlowSettings};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field, Schema};
     use async_trait::async_trait;
@@ -1159,24 +1166,6 @@ mod tests {
         }
     }
 
-    fn node(id: &str, kind: BuiltNodeKind, downstream: Vec<usize>) -> BuiltNode {
-        BuiltNode {
-            id: id.to_string(),
-            name: None,
-            type_name: "test".to_string(),
-            component: Some("V"),
-            kind,
-            downstream: downstream
-                .into_iter()
-                .map(|node| BuiltEdge { node, branch: None })
-                .collect(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        }
-    }
-
     /// One arrival many times the admitted target, whose *chunks* sit well
     /// inside `max_chunk_bytes` even though the whole arrival does not.
     ///
@@ -1206,25 +1195,6 @@ mod tests {
         tx.send(batch).await.expect("the source accepts it");
         drop(tx);
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "stream-chunked-src",
-                    BuiltNodeKind::Source(Box::new(source)),
-                    vec![1],
-                ),
-                node(
-                    "stream-out",
-                    BuiltNodeKind::Sink(Box::new(sink)),
-                    Vec::new(),
-                ),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
         // A range whose *every* admissible size is far inside the ceiling:
         // 1 024 rows weigh about 8 KiB against a 16 KiB bound, and the arms
         // can only ever be 1 024 or 512, so no scheduling accident can bring a
@@ -1239,14 +1209,20 @@ mod tests {
             target_latency_ms: 0,
             ..FlowSettings::default()
         });
+        let built = BuiltWorkflow::builder("w")
+            .source("stream-chunked-src", "V", source)
+            .sink("stream-out", "V", sink)
+            .link("stream-chunked-src", "stream-out")
+            .run_mode(RunMode::Stream)
+            .flow(plan)
+            .build()
+            .unwrap();
 
-        let stats = tokio::time::timeout(
-            Duration::from_secs(30),
-            run_stream(built, CancellationToken::new(), None, None, &plan),
-        )
-        .await
-        .expect("the run terminates at EOF rather than parking")
-        .expect("the run reaches EOF cleanly");
+        let stats =
+            tokio::time::timeout(Duration::from_secs(30), built.run(CancellationToken::new()))
+                .await
+                .expect("the run terminates at EOF rather than parking")
+                .expect("the run reaches EOF cleanly");
         assert_eq!(stats.rows_processed, rows as u64, "every row must flow");
         assert!(
             stats.iterations > 1,
@@ -1333,50 +1309,27 @@ mod tests {
         }
         drop(tx);
 
-        let mut source_node = node(
-            "stream-rewound-src",
-            BuiltNodeKind::Source(Box::new(source)),
-            vec![1],
-        );
-        source_node.component = Some("Sale");
-        let mut processor_node = node(
-            PROCESSOR,
-            BuiltNodeKind::Processor {
-                runtime: Box::new(Noop),
-                kind: "native",
-            },
-            Vec::new(),
-        );
-        processor_node.component = None;
-        processor_node.window = Some(crate::service::config::WindowConfig {
-            spec: crate::window::WindowSpec::tumbling(30_000),
-            time_field: "timestamp_ms".to_string(),
-            key_fields: Vec::new(),
-            allowed_lateness_ms: 5_000,
-        });
+        let built = BuiltWorkflow::builder("w")
+            .source("stream-rewound-src", "Sale", source)
+            .processor(PROCESSOR, Noop)
+            .window(
+                PROCESSOR,
+                crate::service::config::WindowConfig {
+                    spec: crate::window::WindowSpec::tumbling(30_000),
+                    time_field: "timestamp_ms".to_string(),
+                    key_fields: Vec::new(),
+                    allowed_lateness_ms: 5_000,
+                },
+            )
+            .link("stream-rewound-src", PROCESSOR)
+            .run_mode(RunMode::Stream)
+            .build()
+            .unwrap();
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![source_node, processor_node],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
-
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            run_stream(
-                built,
-                CancellationToken::new(),
-                None,
-                None,
-                &FlowPlan::stream_default(),
-            ),
-        )
-        .await
-        .expect("the run terminates at EOF rather than parking")
-        .expect("the run reaches EOF cleanly");
+        tokio::time::timeout(Duration::from_secs(30), built.run(CancellationToken::new()))
+            .await
+            .expect("the run terminates at EOF rather than parking")
+            .expect("the run reaches EOF cleanly");
 
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&crate::metrics::test_registry().gather())
@@ -1523,31 +1476,19 @@ mod tests {
         let (source, source_finishes) = LoggingSource::new(chan_source, Arc::clone(&log));
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::Stream)
+            .build()
+            .unwrap();
 
-        let stats = tokio::time::timeout(
-            Duration::from_secs(10),
-            run_stream(
-                built,
-                CancellationToken::new(),
-                None,
-                None,
-                &FlowPlan::stream_default(),
-            ),
-        )
-        .await
-        .expect("the run reaches EOF rather than parking")
-        .expect("a healthy stream run exits cleanly");
+        let stats =
+            tokio::time::timeout(Duration::from_secs(10), built.run(CancellationToken::new()))
+                .await
+                .expect("the run reaches EOF rather than parking")
+                .expect("a healthy stream run exits cleanly");
 
         assert_eq!(stats.rows_processed, 3, "the one arrival flowed");
         assert_eq!(
@@ -1574,26 +1515,15 @@ mod tests {
         let (source, source_finishes) = LoggingSource::new(chan_source, Arc::clone(&log));
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let source_node = node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]);
-        let mut processor_node = node(
-            "slow",
-            BuiltNodeKind::Processor {
-                runtime: Box::new(SlowRuntime),
-                kind: "native",
-            },
-            vec![2],
-        );
-        processor_node.component = None;
-        let sink_node = node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new());
-
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![source_node, processor_node, sink_node],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .processor("slow", SlowRuntime)
+            .sink("out", "V", sink)
+            .link("src", "slow")
+            .link("slow", "out")
+            .run_mode(RunMode::Stream)
+            .build()
+            .unwrap();
 
         let cancel = CancellationToken::new();
         let stopper = {
@@ -1603,8 +1533,7 @@ mod tests {
                 cancel.cancel();
             }
         };
-        let plan = FlowPlan::stream_default();
-        let (stats, ()) = tokio::join!(run_stream(built, cancel, None, None, &plan), stopper);
+        let (stats, ()) = tokio::join!(built.run(cancel), stopper);
         let stats = stats.expect("a cancel mid item still exits cleanly");
 
         assert_eq!(
@@ -1638,17 +1567,13 @@ mod tests {
         let (source, source_finishes) = LoggingSource::new(chan_source, Arc::clone(&log));
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::Stream)
+            .build()
+            .unwrap();
 
         let cancel = CancellationToken::new();
         let stopper = {
@@ -1661,8 +1586,7 @@ mod tests {
                 cancel.cancel();
             }
         };
-        let plan = FlowPlan::stream_default();
-        let (stats, ()) = tokio::join!(run_stream(built, cancel, None, None, &plan), stopper);
+        let (stats, ()) = tokio::join!(built.run(cancel), stopper);
         let stats = stats.expect("a cancel while idle still exits cleanly");
 
         assert_eq!(stats.iterations, 0, "no item ever arrived");
@@ -1750,6 +1674,7 @@ mod tests {
     /// keeps its counter across the items of a `run_mode kind="stream"`
     /// workflow: the runner hands the blob `run_batch` returned back in as
     /// `prior` on the next item.
+    #[cfg(feature = "wasm-host")]
     #[tokio::test]
     async fn a_native_pipeline_keeps_its_declared_state_across_stream_items() {
         use crate::connector::channel::ChannelSink;
@@ -1824,15 +1749,10 @@ http disabled=#true
         }
         drop(tx);
 
-        let stats = run_stream(
-            built,
-            CancellationToken::new(),
-            None,
-            None,
-            &FlowPlan::stream_default(),
-        )
-        .await
-        .expect("the stream run ends at source EOF");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("the stream run ends at source EOF");
 
         assert_eq!(stats.iterations, 2, "one iteration per item");
         assert_eq!(stats.iteration_errors, 0);

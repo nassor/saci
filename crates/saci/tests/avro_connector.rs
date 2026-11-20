@@ -1,5 +1,5 @@
 //! One transport, two formats, chosen in config: a CSV `FileSource` and an Avro
-//! `FileSink` over one component, driven by `run_standalone`.
+//! `FileSink` over one component, driven by `BuiltWorkflow::run`.
 //!
 //! One run covers the whole path a `format = "avro"` key travels: registration
 //! as a builtin, resolution out of the codec registry, writing a
@@ -24,7 +24,6 @@ use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
 
@@ -117,7 +116,8 @@ async fn a_csv_source_and_an_avro_sink_share_one_file_connector() {
         .expect("both formats resolve through the codec registry")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);

@@ -1,7 +1,7 @@
 //! The whole standalone service path over MariaDB and MySQL: config file,
 //! factories, source drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this
 //! is the end to end proof that a `connector-mariadb` build moves rows from one
 //! table through a pipeline and into another, and that a binlog snapshot on a
 //! MariaDB server replicates into a MySQL server through `apply_changes`. The
@@ -25,7 +25,6 @@ use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
 use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
 use saci::service::config::ServiceConfig;
-use saci::service::run_standalone;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -333,17 +332,13 @@ observability log_level="warn"
 }
 
 /// Build the config at `path` with `pipeline` as the `transform` runtime.
-fn build(
-    path: &std::path::Path,
-    pipeline: Pipeline,
-) -> (ServiceConfig, saci::service::builder::BuiltWorkflow) {
+fn build(path: &std::path::Path, pipeline: Pipeline) -> saci::service::builder::BuiltWorkflow {
     let config = ServiceConfig::load(path).expect("config loads");
-    let built = ServiceBuilder::new()
+    ServiceBuilder::new()
         .runtime("transform", pipeline)
         .build(&config)
         .expect("service builds")
-        .remove(0);
-    (config, built)
+        .remove(0)
 }
 
 #[tokio::test]
@@ -377,8 +372,9 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
     let path = dir.path().join("service.kdl");
     std::fs::write(&path, polling_config_kdl(&dsn, &data_dir)).expect("write config");
 
-    let (config, built) = build(&path, build_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, build_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -406,8 +402,9 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
     // committed at the *start* of the next cycle, so a rerun replays. That is
     // the documented at-least-once contract, and `write_mode = "upsert"` is
     // what makes the replay harmless.
-    let (config, built) = build(&path, build_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, build_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("second run");
     assert_eq!(
@@ -457,8 +454,9 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
     assert_eq!(first, 100);
     assert_eq!(second, 0, "the second cycle is caught up");
 
-    let (config, built) = build(&path, build_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, build_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("third run");
     assert_eq!(
@@ -517,8 +515,9 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
     .expect("write config");
 
     // The snapshot reads the 50 existing rows as `R` and the sink applies them.
-    let (config, built) = build(&path, passthrough_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, passthrough_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("snapshot run");
     assert_eq!(stats.iteration_errors, 0);
@@ -578,8 +577,9 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
         source_conn.query_drop(statement).await.expect(statement);
     }
 
-    let (config, built) = build(&path, passthrough_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, passthrough_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("change run");
     assert_eq!(stats.iteration_errors, 0);

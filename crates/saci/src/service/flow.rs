@@ -239,7 +239,7 @@ impl Default for FlowSettings {
     /// This is what a programmatically assembled batch service gets. A stream
     /// service promises something else and carries a latency objective, so its
     /// policy lives in [`stream_defaults`](Self::stream_defaults) and reaches a
-    /// direct [`run_stream`](super::stream::run_stream) call through
+    /// stream workflow assembled in code through
     /// [`FlowPlan::stream_default`].
     ///
     /// `start_rows` sits in the flat band of the per-row cost curve and
@@ -1163,11 +1163,13 @@ impl FlowPlan {
     /// [`FlowSettings::stream_defaults`] for every source.
     ///
     /// [`Default`] is the batch policy, which carries no latency objective, so
-    /// it is the wrong plan to hand [`run_stream`](super::stream::run_stream).
-    /// The run mode is not recoverable from a [`BuiltWorkflow`](super::builder::BuiltWorkflow),
-    /// so the caller names the policy instead: this constructor for a direct
-    /// call, [`from_config`](Self::from_config) for a config-driven one, which
-    /// resolves the same defaults from `run_mode`.
+    /// it is the wrong plan for a stream workflow. A workflow assembled with
+    /// [`BuiltWorkflow::builder`](super::builder::BuiltWorkflow::builder) gets
+    /// this plan by default once its run mode is
+    /// [`RunMode::Stream`]; pass this
+    /// constructor to its `flow` method only to restate it.
+    /// [`from_config`](Self::from_config) resolves the same defaults from
+    /// `run_mode` for a config-driven service.
     pub fn stream_default() -> Self {
         Self {
             fallback: FlowSettings::stream_defaults(),
@@ -2521,7 +2523,7 @@ mod tests {
         if rows > 4_096 { 12_000.0 } else { 10_000.0 }
     }
 
-    /// The plan a direct `run_stream` call hands the runner decides whether
+    /// The plan a stream workflow's runner is handed decides whether
     /// stream mode's own contract holds. [`FlowPlan::default`] is the batch
     /// policy, so a stream service assembled in code would otherwise commit a
     /// candidate that breaches the per-pass objective the mode exists to

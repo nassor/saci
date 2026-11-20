@@ -36,7 +36,6 @@ use saci::codec::csv::CsvCodec;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
 const CSV_BODY: &[u8] = b"id,total\n1,10\n2,20\n3,30\n4,40\n";
@@ -220,7 +219,8 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
         .expect("both http halves resolve through the registry")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -259,7 +259,6 @@ mod listen {
     use saci::service::builder::ServiceBuilder;
     use saci::service::config::ServiceConfig;
     use saci::service::install_ring_provider;
-    use saci::service::run_standalone;
     use saci::service::standalone::WorkflowStats;
 
     use super::{COMPONENT, build_pipeline, column, config_path_text, schema, serve};
@@ -362,11 +361,8 @@ observability log_level="warn"
 
         let cancel = CancellationToken::new();
         let runner_cancel = cancel.clone();
-        let runner_config = config.clone();
         let local = LocalSet::new();
-        let handle = local.spawn_local(async move {
-            run_standalone(built, &runner_config, runner_cancel, None, None).await
-        });
+        let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
         local
             .run_until(async move {

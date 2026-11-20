@@ -1,7 +1,7 @@
 //! The whole standalone service path over NATS: config file, factories, source
 //! drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this is
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this is
 //! the end to end proof that a `connector-nats` build moves rows from one
 //! JetStream stream through a pipeline into another via the registered
 //! `NatsSourceFactory`/`NatsSinkFactory`, not just via the connector's own
@@ -35,7 +35,6 @@ use saci::codec::ndjson::NdjsonCodec;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::dlq::DlqRegistry;
-use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
 
@@ -249,7 +248,8 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
         .expect("service builds")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -548,7 +548,8 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
             .build(&config)
             .expect("service builds")
             .remove(0);
-        let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+        let stats = built
+            .run(CancellationToken::new())
             .await
             .expect("one-shot run");
         (stats, registry)

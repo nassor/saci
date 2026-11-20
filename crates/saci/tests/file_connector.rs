@@ -1,5 +1,5 @@
 //! One transport, two formats, chosen in config: a CSV `FileSource` and a Parquet
-//! `FileSink` over one component, driven by `run_standalone`.
+//! `FileSink` over one component, driven by `BuiltWorkflow::run`.
 //!
 //! This is the behaviour the connector-versus-codec split exists for. No
 //! build of SACI before it could read one byte format and write another through
@@ -24,7 +24,6 @@ use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::run_standalone;
 
 const COMPONENT: &str = "Order";
 
@@ -115,7 +114,8 @@ async fn a_csv_source_and_a_parquet_sink_share_one_file_connector() {
         .expect("both formats resolve through the codec registry")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -232,7 +232,8 @@ async fn two_runs_against_one_path_keep_both_runs_rows() {
             .expect("the ndjson sink resolves")
             .remove(0);
 
-        let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+        let stats = built
+            .run(CancellationToken::new())
             .await
             .expect("one-shot run");
         assert_eq!(stats.rows_processed, 2, "run {run} drained the fixture");

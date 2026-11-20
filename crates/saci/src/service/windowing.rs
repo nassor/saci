@@ -74,7 +74,7 @@
 //! no epoch experiment, and no `saci_flow_*` series, including
 //! `saci_flow_backoff_total`. Its arrival size is whatever the connector's
 //! declared `batch_size`/`batch_rows` produces, and
-//! [`run_stream`](super::stream::run_stream) names each such source in one
+//! the stream runner names each such source in one
 //! startup line. A controller kept anyway would publish a target nothing
 //! applies, which is the one question those series exist to answer.
 //!
@@ -128,7 +128,7 @@
 //! windowed node's state blob from one pass to the next whatever `store`
 //! says, because a `window` block is the declaration that the node
 //! accumulates over more than one pass; see
-//! [`run_standalone`](super::standalone::run_standalone).
+//! [`BuiltWorkflow::run`](super::builder::BuiltWorkflow::run).
 
 use crate::SaciResult;
 use crate::dataset::Dataset;
@@ -153,7 +153,7 @@ use super::sampling::WINDOWING_TARGET;
 /// [`request_batch_rows`](crate::io::Source::request_batch_rows) hint,
 /// because splitting an arrival or sizing one from the credit would both move
 /// a pass boundary the windowed node observes event time at.
-/// [`run_stream`](super::stream::run_stream) goes one step further and builds
+/// the stream runner goes one step further and builds
 /// no controller for it: with both suppressions in force and one arrival per
 /// item, nothing in that loop would read the target. A source feeding both a
 /// windowed and a non-windowed node is `true` as well. Both see the same

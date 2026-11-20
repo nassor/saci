@@ -507,6 +507,7 @@ mod tests {
     use super::*;
     use crate::component::Component;
     use crate::pipeline::Pipeline;
+    use crate::service::builder::{BuiltWorkflow, BuiltWorkflowBuilder};
     use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -541,54 +542,28 @@ mod tests {
     fn source_node(id: &str, component: &'static str, schema: Arc<Schema>) -> BuiltNode {
         use crate::connector::channel::ChannelSource;
         let (src, _tx) = ChannelSource::new(schema, 1);
-        BuiltNode {
-            id: id.to_string(),
-            name: None,
-            type_name: "ChannelSource".to_string(),
-            component: Some(component),
-            kind: BuiltNodeKind::Source(Box::new(src)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        }
+        lone_node(BuiltWorkflow::builder("w").source(id, component, src))
     }
 
     #[cfg(feature = "connector-channel")]
     fn sink_node(id: &str, component: &'static str, schema: Arc<Schema>) -> BuiltNode {
         use crate::connector::channel::ChannelSink;
         let (sink, _rx) = ChannelSink::new(schema, 1);
-        BuiltNode {
-            id: id.to_string(),
-            name: None,
-            type_name: "ChannelSink".to_string(),
-            component: Some(component),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        }
+        lone_node(BuiltWorkflow::builder("w").sink(id, component, sink))
     }
 
     fn processor_node(id: &str, pipeline: Pipeline) -> BuiltNode {
-        BuiltNode {
-            id: id.to_string(),
-            name: None,
-            type_name: "native".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(pipeline),
-                kind: "native",
-            },
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        }
+        lone_node(BuiltWorkflow::builder("w").processor(id, pipeline))
+    }
+
+    /// The one node of a single-node workflow, so a test can wire its
+    /// `downstream` by hand.
+    fn lone_node(builder: BuiltWorkflowBuilder) -> BuiltNode {
+        builder
+            .build()
+            .expect("a one-node workflow assembles")
+            .nodes
+            .remove(0)
     }
 
     #[cfg(feature = "connector-channel")]

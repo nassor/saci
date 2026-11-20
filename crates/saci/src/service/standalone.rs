@@ -1,6 +1,6 @@
 //! Standalone runner for [`BuiltWorkflow`].
 //!
-//! [`run_standalone`] drives a [`BuiltWorkflow`] through repeated processing
+//! [`BuiltWorkflow::run`] drives a [`BuiltWorkflow`] through repeated processing
 //! iterations in a single process with no distributed coordination, walking
 //! every declared node in topological order each pass. It handles
 //! cancellation, transient per-node errors, and run-mode pacing (one-shot,
@@ -118,9 +118,9 @@
 //! # #[cfg(feature = "service")]
 //! # {
 //! use tokio_util::sync::CancellationToken;
-//! use saci::service::standalone::{run_standalone, WorkflowStats};
+//! use saci::service::BuiltWorkflow;
 //! // Build a BuiltWorkflow (via ServiceBuilder::build) then:
-//! // let stats = run_standalone(built, &config, cancel, None, None).await?;
+//! // let stats = built.run(cancel).await?;
 //! # }
 //! ```
 
@@ -129,7 +129,6 @@ use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
 use serde::Serialize;
-use tokio::sync::RwLock;
 #[cfg(feature = "tracing")]
 use tracing::Instrument as _;
 
@@ -140,16 +139,13 @@ use crate::inspector_wire::{FlowDecision, FlowDecisionKind};
 use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
-use super::builder::{BuiltNodeKind, BuiltWorkflow};
-use super::config::StoreConfig;
-use super::config::{RunMode, ServiceConfig, ServiceMode};
+use super::builder::{BuiltNodeKind, BuiltWorkflow, RunOptions};
+use super::config::RunMode;
 use super::dlq::{DeadLetterQueue, ReplayCtx};
 use super::flow::{
-    Carry, FlowAdjustment, FlowCause, FlowController, FlowOutcome, FlowPlan, FlowSample,
-    FlowSettings,
+    Carry, FlowAdjustment, FlowCause, FlowController, FlowOutcome, FlowSample, FlowSettings,
 };
 use super::lifecycle::RunControl;
-use super::redb_state::RedbStateClient;
 use super::sampling::FLOW_CONTROL_TARGET;
 #[cfg(feature = "windows")]
 use super::windowing::WindowTracker;
@@ -172,13 +168,23 @@ impl NodeRunKind {
     }
 }
 
+/// Serialize a shared node id as a plain string; serde's `Arc` support sits
+/// behind its `rc` feature, which this crate does not otherwise need.
+fn serialize_arc_str<S: serde::Serializer>(
+    id: &Arc<str>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(id)
+}
+
 /// Cumulative counters for one workflow node, across every iteration.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct NodeStats {
     /// The node's declared id.
-    pub id: String,
+    #[serde(serialize_with = "serialize_arc_str")]
+    pub id: Arc<str>,
     /// `"source"`, `"processor"` or `"sink"`.
-    pub kind: String,
+    pub kind: &'static str,
     /// Rows this node produced (source, processor) or wrote (sink).
     pub rows: u64,
     /// Batches this node accounted for, in the unit its kind counts in: a
@@ -190,7 +196,7 @@ pub struct NodeStats {
     pub errors: u64,
 }
 
-/// Diagnostic counters accumulated over a [`run_standalone`] call.
+/// Diagnostic counters accumulated over a [`BuiltWorkflow::run`] call.
 ///
 /// Fields are public so the HTTP control plane can expose them via `/metrics`
 /// by reading from a shared `Arc<RwLock<WorkflowStats>>`.
@@ -204,7 +210,7 @@ pub struct WorkflowStats {
     /// `batches` are per arrival. A pass is one whole drain again where no
     /// credit applies: `flow_control { enabled #false }` and
     /// `RunMode::OneShot`, which builds no controller at all.
-    /// [`run_stream`](super::stream::run_stream) fills the same field once
+    /// [`stream`](super::stream) fills the same field once
     /// per chunk, of the single source that chunk came from.
     pub iterations: u64,
     /// Total number of source drain calls that returned at least one row.
@@ -612,8 +618,10 @@ pub(super) async fn finish_all_sources(
 /// Each iteration checks cancellation, then walks every declared node in
 /// topological order: a source drains into every downstream node, a processor
 /// runs and forwards its output, and a sink writes whatever was staged for it.
-/// Live stats publish to `live_stats` when it is `Some` so `GET /status` sees
-/// current progress, then the run paces or exits according to [`RunMode`].
+/// Live stats publish to `options.live_stats` when it is `Some` so `GET /status`
+/// sees current progress, then the run paces or exits according to the
+/// workflow's [`RunMode`], which is never [`RunMode::Stream`] here:
+/// [`BuiltWorkflow::run`] sends that to the stream runner.
 ///
 /// ## Error policy
 ///
@@ -626,45 +634,24 @@ pub(super) async fn finish_all_sources(
 /// - A `forward_into` or `append_record_batch` fan-out error: log WARN naming
 ///   both node ids, increment `iteration_errors`, continue.
 ///
-/// `control` is the runner's cancellation token plus its pause gate; a bare
-/// [`CancellationToken`](tokio_util::sync::CancellationToken) converts into
-/// one whose gate never parks, which is what an uncontrolled call site passes.
-pub async fn run_standalone(
+/// `options.control` is the runner's cancellation token plus its pause gate.
+pub(crate) async fn run(
     built: BuiltWorkflow,
-    config: &ServiceConfig,
-    control: impl Into<RunControl>,
-    live_stats: Option<Arc<RwLock<WorkflowStats>>>,
-    state: Option<Arc<RedbStateClient>>,
+    options: RunOptions,
 ) -> Result<WorkflowStats, SaciError> {
-    let RunControl { cancel, pause } = control.into();
-    let run_mode = match &config.mode {
-        ServiceMode::Standalone { config: sc } => sc.run_mode.clone(),
-        ServiceMode::Cluster { .. } => {
-            return Err(SaciError::configuration(
-                "run_standalone called with a cluster-mode config; use the cluster runner instead",
-            ));
-        }
-    };
-
-    // Stream mode is a different loop shape entirely: one workflow invocation
-    // per admitted chunk, no inter-item pacing.
-    if run_mode == RunMode::Stream {
-        let flow = FlowPlan::from_config(config);
-        return super::stream::run_stream(
-            built,
-            RunControl { cancel, pause },
-            live_stats,
-            state,
-            &flow,
-        )
-        .await;
-    }
-
+    let RunOptions {
+        control: RunControl { cancel, pause },
+        live_stats,
+        state,
+    } = options;
     let BuiltWorkflow {
         workflow_id,
         nodes,
         inspector,
         dlq,
+        run: run_mode,
+        flow: flow_plan,
+        batch_resume,
         ..
     } = built;
     let mut dlq = dlq;
@@ -723,8 +710,8 @@ pub async fn run_standalone(
         datasets.push(dataset);
         sinks.push(sink);
         node_stats.push(NodeStats {
-            id: ids.last().expect("just pushed").clone(),
-            kind: kind.as_str().to_string(),
+            id: Arc::from(ids.last().expect("just pushed").as_str()),
+            kind: kind.as_str(),
             rows: 0,
             batches: 0,
             errors: 0,
@@ -741,17 +728,10 @@ pub async fn run_standalone(
     #[cfg(not(feature = "tracing"))]
     let _ = &workflow_id;
     // Interval/one-shot processor state carry, opt-in per store: with
-    // `store "redb" { batch_resume true }` the runner threads the processor
+    // `store "redb" { batch_resume #true }` the runner threads the processor
     // state blob as `prior` and persists it, so a restarted service resumes
     // from its last save point. Default (no store or no flag): per-call
-    // fresh-Store behaviour.
-    let batch_resume = matches!(
-        &config.store,
-        Some(StoreConfig::Redb {
-            batch_resume: true,
-            ..
-        })
-    );
+    // fresh-Store behaviour. The workflow carries the decision.
     let mut prior: Vec<Option<Vec<u8>>> = vec![None; n];
     if batch_resume && let Some(client) = &state {
         for i in 0..n {
@@ -793,7 +773,7 @@ pub async fn run_standalone(
     // `RunMode::OneShot` engages none: a single pass must drain every source
     // by definition, so admitting a credit-sized prefix and exiting would
     // silently drop the rest of the source. Every other batch mode gets one.
-    let flow_plan = FlowPlan::from_config(config);
+    // The workflow carries the resolved policy; `flow_plan` was bound above.
     let mut controllers: Vec<Option<FlowController>> = (0..n)
         .map(|i| {
             (run_mode != RunMode::OneShot && kinds[i] == NodeRunKind::Source).then(|| {
@@ -997,7 +977,14 @@ pub async fn run_standalone(
                                 match result {
                                     Ok(None) => break,
                                     Ok(Some(batch)) => {
-                                        let weight = Carry::weigh(&batch);
+                                        // Weighed only for a source a controller
+                                        // governs: the weight feeds its byte
+                                        // accounting and nothing else.
+                                        let weight = if controllers[i].is_some() {
+                                            Carry::weigh(&batch)
+                                        } else {
+                                            0.0
+                                        };
                                         (batch, weight)
                                     }
                                     Err(_e) => {
@@ -1538,8 +1525,8 @@ pub async fn run_standalone(
         crate::metrics::instruments().workflow_run(&workflow_id);
         let iter_ms = iter_start.elapsed().as_millis() as u64;
 
-        stats.nodes = node_stats.clone();
         if let Some(shared) = &live_stats {
+            stats.nodes = node_stats.clone();
             *shared.write().await = stats.clone();
         }
 
@@ -1627,7 +1614,7 @@ pub async fn run_standalone(
                 }
             }
 
-            // Dispatched to `super::stream::run_stream` before the loop starts.
+            // Dispatched to the stream runner by `BuiltWorkflow::run`.
             RunMode::Stream => unreachable!("stream mode never reaches the batch loop"),
         }
     }
@@ -1694,11 +1681,10 @@ mod tests {
     use crate::SaciResult;
     use crate::connector::channel::{ChannelSink, ChannelSource};
     use crate::pipeline::Pipeline;
-    use crate::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
     use crate::service::config::{
-        HttpConfig, NodeConfig, ObservabilityConfig, RunMode as CfgRunMode,
-        ServiceMode as CfgServiceMode, StandaloneConfig,
+        HttpConfig, NodeConfig, ObservabilityConfig, ServiceConfig, ServiceMode, StandaloneConfig,
     };
+    use crate::service::flow::FlowPlan;
     use arrow_schema::{DataType, Field, Schema};
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -1710,7 +1696,7 @@ mod tests {
         Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]))
     }
 
-    fn config(run_mode: CfgRunMode) -> ServiceConfig {
+    fn config(run_mode: RunMode) -> ServiceConfig {
         ServiceConfig {
             heal: Default::default(),
             flow_control: Default::default(),
@@ -1719,7 +1705,7 @@ mod tests {
                 name: None,
                 data_dir: PathBuf::from("/tmp/saci-standalone-test"),
             },
-            mode: CfgServiceMode::Standalone {
+            mode: ServiceMode::Standalone {
                 config: StandaloneConfig { run_mode },
             },
             workflows: vec![crate::service::config::WorkflowSpec {
@@ -1753,60 +1739,25 @@ mod tests {
         tx.send(batch.clone()).await.unwrap();
         drop(tx);
 
-        let nodes = vec![
-            BuiltNode {
-                id: "in".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some("V"),
-                kind: BuiltNodeKind::Source(Box::new(source)),
-                downstream: vec![BuiltEdge {
-                    node: 1,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "out".to_string(),
-                name: None,
-                type_name: "ChannelSink".to_string(),
-                component: Some("V"),
-                kind: BuiltNodeKind::Sink(Box::new(sink)),
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ];
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("in", "V", source)
+            .sink("out", "V", sink)
+            .link("in", "out")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        let stats = run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
 
         assert_eq!(stats.rows_processed, 3);
         assert_eq!(stats.sink_batches_written, 1);
         assert_eq!(stats.nodes.len(), 2);
-        assert_eq!(stats.nodes[0].id, "in");
+        assert_eq!(&*stats.nodes[0].id, "in");
         assert_eq!(stats.nodes[0].rows, 3);
-        assert_eq!(stats.nodes[1].id, "out");
+        assert_eq!(&*stats.nodes[1].id, "out");
         assert_eq!(stats.nodes[1].rows, 3);
 
         let received = rx.recv().await.expect("sink forwarded the batch");
@@ -1833,56 +1784,18 @@ mod tests {
         let mut pipeline = Pipeline::new("p");
         pipeline.data_mut().register::<OrderComponent>().unwrap();
 
-        let nodes = vec![
-            BuiltNode {
-                id: "p".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(pipeline),
-                    kind: "native",
-                },
-                downstream: vec![BuiltEdge {
-                    node: 1,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "out".to_string(),
-                name: None,
-                type_name: "ChannelSink".to_string(),
-                component: Some("Order"),
-                kind: BuiltNodeKind::Sink(Box::new(sink)),
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ];
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .processor("p", pipeline)
+            .sink("out", "Order", sink)
+            .link("p", "out")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        let stats = run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds even though the processor starts from an empty dataset");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds even though the processor starts from an empty dataset");
 
         assert_eq!(stats.iterations, 1);
         assert_eq!(stats.iteration_errors, 0);
@@ -1947,82 +1860,25 @@ mod tests {
     ) {
         let (sink_a, rx_a) = ChannelSink::new(schema(), 8);
         let (sink_b, rx_b) = ChannelSink::new(schema(), 8);
-        let nodes = vec![
-            BuiltNode {
-                id: "p".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(RoutingRuntime { routes }),
-                    kind: "native",
-                },
-                downstream: vec![
-                    BuiltEdge {
-                        node: 1,
-                        branch: Some("a".to_string()),
-                    },
-                    BuiltEdge {
-                        node: 2,
-                        branch: Some("b".to_string()),
-                    },
-                ],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "out_a".to_string(),
-                name: None,
-                type_name: "ChannelSink".to_string(),
-                component: Some("V"),
-                kind: BuiltNodeKind::Sink(Box::new(sink_a)),
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "out_b".to_string(),
-                name: None,
-                type_name: "ChannelSink".to_string(),
-                component: Some("V"),
-                kind: BuiltNodeKind::Sink(Box::new(sink_b)),
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ];
-        (
-            BuiltWorkflow {
-                workflow_id: "w".to_string(),
-                workflow_name: None,
-                nodes,
-                registry: Arc::new(crate::service::registry::Registry::new()),
-                inspector: None,
-                dlq: None,
-            },
-            rx_a,
-            rx_b,
-        )
+        let built = BuiltWorkflow::builder("w")
+            .processor("p", RoutingRuntime { routes })
+            .sink("out_a", "V", sink_a)
+            .sink("out_b", "V", sink_b)
+            .link_branch("p", "out_a", "a")
+            .link_branch("p", "out_b", "b")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
+        (built, rx_a, rx_b)
     }
 
     #[tokio::test]
     async fn routing_processor_delivers_only_to_the_selected_branch() {
         let (built, mut rx_a, mut rx_b) = routing_built(Some(vec!["a".to_string()]));
-        run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
 
         let received = rx_a.recv().await.expect("sink a received the batch");
         assert_eq!(received.num_rows(), 3);
@@ -2035,15 +1891,10 @@ mod tests {
     #[tokio::test]
     async fn routing_processor_can_route_to_nowhere() {
         let (built, mut rx_a, mut rx_b) = routing_built(Some(Vec::new()));
-        run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
 
         assert!(
             rx_a.try_recv().is_err(),
@@ -2055,15 +1906,10 @@ mod tests {
     #[tokio::test]
     async fn routing_processor_without_routes_multicasts_to_every_edge() {
         let (built, mut rx_a, mut rx_b) = routing_built(None);
-        run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
 
         assert_eq!(rx_a.recv().await.expect("sink a").num_rows(), 3);
         assert_eq!(rx_b.recv().await.expect("sink b").num_rows(), 3);
@@ -2121,73 +1967,25 @@ mod tests {
         drop(tx_a);
         drop(tx_b);
 
-        let nodes = vec![
-            BuiltNode {
-                id: "a".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some("V"),
-                kind: BuiltNodeKind::Source(Box::new(source_a)),
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "b".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some("V"),
-                kind: BuiltNodeKind::Source(Box::new(source_b)),
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "p".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(RowCounter {
-                        rows_seen: Arc::clone(&rows_seen),
-                    }),
-                    kind: "native",
+        let built = BuiltWorkflow::builder("w")
+            .source("a", "V", source_a)
+            .source("b", "V", source_b)
+            .processor(
+                "p",
+                RowCounter {
+                    rows_seen: Arc::clone(&rows_seen),
                 },
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ];
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+            )
+            .link("a", "p")
+            .link("b", "p")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        let stats = run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
 
         assert_eq!(stats.rows_processed, 5);
         assert_eq!(
@@ -2234,76 +2032,25 @@ mod tests {
             }
         }
 
-        let nodes = vec![
-            BuiltNode {
-                id: "s".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some("V"),
-                kind: BuiltNodeKind::Source(Box::new(source)),
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "up".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(Producer),
-                    kind: "native",
+        let built = BuiltWorkflow::builder("w")
+            .source("s", "V", source)
+            .processor("up", Producer)
+            .processor(
+                "down",
+                RowCounter {
+                    rows_seen: Arc::clone(&rows_seen),
                 },
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "down".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(RowCounter {
-                        rows_seen: Arc::clone(&rows_seen),
-                    }),
-                    kind: "native",
-                },
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ];
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+            )
+            .link("s", "down")
+            .link("up", "down")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        let stats = run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
 
         assert_eq!(stats.rows_processed, 2);
         assert_eq!(
@@ -2377,75 +2124,34 @@ mod tests {
         drop(tx_a);
         drop(tx_b);
 
-        let nodes = vec![
-            BuiltNode {
-                id: "a".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some("Trade"),
-                kind: BuiltNodeKind::Source(Box::new(source_a)),
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "b".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some("Trade"),
-                kind: BuiltNodeKind::Source(Box::new(source_b)),
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "p".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(WatermarkReader {
-                        seen: Arc::clone(&watermark_seen),
-                    }),
-                    kind: "native",
+        let built = BuiltWorkflow::builder("w")
+            .source("a", "Trade", source_a)
+            .source("b", "Trade", source_b)
+            .processor(
+                "p",
+                WatermarkReader {
+                    seen: Arc::clone(&watermark_seen),
                 },
-                downstream: Vec::new(),
-                artifact: None,
-                window: Some(crate::service::config::WindowConfig {
+            )
+            .window(
+                "p",
+                crate::service::config::WindowConfig {
                     spec: WindowSpec::tumbling(30_000),
                     time_field: "timestamp_ms".to_string(),
                     key_fields: Vec::new(),
                     allowed_lateness_ms: 0,
-                }),
-                heal_recovered: None,
-            },
-        ];
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+                },
+            )
+            .link("a", "p")
+            .link("b", "p")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
 
         assert_eq!(
             *watermark_seen.lock().unwrap(),
@@ -2482,48 +2188,19 @@ mod tests {
             tx.send(batch).await.unwrap();
             drop(tx);
 
-            let built = BuiltWorkflow {
-                workflow_id: "w".to_string(),
-                workflow_name: None,
-                nodes: vec![
-                    BuiltNode {
-                        id: source_id.to_string(),
-                        name: None,
-                        type_name: "ChannelSource".to_string(),
-                        component: Some("V"),
-                        kind: BuiltNodeKind::Source(Box::new(source)),
-                        downstream: vec![BuiltEdge {
-                            node: 1,
-                            branch: None,
-                        }],
-                        artifact: None,
-                        #[cfg(feature = "windows")]
-                        window: None,
-                        heal_recovered: None,
-                    },
-                    BuiltNode {
-                        id: "out".to_string(),
-                        name: None,
-                        type_name: "ChannelSink".to_string(),
-                        component: Some("V"),
-                        kind: BuiltNodeKind::Sink(Box::new(sink)),
-                        downstream: Vec::new(),
-                        artifact: None,
-                        #[cfg(feature = "windows")]
-                        window: None,
-                        heal_recovered: None,
-                    },
-                ],
-                registry: Arc::new(crate::service::registry::Registry::new()),
-                inspector: None,
-                dlq: None,
-            };
-
-            let mut cfg = config(CfgRunMode::Continuous);
+            let mut cfg = config(RunMode::Continuous);
             cfg.flow_control = crate::service::config::FlowControlConfig {
                 enabled: Some(enabled),
                 ..Default::default()
             };
+            let built = BuiltWorkflow::builder("w")
+                .source(source_id, "V", source)
+                .sink("out", "V", sink)
+                .link(source_id, "out")
+                .run_mode(RunMode::Continuous)
+                .flow(FlowPlan::from_config(&cfg))
+                .build()
+                .unwrap();
 
             // `Continuous` never exits on its own: one drained iteration, then
             // cancel out of the pacing sleep.
@@ -2535,10 +2212,7 @@ mod tests {
                     cancel.cancel();
                 }
             };
-            let (stats, ()) = tokio::join!(
-                run_standalone(built, &cfg, cancel.clone(), None, None),
-                stopper
-            );
+            let (stats, ()) = tokio::join!(built.run(cancel.clone()), stopper);
             let stats = stats.expect("run succeeds");
             assert_eq!(stats.rows_processed, 3, "every row must still flow");
         }
@@ -2615,42 +2289,13 @@ mod tests {
         tx.send(batch).await.unwrap();
         drop(tx);
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                BuiltNode {
-                    id: "quiet-src".to_string(),
-                    name: None,
-                    type_name: "ChannelSource".to_string(),
-                    component: Some("V"),
-                    kind: BuiltNodeKind::Source(Box::new(source)),
-                    downstream: vec![BuiltEdge {
-                        node: 1,
-                        branch: None,
-                    }],
-                    artifact: None,
-                    #[cfg(feature = "windows")]
-                    window: None,
-                    heal_recovered: None,
-                },
-                BuiltNode {
-                    id: "out".to_string(),
-                    name: None,
-                    type_name: "ChannelSink".to_string(),
-                    component: Some("V"),
-                    kind: BuiltNodeKind::Sink(Box::new(sink)),
-                    downstream: Vec::new(),
-                    artifact: None,
-                    #[cfg(feature = "windows")]
-                    window: None,
-                    heal_recovered: None,
-                },
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("quiet-src", "V", source)
+            .sink("out", "V", sink)
+            .link("quiet-src", "out")
+            .run_mode(RunMode::Continuous)
+            .build()
+            .unwrap();
 
         // `Continuous` never exits on its own: one drained iteration, then
         // cancel out of the pacing sleep.
@@ -2662,11 +2307,7 @@ mod tests {
                 cancel.cancel();
             }
         };
-        let cfg = config(CfgRunMode::Continuous);
-        let (stats, ()) = tokio::join!(
-            run_standalone(built, &cfg, cancel.clone(), None, None),
-            stopper
-        );
+        let (stats, ()) = tokio::join!(built.run(cancel.clone()), stopper);
         stats.expect("run succeeds");
 
         let captured = logs.read_recent();
@@ -2709,7 +2350,11 @@ mod tests {
     /// [`reaches_windowed_node`](crate::service::windowing::reaches_windowed_node),
     /// which is what both flow-target tests below turn on.
     #[cfg(all(feature = "metrics", feature = "windows"))]
-    fn windowed_service(source_id: &str, source: ChannelSource) -> BuiltWorkflow {
+    fn windowed_service(
+        source_id: &str,
+        source: ChannelSource,
+        run_mode: RunMode,
+    ) -> BuiltWorkflow {
         use crate::window::WindowSpec;
 
         struct PassThrough;
@@ -2732,48 +2377,22 @@ mod tests {
             }
         }
 
-        BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                BuiltNode {
-                    id: source_id.to_string(),
-                    name: None,
-                    type_name: "ChannelSource".to_string(),
-                    component: Some("Trade"),
-                    kind: BuiltNodeKind::Source(Box::new(source)),
-                    downstream: vec![BuiltEdge {
-                        node: 1,
-                        branch: None,
-                    }],
-                    artifact: None,
-                    window: None,
-                    heal_recovered: None,
+        BuiltWorkflow::builder("w")
+            .source(source_id, "Trade", source)
+            .processor("w-proc", PassThrough)
+            .window(
+                "w-proc",
+                crate::service::config::WindowConfig {
+                    spec: WindowSpec::tumbling(30_000),
+                    time_field: "timestamp_ms".to_string(),
+                    key_fields: Vec::new(),
+                    allowed_lateness_ms: 0,
                 },
-                BuiltNode {
-                    id: "w-proc".to_string(),
-                    name: None,
-                    type_name: "native".to_string(),
-                    component: None,
-                    kind: BuiltNodeKind::Processor {
-                        runtime: Box::new(PassThrough),
-                        kind: "native",
-                    },
-                    downstream: Vec::new(),
-                    artifact: None,
-                    window: Some(crate::service::config::WindowConfig {
-                        spec: WindowSpec::tumbling(30_000),
-                        time_field: "timestamp_ms".to_string(),
-                        key_fields: Vec::new(),
-                        allowed_lateness_ms: 0,
-                    }),
-                    heal_recovered: None,
-                },
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        }
+            )
+            .link(source_id, "w-proc")
+            .run_mode(run_mode)
+            .build()
+            .unwrap()
     }
 
     #[cfg(all(feature = "metrics", feature = "windows"))]
@@ -2810,15 +2429,10 @@ mod tests {
 
         // EOF on the second poll ends the rotation, so the run needs no
         // cancellation.
-        let stats = run_standalone(
-            windowed_service("stream-windowed-src", source),
-            &config(CfgRunMode::Stream),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("run succeeds");
+        let stats = windowed_service("stream-windowed-src", source, RunMode::Stream)
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
         assert_eq!(stats.rows_processed, 1, "the row must still flow");
 
         let text = prometheus::TextEncoder::new()
@@ -2854,15 +2468,9 @@ mod tests {
                 cancel.cancel();
             }
         };
-        let cfg = config(CfgRunMode::Continuous);
         let (stats, ()) = tokio::join!(
-            run_standalone(
-                windowed_service("continuous-windowed-src", source),
-                &cfg,
-                cancel.clone(),
-                None,
-                None,
-            ),
+            windowed_service("continuous-windowed-src", source, RunMode::Continuous)
+                .run(cancel.clone()),
             stopper
         );
         let stats = stats.expect("run succeeds");
@@ -2898,29 +2506,8 @@ mod tests {
         }
     }
 
-    /// One source node feeding node index `sink_index`, plus a `ChannelSink`
-    /// at that index, for the two attribution tests below.
     #[cfg(feature = "metrics")]
-    fn node(id: &str, kind: BuiltNodeKind, downstream: Vec<usize>) -> BuiltNode {
-        BuiltNode {
-            id: id.to_string(),
-            name: None,
-            type_name: "test".to_string(),
-            component: Some("V"),
-            kind,
-            downstream: downstream
-                .into_iter()
-                .map(|node| BuiltEdge { node, branch: None })
-                .collect(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        }
-    }
-
-    #[cfg(feature = "metrics")]
-    async fn run_until_cancelled(built: BuiltWorkflow, cfg: &ServiceConfig, millis: u64) {
+    async fn run_until_cancelled(built: BuiltWorkflow, millis: u64) {
         let cancel = CancellationToken::new();
         let stopper = {
             let cancel = cancel.clone();
@@ -2929,7 +2516,7 @@ mod tests {
                 cancel.cancel();
             }
         };
-        let (stats, ()) = tokio::join!(run_standalone(built, cfg, cancel, None, None), stopper);
+        let (stats, ()) = tokio::join!(built.run(cancel), stopper);
         stats.expect("the run exits cleanly even though a source is failing");
     }
 
@@ -3059,28 +2646,21 @@ mod tests {
         tx.send(batch).await.unwrap();
         drop(tx);
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "peers-failing-src",
-                    BuiltNodeKind::Source(Box::new(AlwaysFailingSource { schema: schema() })),
-                    vec![2],
-                ),
-                node(
-                    "peers-healthy-src",
-                    BuiltNodeKind::Source(Box::new(healthy)),
-                    vec![2],
-                ),
-                node("peers-out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source(
+                "peers-failing-src",
+                "V",
+                AlwaysFailingSource { schema: schema() },
+            )
+            .source("peers-healthy-src", "V", healthy)
+            .sink("peers-out", "V", sink)
+            .link("peers-failing-src", "peers-out")
+            .link("peers-healthy-src", "peers-out")
+            .run_mode(RunMode::Continuous)
+            .build()
+            .unwrap();
 
-        run_until_cancelled(built, &config(CfgRunMode::Continuous), 250).await;
+        run_until_cancelled(built, 250).await;
 
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&crate::metrics::test_registry().gather())
@@ -3102,32 +2682,29 @@ mod tests {
     #[tokio::test]
     async fn a_guard_trip_at_min_rows_is_still_counted_as_a_back_off() {
         let (sink, _rx) = ChannelSink::new(schema(), 8);
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "floor-guard-src",
-                    BuiltNodeKind::Source(Box::new(AlwaysFailingSource { schema: schema() })),
-                    vec![1],
-                ),
-                node("floor-out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
-
         // One admissible size, which is therefore also the floor: every guard
         // trip has nowhere left to divide to.
-        let mut cfg = config(CfgRunMode::Continuous);
+        let mut cfg = config(RunMode::Continuous);
         cfg.flow_control = crate::service::config::FlowControlConfig {
             min_rows: Some(4_096),
             max_rows: Some(4_096),
             ..Default::default()
         };
 
-        run_until_cancelled(built, &cfg, 250).await;
+        let built = BuiltWorkflow::builder("w")
+            .source(
+                "floor-guard-src",
+                "V",
+                AlwaysFailingSource { schema: schema() },
+            )
+            .sink("floor-out", "V", sink)
+            .link("floor-guard-src", "floor-out")
+            .run_mode(RunMode::Continuous)
+            .flow(FlowPlan::from_config(&cfg))
+            .build()
+            .unwrap();
+
+        run_until_cancelled(built, 250).await;
 
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&crate::metrics::test_registry().gather())
@@ -3149,35 +2726,18 @@ mod tests {
         const ROWS: i32 = 5_000;
 
         let (sink, delivered) = ProbeSink::new(SinkBehaviour::Quiet);
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "one-shot-src",
-                    BuiltNodeKind::Source(Box::new(one_big_arrival(ROWS).await)),
-                    vec![1],
-                ),
-                node(
-                    "one-shot-out",
-                    BuiltNodeKind::Sink(Box::new(sink)),
-                    Vec::new(),
-                ),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("one-shot-src", "V", one_big_arrival(ROWS).await)
+            .sink("one-shot-out", "V", sink)
+            .link("one-shot-src", "one-shot-out")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        let stats = run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("the one-shot run succeeds");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("the one-shot run succeeds");
 
         assert_eq!(
             stats.rows_processed, ROWS as u64,
@@ -3219,28 +2779,17 @@ mod tests {
         drop(tx_right);
 
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::Failing);
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "chain-left-src",
-                    BuiltNodeKind::Source(Box::new(left)),
-                    vec![2],
-                ),
-                node(
-                    "chain-right-src",
-                    BuiltNodeKind::Source(Box::new(right)),
-                    vec![2],
-                ),
-                node("chain-out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("chain-left-src", "V", left)
+            .source("chain-right-src", "V", right)
+            .sink("chain-out", "V", sink)
+            .link("chain-left-src", "chain-out")
+            .link("chain-right-src", "chain-out")
+            .run_mode(RunMode::Continuous)
+            .build()
+            .unwrap();
 
-        run_until_cancelled(built, &config(CfgRunMode::Continuous), 250).await;
+        run_until_cancelled(built, 250).await;
 
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&crate::metrics::test_registry().gather())
@@ -3261,31 +2810,11 @@ mod tests {
     #[tokio::test]
     async fn a_growing_sink_backlog_backs_the_source_off() {
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::GrowingBacklog);
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "backlog-src",
-                    BuiltNodeKind::Source(Box::new(one_big_arrival(4_096).await)),
-                    vec![1],
-                ),
-                node(
-                    "backlog-out",
-                    BuiltNodeKind::Sink(Box::new(sink)),
-                    Vec::new(),
-                ),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
-
         // A credit well below the arrival, so one arrival is many passes and
         // the backlog has consecutive passes to grow on. The source never
         // errors and no chunk comes near the byte ceiling, so a back-off here
         // can only be the backlog trend.
-        let mut cfg = config(CfgRunMode::Continuous);
+        let mut cfg = config(RunMode::Continuous);
         cfg.flow_control = crate::service::config::FlowControlConfig {
             min_rows: Some(64),
             max_rows: Some(8_192),
@@ -3293,7 +2822,16 @@ mod tests {
             ..Default::default()
         };
 
-        run_until_cancelled(built, &cfg, 250).await;
+        let built = BuiltWorkflow::builder("w")
+            .source("backlog-src", "V", one_big_arrival(4_096).await)
+            .sink("backlog-out", "V", sink)
+            .link("backlog-src", "backlog-out")
+            .run_mode(RunMode::Continuous)
+            .flow(FlowPlan::from_config(&cfg))
+            .build()
+            .unwrap();
+
+        run_until_cancelled(built, 250).await;
 
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&crate::metrics::test_registry().gather())
@@ -3323,27 +2861,7 @@ mod tests {
     async fn a_backlog_back_off_is_recorded_with_its_rows_and_its_cause() {
         let inspector = Inspector::new(&crate::inspector::InspectorConfig::default());
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::GrowingBacklog);
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "recorded-backlog-src",
-                    BuiltNodeKind::Source(Box::new(one_big_arrival(4_096).await)),
-                    vec![1],
-                ),
-                node(
-                    "recorded-backlog-out",
-                    BuiltNodeKind::Sink(Box::new(sink)),
-                    Vec::new(),
-                ),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: Some(inspector.clone()),
-            dlq: None,
-        };
-
-        let mut cfg = config(CfgRunMode::Continuous);
+        let mut cfg = config(RunMode::Continuous);
         cfg.flow_control = crate::service::config::FlowControlConfig {
             min_rows: Some(64),
             max_rows: Some(8_192),
@@ -3351,7 +2869,17 @@ mod tests {
             ..Default::default()
         };
 
-        run_until_cancelled(built, &cfg, 250).await;
+        let built = BuiltWorkflow::builder("w")
+            .source("recorded-backlog-src", "V", one_big_arrival(4_096).await)
+            .sink("recorded-backlog-out", "V", sink)
+            .link("recorded-backlog-src", "recorded-backlog-out")
+            .run_mode(RunMode::Continuous)
+            .flow(FlowPlan::from_config(&cfg))
+            .inspector(inspector.clone())
+            .build()
+            .unwrap();
+
+        run_until_cancelled(built, 250).await;
 
         let decisions = decisions_for(&inspector, "recorded-backlog-src");
         let backed_off = decisions
@@ -3577,27 +3105,7 @@ mod tests {
     #[tokio::test]
     async fn a_chunk_that_really_exceeds_the_byte_ceiling_backs_the_source_off() {
         let (sink, _delivered) = ProbeSink::new(SinkBehaviour::Quiet);
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node(
-                    "wide-chunk-src",
-                    BuiltNodeKind::Source(Box::new(one_big_arrival(4_096).await)),
-                    vec![1],
-                ),
-                node(
-                    "wide-chunk-out",
-                    BuiltNodeKind::Sink(Box::new(sink)),
-                    Vec::new(),
-                ),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
-
-        let mut cfg = config(CfgRunMode::Continuous);
+        let mut cfg = config(RunMode::Continuous);
         cfg.flow_control = crate::service::config::FlowControlConfig {
             min_rows: Some(64),
             max_rows: Some(8_192),
@@ -3606,7 +3114,16 @@ mod tests {
             ..Default::default()
         };
 
-        run_until_cancelled(built, &cfg, 250).await;
+        let built = BuiltWorkflow::builder("w")
+            .source("wide-chunk-src", "V", one_big_arrival(4_096).await)
+            .sink("wide-chunk-out", "V", sink)
+            .link("wide-chunk-src", "wide-chunk-out")
+            .run_mode(RunMode::Continuous)
+            .flow(FlowPlan::from_config(&cfg))
+            .build()
+            .unwrap();
+
+        run_until_cancelled(built, 250).await;
 
         let text = prometheus::TextEncoder::new()
             .encode_to_string(&crate::metrics::test_registry().gather())
@@ -3668,26 +3185,18 @@ mod tests {
             drop(tx);
 
             let (sink, delivered) = ProbeSink::new(behaviour);
-            let built = BuiltWorkflow {
-                workflow_id: "dlqwf".to_string(),
-                workflow_name: None,
-                nodes: vec![
-                    node("dlq-src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                    node("dlq-out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-                ],
-                registry: Arc::new(Registry::new()),
-                inspector: None,
-                dlq: Some(queue),
-            };
-            let stats = run_standalone(
-                built,
-                &config(CfgRunMode::OneShot),
-                CancellationToken::new(),
-                None,
-                None,
-            )
-            .await
-            .expect("the run exits cleanly even with a failing sink");
+            let built = BuiltWorkflow::builder("dlqwf")
+                .source("dlq-src", "V", source)
+                .sink("dlq-out", "V", sink)
+                .link("dlq-src", "dlq-out")
+                .run_mode(RunMode::OneShot)
+                .dlq(queue)
+                .build()
+                .unwrap();
+            let stats = built
+                .run(CancellationToken::new())
+                .await
+                .expect("the run exits cleanly even with a failing sink");
             (stats, delivered)
         }
 
@@ -3876,27 +3385,18 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        let stats = run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("a healthy one-shot run exits cleanly");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("a healthy one-shot run exits cleanly");
 
         assert_eq!(stats.rows_processed, 3, "the one arrival drained");
         assert_eq!(
@@ -3921,21 +3421,18 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::Continuous)
+            .build()
+            .unwrap();
 
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let stats = run_standalone(built, &config(CfgRunMode::Continuous), cancel, None, None)
+        let stats = built
+            .run(cancel)
             .await
             .expect("a pre-cancelled run exits cleanly");
 
@@ -3965,17 +3462,13 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::Interval { interval_ms: 5_000 })
+            .build()
+            .unwrap();
 
         let cancel = CancellationToken::new();
         let stopper = {
@@ -3989,8 +3482,7 @@ mod tests {
                 cancel.cancel();
             }
         };
-        let cfg = config(CfgRunMode::Interval { interval_ms: 5_000 });
-        let (stats, ()) = tokio::join!(run_standalone(built, &cfg, cancel, None, None), stopper);
+        let (stats, ()) = tokio::join!(built.run(cancel), stopper);
         let stats = stats.expect("cancelling mid-interval still exits cleanly");
 
         assert_eq!(
@@ -4020,17 +3512,13 @@ mod tests {
         let (source, source_finishes) = one_item_source(Arc::clone(&log)).await;
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::Continuous)
+            .build()
+            .unwrap();
 
         let cancel = CancellationToken::new();
         let stopper = {
@@ -4044,8 +3532,7 @@ mod tests {
                 cancel.cancel();
             }
         };
-        let cfg = config(CfgRunMode::Continuous);
-        let (stats, ()) = tokio::join!(run_standalone(built, &cfg, cancel, None, None), stopper);
+        let (stats, ()) = tokio::join!(built.run(cancel), stopper);
         let stats = stats.expect("cancelling mid-pause still exits cleanly");
 
         assert_eq!(
@@ -4075,34 +3562,25 @@ mod tests {
         let (source, source_finishes) = LoggingSource::failing(chan_source, Arc::clone(&log));
         let (sink, _sink_finishes) = LoggingSink::new(Arc::clone(&log));
 
-        let built = BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes: vec![
-                node("src", BuiltNodeKind::Source(Box::new(source)), vec![1]),
-                node("out", BuiltNodeKind::Sink(Box::new(sink)), Vec::new()),
-            ],
-            registry: Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        };
+        let built = BuiltWorkflow::builder("w")
+            .source("src", "V", source)
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::OneShot)
+            .build()
+            .unwrap();
 
-        let stats = run_standalone(
-            built,
-            &config(CfgRunMode::OneShot),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("a source finish error does not fail the run");
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("a source finish error does not fail the run");
 
         assert_eq!(source_finishes.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(stats.iteration_errors, 1);
         let src_stats = stats
             .nodes
             .iter()
-            .find(|n| n.id == "src")
+            .find(|n| &*n.id == "src")
             .expect("the source node has stats");
         assert_eq!(src_stats.errors, 1);
     }

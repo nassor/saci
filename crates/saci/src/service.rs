@@ -91,6 +91,8 @@ pub mod registry;
 #[cfg(feature = "service")]
 pub mod sampling;
 #[cfg(feature = "service")]
+mod serve;
+#[cfg(feature = "service")]
 pub mod shutdown;
 #[cfg(feature = "service")]
 pub mod span_metrics;
@@ -108,7 +110,9 @@ pub mod windowing;
 #[cfg(feature = "service")]
 pub use crate::connector::{ChannelBridge, ConnectorContext};
 #[cfg(feature = "service")]
-pub use builder::{BuiltNode, BuiltNodeKind, BuiltWorkflow, ServiceBuilder};
+pub use builder::{
+    BuiltNode, BuiltNodeKind, BuiltWorkflow, BuiltWorkflowBuilder, RunOptions, ServiceBuilder,
+};
 #[cfg(feature = "service-cluster")]
 pub use cluster::{ClusterStats, run_cluster};
 #[cfg(feature = "service")]
@@ -145,13 +149,13 @@ pub use redb_state::{RedbStateClient, SourceCursorMeta};
 #[cfg(feature = "service")]
 pub use registry::{Codec, CodecFactory, CodecRegistry, Registry, SinkFactory, SourceFactory};
 #[cfg(feature = "service")]
+pub use serve::{ServeExit, ServeOptions, serve};
+#[cfg(feature = "service")]
 pub use shutdown::ShutdownCoordinator;
 #[cfg(feature = "service")]
 pub use span_metrics::SpanMetricsLayer;
 #[cfg(feature = "service")]
-pub use standalone::{WorkflowStats, run_standalone};
-#[cfg(feature = "service")]
-pub use stream::run_stream;
+pub use standalone::WorkflowStats;
 #[cfg(feature = "service")]
 pub use topology::build_topology;
 #[cfg(feature = "service")]

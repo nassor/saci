@@ -107,6 +107,23 @@
 - Connectors: the file, tcp, udp, peer and channel factories deserialize a config struct and
   refuse an unknown key; a `0` buffer or size is a configuration error instead of being clamped
   (a channel `buffer 0` no longer panics). The HTTP factory refuses a key its role does not read.
+- `service`: `BuiltService`, `ServiceFactory`, `StandaloneStats` and `NodeRunStats` are
+  `BuiltWorkflow`, `WorkflowFactory`, `WorkflowStats` and `NodeStats`;
+  `ServiceBuilder::build_all` is `build`. `ServiceBuilder::new()` registers every compiled-in
+  connector and codec (`register_builtin_factories` is no longer public) and
+  `ServiceBuilder::empty()` registers none. `with_runtime`, `with_inspector`, `with_dlq_registry`,
+  `with_channel_bridge` and `with_wasm_engine` are `runtime` (taking `impl PipelineRuntime`),
+  `inspector`, `dlq_registry`, `channels` and `wasm_engine`; `register_source_mut` and
+  `register_sink_mut` are removed.
+- `PipelineRuntime::run_batch(data, prior)` replaces `run_on`, `run_on_with_state` and
+  `run_on_with_state_and_routes`. A native `Pipeline` handed to `ServiceBuilder::runtime`
+  carries its declared state and honours a `RouteDecision`, as a wasm or plugin processor does.
+- `service`: `ServiceConfig::from_kdl(text)` and `FromStr` parse a config held in memory.
+- `wasm-host`: `WasmEngine::new()` returns `SaciResult`; `WasmPipelineRuntime::from_bytes` takes
+  its deadline as a `Duration` and `PipelineRuntimeLoader::with_epoch_deadline(ticks)` is
+  `with_timeout(Duration)`.
+- `service`: the `/status` body loses its `cluster` field; `ClusterProbe`,
+  `ClusterProbeSnapshot`, `ClusterStatusBody` and `MemberEntry` are removed.
 
 ### Changed
 

@@ -35,7 +35,7 @@ use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::inspector::{Inspector, InspectorConfig};
 use saci::inspector_wire::{Snapshot, Topology};
 use saci::prelude::*;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind};
+use saci::service::BuiltWorkflow;
 use saci::service::config::ServiceConfig;
 use saci::service::http::{ServiceModeLabel, ServiceState};
 use saci::service::{build_router, build_topology};
@@ -197,68 +197,21 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     let topology_pipeline = Pipeline::new("inspector-http")
         .component::<Reading>()
         .system(Scale);
-    let nodes = vec![
-        BuiltNode {
-            id: "orders-eu".to_string(),
-            name: None,
-            type_name: "NatsSource".to_string(),
-            component: Some("Reading"),
-            kind: BuiltNodeKind::Source(Box::new(src_eu)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "orders-us".to_string(),
-            name: None,
-            type_name: "NatsSource".to_string(),
-            component: Some("Reading"),
-            kind: BuiltNodeKind::Source(Box::new(src_us)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "scale".to_string(),
-            name: Some("Scale".to_string()),
-            type_name: "native".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(topology_pipeline),
-                kind: "native",
-            },
-            downstream: vec![BuiltEdge {
-                node: 3,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "settlements".to_string(),
-            name: None,
-            type_name: "PostgresSink".to_string(),
-            component: Some("Reading"),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-    ];
+    let mut built = BuiltWorkflow::builder("inspector-http")
+        .source("orders-eu", "Reading", src_eu)
+        .source("orders-us", "Reading", src_us)
+        .processor("scale", topology_pipeline)
+        .sink("settlements", "Reading", sink)
+        .link("orders-eu", "scale")
+        .link("orders-us", "scale")
+        .link("scale", "settlements")
+        .build()
+        .expect("build workflow");
+    built.nodes[0].type_name = "NatsSource".to_string();
+    built.nodes[1].type_name = "NatsSource".to_string();
+    built.nodes[2].name = Some("Scale".to_string());
+    built.nodes[3].type_name = "PostgresSink".to_string();
+    let nodes = built.nodes;
 
     inspector.set_topology(build_topology(&config, &[nodes.as_slice()], 1));
 

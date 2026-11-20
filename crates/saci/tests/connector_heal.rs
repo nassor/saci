@@ -28,7 +28,6 @@ use saci::io::Source;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::registry::SourceFactory;
-use saci::service::run_standalone;
 
 const COMPONENT: &str = "Tick";
 
@@ -196,11 +195,8 @@ async fn a_tcp_sink_whose_peer_disappears_is_rebuilt_and_resumes_writing() {
 
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
-    let runner_config = config.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_standalone(built, &runner_config, runner_cancel, None, None).await
-    });
+    let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
     let stats = local
         .run_until(async move {

@@ -41,7 +41,6 @@ use saci::pipeline::Pipeline;
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
 use saci::service::registry::{SinkFactory, SourceFactory};
-use saci::service::run_standalone;
 
 const COMPONENT: &str = "Tick";
 
@@ -183,11 +182,8 @@ async fn datagrams_pushed_into_the_udp_source_come_back_out_of_the_udp_sink() {
 
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
-    let runner_config = config.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_standalone(built, &runner_config, runner_cancel, None, None).await
-    });
+    let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
     let stats = local
         .run_until(async move {
@@ -467,11 +463,8 @@ async fn a_udp_sink_whose_peer_stops_echoing_is_rebuilt_and_resumes_once_it_echo
 
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
-    let runner_config = config.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_standalone(built, &runner_config, runner_cancel, None, None).await
-    });
+    let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
     let stats = local
         .run_until(async move {

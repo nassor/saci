@@ -40,7 +40,7 @@ use saci::service::config::ServiceConfig;
 use saci::service::http::{ServiceModeLabel, ServiceState, build_router};
 use saci::service::lifecycle::{LifecycleRegistryBuilder, PauseHandle, RunControl};
 use saci::service::standalone::WorkflowStats;
-use saci::service::{run_standalone, run_supervised};
+use saci::service::{RunOptions, run_supervised};
 
 /// How long a state poll waits before it gives up and fails the test.
 const SETTLE_BUDGET: Duration = Duration::from_secs(10);
@@ -327,7 +327,6 @@ impl Harness {
                 let _ = run_supervised(
                     service,
                     &config.workflows[index],
-                    &config,
                     cancel,
                     Some(live),
                     None,
@@ -455,14 +454,9 @@ async fn pause_parks_the_runner_and_resume_releases_it() {
                 let live = live.clone();
                 let cancel = cancel.clone();
                 tokio::task::spawn_local(async move {
-                    run_standalone(
-                        built,
-                        &config,
-                        RunControl::new(cancel, gate),
-                        Some(live),
-                        None,
-                    )
-                    .await
+                    built
+                        .run(RunOptions::new(RunControl::new(cancel, gate)).live_stats(live))
+                        .await
                 })
             };
 

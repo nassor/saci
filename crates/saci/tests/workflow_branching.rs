@@ -1,6 +1,6 @@
 //! Conditional fan-out routing end to end: a real `saci-processor-smoketest`
 //! WebAssembly component returning a `RouteDecision` from its `route` config
-//! key, driven through the real `run_standalone` / `run_stream` runners with
+//! key, driven through the real `BuiltWorkflow::run` runner with
 //! real `ChannelSink`s, asserting branch-selected delivery, multi-branch fan,
 //! legacy multicast and drop.
 //!
@@ -25,15 +25,12 @@ use std::sync::Arc;
 use arrow_array::{Array, RecordBatch, UInt64Array};
 use saci::component::Component as _;
 use saci::connector::channel::{ChannelSink, ChannelSource};
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
+use saci::service::builder::BuiltWorkflow;
 use saci::service::config::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WorkflowSpec,
 };
 use saci::service::flow::FlowPlan;
-use saci::service::registry::Registry;
-use saci::service::standalone::run_standalone;
-use saci::service::stream::run_stream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -77,6 +74,8 @@ fn config(run_mode: RunMode) -> ServiceConfig {
 /// (branch `b`), in topological order.
 fn branching_built(
     config_map: HashMap<String, String>,
+    run_mode: RunMode,
+    flow: Option<FlowPlan>,
 ) -> (
     BuiltWorkflow,
     mpsc::Sender<RecordBatch>,
@@ -86,84 +85,24 @@ fn branching_built(
     let (source, tx) = ChannelSource::new(Ping::schema(), 8);
     let (sink_a, rx_a) = ChannelSink::new(Ping::schema(), 8);
     let (sink_b, rx_b) = ChannelSink::new(Ping::schema(), 8);
-    let nodes = vec![
-        BuiltNode {
-            id: "in".to_string(),
-            name: None,
-            type_name: "ChannelSource".to_string(),
-            component: Some("Ping"),
-            kind: BuiltNodeKind::Source(Box::new(source)),
-            downstream: vec![BuiltEdge {
-                node: 1,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "router".to_string(),
-            name: None,
-            type_name: "wasm".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(load_runtime(config_map)),
-                kind: "wasm",
-            },
-            downstream: vec![
-                BuiltEdge {
-                    node: 2,
-                    branch: Some("a".to_string()),
-                },
-                BuiltEdge {
-                    node: 3,
-                    branch: Some("b".to_string()),
-                },
-            ],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "out_a".to_string(),
-            name: None,
-            type_name: "ChannelSink".to_string(),
-            component: Some("Ping"),
-            kind: BuiltNodeKind::Sink(Box::new(sink_a)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "out_b".to_string(),
-            name: None,
-            type_name: "ChannelSink".to_string(),
-            component: Some("Ping"),
-            kind: BuiltNodeKind::Sink(Box::new(sink_b)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-    ];
-    (
-        BuiltWorkflow {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(Registry::new()),
-            inspector: None,
-            dlq: None,
-        },
-        tx,
-        rx_a,
-        rx_b,
-    )
+    let mut builder = BuiltWorkflow::builder("w")
+        .source("in", "Ping", source)
+        .processor("router", load_runtime(config_map))
+        .sink("out_a", "Ping", sink_a)
+        .sink("out_b", "Ping", sink_b)
+        .link("in", "router")
+        .link_branch("router", "out_a", "a")
+        .link_branch("router", "out_b", "b")
+        .run_mode(run_mode);
+    if let Some(flow) = flow {
+        builder = builder.flow(flow);
+    }
+    let mut built = builder.build().expect("build workflow");
+    built.nodes[0].type_name = "ChannelSource".to_string();
+    built.nodes[1].type_name = "wasm".to_string();
+    built.nodes[2].type_name = "ChannelSink".to_string();
+    built.nodes[3].type_name = "ChannelSink".to_string();
+    (built, tx, rx_a, rx_b)
 }
 
 fn three_row_batch() -> RecordBatch {
@@ -176,20 +115,18 @@ fn three_row_batch() -> RecordBatch {
 
 #[tokio::test]
 async fn routing_processor_delivers_only_to_the_selected_branch() {
-    let (built, tx, mut rx_a, mut rx_b) =
-        branching_built(HashMap::from([("route".to_string(), "a".to_string())]));
+    let (built, tx, mut rx_a, mut rx_b) = branching_built(
+        HashMap::from([("route".to_string(), "a".to_string())]),
+        RunMode::OneShot,
+        None,
+    );
     tx.send(three_row_batch()).await.expect("send batch");
     drop(tx);
 
-    run_standalone(
-        built,
-        &config(RunMode::OneShot),
-        CancellationToken::new(),
-        None,
-        None,
-    )
-    .await
-    .expect("run succeeds");
+    built
+        .run(CancellationToken::new())
+        .await
+        .expect("run succeeds");
 
     assert_eq!(
         rx_a.recv()
@@ -206,20 +143,18 @@ async fn routing_processor_delivers_only_to_the_selected_branch() {
 
 #[tokio::test]
 async fn routing_processor_can_fan_to_several_branches() {
-    let (built, tx, mut rx_a, mut rx_b) =
-        branching_built(HashMap::from([("route".to_string(), "a,b".to_string())]));
+    let (built, tx, mut rx_a, mut rx_b) = branching_built(
+        HashMap::from([("route".to_string(), "a,b".to_string())]),
+        RunMode::OneShot,
+        None,
+    );
     tx.send(three_row_batch()).await.expect("send batch");
     drop(tx);
 
-    run_standalone(
-        built,
-        &config(RunMode::OneShot),
-        CancellationToken::new(),
-        None,
-        None,
-    )
-    .await
-    .expect("run succeeds");
+    built
+        .run(CancellationToken::new())
+        .await
+        .expect("run succeeds");
 
     assert_eq!(rx_a.recv().await.expect("sink a").num_rows(), 3);
     assert_eq!(rx_b.recv().await.expect("sink b").num_rows(), 3);
@@ -227,19 +162,14 @@ async fn routing_processor_can_fan_to_several_branches() {
 
 #[tokio::test]
 async fn legacy_processor_without_routes_multicasts_to_every_labelled_edge() {
-    let (built, tx, mut rx_a, mut rx_b) = branching_built(HashMap::new());
+    let (built, tx, mut rx_a, mut rx_b) = branching_built(HashMap::new(), RunMode::OneShot, None);
     tx.send(three_row_batch()).await.expect("send batch");
     drop(tx);
 
-    run_standalone(
-        built,
-        &config(RunMode::OneShot),
-        CancellationToken::new(),
-        None,
-        None,
-    )
-    .await
-    .expect("run succeeds");
+    built
+        .run(CancellationToken::new())
+        .await
+        .expect("run succeeds");
 
     assert_eq!(rx_a.recv().await.expect("sink a").num_rows(), 3);
     assert_eq!(rx_b.recv().await.expect("sink b").num_rows(), 3);
@@ -247,20 +177,18 @@ async fn legacy_processor_without_routes_multicasts_to_every_labelled_edge() {
 
 #[tokio::test]
 async fn stream_routing_processor_delivers_to_the_selected_branch() {
-    let (built, tx, mut rx_a, mut rx_b) =
-        branching_built(HashMap::from([("route".to_string(), "a".to_string())]));
+    let (built, tx, mut rx_a, mut rx_b) = branching_built(
+        HashMap::from([("route".to_string(), "a".to_string())]),
+        RunMode::Stream,
+        None,
+    );
     tx.send(three_row_batch()).await.expect("send item");
     drop(tx); // EOF
 
-    run_stream(
-        built,
-        CancellationToken::new(),
-        None,
-        None,
-        &FlowPlan::stream_default(),
-    )
-    .await
-    .expect("run succeeds");
+    built
+        .run(CancellationToken::new())
+        .await
+        .expect("run succeeds");
 
     assert_eq!(
         rx_a.recv()
@@ -286,7 +214,7 @@ fn many_row_batch(n: u64) -> RecordBatch {
 }
 
 /// A stream-mode [`FlowPlan`] resolving `flow_control` exactly as
-/// `run_stream` would from a config declaring it, without going through
+/// the stream runner would from a config declaring it, without going through
 /// [`ServiceConfig::load`].
 fn stream_flow_plan(flow_control: FlowControlConfig) -> FlowPlan {
     let mut cfg = config(RunMode::Stream);
@@ -332,15 +260,19 @@ fn flatten_rows(batches: &[RecordBatch]) -> Vec<u64> {
 async fn branch_delivery_is_invariant_to_chunk_size() {
     let input = many_row_batch(37);
 
-    let (built, tx, mut rx_a, mut rx_b) =
-        branching_built(HashMap::from([("route".to_string(), "a".to_string())]));
-    tx.send(input.clone()).await.expect("send batch");
-    drop(tx);
     let unchunked = stream_flow_plan(FlowControlConfig {
         enabled: Some(false),
         ..Default::default()
     });
-    run_stream(built, CancellationToken::new(), None, None, &unchunked)
+    let (built, tx, mut rx_a, mut rx_b) = branching_built(
+        HashMap::from([("route".to_string(), "a".to_string())]),
+        RunMode::Stream,
+        Some(unchunked),
+    );
+    tx.send(input.clone()).await.expect("send batch");
+    drop(tx);
+    built
+        .run(CancellationToken::new())
         .await
         .expect("unchunked run succeeds");
     let unchunked_batches = collect_batches(&mut rx_a);
@@ -354,15 +286,19 @@ async fn branch_delivery_is_invariant_to_chunk_size() {
         "branch b must stay empty in the unchunked run"
     );
 
-    let (built, tx, mut rx_a, mut rx_b) =
-        branching_built(HashMap::from([("route".to_string(), "a".to_string())]));
-    tx.send(input.clone()).await.expect("send batch");
-    drop(tx);
     let chunked = stream_flow_plan(FlowControlConfig {
         rows: Some(12),
         ..Default::default()
     });
-    run_stream(built, CancellationToken::new(), None, None, &chunked)
+    let (built, tx, mut rx_a, mut rx_b) = branching_built(
+        HashMap::from([("route".to_string(), "a".to_string())]),
+        RunMode::Stream,
+        Some(chunked),
+    );
+    tx.send(input.clone()).await.expect("send batch");
+    drop(tx);
+    built
+        .run(CancellationToken::new())
         .await
         .expect("chunked run succeeds");
     let chunked_batches = collect_batches(&mut rx_a);

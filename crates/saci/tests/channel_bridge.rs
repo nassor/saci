@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 
 use saci::service::builder::ServiceBuilder;
 use saci::service::config::ServiceConfig;
-use saci::service::run_standalone;
 
 /// A quoted KDL string reads backslashes as escapes, so a Windows path has to
 /// go in with forward slashes.
@@ -115,8 +114,8 @@ async fn a_channel_sink_in_one_workflow_bridges_to_a_channel_source_in_another()
     let producer = built.remove(0);
 
     let results = futures::future::join_all([
-        run_standalone(producer, &config, CancellationToken::new(), None, None),
-        run_standalone(consumer, &config, CancellationToken::new(), None, None),
+        producer.run(CancellationToken::new()),
+        consumer.run(CancellationToken::new()),
     ])
     .await;
     let mut results = results.into_iter();

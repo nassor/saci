@@ -28,21 +28,28 @@ use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
 use super::config::{
-    CodecSpec, HealConfig, NodeKind, RunMode, ServiceConfig, ServiceMode, WorkflowSpec,
+    CodecSpec, HealConfig, NodeKind, RunMode, ServiceConfig, ServiceMode, StoreConfig,
+    WindowConfig, WorkflowSpec,
 };
 use super::dlq::{DeadLetterQueue, DlqRegistry, DlqShared};
 use super::factories::{missing_codec_error, missing_factory_error};
+use super::flow::FlowPlan;
 use super::heal::{HealSettings, HealingSink, HealingSource, Rebuilder};
+use super::lifecycle::RunControl;
 #[cfg(feature = "wasm-host")]
 use super::loader::{LocalModuleResolver, PipelineRuntimeLoader};
 #[cfg(feature = "plugin-host")]
 use super::plugin_loader::load_plugin_runtime;
+use super::redb_state::RedbStateClient;
 use super::registry::{CodecFactory, Registry, SinkFactory, SourceFactory};
+use super::standalone::WorkflowStats;
 use crate::codec::Codec;
 use crate::connector::{ChannelBridge, NodeIdentity};
 use crate::inspector::Inspector;
 #[cfg(feature = "wasm-host")]
 use crate::wasm_host::WasmEngine;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use super::topology::build_topology;
 
@@ -73,7 +80,7 @@ const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::run
 ///   pass. The wrapper is what turns a transient failure into a retried read
 ///   instead of a source contributing nothing to the iteration. Cluster mode
 ///   declares no source node at all, so its answer never applies.
-/// - `run_mode kind="stream"` is itself the retry loop: `run_stream` polls the
+/// - `run_mode kind="stream"` is itself the retry loop: the stream runner polls the
 ///   source once per item, and on an error logs it, counts it in
 ///   `iteration_errors` and re-polls after a cancellable
 ///   `SOURCE_ERROR_BACKOFF`. Wrapping there nests a second retry loop inside
@@ -217,6 +224,14 @@ pub struct WorkflowFactory {
     data_dir: std::path::PathBuf,
     /// `node.label()`, the service name a peer-facing connector announces.
     service: String,
+    /// How every built workflow is run: the config's `run_mode`, or
+    /// [`RunMode::Continuous`] in cluster mode, where it is not read.
+    run: RunMode,
+    /// The flow-control policy the config resolves for every source.
+    flow: FlowPlan,
+    /// Whether a batch run threads processor state through the redb store
+    /// (`store "redb" { batch_resume #true }`).
+    batch_resume: bool,
 }
 
 impl WorkflowFactory {
@@ -231,14 +246,18 @@ impl WorkflowFactory {
     ///
     /// Whatever [`ServiceBuilder::build`] would return for this workflow.
     pub fn build(&mut self, workflow: &WorkflowSpec) -> Result<BuiltWorkflow, SaciError> {
-        self.builder.build_one(
+        let mut built = self.builder.build_one(
             &self.registry,
             workflow,
             self.retry_sources,
             &self.heal,
             &self.data_dir,
             &self.service,
-        )
+        )?;
+        built.run = self.run.clone();
+        built.flow = self.flow.clone();
+        built.batch_resume = self.batch_resume;
+        Ok(built)
     }
 
     /// Publish the topology of `built` into the inspector, if one is attached.
@@ -321,13 +340,16 @@ pub(crate) fn edge_selected(routes: &Option<Vec<String>>, branch: &Option<String
 }
 
 /// One assembled node of the workflow graph.
+#[non_exhaustive]
 pub struct BuiltNode {
     /// The declared id.
     pub id: String,
     /// Declared name, absent when the config named none.
     pub name: Option<String>,
     /// Connector `type` for a source or sink; the runtime kind
-    /// (`"wasm"`/`"plugin"`/`"native"`) for a processor.
+    /// (`"wasm"`/`"plugin"`/`"native"`) for a processor. A node added through
+    /// [`BuiltWorkflowBuilder`] carries `"native"` (processor) or `"custom"`
+    /// (source or sink).
     pub type_name: String,
     /// Component a source writes or a sink reads. `None` for a processor.
     ///
@@ -351,17 +373,17 @@ pub struct BuiltNode {
     pub heal_recovered: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The node's windowing declaration, when its config declared a `window`
     /// block. `None` for a non-windowed processor and for every source or
-    /// sink. The runners use it to track the node's watermark; the topology
-    /// uses it to describe the node.
-    #[cfg(feature = "windows")]
-    pub window: Option<super::config::WindowConfig>,
+    /// sink. The runners read it to track the node's watermark when the
+    /// `windows` feature is on; the topology uses it to describe the node.
+    pub window: Option<WindowConfig>,
 }
 
 /// All runtime artifacts produced by [`ServiceBuilder::build`] for one
 /// workflow.
 ///
-/// The caller owns these and drives them with a runner function
-/// (`run_standalone`, `run_cluster`).
+/// The caller owns these and drives them with [`run`](Self::run), or with
+/// `run_cluster` in cluster mode. A workflow assembled in code rather than
+/// from a config is built with [`BuiltWorkflow::builder`].
 ///
 /// `registry` is shared (via `Arc`) across every workflow one `build` call
 /// produces, so that factory-allocated resources the sources and sinks point
@@ -369,6 +391,7 @@ pub struct BuiltNode {
 ///
 /// The `Debug` implementation reports counts only, because the node trait
 /// objects are not `Debug`.
+#[non_exhaustive]
 pub struct BuiltWorkflow {
     /// The workflow's declared id.
     pub workflow_id: String,
@@ -389,6 +412,13 @@ pub struct BuiltWorkflow {
     /// The runner owns it: `record` and `replay` both run inline between
     /// passes, so nothing else may touch it.
     pub dlq: Option<DeadLetterQueue>,
+    /// How [`run`](Self::run) drives the workflow, from the config's
+    /// `run_mode`. Not read in cluster mode.
+    pub(super) run: RunMode,
+    /// The flow-control policy each source node runs under.
+    pub(super) flow: FlowPlan,
+    /// Whether a batch run threads processor state through the redb store.
+    pub(super) batch_resume: bool,
 }
 
 impl std::fmt::Debug for BuiltWorkflow {
@@ -397,6 +427,342 @@ impl std::fmt::Debug for BuiltWorkflow {
             .field("workflow_id", &self.workflow_id)
             .field("nodes_count", &self.nodes.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl BuiltWorkflow {
+    /// Start assembling a workflow by hand, node by node.
+    ///
+    /// ```rust
+    /// # #[cfg(all(feature = "service", feature = "connector-channel"))]
+    /// # {
+    /// use saci::connector::channel::{ChannelSink, ChannelSource};
+    /// use saci::service::BuiltWorkflow;
+    /// # use arrow_schema::{DataType, Field, Schema};
+    /// # use std::sync::Arc;
+    /// # let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+    /// let (source, _tx) = ChannelSource::new(schema.clone(), 8);
+    /// let (sink, _rx) = ChannelSink::new(schema, 8);
+    /// let workflow = BuiltWorkflow::builder("w")
+    ///     .source("in", "T", source)
+    ///     .sink("out", "T", sink)
+    ///     .link("in", "out")
+    ///     .build()
+    ///     .unwrap();
+    /// // workflow.run(cancel).await drives it.
+    /// # let _ = workflow;
+    /// # }
+    /// ```
+    pub fn builder(id: impl Into<String>) -> BuiltWorkflowBuilder {
+        BuiltWorkflowBuilder {
+            id: id.into(),
+            name: None,
+            nodes: Vec::new(),
+            links: Vec::new(),
+            windows: Vec::new(),
+            run: RunMode::default(),
+            flow: None,
+            batch_resume: false,
+            inspector: None,
+            dlq: None,
+        }
+    }
+
+    /// Drive the workflow until its run mode finishes it or `options` cancel
+    /// it.
+    ///
+    /// [`RunMode::Stream`] runs one pass per admitted chunk of each arriving
+    /// source batch; every other mode runs repeated passes over every node in
+    /// topological order, paced by the mode. Returns [`WorkflowStats`]
+    /// on success, including on cancellation, which is a clean exit; `Err` is
+    /// reserved for an unrecoverable condition such as a stream workflow with
+    /// no source.
+    ///
+    /// `options` is a [`RunOptions`], or anything that converts into one: a
+    /// bare [`CancellationToken`] for an uncontrolled run, a [`RunControl`]
+    /// when the caller owns a pause gate.
+    ///
+    /// # Errors
+    ///
+    /// [`SaciError::Configuration`] for a stream workflow with no source, and
+    /// any error loading processor state from the store.
+    pub async fn run(self, options: impl Into<RunOptions>) -> SaciResult<WorkflowStats> {
+        let options = options.into();
+        match self.run {
+            RunMode::Stream => super::stream::run(self, options).await,
+            _ => super::standalone::run(self, options).await,
+        }
+    }
+}
+
+/// What a [`BuiltWorkflow::run`] call reads besides the workflow itself: the
+/// runner's cancellation and pause control, where it publishes live counters,
+/// and the store it persists processor state to.
+///
+/// A [`CancellationToken`] or a [`RunControl`] converts into one with
+/// everything else unset, so an uncontrolled run is `workflow.run(cancel)`.
+/// The default carries a token nothing cancels.
+#[derive(Default)]
+pub struct RunOptions {
+    pub(super) control: RunControl,
+    pub(super) live_stats: Option<Arc<RwLock<WorkflowStats>>>,
+    pub(super) state: Option<Arc<RedbStateClient>>,
+}
+
+impl RunOptions {
+    /// Options that run under `control` and publish and persist nothing.
+    pub fn new(control: impl Into<RunControl>) -> Self {
+        Self {
+            control: control.into(),
+            live_stats: None,
+            state: None,
+        }
+    }
+
+    /// Publish the run's counters into `stats` as it goes, so `GET /status`
+    /// sees current progress rather than only the final tally.
+    pub fn live_stats(mut self, stats: Arc<RwLock<WorkflowStats>>) -> Self {
+        self.live_stats = Some(stats);
+        self
+    }
+
+    /// Persist processor state and source cursors through `state`.
+    pub fn state(mut self, state: Arc<RedbStateClient>) -> Self {
+        self.state = Some(state);
+        self
+    }
+}
+
+impl From<CancellationToken> for RunOptions {
+    fn from(cancel: CancellationToken) -> Self {
+        Self::new(cancel)
+    }
+}
+
+impl From<RunControl> for RunOptions {
+    fn from(control: RunControl) -> Self {
+        Self::new(control)
+    }
+}
+
+/// Assembles a [`BuiltWorkflow`] by hand: declare nodes in flow order, link
+/// them, choose a run mode. Obtained from [`BuiltWorkflow::builder`].
+///
+/// Nodes keep declaration order, so a node must be declared after every node
+/// that links into it. A node added here is a native one: a source or sink
+/// is never wrapped in a retry or heal wrapper, and the workflow's registry
+/// is empty. [`build`](Self::build) does not run the graph validation
+/// [`ServiceBuilder::build`] applies to a configured workflow.
+pub struct BuiltWorkflowBuilder {
+    id: String,
+    name: Option<String>,
+    nodes: Vec<BuiltNode>,
+    links: Vec<(String, String, Option<String>)>,
+    windows: Vec<(String, WindowConfig)>,
+    run: RunMode,
+    flow: Option<FlowPlan>,
+    batch_resume: bool,
+    inspector: Option<Inspector>,
+    dlq: Option<DeadLetterQueue>,
+}
+
+impl BuiltWorkflowBuilder {
+    /// Set the workflow's declared name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    fn node(
+        mut self,
+        id: &str,
+        type_name: &str,
+        component: Option<&'static str>,
+        kind: BuiltNodeKind,
+    ) -> Self {
+        self.nodes.push(BuiltNode {
+            id: id.to_string(),
+            name: None,
+            type_name: type_name.to_string(),
+            component,
+            kind,
+            downstream: Vec::new(),
+            artifact: None,
+            heal_recovered: None,
+            window: None,
+        });
+        self
+    }
+
+    /// Declare a source node `id` that writes `component`.
+    pub fn source(self, id: &str, component: &str, source: impl Source + 'static) -> Self {
+        self.node(
+            id,
+            "custom",
+            Some(intern_component_name(component)),
+            BuiltNodeKind::Source(Box::new(source)),
+        )
+    }
+
+    /// Declare a processor node `id` backed by `runtime`.
+    pub fn processor(self, id: &str, runtime: impl PipelineRuntime + 'static) -> Self {
+        self.node(
+            id,
+            "native",
+            None,
+            BuiltNodeKind::Processor {
+                runtime: Box::new(runtime),
+                kind: "native",
+            },
+        )
+    }
+
+    /// Declare a sink node `id` that reads `component`.
+    pub fn sink(self, id: &str, component: &str, sink: impl Sink + 'static) -> Self {
+        self.node(
+            id,
+            "custom",
+            Some(intern_component_name(component)),
+            BuiltNodeKind::Sink(Box::new(sink)),
+        )
+    }
+
+    /// Attach a `window` declaration to the processor node `processor_id`,
+    /// which the runners read to track that node's watermark when the
+    /// `windows` feature is on.
+    pub fn window(mut self, processor_id: &str, window: WindowConfig) -> Self {
+        self.windows.push((processor_id.to_string(), window));
+        self
+    }
+
+    /// Link node `from` to node `to`.
+    pub fn link(mut self, from: &str, to: &str) -> Self {
+        self.links.push((from.to_string(), to.to_string(), None));
+        self
+    }
+
+    /// Link node `from` to node `to` on the named `branch`, which a
+    /// processor's routing decision selects by name.
+    pub fn link_branch(mut self, from: &str, to: &str, branch: &str) -> Self {
+        self.links
+            .push((from.to_string(), to.to_string(), Some(branch.to_string())));
+        self
+    }
+
+    /// How [`BuiltWorkflow::run`] drives the workflow. The default is
+    /// [`RunMode::Continuous`].
+    pub fn run_mode(mut self, run: RunMode) -> Self {
+        self.run = run;
+        self
+    }
+
+    /// The flow-control policy for each source. Without one, a stream
+    /// workflow gets [`FlowPlan::stream_default`] and every other run mode the
+    /// batch defaults.
+    pub fn flow(mut self, flow: FlowPlan) -> Self {
+        self.flow = Some(flow);
+        self
+    }
+
+    /// Whether a batch run threads processor state through the redb store
+    /// handed to [`RunOptions::state`]. Off by default.
+    pub fn batch_resume(mut self, on: bool) -> Self {
+        self.batch_resume = on;
+        self
+    }
+
+    /// Record flow-control decisions into `inspector`.
+    pub fn inspector(mut self, inspector: Inspector) -> Self {
+        self.inspector = Some(inspector);
+        self
+    }
+
+    /// Give the workflow a dead letter queue.
+    pub fn dlq(mut self, dlq: DeadLetterQueue) -> Self {
+        self.dlq = Some(dlq);
+        self
+    }
+
+    /// Resolve every link and window to node indices and assemble the
+    /// workflow.
+    ///
+    /// # Errors
+    ///
+    /// [`SaciError::Configuration`] for a duplicate node id, a link or window
+    /// that names an undeclared node, a window on a node that is not a
+    /// processor, a link from a node to itself, and a link whose target was
+    /// declared before its origin.
+    pub fn build(self) -> SaciResult<BuiltWorkflow> {
+        let Self {
+            id,
+            name,
+            mut nodes,
+            links,
+            windows,
+            run,
+            flow,
+            batch_resume,
+            inspector,
+            dlq,
+        } = self;
+
+        let mut index: HashMap<String, usize> = HashMap::with_capacity(nodes.len());
+        for (i, node) in nodes.iter().enumerate() {
+            if index.insert(node.id.clone(), i).is_some() {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': duplicate node id '{}'",
+                    node.id
+                )));
+            }
+        }
+        let position = |node: &str| {
+            index.get(node).copied().ok_or_else(|| {
+                SaciError::configuration(format!(
+                    "workflow '{id}': link or window names undeclared node '{node}'"
+                ))
+            })
+        };
+
+        for (processor_id, window) in windows {
+            let i = position(&processor_id)?;
+            if !matches!(nodes[i].kind, BuiltNodeKind::Processor { .. }) {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': node '{processor_id}' is not a processor and takes no window"
+                )));
+            }
+            nodes[i].window = Some(window);
+        }
+
+        for (from, to, branch) in links {
+            let (f, t) = (position(&from)?, position(&to)?);
+            if f == t {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': node '{from}' cannot link to itself"
+                )));
+            }
+            if t < f {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': declare nodes in flow order: '{to}' comes before '{from}'"
+                )));
+            }
+            nodes[f].downstream.push(BuiltEdge { node: t, branch });
+        }
+
+        let flow = flow.unwrap_or_else(|| match run {
+            RunMode::Stream => FlowPlan::stream_default(),
+            _ => FlowPlan::default(),
+        });
+        Ok(BuiltWorkflow {
+            workflow_id: id,
+            workflow_name: name,
+            nodes,
+            registry: Arc::new(Registry::new()),
+            inspector,
+            dlq,
+            run,
+            flow,
+            batch_resume,
+        })
     }
 }
 
@@ -576,6 +942,17 @@ impl ServiceBuilder {
     pub fn into_factory(mut self, config: &ServiceConfig) -> WorkflowFactory {
         let registry = Arc::new(std::mem::replace(&mut self.registry, Registry::new()));
         let retry_sources = sources_take_retry_wrapper(config);
+        let run = match &config.mode {
+            ServiceMode::Standalone { config: standalone } => standalone.run_mode.clone(),
+            ServiceMode::Cluster { .. } => RunMode::Continuous,
+        };
+        let batch_resume = matches!(
+            &config.store,
+            Some(StoreConfig::Redb {
+                batch_resume: true,
+                ..
+            })
+        );
         WorkflowFactory {
             builder: self,
             registry,
@@ -583,6 +960,9 @@ impl ServiceBuilder {
             heal: config.heal.clone(),
             data_dir: config.node.data_dir.clone(),
             service: config.node.label(),
+            run,
+            flow: FlowPlan::from_config(config),
+            batch_resume,
         }
     }
 
@@ -714,6 +1094,8 @@ impl ServiceBuilder {
         // the graph first.
         let dlq = self.build_dlq(workflow, registry, data_dir)?;
 
+        // `run`, `flow` and `batch_resume` are the factory's to fill: they
+        // come from the whole config, which this method never sees.
         Ok(BuiltWorkflow {
             workflow_id: workflow.id.clone(),
             workflow_name: workflow.name.clone(),
@@ -721,6 +1103,9 @@ impl ServiceBuilder {
             registry: registry.clone(),
             inspector: self.inspector.clone(),
             dlq,
+            run: RunMode::default(),
+            flow: FlowPlan::default(),
+            batch_resume: false,
         })
     }
 
@@ -806,7 +1191,6 @@ impl ServiceBuilder {
             kind: BuiltNodeKind::Source(source),
             downstream: Vec::new(),
             artifact: None,
-            #[cfg(feature = "windows")]
             window: None,
             heal_recovered: None,
         })
@@ -865,7 +1249,6 @@ impl ServiceBuilder {
             downstream: Vec::new(),
             artifact: None,
             heal_recovered,
-            #[cfg(feature = "windows")]
             window: None,
         })
     }
@@ -998,7 +1381,6 @@ impl ServiceBuilder {
             kind: BuiltNodeKind::Processor { runtime, kind },
             downstream: Vec::new(),
             artifact,
-            #[cfg(feature = "windows")]
             window: spec.window.clone(),
             heal_recovered: None,
         })
@@ -1047,7 +1429,6 @@ impl ServiceBuilder {
             kind: BuiltNodeKind::Processor { runtime, kind },
             downstream: Vec::new(),
             artifact,
-            #[cfg(feature = "windows")]
             window: spec.window.clone(),
             heal_recovered: None,
         })
@@ -1921,7 +2302,7 @@ workflow "w" {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "single attempt");
     }
 
-    /// `run_mode kind="stream"` hands the source over unwrapped: `run_stream`
+    /// `run_mode kind="stream"` hands the source over unwrapped: the stream runner
     /// is itself the retry loop, so a second one inside `next_batch` would put
     /// its 100 ms first backoff on the item path in front of the runner's own
     /// 10 ms re-poll. The error must reach the runner as the connector raised
@@ -2218,5 +2599,88 @@ workflow "w" {
             ..Default::default()
         };
         build_heal_service(&inherited, &builds).expect("an inherited policy skips the node");
+    }
+
+    // ── BuiltWorkflow::builder ────────────────────────────────────────────────
+
+    #[cfg(feature = "connector-channel")]
+    fn int_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]))
+    }
+
+    /// A hand-assembled source-to-sink workflow runs through
+    /// [`BuiltWorkflow::run`] and delivers every row.
+    #[cfg(feature = "connector-channel")]
+    #[tokio::test]
+    async fn a_hand_built_workflow_moves_every_row() -> SaciResult<()> {
+        use crate::connector::channel::{ChannelSink, ChannelSource};
+
+        let (source, tx) = ChannelSource::new(int_schema(), 8);
+        let (sink, mut rx) = ChannelSink::new(int_schema(), 8);
+        let batch = RecordBatch::try_new(
+            int_schema(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4]))],
+        )
+        .unwrap();
+        tx.send(batch).await.unwrap();
+        drop(tx);
+
+        let workflow = BuiltWorkflow::builder("w")
+            .source("a", "T", source)
+            .sink("b", "T", sink)
+            .link("a", "b")
+            .build()?;
+        assert_eq!(workflow.nodes[0].type_name, "custom");
+        assert_eq!(workflow.nodes[0].downstream.len(), 1);
+
+        // The default run mode is continuous: it ends when the token fires,
+        // which the stopper does once the sink has delivered the batch.
+        let cancel = CancellationToken::new();
+        let stopper = {
+            let cancel = cancel.clone();
+            async move {
+                let delivered = rx.recv().await.expect("the sink wrote").num_rows();
+                cancel.cancel();
+                delivered
+            }
+        };
+        let (stats, delivered) = tokio::join!(workflow.run(cancel), stopper);
+        assert_eq!(stats?.rows_processed, 4);
+        assert_eq!(delivered, 4);
+        Ok(())
+    }
+
+    /// A link whose target was declared before its origin is refused, as is
+    /// every other shape the graph cannot carry.
+    #[cfg(feature = "connector-channel")]
+    #[test]
+    fn the_workflow_builder_refuses_a_graph_it_cannot_order() {
+        use crate::connector::channel::{ChannelSink, ChannelSource};
+
+        let nodes = || {
+            let (source, _tx) = ChannelSource::new(int_schema(), 1);
+            let (sink, _rx) = ChannelSink::new(int_schema(), 1);
+            BuiltWorkflow::builder("w")
+                .source("a", "T", source)
+                .sink("b", "T", sink)
+        };
+
+        let err = nodes().link("b", "a").build().unwrap_err();
+        assert_eq!(err.category(), "configuration");
+        assert!(
+            err.message()
+                .contains("declare nodes in flow order: 'a' comes before 'b'"),
+            "{err}"
+        );
+
+        let err = nodes().link("a", "missing").build().unwrap_err();
+        assert!(err.message().contains("undeclared node 'missing'"), "{err}");
+
+        let err = nodes().link("a", "a").build().unwrap_err();
+        assert!(err.message().contains("cannot link to itself"), "{err}");
+
+        let (extra, _tx) = crate::connector::channel::ChannelSource::new(int_schema(), 1);
+        let err = nodes().source("a", "T", extra).build().unwrap_err();
+        assert!(err.message().contains("duplicate node id 'a'"), "{err}");
     }
 }

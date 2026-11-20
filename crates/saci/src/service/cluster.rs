@@ -110,7 +110,7 @@ pub async fn run_cluster(
         ServiceMode::Cluster { config: c } => c,
         ServiceMode::Standalone { .. } => {
             return Err(SaciError::configuration(
-                "run_cluster called with standalone config — use run_standalone instead",
+                "run_cluster called with standalone config — use BuiltWorkflow::run instead",
             ));
         }
     };
@@ -639,29 +639,10 @@ mod tests {
     }
 
     fn empty_built_service() -> crate::service::builder::BuiltWorkflow {
-        use crate::service::builder::{BuiltNode, BuiltNodeKind, BuiltWorkflow};
-        BuiltWorkflow {
-            workflow_id: "cluster-test".to_string(),
-            workflow_name: None,
-            nodes: vec![BuiltNode {
-                id: "p".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(crate::pipeline::Pipeline::new("test")),
-                    kind: "native",
-                },
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            }],
-            registry: std::sync::Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        }
+        crate::service::builder::BuiltWorkflow::builder("cluster-test")
+            .processor("p", crate::pipeline::Pipeline::new("test"))
+            .build()
+            .expect("a one-node workflow assembles")
     }
     #[test]
     fn test_inconsistent_data_dir_returns_error() {

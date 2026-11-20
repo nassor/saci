@@ -515,3 +515,55 @@ async fn test_status_subcommand_hits_running_service() {
         "status output should contain 'node': {status_stdout}"
     );
 }
+
+/// `serve` is callable as a library: cancelling `ServeOptions::shutdown` drains
+/// the runner, the HTTP server and the watchdog inside the budget and reports
+/// `Clean`, with `announce: false` keeping stdout quiet.
+///
+/// This is the only test in the binary that calls `serve` in-process, so the
+/// process-wide tracing subscriber and meter provider it installs are its own.
+#[tokio::test]
+async fn test_serve_returns_clean_after_shutdown_token_fires() {
+    use saci::service::{ServeExit, ServeOptions, ServiceBuilder, ServiceConfig, serve};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let config_file = write_standalone_config(dir.path());
+    let text = std::fs::read_to_string(config_file.path()).expect("read config");
+    let config = ServiceConfig::from_kdl(&text).expect("config parses");
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let options = ServeOptions {
+        config_path: None,
+        announce: false,
+        shutdown: Some(shutdown.clone()),
+    };
+    // `serve` runs its runners inline and is not `Send`, so it shares this
+    // task with the trigger instead of being spawned. `fired` records that
+    // the token was cancelled before `serve` returned: a runner that ended on
+    // its own would also yield `Clean`, and this tells the two apart.
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    let stop = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        shutdown.cancel();
+    };
+    let run = async {
+        let exit = serve(config, ServiceBuilder::new(), options).await;
+        (exit, fired.load(std::sync::atomic::Ordering::SeqCst))
+    };
+    let ((exit, stopped_by_token), ()) =
+        tokio::time::timeout(STARTUP_BUDGET + SHUTDOWN_BUDGET, async {
+            tokio::join!(run, stop)
+        })
+        .await
+        .expect("serve must stop within its budget");
+
+    assert!(
+        stopped_by_token,
+        "serve returned before the shutdown token was cancelled"
+    );
+    assert_eq!(
+        exit.expect("serve returns Ok after a requested shutdown"),
+        ServeExit::Clean
+    );
+}

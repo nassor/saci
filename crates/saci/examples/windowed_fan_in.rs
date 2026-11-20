@@ -21,12 +21,9 @@ use saci::connector::channel::{ChannelSink, ChannelSource};
 use tokio_util::sync::CancellationToken;
 
 use saci::prelude::*;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow};
-use saci::service::config::{
-    HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
-    StandaloneConfig, WorkflowSpec,
-};
-use saci::service::standalone::run_standalone;
+use saci::service::RunMode;
+use saci::service::builder::BuiltWorkflow;
+use saci::service::config::WindowConfig;
 use saci::windows::{WindowFunction, WindowResults, WindowWatermark, WindowedSystem};
 
 /// A trade event: one price at one instant, in milliseconds since the epoch.
@@ -164,114 +161,35 @@ async fn main() -> Result<(), SaciError> {
     // senders and the sink receiver. The shape is exactly what a config file
     // with two `source` nodes, one `wasm` node carrying a `window` block, and
     // one `sink` node would produce.
-    let nodes = vec![
-        BuiltNode {
-            id: "trades_a".to_string(),
-            name: Some("Trades A".to_string()),
-            type_name: "ChannelSource".to_string(),
-            component: Some("Trade"),
-            kind: BuiltNodeKind::Source(Box::new(source_a)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "trades_b".to_string(),
-            name: Some("Trades B".to_string()),
-            type_name: "ChannelSource".to_string(),
-            component: Some("Trade"),
-            kind: BuiltNodeKind::Source(Box::new(source_b)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "windowed".to_string(),
-            name: Some("Windowed aggregate".to_string()),
-            type_name: "native".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(build_windowed_pipeline()),
-                kind: "native",
-            },
-            downstream: vec![BuiltEdge {
-                node: 3,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: Some(saci::service::config::WindowConfig {
+    let mut built = BuiltWorkflow::builder("windowed-fan-in")
+        .name("Two streams, one windowed processor")
+        .source("trades_a", "Trade", source_a)
+        .source("trades_b", "Trade", source_b)
+        .processor("windowed", build_windowed_pipeline())
+        .sink("totals", "WindowTotal", sink)
+        .window(
+            "windowed",
+            WindowConfig {
                 spec: WindowSpec::tumbling(30_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 5_000,
-            }),
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "totals".to_string(),
-            name: Some("Window totals".to_string()),
-            type_name: "ChannelSink".to_string(),
-            component: Some("WindowTotal"),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-    ];
-
-    let config = ServiceConfig {
-        heal: Default::default(),
-        flow_control: Default::default(),
-        node: NodeConfig {
-            id: 1,
-            name: Some("demo".to_string()),
-            data_dir: std::path::PathBuf::from("/tmp/saci-windowed-fan-in"),
-        },
-        mode: ServiceMode::Standalone {
-            config: StandaloneConfig {
-                run_mode: RunMode::OneShot,
             },
-        },
-        workflows: vec![WorkflowSpec {
-            id: "windowed-fan-in".to_string(),
-            name: Some("Two streams, one windowed processor".to_string()),
-            codecs: Vec::new(),
-            sources: Vec::new(),
-            plugin: Vec::new(),
-            wasm: Vec::new(),
-            sinks: Vec::new(),
-            links: Vec::new(),
-            dlq: None,
-        }],
-        store: None,
-        http: HttpConfig::default(),
-        observability: ObservabilityConfig::default(),
-        variables: std::collections::HashMap::new(),
-    };
+        )
+        .link("trades_a", "windowed")
+        .link("trades_b", "windowed")
+        .link("windowed", "totals")
+        .run_mode(RunMode::OneShot)
+        .build()?;
+    built.nodes[0].name = Some("Trades A".to_string());
+    built.nodes[0].type_name = "ChannelSource".to_string();
+    built.nodes[1].name = Some("Trades B".to_string());
+    built.nodes[1].type_name = "ChannelSource".to_string();
+    built.nodes[2].name = Some("Windowed aggregate".to_string());
+    built.nodes[3].name = Some("Window totals".to_string());
+    built.nodes[3].type_name = "ChannelSink".to_string();
 
-    let built = BuiltWorkflow {
-        workflow_id: "windowed-fan-in".to_string(),
-        workflow_name: Some("Two streams, one windowed processor".to_string()),
-        nodes,
-        registry: std::sync::Arc::new(saci::service::registry::Registry::new()),
-        inspector: None,
-        dlq: None,
-    };
-
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None).await?;
+    let stats = built.run(CancellationToken::new()).await?;
     println!();
     println!(
         "iterations: {} · rows in: {} · sink batches: {}",
