@@ -1285,10 +1285,10 @@ pub async fn run_standalone(
                                     NodeRunKind::Sink => {
                                         let component = components[d]
                                             .expect("a sink node always declares a component");
-                                        if let Some(batch) = datasets[i]
+                                        if let Ok(batch) = datasets[i]
                                             .as_ref()
                                             .expect("processor dataset")
-                                            .batch_for(component)
+                                            .batch_named(component)
                                             .cloned()
                                             && batch.num_rows() > 0
                                         {
@@ -1832,10 +1832,7 @@ mod tests {
         }
 
         let mut pipeline = Pipeline::new("p");
-        pipeline
-            .data_mut()
-            .register_component::<OrderComponent>()
-            .unwrap();
+        pipeline.data_mut().register::<OrderComponent>().unwrap();
 
         let nodes = vec![
             BuiltNode {
@@ -1942,7 +1939,7 @@ mod tests {
 
         fn template_dataset(&self) -> Dataset {
             let mut dataset = Dataset::new();
-            dataset.register_component::<V>().expect("register V");
+            dataset.register::<V>().expect("register V");
             dataset
         }
     }
@@ -2098,7 +2095,7 @@ mod tests {
 
         fn template_dataset(&self) -> Dataset {
             let mut dataset = Dataset::new();
-            dataset.register_component::<V>().expect("register V");
+            dataset.register::<V>().expect("register V");
             dataset
         }
     }
@@ -2231,7 +2228,7 @@ mod tests {
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();
-                dataset.register_component::<V>().expect("register V");
+                dataset.register::<V>().expect("register V");
                 dataset
             }
         }
@@ -2351,7 +2348,7 @@ mod tests {
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();
-                dataset.register_raw_component("Trade", trade_schema());
+                dataset.register_schema("Trade", trade_schema()).unwrap();
                 dataset
             }
         }
@@ -2723,7 +2720,7 @@ mod tests {
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();
-                dataset.register_raw_component("Trade", windowed_schema());
+                dataset.register_schema("Trade", windowed_schema()).unwrap();
                 dataset
             }
         }

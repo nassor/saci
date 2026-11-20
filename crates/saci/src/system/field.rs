@@ -2,22 +2,9 @@ use crate::component::Component;
 
 /// A field-level data access declaration: `(component_name, field_name)`.
 ///
-/// Used in [`SystemMeta`](super::SystemMeta) to declare exactly which fields a
-/// system reads or writes, so two systems writing different fields of the same
-/// component can share a pipeline stage.
-///
-/// # Example
-///
-/// ```rust
-/// #
-/// # {
-/// use saci::system::FieldAccess;
-///
-/// let fa = FieldAccess { component: "Order", field: "total" };
-/// assert_eq!(fa.component, "Order");
-/// assert_eq!(fa.field, "total");
-/// # }
-/// ```
+/// [`SystemMeta`](super::SystemMeta) records one per declared field, so two
+/// systems writing different fields of the same component can share a
+/// pipeline stage.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct FieldAccess {
     /// Name of the component (must match [`Component::name()`](crate::component::Component::name)).
@@ -28,11 +15,13 @@ pub struct FieldAccess {
 
 /// A typed reference to a named field of component `C`.
 ///
-/// Declare constants on a component to avoid stringly-typed `SystemMeta`:
+/// `#[derive(Component)]` declares one per field as an associated constant
+/// named after the field in upper case (`Order::AMOUNT`). A hand-written
+/// [`Component`] impl declares its own:
 ///
 /// ```rust
-/// # use saci::system::FieldRef;
-/// # use saci::component::Component;
+/// # use saci::FieldRef;
+/// # use saci::Component;
 /// # use std::sync::Arc;
 /// # use arrow_schema::Schema;
 /// # struct Order;
@@ -42,12 +31,12 @@ pub struct FieldAccess {
 /// # }
 /// impl Order {
 ///     pub const AMOUNT: FieldRef<Order> = FieldRef::new("amount");
-///     pub const STATUS: FieldRef<Order> = FieldRef::new("status");
 /// }
+/// assert_eq!(Order::AMOUNT.name(), "amount");
+/// assert_eq!(Order::AMOUNT.component(), "Order");
 /// ```
 pub struct FieldRef<C: Component> {
-    /// The field name within the component's Arrow schema.
-    pub field: &'static str,
+    field: &'static str,
     _p: std::marker::PhantomData<fn() -> C>,
 }
 
@@ -58,6 +47,16 @@ impl<C: Component> FieldRef<C> {
             field,
             _p: std::marker::PhantomData,
         }
+    }
+
+    /// The field name within the component's Arrow schema.
+    pub const fn name(&self) -> &'static str {
+        self.field
+    }
+
+    /// The name of the component the field belongs to.
+    pub fn component(&self) -> &'static str {
+        C::name()
     }
 }
 

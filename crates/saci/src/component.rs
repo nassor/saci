@@ -61,7 +61,7 @@ pub trait Component: Send + Sync + 'static {
 
     /// Arrow [`Schema`] that describes this component's fields.
     ///
-    /// Called once during [`register_component`](super::dataset::Dataset::register_component).
+    /// Called once during [`register`](super::dataset::Dataset::register).
     fn schema() -> Arc<Schema>;
 
     /// Schema version written by this binary.

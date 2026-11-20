@@ -30,7 +30,7 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 
 | Module | Feature | What it gives you |
 |---|---|---|
-| crate root | `engine` (default) | `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, plus the `Source` and `Sink` traits and the schema cast helpers. Arrow and serde are always present; tokio and rayon arrive with `runtime`, and `futures` with `service` or `connector-udp`. |
+| crate root | `engine` (default) | `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, plus the `Source` and `Sink` traits and the schema cast helpers. Arrow and serde are always present; tokio and rayon arrive with `engine`, and `futures` with `service` or `connector-udp`. |
 | `saci::config` | `config` | The configuration language: parses KDL into `ConfigValue` (an alias for `serde_json::Value`) plus `ConfigMap`, and exports `from_kdl_str`, `from_kdl_str_with_vars`, `one_or_many`, `substitute_env_vars` and `substitute_vars`. `from_kdl_str_with_vars` substitutes and parses in one call, and a parse failure over substituted text names the variables whose values were inserted, plus any holding a backslash or double quote. Values stay out of the message. |
 | `saci::transformer` | `transformer-contract` | The byte-format contract: `Transformer`, `BatchReader`, `BatchWriter`, `MessageDecoder`, `TransformerFactory`, `TransformerRegistry`. The traits live in `transformer::contract`. |
 | `saci::transformer::arrow_ipc` | `transformer-arrow-ipc` | `ArrowIpcTransformer`: stream read and write plus `PerBatch` messages, both over the same Arrow IPC stream encapsulation. |
@@ -71,9 +71,10 @@ Library default is `engine` alone: the columnar engine with no connector, transf
 authoring SDK.
 
 - `engine` (**default**): `Dataset`, `Pipeline`, `System`, `Scheduler`, `Component`, the
-  `Source`/`Sink` traits. Implies `io`, which implies `runtime`.
-- `runtime`: tokio and rayon stage parallelism. A `wasm32-wasip3` build leaves it off.
-- `io`: the `Source` and `Sink` traits and the schema cast helpers (implies `runtime`).
+  `Source`/`Sink` traits and the schema cast helpers, with tokio and rayon stage parallelism.
+  Implies `derive`. A `wasm32-wasip3` build leaves it off.
+- `derive`: `#[derive(Component)]`, `#[transform]` and `#[fold]`. It needs no tokio, so a
+  `wasm32-wasip3` build carries it.
 - `windows`: windowed aggregation. `WindowedSystem`, watermarks, `WindowAccumulator`. The
   `WindowSpec` geometry enum is outside the feature, so a host parses a `window` declaration in
   every build.
@@ -85,7 +86,7 @@ authoring SDK.
 - `trace-context`: trace context carried across a `connector-saci` link (implies `tracing`).
 - `processor`: the wasm processor SDK targeting WASI 0.3 (`wasm32-wasip3`) and Component Model
   Async. Build with `--no-default-features --features processor` so tokio stays out.
-- `plugin`: the native plugin SDK (implies `runtime`).
+- `plugin`: the native plugin SDK (implies `engine`).
 - `connector-channel`, `connector-clickhouse`, `connector-file`, `connector-http`,
   `connector-kafka`, `connector-mariadb`, `connector-nats`, `connector-opentelemetry`,
   `connector-postgresql`, `connector-redb`, `connector-s3`, `connector-saci`, `connector-tcp`,
@@ -268,8 +269,8 @@ Add `windows` for windowed aggregation, or use `plugin` for a native plugin.
 
 | What | Items | Module | Feature |
 |---|---|---|---|
-| Traits and drains | `Source`, `Sink`, `drain_into_dataset`, `drain_dataset` | crate root | `io` (implies `runtime`) |
-| Cast helpers | `cast_batch`, `CastingSource`, `build_target_schema` | crate root | `io` |
+| Traits and drains | `Source`, `Sink`, `drain_into_dataset`, `drain_dataset` | crate root | `engine` |
+| Cast helpers | `cast_batch`, `CastingSource`, `build_target_schema` | crate root | `engine` |
 | Factory contract | `SourceFactory`, `SinkFactory`, `ConnectorContext`, `parse_schema_fields` | `saci::connector` | `connector-contract` |
 | Transformer contract | `Transformer`, `BatchReader`, `BatchWriter`, `MessageDecoder` | `saci::transformer` | `transformer-contract` |
 | Config registration | `Registry`, `register_builtin_factories` | `saci::service` | `service` |

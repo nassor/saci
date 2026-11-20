@@ -141,14 +141,12 @@ struct SequentialHashSystem;
 impl System for SequentialHashSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("sequential_hash")
-            .read("Blob", "data")
-            .write("Hash", "digest")
+            .reads_named("Blob", "data")
+            .writes_named("Hash", "digest")
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let blob_batch = pipeline
-            .batch_for("Blob")
-            .ok_or_else(|| SaciError::generic("Blob not found"))?;
+        let blob_batch = pipeline.batch_named("Blob")?;
         let arr = blob_batch
             .column_by_name("data")
             .ok_or_else(|| SaciError::generic("data not found"))?
@@ -176,14 +174,12 @@ struct ParallelHashSystem;
 impl ParallelSystem for ParallelHashSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("parallel_hash")
-            .read("Blob", "data")
-            .write("Hash", "digest")
+            .reads_named("Blob", "data")
+            .writes_named("Hash", "digest")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let blob_batch = pipeline
-            .batch_for("Blob")
-            .ok_or_else(|| SaciError::generic("Blob not found"))?;
+        let blob_batch = pipeline.batch_named("Blob")?;
         let arr = blob_batch
             .column_by_name("data")
             .ok_or_else(|| SaciError::generic("data not found"))?
@@ -194,19 +190,25 @@ impl ParallelSystem for ParallelHashSystem {
         let n = arr.len();
         let flat = compute_hashes(arr);
         let hash_arr = hashes_to_array(flat, n);
-        Ok(WriteSet::new().put("Hash", "digest", hash_arr))
+        Ok(WriteSet::new().put_named("Hash", "digest", hash_arr))
+    }
+
+    fn sliced(&self) -> bool {
+        true
     }
 
     fn run_slice(
         &self,
         pipeline: &Dataset,
         rows: std::ops::Range<u32>,
-    ) -> Option<Result<SliceWriteSet, SaciError>> {
-        let blob_batch = pipeline.batch_for("Blob")?;
+    ) -> Result<SliceWriteSet, SaciError> {
+        let blob_batch = pipeline.batch_named("Blob")?;
         let arr = blob_batch
-            .column_by_name("data")?
+            .column_by_name("data")
+            .ok_or_else(|| SaciError::generic("data not found"))?
             .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()?;
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .ok_or_else(|| SaciError::generic("data wrong type"))?;
 
         let start = rows.start as usize;
         let len = (rows.end - rows.start) as usize;
@@ -217,14 +219,14 @@ impl ParallelSystem for ParallelHashSystem {
             .unwrap();
         let flat = compute_hashes(slice_arr);
         let hash_arr: Arc<dyn arrow_array::Array> = hashes_to_array(flat, len);
-        Some(Ok(SliceWriteSet::new(rows).put("Hash", "digest", hash_arr)))
+        Ok(SliceWriteSet::new(rows).put_named("Hash", "digest", hash_arr))
     }
 }
 
 fn build_pipeline(blob_batch: &RecordBatch) -> Dataset {
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<Blob>().unwrap();
-    pipeline.register_component::<Hash>().unwrap();
+    pipeline.register::<Blob>().unwrap();
+    pipeline.register::<Hash>().unwrap();
     pipeline
         .append_record_batch("Blob", blob_batch.clone())
         .unwrap();
@@ -236,7 +238,7 @@ fn build_pipeline(blob_batch: &RecordBatch) -> Dataset {
 }
 
 fn extract_hashes(pipeline: &Dataset) -> Vec<Vec<u8>> {
-    let batch = pipeline.batch_for("Hash").unwrap();
+    let batch = pipeline.batch_named("Hash").unwrap();
     let arr = batch
         .column_by_name("digest")
         .unwrap()
@@ -267,17 +269,15 @@ fn bench_parallelism_compute(c: &mut Criterion) {
 
     // Correctness: sequential == parallel hashes
     {
-        let mut wl_seq = Pipeline::new("hash_seq_check");
-        wl_seq.data = build_pipeline(&blob_batch);
-        wl_seq.add_system(SequentialHashSystem);
+        let mut wl_seq = Pipeline::new("hash_seq_check").system(SequentialHashSystem);
+        *wl_seq.data_mut() = build_pipeline(&blob_batch);
         rt.block_on(wl_seq.run()).unwrap();
-        let seq_hashes = extract_hashes(&wl_seq.data);
+        let seq_hashes = extract_hashes(wl_seq.data());
 
-        let mut wl_par = Pipeline::new("hash_par_check");
-        wl_par.data = build_pipeline(&blob_batch);
-        wl_par.add_parallel_system(ParallelHashSystem);
+        let mut wl_par = Pipeline::new("hash_par_check").parallel_system(ParallelHashSystem);
+        *wl_par.data_mut() = build_pipeline(&blob_batch);
         rt.block_on(wl_par.run()).unwrap();
-        let par_hashes = extract_hashes(&wl_par.data);
+        let par_hashes = extract_hashes(wl_par.data());
 
         assert_eq!(seq_hashes.len(), par_hashes.len(), "hash count mismatch");
         for (i, (s, p)) in seq_hashes.iter().zip(par_hashes.iter()).enumerate() {
@@ -292,11 +292,14 @@ fn bench_parallelism_compute(c: &mut Criterion) {
 
     group.bench_function("sequential", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("hash_seq");
-            wl.data = build_pipeline(std::hint::black_box(&blob_batch));
-            wl.add_system(SequentialHashSystem);
+            let mut wl = Pipeline::new("hash_seq").system(SequentialHashSystem);
+            *wl.data_mut() = build_pipeline(std::hint::black_box(&blob_batch));
             rt.block_on(wl.run()).unwrap();
-            let first = wl.data.batch_for("Hash").map(|b| b.num_rows()).unwrap_or(0);
+            let first = wl
+                .data()
+                .batch_named("Hash")
+                .map(|b| b.num_rows())
+                .unwrap_or(0);
             std::hint::black_box(first)
         })
     });
@@ -304,11 +307,14 @@ fn bench_parallelism_compute(c: &mut Criterion) {
     // The default slice threshold is 100_000 rows.
     group.bench_function("slice_parallel", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("hash_par");
-            wl.data = build_pipeline(std::hint::black_box(&blob_batch));
-            wl.add_parallel_system(ParallelHashSystem);
+            let mut wl = Pipeline::new("hash_par").parallel_system(ParallelHashSystem);
+            *wl.data_mut() = build_pipeline(std::hint::black_box(&blob_batch));
             rt.block_on(wl.run()).unwrap();
-            let first = wl.data.batch_for("Hash").map(|b| b.num_rows()).unwrap_or(0);
+            let first = wl
+                .data()
+                .batch_named("Hash")
+                .map(|b| b.num_rows())
+                .unwrap_or(0);
             std::hint::black_box(first)
         })
     });
@@ -320,14 +326,12 @@ fn bench_parallelism_compute(c: &mut Criterion) {
     impl ParallelSystem for ForcedSingleThreadSystem {
         fn meta(&self) -> SystemMeta {
             SystemMeta::new("forced_single_thread")
-                .read("Blob", "data")
-                .write("Hash", "digest")
+                .reads_named("Blob", "data")
+                .writes_named("Hash", "digest")
         }
         async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
             // Same body as `ParallelHashSystem::run`.
-            let blob_batch = pipeline
-                .batch_for("Blob")
-                .ok_or_else(|| SaciError::generic("Blob not found"))?;
+            let blob_batch = pipeline.batch_named("Blob")?;
             let arr = blob_batch
                 .column_by_name("data")
                 .ok_or_else(|| SaciError::generic("data not found"))?
@@ -337,18 +341,21 @@ fn bench_parallelism_compute(c: &mut Criterion) {
             let n = arr.len();
             let flat = compute_hashes(arr);
             let hash_arr = hashes_to_array(flat, n);
-            Ok(WriteSet::new().put("Hash", "digest", hash_arr))
+            Ok(WriteSet::new().put_named("Hash", "digest", hash_arr))
         }
         // No `run_slice` override, so slice parallelism stays off.
     }
 
     group.bench_function("high_threshold_single_thread", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("hash_forced_st");
-            wl.data = build_pipeline(std::hint::black_box(&blob_batch));
-            wl.add_parallel_system(ForcedSingleThreadSystem);
+            let mut wl = Pipeline::new("hash_forced_st").parallel_system(ForcedSingleThreadSystem);
+            *wl.data_mut() = build_pipeline(std::hint::black_box(&blob_batch));
             rt.block_on(wl.run()).unwrap();
-            let first = wl.data.batch_for("Hash").map(|b| b.num_rows()).unwrap_or(0);
+            let first = wl
+                .data()
+                .batch_named("Hash")
+                .map(|b| b.num_rows())
+                .unwrap_or(0);
             std::hint::black_box(first)
         })
     });

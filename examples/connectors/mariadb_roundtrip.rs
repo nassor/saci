@@ -109,7 +109,7 @@ schema_fields "amount" type="decimal128" precision=18 scale=4
     let mut source = MariadbSource::new(source_cfg)?;
     let schema = source.schema();
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
+    dataset.register_schema(COMPONENT, schema.clone())?;
     let read = drain_into_dataset(&mut source, &mut dataset, COMPONENT).await?;
     println!("source drained {read} row(s) into the dataset");
 
@@ -132,9 +132,7 @@ schema_fields "amount" type="decimal128" precision=18 scale=4
     ))?;
 
     let mut sink = MariadbSink::new(sink_cfg)?;
-    let batch = dataset
-        .batch_for(COMPONENT)
-        .ok_or("the dataset lost its component")?;
+    let batch = dataset.batch_named(COMPONENT)?;
     sink.write_batch(batch).await?;
     sink.finish().await?;
     println!(

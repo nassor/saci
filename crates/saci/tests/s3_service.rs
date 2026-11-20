@@ -54,7 +54,10 @@ fn schema() -> Arc<Schema> {
 /// covered by the S3 connector's own tests).
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("s3_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
@@ -321,13 +324,13 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
     )
     .expect("readback source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema);
+    dataset.register_schema(COMPONENT, schema).unwrap();
     let rows = saci::io::source::drain_into_dataset(&mut read_source, &mut dataset, COMPONENT)
         .await
         .expect("drain output prefix");
     assert_eq!(rows, 3);
 
-    let out = dataset.batch_for(COMPONENT).expect("component present");
+    let out = dataset.batch_named(COMPONENT).expect("component present");
     let ids = out
         .column(0)
         .as_any()

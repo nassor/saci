@@ -385,7 +385,7 @@ mod tests {
             .collect();
 
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<Trade>().unwrap();
+        pipeline.register::<Trade>().unwrap();
         pipeline.append::<Trade>(&trades).unwrap();
         pipeline
     }
@@ -542,7 +542,7 @@ mod tests {
         .unwrap();
 
         let mut pipeline = Dataset::new();
-        pipeline.register_raw_component("NullPriceTrade", schema);
+        pipeline.register_schema("NullPriceTrade", schema).unwrap();
         pipeline
             .append_record_batch("NullPriceTrade", batch)
             .unwrap();
@@ -606,7 +606,7 @@ mod tests {
         .unwrap();
 
         let mut pipeline = Dataset::new();
-        pipeline.register_raw_component("AllNullPrice", schema);
+        pipeline.register_schema("AllNullPrice", schema).unwrap();
         pipeline.append_record_batch("AllNullPrice", batch).unwrap();
 
         let sys = WindowedSystemBuilder::new()

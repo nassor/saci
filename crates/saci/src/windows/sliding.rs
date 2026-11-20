@@ -165,7 +165,7 @@ mod tests {
         ];
 
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<Trade>().unwrap();
+        pipeline.register::<Trade>().unwrap();
         pipeline.append::<Trade>(&trades).unwrap();
 
         let sys = WindowedSystemBuilder::new()
@@ -246,11 +246,11 @@ mod tests {
         ];
 
         let mut world_sliding = Dataset::new();
-        world_sliding.register_component::<Trade>().unwrap();
+        world_sliding.register::<Trade>().unwrap();
         world_sliding.append::<Trade>(&trades).unwrap();
 
         let mut world_tumbling = Dataset::new();
-        world_tumbling.register_component::<Trade>().unwrap();
+        world_tumbling.register::<Trade>().unwrap();
         world_tumbling.append::<Trade>(&trades).unwrap();
 
         let sys_sliding = WindowedSystemBuilder::new()
@@ -299,7 +299,7 @@ mod tests {
         }];
 
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<Trade>().unwrap();
+        pipeline.register::<Trade>().unwrap();
         pipeline.append::<Trade>(&trades).unwrap();
 
         let sys = WindowedSystemBuilder::new()
@@ -329,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn test_sliding_empty_world_no_panic() {
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<Trade>().unwrap();
+        pipeline.register::<Trade>().unwrap();
 
         let sys = WindowedSystemBuilder::new()
             .source("Trade", "timestamp_ms")

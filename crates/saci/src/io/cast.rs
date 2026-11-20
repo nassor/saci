@@ -131,8 +131,6 @@ impl<S: Source + 'static> Source for CastingSource<S> {
 /// # Example
 ///
 /// ```rust
-/// # #[cfg(feature = "io")]
-/// # {
 /// use std::collections::HashMap;
 /// use std::sync::Arc;
 /// use arrow_schema::{DataType, Field, Schema};
@@ -147,7 +145,6 @@ impl<S: Source + 'static> Source for CastingSource<S> {
 /// let target = build_target_schema(&source, &overrides);
 /// assert_eq!(target.field(0).data_type(), &DataType::Int64);
 /// assert_eq!(target.field(1).data_type(), &DataType::Float32); // unchanged
-/// # }
 /// ```
 pub fn build_target_schema(source: &Schema, overrides: &HashMap<&str, DataType>) -> Arc<Schema> {
     let fields: Vec<Field> = source
@@ -164,7 +161,7 @@ pub fn build_target_schema(source: &Schema, overrides: &HashMap<&str, DataType>)
     Arc::new(Schema::new(fields))
 }
 
-#[cfg(all(test, feature = "io"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use arrow_array::{Int32Array, Int64Array};

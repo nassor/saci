@@ -7,7 +7,7 @@ weight = 1
 # Writing a connector
 
 A connector is reached either by calling its constructor in Rust and handing the
-result to `Pipeline::add_source`, or by naming its `type` string in the service
+result to `Pipeline::source` or `Pipeline::sink`, or by naming its `type` string in the service
 config and letting the factory build it. The second path needs the connector's
 feature on `saci`, because `register_builtin_factories` only installs
 what is compiled in, and it registers a `connector-*` feature's factories only when `service` is
@@ -22,8 +22,8 @@ saci = { path = "crates/saci", default-features = false, features = ["connector-
 ```
 
 Each connector is a module under `saci::connector`, gated by its `connector-<name>` feature, and
-every one of them turns on `connector-contract` and `io`, so the `Source` and `Sink` traits and
-the factory contract arrive with it. A connector compiles without wasmtime, axum or openraft in
+every one of them turns on `connector-contract`, which implies `engine`, so the `Source` and `Sink`
+traits and the factory contract arrive with it. A connector compiles without wasmtime, axum or openraft in
 the graph. The config keys each node accepts, and the errors they raise, are on
 [Sources and sinks](@/service/connectors/_index.md).
 

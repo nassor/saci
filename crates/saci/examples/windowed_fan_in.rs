@@ -17,65 +17,34 @@
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use tokio_util::sync::CancellationToken;
 
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
+use saci::prelude::*;
 use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
 use saci::service::config::{
     HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
     StandaloneConfig, WorkflowSpec,
 };
 use saci::service::standalone::run_standalone;
-use saci::system::{System, SystemMeta};
 use saci::windows::{
     ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowWatermark,
     WindowedSystemBuilder,
 };
 
 /// A trade event: one price at one instant, in milliseconds since the epoch.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Component, serde::Serialize, serde::Deserialize)]
 struct Trade {
     timestamp_ms: i64,
     price: f64,
 }
 
-impl Component for Trade {
-    fn name() -> &'static str {
-        "Trade"
-    }
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("timestamp_ms", DataType::Int64, false),
-            Field::new("price", DataType::Float64, false),
-        ]))
-    }
-}
-
 /// One aggregate row per (window, key) group, the processor node's output.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Component, serde::Serialize, serde::Deserialize)]
 struct WindowTotal {
     window_id: i64,
     key_hash: i64,
     total: f64,
-}
-
-impl Component for WindowTotal {
-    fn name() -> &'static str {
-        "WindowTotal"
-    }
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("window_id", DataType::Int64, false),
-            Field::new("key_hash", DataType::Int64, false),
-            Field::new("total", DataType::Float64, false),
-        ]))
-    }
 }
 
 /// Reads the [`WindowResults`] the [`WindowedSystem`] left on the batch
@@ -87,15 +56,13 @@ struct ReportSystem;
 impl System for ReportSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("report")
-            .read_resource::<WindowResults>()
-            .read_resource::<WindowWatermark>()
-            .write_component("WindowTotal")
+            .reads_resource::<WindowResults>()
+            .reads_resource::<WindowWatermark>()
+            .writes_all::<WindowTotal>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-        let results = data
-            .get_resource::<WindowResults>()
-            .ok_or_else(|| SaciError::generic("WindowResults resource not found"))?;
+        let results = data.resource::<WindowResults>()?;
 
         let mut rows = Vec::new();
         for batch in &results.batches {
@@ -165,18 +132,11 @@ fn build_windowed_pipeline() -> Pipeline {
         .build()
         .expect("windowed system builds");
 
-    let mut pipeline = Pipeline::new("windowed-fan-in");
-    pipeline
-        .data_mut()
-        .register_component::<Trade>()
-        .expect("register Trade");
-    pipeline
-        .data_mut()
-        .register_component::<WindowTotal>()
-        .expect("register WindowTotal");
-    pipeline.add_system(windowed);
-    pipeline.add_system(ReportSystem);
-    pipeline
+    Pipeline::new("windowed-fan-in")
+        .component::<Trade>()
+        .component::<WindowTotal>()
+        .system(windowed)
+        .system(ReportSystem)
 }
 
 fn trade_batch(trades: &[(i64, f64)]) -> RecordBatch {

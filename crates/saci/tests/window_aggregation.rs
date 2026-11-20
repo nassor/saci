@@ -1,6 +1,6 @@
 // Tumbling window aggregation over a keyed source. Requires the `windows` feature.
 
-#![cfg(all(feature = "runtime", feature = "windows"))]
+#![cfg(all(feature = "engine", feature = "windows"))]
 
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ struct IngestSystem;
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("SalesEvent")
+        SystemMeta::new("ingest").writes_all::<SalesEvent>()
     }
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
         let events = vec![
@@ -117,11 +117,10 @@ async fn test_window_aggregation_produces_results_for_all_windows() {
         .build()
         .unwrap();
 
-    let mut pipeline = Pipeline::builder("window_aggregation")
-        .with::<SalesEvent>()
-        .with_system(IngestSystem)
-        .with_system(windowed)
-        .build();
+    let mut pipeline = Pipeline::new("window_aggregation")
+        .component::<SalesEvent>()
+        .system(IngestSystem)
+        .system(windowed);
 
     pipeline.run().await.unwrap();
 
@@ -158,14 +157,13 @@ async fn test_window_aggregation_stage_layout_is_valid() {
         .build()
         .unwrap();
 
-    let mut pipeline = Pipeline::builder("window_stages")
-        .with::<SalesEvent>()
-        .with_system(IngestSystem)
-        .with_system(windowed)
-        .build();
+    let mut pipeline = Pipeline::new("window_stages")
+        .component::<SalesEvent>()
+        .system(IngestSystem)
+        .system(windowed);
 
     pipeline.run().await.unwrap();
 
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan().unwrap();
     assert!(stages.len() >= 2, "expected at least 2 stages");
 }

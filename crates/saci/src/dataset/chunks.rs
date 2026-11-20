@@ -135,11 +135,11 @@ mod tests {
     #[test]
     fn test_many_appends_merged_correctly() {
         let mut ds = Dataset::new();
-        ds.register_component::<CkOrder>().unwrap();
+        ds.register::<CkOrder>().unwrap();
         for i in 0..100usize {
             ds.append::<CkOrder>(&[CkOrder { id: i as u64 }]).unwrap();
         }
-        let batch = ds.columns::<CkOrder>().unwrap();
+        let batch = ds.batch::<CkOrder>().unwrap();
         assert_eq!(batch.num_rows(), 100);
         let arr = batch
             .column(0)

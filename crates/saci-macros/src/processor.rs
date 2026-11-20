@@ -228,7 +228,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                     use crate::bindings::saci::pipeline::types::ComponentDescriptor;
 
                     let __saci_pipeline = __SACI_PIPELINE.pipeline(#build_fn);
-                    let __saci_registry = __saci_pipeline.data.schemas();
+                    let __saci_registry = __saci_pipeline.data().schemas();
 
                     // Sorted by component name, so the WIT
                     // `components: list<component-descriptor>` order is
@@ -298,7 +298,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                         .map_err(|e| RunError::Permanent(format!("state restore: {e}")))?;
 
                     let pipeline = __SACI_PIPELINE.pipeline(#build_fn);
-                    let run_result = pipeline.run_on_with_stats(&mut dataset).await;
+                    let run_result = pipeline.run_on(&mut dataset).await;
 
                     let stats = match run_result {
                         Ok(stats) => stats,
@@ -331,7 +331,7 @@ fn guest_impl(build_fn: &Ident, name: &LitStr, spec: &TokenStream) -> TokenStrea
                         rows_in,
                         rows_out,
                         systems_run: stats.systems_run as u32,
-                        retries: stats.retries_this_batch,
+                        retries: stats.retries,
                     };
 
                     Ok(RunResult {

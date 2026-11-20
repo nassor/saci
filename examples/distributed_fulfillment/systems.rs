@@ -16,11 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arrow_array::{ArrayRef, Float64Array, RecordBatch, StringArray};
 use async_trait::async_trait;
 
-use saci::SaciError;
-use saci::SystemConfig;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::system::{ParallelSystem, System, SystemMeta, WriteSet};
+use saci::prelude::*;
 
 use crate::components::{Invoice, Order};
 use crate::resources::{FxRateTable, InventoryCatalog, NodeId, TaxRateTable};
@@ -88,7 +84,7 @@ impl ParallelSystem for ValidateOrderSystem {
         let _ = nid;
 
         let arr: ArrayRef = Arc::new(StringArray::from(statuses));
-        Ok(WriteSet::new().put("Order", "validation_status", arr))
+        Ok(WriteSet::new().put(Order::VALIDATION_STATUS, arr))
     }
 }
 
@@ -149,7 +145,7 @@ impl ParallelSystem for DetectFraudSystem {
         let _ = nid;
 
         let arr: ArrayRef = Arc::new(Float64Array::from(scores));
-        Ok(WriteSet::new().put("Order", "fraud_score", arr))
+        Ok(WriteSet::new().put(Order::FRAUD_SCORE, arr))
     }
 }
 
@@ -163,14 +159,12 @@ impl ParallelSystem for ConvertCurrencySystem {
         SystemMeta::new("convert_currency")
             .reads(Order::AMOUNT_ORIGINAL)
             .reads(Order::CURRENCY)
-            .read_resource::<FxRateTable>()
+            .reads_resource::<FxRateTable>()
             .writes(Order::AMOUNT_USD)
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let rates = pipeline
-            .get_resource::<FxRateTable>()
-            .ok_or_else(|| SaciError::generic("FxRateTable resource missing"))?;
+        let rates = pipeline.resource::<FxRateTable>()?;
         let orders = pipeline.view::<Order>()?;
         let n = orders.len();
         let nid = node_id(pipeline);
@@ -200,7 +194,7 @@ impl ParallelSystem for ConvertCurrencySystem {
         let _ = nid;
 
         let arr: ArrayRef = Arc::new(Float64Array::from(usd_amounts));
-        Ok(WriteSet::new().put("Order", "amount_usd", arr))
+        Ok(WriteSet::new().put(Order::AMOUNT_USD, arr))
     }
 }
 
@@ -217,14 +211,12 @@ impl System for CheckInventorySystem {
             .reads(Order::PRODUCT_ID)
             .reads(Order::QUANTITY)
             .reads(Order::VALIDATION_STATUS)
-            .read_resource::<InventoryCatalog>()
+            .reads_resource::<InventoryCatalog>()
             .writes(Order::INVENTORY_STATUS)
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let catalog = pipeline
-            .get_resource::<InventoryCatalog>()
-            .ok_or_else(|| SaciError::generic("InventoryCatalog resource missing"))?;
+        let catalog = pipeline.resource::<InventoryCatalog>()?;
 
         // Copy the columns out so `replace_batch` can take `&mut Dataset` once
         // the view is dropped.
@@ -363,7 +355,7 @@ impl ParallelSystem for ApproveOrderSystem {
         let _ = nid;
 
         let arr: ArrayRef = Arc::new(StringArray::from(statuses));
-        Ok(WriteSet::new().put("Order", "processing_status", arr))
+        Ok(WriteSet::new().put(Order::PROCESSING_STATUS, arr))
     }
 }
 
@@ -378,15 +370,13 @@ impl ParallelSystem for ComputeTaxSystem {
         SystemMeta::new("compute_tax")
             .reads(Order::AMOUNT_USD)
             .reads(Order::REGION)
-            .read_resource::<TaxRateTable>()
+            .reads_resource::<TaxRateTable>()
             .writes(Order::TAX_RATE)
             .writes(Order::TAX_AMOUNT)
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let tax_table = pipeline
-            .get_resource::<TaxRateTable>()
-            .ok_or_else(|| SaciError::generic("TaxRateTable resource missing"))?;
+        let tax_table = pipeline.resource::<TaxRateTable>()?;
         let orders = pipeline.view::<Order>()?;
         let n = orders.len();
         let nid = node_id(pipeline);
@@ -420,23 +410,15 @@ impl ParallelSystem for ComputeTaxSystem {
 
         let rate_arr: ArrayRef = Arc::new(Float64Array::from(rates));
         let amount_arr: ArrayRef = Arc::new(Float64Array::from(amounts));
-        Ok(WriteSet::new().put("Order", "tax_rate", rate_arr).put(
-            "Order",
-            "tax_amount",
-            amount_arr,
-        ))
+        Ok(WriteSet::new()
+            .put(Order::TAX_RATE, rate_arr)
+            .put(Order::TAX_AMOUNT, amount_arr))
     }
 }
 
 /// Stage 3: appends one `Invoice` row per order. Rejected orders get a
 /// "skipped" invoice. Retries with a fixed backoff.
 pub struct GenerateInvoiceSystem;
-
-impl GenerateInvoiceSystem {
-    fn config() -> SystemConfig {
-        SystemConfig::new().with_fixed_retry(3, Duration::from_millis(50))
-    }
-}
 
 #[async_trait]
 impl System for GenerateInvoiceSystem {
@@ -447,11 +429,11 @@ impl System for GenerateInvoiceSystem {
             .reads(Order::TAX_RATE)
             .reads(Order::TAX_AMOUNT)
             .reads(Order::PROCESSING_STATUS)
-            .write_component("Invoice")
+            .writes_all::<Invoice>()
     }
 
-    fn config(&self) -> SystemConfig {
-        Self::config()
+    fn retry(&self) -> RetryMode {
+        RetryMode::fixed(3, Duration::from_millis(50))
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
@@ -524,18 +506,12 @@ impl System for GenerateInvoiceSystem {
 /// Assemble the fulfillment pipeline. Its seven systems resolve to four stages
 /// from their `SystemMeta` declarations.
 pub fn build_pipeline() -> Pipeline {
-    let mut pipeline = Pipeline::new("fulfillment");
-
-    pipeline.add_parallel_system(ValidateOrderSystem);
-    pipeline.add_parallel_system(DetectFraudSystem);
-    pipeline.add_parallel_system(ConvertCurrencySystem);
-
-    pipeline.add_system(CheckInventorySystem);
-
-    pipeline.add_parallel_system(ApproveOrderSystem);
-    pipeline.add_parallel_system(ComputeTaxSystem);
-
-    pipeline.add_system(GenerateInvoiceSystem);
-
-    pipeline
+    Pipeline::new("fulfillment")
+        .parallel_system(ValidateOrderSystem)
+        .parallel_system(DetectFraudSystem)
+        .parallel_system(ConvertCurrencySystem)
+        .system(CheckInventorySystem)
+        .parallel_system(ApproveOrderSystem)
+        .parallel_system(ComputeTaxSystem)
+        .system(GenerateInvoiceSystem)
 }

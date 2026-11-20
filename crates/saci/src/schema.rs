@@ -2,7 +2,7 @@
 //!
 //! The registry lives inside [`Dataset`](super::dataset::Dataset) and records the
 //! canonical [`Schema`] for every component registered with
-//! [`register_component`](super::dataset::Dataset::register_component). The
+//! [`register`](super::dataset::Dataset::register). The
 //! pipeline manages it; it is public to support schema introspection and IPC
 //! round-trips.
 

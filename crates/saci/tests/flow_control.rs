@@ -89,7 +89,9 @@ impl PipelineRuntime for FixedCostRuntime {
 
     fn template_dataset(&self) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_raw_component(COMP, Arc::clone(&self.schema));
+        dataset
+            .register_schema(COMP, Arc::clone(&self.schema))
+            .unwrap();
         dataset
     }
 }
@@ -959,10 +961,7 @@ mod windowed {
                 None => WindowState::default(),
             };
 
-            let batch = data
-                .batch_for(SALE)
-                .cloned()
-                .ok_or_else(|| SaciError::generic("Sale component missing"))?;
+            let batch = data.batch_named(SALE)?.clone();
 
             let mut watermark = WatermarkState::new(WINDOW_LATENESS_MS);
             if let Some(previous) = state.watermark_ms {
@@ -1074,8 +1073,12 @@ mod windowed {
 
         fn template_dataset(&self) -> Dataset {
             let mut dataset = Dataset::new();
-            dataset.register_raw_component(SALE, Arc::clone(&self.in_schema));
-            dataset.register_raw_component(TOTAL, Arc::clone(&self.out_schema));
+            dataset
+                .register_schema(SALE, Arc::clone(&self.in_schema))
+                .unwrap();
+            dataset
+                .register_schema(TOTAL, Arc::clone(&self.out_schema))
+                .unwrap();
             dataset
         }
     }

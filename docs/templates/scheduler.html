@@ -19,7 +19,7 @@
     <dt>In one line</dt>
     <dd>Many pipelines, <strong>one dependency-ordered pass</strong> per tick</dd>
     <dt>You need</dt>
-    <dd>Nothing beyond <code>saci</code>. The <code>io</code> feature only changes what a tick does and unlocks the sink-depth probe</dd>
+    <dd>Nothing beyond <code>saci</code>. The default <code>engine</code> feature supplies the sources and sinks a tick drains and the sink-depth probe</dd>
     <dt>Read this if</dt>
     <dd>You have two or more workloads sharing a process, and one of them must wait for another or be skipped because of it</dd>
 </dl>
@@ -43,57 +43,50 @@
 <h2 id="adding">Adding pipelines</h2>
 
 <p>
-    <code>add_pipeline</code> takes a pipeline and gives it a default
-    <code>PipelineConfig</code>: no dependencies, priority 0, no backpressure.
-    <code>add_pipeline_with_config</code> takes the config explicitly. Both return
-    <code>&amp;mut Self</code>, so calls chain.
+    <code>pipeline</code> takes a pipeline and gives it a default
+    <code>PipelineConfig</code>: no dependencies, priority 0, no pause predicate.
+    <code>pipeline_with</code> takes the config explicitly. Both take the scheduler and
+    return it, so calls chain.
 </p>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>two ways in, one prelude import</em></div>
     <pre><code class="language-rust">use saci::prelude::*;
 
-let mut sched = Scheduler::new();
-
-// Default config: no edges, priority 0, no backpressure.
-sched.add_pipeline(
-    Pipeline::builder("ingest")
-        .with::&lt;Transaction&gt;()
-        .with_system(IngestSystem)
-        .build(),
-);
-
-// Explicit config: one edge, one priority.
-sched.add_pipeline_with_config(
-    Pipeline::builder("enrich")
-        .with::&lt;Transaction&gt;()
-        .with_system(EnrichSystem)
-        .build(),
-    PipelineConfig::new()
-        .after("ingest", DependencyKind::Data)
-        .priority(-1),
-);</code></pre>
+let mut sched = Scheduler::new()
+    // Default config: no edges, priority 0, no pause predicate.
+    .pipeline(
+        Pipeline::new("ingest")
+            .component::&lt;Transaction&gt;()
+            .system(IngestSystem),
+    )
+    // Explicit config: one edge, one priority.
+    .pipeline_with(
+        Pipeline::new("enrich")
+            .component::&lt;Transaction&gt;()
+            .system(EnrichSystem),
+        PipelineConfig::new().after_data("ingest").priority(-1),
+    );</code></pre>
 </div>
 
 <p>
-    <code>PipelineConfig</code> has exactly three fields, one builder method each:
-    <code>dependencies</code>, <code>priority</code> (an <code>i32</code>, lower runs
-    first, default 0), and <code>backpressure</code> (an <code>Option</code>).
-    <code>.after()</code> <em>pushes</em> an edge, so call it once per predecessor.
-    <code>Scheduler</code>, <code>PipelineConfig</code>, <code>DependencyKind</code> and
-    <code>BackpressureSpec</code> are all in <code>saci::prelude</code>.
+    <code>PipelineConfig</code> has three settings, one builder method each:
+    the edges (<code>after</code> and <code>after_data</code>), <code>priority</code>
+    (an <code>i32</code>, lower runs first, default 0), and <code>pause_when</code>
+    (a closure over the pipeline).
+    <code>after</code> and <code>after_data</code> each <em>push</em> an edge, so call
+    one once per predecessor.
+    <code>Scheduler</code> and <code>PipelineConfig</code> are in <code>saci::prelude</code>.
 </p>
 
 <div class="note note-warn">
-    <span class="note-label">The plan is built once, and cached</span>
+    <span class="note-label">The plan is cached until the pipeline set changes</span>
     <p>
-        The stage plan lives in a <code>OnceLock</code> filled by the first
-        <code>tick()</code>. <code>add_pipeline</code> does not clear it, unlike
-        <code>Pipeline::add_system</code>, which does invalidate its own pipeline's stage
-        cache. Register every pipeline <b>before</b> the first tick. One added afterwards
-        belongs to no stage and will never run, with no error. A bad graph is cached the
-        same way, so a cycle or an unknown dependency name returns the identical error from
-        every later tick.
+        The first <code>tick()</code> builds the stage plan and keeps it.
+        <code>pipeline</code> and <code>pipeline_with</code> clear it, so a pipeline added
+        after a tick takes part in the next one. A bad graph is never cached: a cycle or an
+        unknown dependency name returns the identical error from every tick until the
+        graph changes.
     </p>
 </div>
 
@@ -109,10 +102,11 @@ sched.add_pipeline_with_config(
         dependency graph with Kahn's algorithm. Every pipeline with no unmet dependency
         forms stage 1, removing them exposes stage 2, and so on. Each entry in
         <code>dependencies</code> becomes one edge, and <em>the kind is ignored here</em>, so
-        <code>Order</code> and <code>Data</code> build the same graph. A name that
-        matches no pipeline fails with a message quoting both pipelines, and a cycle fails
-        with <code>"pipeline dependency graph contains a cycle"</code>. Either way
-        <code>tick</code> hands it back as a <code>SaciError::Scheduler</code>.
+        <code>after</code> and <code>after_data</code> build the same graph. A name that
+        matches no pipeline fails with a <code>SaciError::Configuration</code> quoting both
+        pipelines, and a cycle fails with a <code>SaciError::Scheduler</code> carrying
+        <code>"pipeline dependency graph contains a cycle"</code>. <code>tick</code>
+        returns either error as it is.
     </li>
     <li>
         <b>Sort each stage by priority.</b> A stable sort, so pipelines with equal priority
@@ -120,9 +114,8 @@ sched.add_pipeline_with_config(
     </li>
     <li>
         <b>For each member, in that order:</b> test its <code>Data</code> edges, then its
-        backpressure predicate, then run it. The run is <code>run_with_io()</code> when the
-        <code>io</code> feature is on, which drains sources in, runs systems, and drains
-        sinks out. Otherwise it is plain <code>run()</code>.
+        pause predicate, then run it with <code>run()</code>, which drains attached sources
+        in, runs systems, and drains sinks out.
     </li>
     <li>
         <b>Record whether it produced zero rows,</b> for the <code>Data</code> edges
@@ -269,11 +262,11 @@ sched.add_pipeline_with_config(
 
 <ul>
     <li>
-        <code>DependencyKind::Order</code>: run after the named pipeline, whatever it
+        <code>after</code>: run after the named pipeline, whatever it
         produced.
     </li>
     <li>
-        <code>DependencyKind::Data</code>: run after the named pipeline
+        <code>after_data</code>: run after the named pipeline
         <b>and skip this tick</b> if that pipeline produced nothing.
     </li>
 </ul>
@@ -284,7 +277,7 @@ sched.add_pipeline_with_config(
 </p>
 
 <ul>
-    <li>it ran and its <code>last_stats().rows_produced</code> was <b>exactly 0</b>; or</li>
+    <li>it ran and the <code>rows_produced</code> of its <code>RunStats</code> was <b>exactly 0</b>; or</li>
     <li>it was itself skipped, by one of its own <code>Data</code> edges, or by backpressure.</li>
 </ul>
 
@@ -318,8 +311,8 @@ sched.add_pipeline_with_config(
 <h2 id="skips">Skips and backpressure</h2>
 
 <p>
-    <code>BackpressureSpec</code> has one variant:
-    <code>Predicate(Box&lt;dyn Fn(&amp;Pipeline) -&gt; bool + Send + Sync&gt;)</code>. The
+    <code>pause_when</code> takes a closure
+    <code>Fn(&amp;Pipeline) -&gt; bool + Send + Sync</code>. The
     closure receives <b>the pipeline it gates</b>. Returning <code>true</code> skips that
     pipeline for the current tick and flags it, so <code>Data</code> dependents skip too.
     The two checks are ordered. The <code>Data</code> edges are tested first, and
@@ -358,7 +351,7 @@ sched.add_pipeline_with_config(
             <rect class="hd hd-ctl" x="0" y="126" width="196" height="22" rx="8"/>
             <rect class="hd hd-ctl" x="0" y="140" width="196" height="8"/>
             <text class="t-lbl t-ctl" x="12" y="141">2. Backpressure</text>
-            <text class="t-sm" x="12" y="164">Predicate(&amp;pipeline) true?</text>
+            <text class="t-sm" x="12" y="164">pause_when(&amp;pipeline) true?</text>
             <text class="t-sm" x="12" y="180">may probe sink_pending_rows</text>
 
             <path class="arw arw-ctl" d="M98 188 V206" marker-end="url(#sch-c2)"/>
@@ -369,7 +362,7 @@ sched.add_pipeline_with_config(
             <rect class="hd hd-data" x="0" y="220" width="196" height="8"/>
             <text class="t-lbl t-data" x="12" y="221">3. Run it</text>
             <rect class="row-w" x="8" y="234" width="180" height="18" rx="3"/>
-            <text class="t-sm" x="16" y="247">run_with_io(), else run()</text>
+            <text class="t-sm" x="16" y="247">run()</text>
             <text class="t-sm" x="12" y="265">rows_produced = live rows</text>
             <text class="t-sm" x="12" y="279">after minus before</text>
         </g>
@@ -456,9 +449,9 @@ sched.add_pipeline_with_config(
 </div>
 
 <p>
-    The closure is where the <code>io</code> feature earns its place.
-    <code>Pipeline::sink_pending_rows(component)</code> is gated on <code>io</code> and
-    forwards to <code>Sink::pending_rows()</code>, which lets a pipeline pause itself when
+    A closure can probe the sink.
+    <code>Pipeline::sink_pending_rows(component)</code> forwards to
+    <code>Sink::pending_rows()</code>, which lets a pipeline pause itself when
     the sink it writes into has backed up.
 </p>
 
@@ -470,15 +463,14 @@ use saci::prelude::*;
 // The receiver is consumed elsewhere; four batches of headroom.
 let (sink, rx) = ChannelSink::new(Transaction::schema(), 4);
 
-sched.add_pipeline_with_config(
-    Pipeline::builder("ingest")
-        .with::&lt;Transaction&gt;()
-        .with_system(IngestSystem)
-        .with_sink("Transaction", sink)
-        .build(),
-    PipelineConfig::new().backpressure(BackpressureSpec::Predicate(Box::new(
-        |p: &amp;Pipeline| p.sink_pending_rows("Transaction").is_some_and(|n| n &gt;= 10_000),
-    ))),
+let mut sched = Scheduler::new().pipeline_with(
+    Pipeline::new("ingest")
+        .component::&lt;Transaction&gt;()
+        .system(IngestSystem)
+        .sink("Transaction", sink),
+    PipelineConfig::new().pause_when(|p: &amp;Pipeline| {
+        p.sink_pending_rows("Transaction").is_some_and(|n| n &gt;= 10_000)
+    }),
 );</code></pre>
 </div>
 
@@ -493,9 +485,8 @@ sched.add_pipeline_with_config(
 </p>
 
 <p>
-    Without the <code>io</code> feature the predicate still works, but it has to
-    look at something else. It receives the whole <code>&amp;Pipeline</code>, so
-    <code>last_stats()</code> is available. So is any state you captured in the closure: a
+    The predicate is not limited to sinks. It receives the whole <code>&amp;Pipeline</code>,
+    so <code>data()</code> is available. So is any state you captured in the closure: a
     clock, an <code>Arc&lt;AtomicBool&gt;</code> flipped by an operator, or a queue depth read
     from elsewhere in your process.
 </p>
@@ -504,13 +495,13 @@ sched.add_pipeline_with_config(
 
 <p>
     A pipeline's error is returned from <code>tick</code> unchanged, by <code>?</code>. The
-    rest of that stage does not run, and neither does any later stage. Only plan failures
-    are re-wrapped, as <code>SaciError::Scheduler</code>.
+    rest of that stage does not run, and neither does any later stage. A plan failure is a
+    <code>SaciError::Scheduler</code>.
 </p>
 
 <p>
     There is no rollback. Pipelines that already ran in that tick kept their effects. Their
-    datasets are mutated and, under <code>io</code>, their sinks have already been written
+    datasets are mutated and their sinks have already been written
     and finished. Systems reached by a retried tick therefore need to be idempotent, exactly
     as they do under the distributed runner. The next <code>tick</code> starts again from
     the top of the cached plan, so a pipeline that succeeded before the failure runs a
@@ -526,19 +517,15 @@ sched.add_pipeline_with_config(
 <h2 id="inspecting">Reading results back</h2>
 
 <p>
-    Every pipeline keeps the <code>RunStats</code> from its most recent run, and the
-    scheduler hands you the pipelines themselves, by slice or by name.
+    <code>tick</code> returns no stats. The scheduler hands you the pipelines themselves, by
+    slice or by name, and each one reports through its dataset.
 </p>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>stats, and mutation between ticks</em></div>
     <pre><code class="language-rust">// Registration order, not stage order.
 for p in sched.pipelines() {
-    let s = p.last_stats();
-    println!(
-        "{:&lt;8} {:&gt;3} systems  {:&gt;6} rows  {:&gt;5} ms  {} retries",
-        p.name(), s.systems_run, s.rows_produced, s.duration_millis, s.retries_this_batch,
-    );
+    println!("{:&lt;8} {:&gt;6} live rows", p.name(), p.data().live_rows());
 }
 
 // Feed a pipeline by hand between ticks.
@@ -548,9 +535,8 @@ if let Some(p) = sched.get_mut("ingest") {
 </div>
 
 <p>
-    A skipped pipeline is not re-run, so its <code>last_stats()</code> still holds the
-    figures from the tick in which it last ran. <code>rows_produced</code> is an
-    <code>isize</code> for that reason. It is a delta, and it can be negative.
+    A skipped pipeline is not re-run, so its dataset still holds the rows from the tick in
+    which it last ran.
 </p>
 
 <h2 id="choosing">When to reach for one</h2>
@@ -584,7 +570,7 @@ if let Some(p) = sched.get_mut("ingest") {
 </p>
 
 <p>
-    That boundary is also where <code>BackpressureSpec::Predicate</code> stops applying.
+    That boundary is also where <code>pause_when</code> stops applying.
     It gates one <code>Pipeline</code> inside a hand-built <code>Scheduler</code>, and a
     service workflow never constructs a <code>Scheduler</code> at all.
     What a service workflow gets instead is the runners' own

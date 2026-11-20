@@ -82,28 +82,17 @@ impl Dataset {
     /// # Example
     ///
     /// ```rust
-    /// # {
-    /// use saci::dataset::Dataset;
-    /// use saci::component::Component;
-    /// use arrow_schema::{DataType, Field, Schema};
-    /// use std::sync::Arc;
+    /// use saci::prelude::*;
     /// use serde::{Deserialize, Serialize};
     ///
-    /// #[derive(Serialize, Deserialize)]
-    /// struct Price(f64);
-    /// impl Component for Price {
-    ///     fn name() -> &'static str { "price" }
-    ///     fn schema() -> Arc<Schema> {
-    ///         Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, false)]))
-    ///     }
-    /// }
+    /// #[derive(Component, Serialize, Deserialize)]
+    /// struct Price { value: f64 }
     ///
     /// let mut dataset = Dataset::new();
-    /// dataset.register_component::<Price>().unwrap();
+    /// dataset.register::<Price>().unwrap();
     ///
     /// let empty = dataset.clone_empty();
     /// assert_eq!(empty.rows(), 0);
-    /// # }
     /// ```
     pub fn clone_empty(&self) -> Self {
         let mut new_dataset = Self::new();
@@ -117,9 +106,9 @@ impl Dataset {
             new_dataset
                 .schemas
                 .register_raw(name, schema.clone(), version);
-            new_dataset
-                .components
-                .insert(name, vec![RecordBatch::new_empty(schema)]);
+            let empty = RecordBatch::new_empty(schema);
+            new_dataset.empty_templates.insert(name, empty.clone());
+            new_dataset.components.insert(name, vec![empty]);
         }
         new_dataset
     }
@@ -127,7 +116,7 @@ impl Dataset {
     /// Drop all rows and resources, resetting the dataset to empty.
     ///
     /// Schemas remain registered so the dataset can be re-used with the same
-    /// component types without calling `register_component` again.
+    /// component types without calling `register` again.
     pub fn clear(&mut self) {
         // Disjoint field borrows: `components` mutably, `empty_templates`
         // shared. Cloning a prebuilt zero-row batch is a few `Arc` bumps
@@ -207,7 +196,7 @@ mod tests {
     #[test]
     fn test_mark_dead_idempotent() {
         let mut ds = Dataset::new();
-        ds.register_component::<LcOrder>().unwrap();
+        ds.register::<LcOrder>().unwrap();
         ds.append::<LcOrder>(&make_orders(10)).unwrap();
         ds.mark_dead(Row::new(0));
         ds.mark_dead(Row::new(0));
@@ -217,7 +206,7 @@ mod tests {
     #[test]
     fn test_should_compact_threshold() {
         let mut ds = Dataset::new();
-        ds.register_component::<LcOrder>().unwrap();
+        ds.register::<LcOrder>().unwrap();
         ds.append::<LcOrder>(&make_orders(100)).unwrap();
         for i in 0..25usize {
             ds.mark_dead(Row::new(i as u32));
@@ -230,7 +219,7 @@ mod tests {
     #[test]
     fn test_compact_filters_dead_rows() {
         let mut ds = Dataset::new();
-        ds.register_component::<LcOrder>().unwrap();
+        ds.register::<LcOrder>().unwrap();
         ds.append::<LcOrder>(&make_orders(100)).unwrap();
         for i in 0..50usize {
             ds.mark_dead(Row::new(i as u32));
@@ -238,7 +227,7 @@ mod tests {
         ds.compact().unwrap();
         assert_eq!(ds.rows(), 50);
         assert_eq!(ds.live_rows(), 50);
-        let col = ds.column::<LcOrder>("id").unwrap();
+        let col = ds.column_named("LcOrder", "id").unwrap();
         let arr = col.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(arr.value(0), 50u64);
     }
@@ -246,7 +235,7 @@ mod tests {
     #[test]
     fn test_clear_resets_rows_not_schemas() {
         let mut ds = Dataset::new();
-        ds.register_component::<LcOrder>().unwrap();
+        ds.register::<LcOrder>().unwrap();
         ds.append::<LcOrder>(&make_orders(10)).unwrap();
         ds.clear();
         assert_eq!(ds.rows(), 0);
@@ -257,10 +246,25 @@ mod tests {
     #[test]
     fn test_clone_empty_preserves_schemas() {
         let mut ds = Dataset::new();
-        ds.register_component::<LcOrder>().unwrap();
+        ds.register::<LcOrder>().unwrap();
         ds.append::<LcOrder>(&make_orders(10)).unwrap();
         let empty = ds.clone_empty();
         assert_eq!(empty.rows(), 0);
         assert!(empty.schemas().contains("LcOrder"));
+    }
+
+    /// `clone_empty` carries the zero-row templates, so a `clear` afterwards
+    /// takes the prebuilt-template path and the component stays readable.
+    #[test]
+    fn test_clone_empty_then_clear_keeps_batch_named_working() {
+        let mut ds = Dataset::new();
+        ds.register::<LcOrder>().unwrap();
+        let mut empty = ds.clone_empty();
+        assert!(empty.empty_templates.contains_key("LcOrder"));
+        empty.append::<LcOrder>(&make_orders(3)).unwrap();
+        empty.clear();
+        let batch = empty.batch_named("LcOrder").unwrap();
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 2);
     }
 }

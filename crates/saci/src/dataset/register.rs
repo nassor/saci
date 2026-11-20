@@ -6,7 +6,7 @@ use arrow_schema::Schema;
 use crate::component::Component;
 use crate::error::SaciError;
 
-use super::Dataset;
+use super::{Dataset, intern_component_name};
 
 impl Dataset {
     /// Register a component type, creating an empty chunk list for it.
@@ -23,104 +23,80 @@ impl Dataset {
     /// # Example
     ///
     /// ```rust
-    /// #
-    /// # {
-    /// use std::sync::Arc;
-    /// use arrow_schema::{DataType, Field, Schema};
-    /// use saci::dataset::Dataset;
-    /// use saci::component::Component;
+    /// use saci::prelude::*;
     /// use serde::{Deserialize, Serialize};
     ///
-    /// #[derive(Serialize, Deserialize)]
+    /// #[derive(Component, Serialize, Deserialize)]
     /// struct Price { value: f64 }
-    /// impl Component for Price {
-    ///     fn name() -> &'static str { "Price" }
-    ///     fn schema() -> Arc<Schema> {
-    ///         Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, false)]))
-    ///     }
-    /// }
     ///
     /// let mut dataset = Dataset::new();
-    /// dataset.register_component::<Price>().unwrap();
-    /// # }
+    /// dataset.register::<Price>().unwrap();
     /// ```
-    pub fn register_component<C: Component>(&mut self) -> Result<(), SaciError> {
+    pub fn register<C: Component>(&mut self) -> Result<(), SaciError> {
         if self.schemas.contains(C::name()) {
             return Ok(());
         }
-        if self.row_count != 0 {
-            return Err(SaciError::configuration(format!(
-                "Dataset: cannot register new component '{}' after rows have been appended \
-                 (row_count={}). Register all components before appending data, or call \
-                 clear() first.",
-                C::name(),
-                self.row_count
-            )));
-        }
+        self.refuse_after_rows(C::name())?;
         self.schemas.register::<C>();
-        let schema = C::schema();
-        let empty = RecordBatch::new_empty(schema);
-        self.empty_templates.insert(C::name(), empty.clone());
-        self.components.insert(C::name(), vec![empty]);
+        self.insert_empty(C::name(), C::schema());
         Ok(())
     }
 
-    /// Register a component using an explicit Arrow [`Schema`], without a typed
-    /// [`Component`] implementation.
+    /// Register a component by name with an explicit Arrow [`Schema`], for a
+    /// schema known only at runtime: one read from Parquet metadata, a
+    /// WebAssembly processor's `describe`, a native plugin's manifest. The
+    /// schema version is `1`.
     ///
-    /// For sources whose schema is only known at runtime, such as one read from
-    /// Parquet file metadata. The schema version defaults to `1`.
+    /// The name is interned, so registering the same name repeatedly reuses
+    /// one allocation. Idempotent for a name already registered.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `row_count > 0` when registering a new component.
-    pub fn register_raw_component(&mut self, name: &'static str, schema: Arc<Schema>) {
-        self.register_raw_component_versioned(name, schema, 1);
+    /// Returns [`SaciError::Configuration`] if rows have already been
+    /// appended.
+    pub fn register_schema(&mut self, name: &str, schema: Arc<Schema>) -> Result<(), SaciError> {
+        self.register_schema_versioned(name, schema, 1)
     }
 
-    /// Like [`register_raw_component`](Self::register_raw_component) but with
-    /// an explicit schema `version`.
+    /// [`register_schema`](Self::register_schema) with an explicit schema
+    /// `version`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `row_count > 0` when registering a new component.
-    pub fn register_raw_component_versioned(
+    /// Returns [`SaciError::Configuration`] if rows have already been
+    /// appended.
+    pub fn register_schema_versioned(
         &mut self,
-        name: &'static str,
+        name: &str,
         schema: Arc<Schema>,
         version: u32,
-    ) {
+    ) -> Result<(), SaciError> {
         if self.schemas.contains(name) {
-            return;
+            return Ok(());
         }
-        assert!(
-            self.row_count == 0,
-            "Dataset: cannot register raw component '{name}' after rows have been appended \
-             (row_count={}). Register all components before appending data.",
-            self.row_count
-        );
+        self.refuse_after_rows(name)?;
+        let name = intern_component_name(name);
         self.schemas.register_raw(name, schema.clone(), version);
+        self.insert_empty(name, schema);
+        Ok(())
+    }
+
+    fn refuse_after_rows(&self, name: &str) -> Result<(), SaciError> {
+        if self.row_count == 0 {
+            return Ok(());
+        }
+        Err(SaciError::configuration(format!(
+            "Dataset: cannot register new component '{name}' after rows have been appended \
+             (row_count={}). Register all components before appending data, or call \
+             clear() first.",
+            self.row_count
+        )))
+    }
+
+    fn insert_empty(&mut self, name: &'static str, schema: Arc<Schema>) {
         let empty = RecordBatch::new_empty(schema);
         self.empty_templates.insert(name, empty.clone());
         self.components.insert(name, vec![empty]);
-    }
-
-    /// Register a component whose name is only known at runtime.
-    ///
-    /// For a host loading a pipeline implementation across a process boundary: a
-    /// WebAssembly processor's `describe` or a native plugin's manifest names its
-    /// components as owned strings, while the registry keys on `&'static str`.
-    ///
-    /// The name is interned, so loading the same component repeatedly reuses one
-    /// allocation instead of growing memory per load. Callers must not leak the
-    /// name themselves.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `row_count > 0` when registering a new component.
-    pub fn register_named_component(&mut self, name: &str, schema: Arc<Schema>) {
-        let name = crate::dataset::intern_component_name(name);
-        self.register_raw_component_versioned(name, schema, 1);
     }
 }
 
@@ -173,31 +149,41 @@ mod tests {
     #[test]
     fn test_register_ok() {
         let mut ds = Dataset::new();
-        assert!(ds.register_component::<Reg>().is_ok());
+        assert!(ds.register::<Reg>().is_ok());
     }
 
     #[test]
     fn test_register_idempotent() {
         let mut ds = Dataset::new();
-        ds.register_component::<Reg>().unwrap();
-        assert!(ds.register_component::<Reg>().is_ok());
+        ds.register::<Reg>().unwrap();
+        assert!(ds.register::<Reg>().is_ok());
     }
 
     #[test]
     fn test_register_after_rows_different_type_errors() {
         let mut ds = Dataset::new();
-        ds.register_component::<Reg>().unwrap();
+        ds.register::<Reg>().unwrap();
         ds.append::<Reg>(&[Reg { value: 1.0 }]).unwrap();
-        let result = ds.register_component::<RegB>();
+        let result = ds.register::<RegB>();
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("RegB"));
     }
 
     #[test]
-    fn test_register_raw_component() {
+    fn test_register_schema() {
         let mut ds = Dataset::new();
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
-        ds.register_raw_component("raw_test", schema);
+        ds.register_schema("raw_test", schema).unwrap();
         assert!(ds.schemas().contains("raw_test"));
+    }
+
+    #[test]
+    fn test_register_schema_after_rows_is_a_configuration_error() {
+        let mut ds = Dataset::new();
+        ds.register::<Reg>().unwrap();
+        ds.append::<Reg>(&[Reg { value: 1.0 }]).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
+        let err = ds.register_schema("late", schema).unwrap_err();
+        assert_eq!(err.category(), "configuration");
     }
 }

@@ -17,47 +17,16 @@
 use std::sync::Arc;
 
 use arrow_array::{BooleanArray, Float64Array};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
-
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::system::{FieldRef, ParallelSystem, System, SystemMeta, WriteSet, system_fn};
+use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
 struct Order {
     id: u64,
     currency: String,
     amount: f64,
     usd_amount: f64,
     express: bool,
-}
-
-impl Component for Order {
-    fn name() -> &'static str {
-        "Order"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::UInt64, false),
-            Field::new("currency", DataType::Utf8, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("usd_amount", DataType::Float64, false),
-            Field::new("express", DataType::Boolean, false),
-        ]))
-    }
-}
-
-impl Order {
-    const ID: FieldRef<Order> = FieldRef::new("id");
-    const CURRENCY: FieldRef<Order> = FieldRef::new("currency");
-    const AMOUNT: FieldRef<Order> = FieldRef::new("amount");
-    const USD_AMOUNT: FieldRef<Order> = FieldRef::new("usd_amount");
-    const EXPRESS: FieldRef<Order> = FieldRef::new("express");
 }
 
 /// USD-base exchange rates, held as a resource rather than a column.
@@ -92,7 +61,7 @@ struct SeedOrders;
 #[async_trait]
 impl System for SeedOrders {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("seed").write_component("Order")
+        SystemMeta::new("seed").writes_all::<Order>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
@@ -150,13 +119,11 @@ impl ParallelSystem for ConvertCurrency {
             .reads(Order::AMOUNT)
             .reads(Order::CURRENCY)
             .writes(Order::USD_AMOUNT)
-            .read_resource::<FxRates>()
+            .reads_resource::<FxRates>()
     }
 
     async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError> {
-        let rates = data
-            .get_resource::<FxRates>()
-            .ok_or_else(|| SaciError::generic("FxRates resource not found"))?;
+        let rates = data.resource::<FxRates>()?;
 
         let orders = data.view::<Order>()?;
         let amount = orders.f64(Order::AMOUNT)?;
@@ -165,7 +132,7 @@ impl ParallelSystem for ConvertCurrency {
             .map(|i| amount.value(i) * rates.rate_for(currency.value(i)))
             .collect();
 
-        Ok(WriteSet::new().put("Order", "usd_amount", Arc::new(Float64Array::from(values))))
+        Ok(WriteSet::new().put(Order::USD_AMOUNT, Arc::new(Float64Array::from(values))))
     }
 }
 
@@ -186,7 +153,7 @@ impl ParallelSystem for FlagExpress {
             .map(|i| amount.value(i) > 1000.0)
             .collect();
 
-        Ok(WriteSet::new().put("Order", "express", Arc::new(BooleanArray::from(flags))))
+        Ok(WriteSet::new().put(Order::EXPRESS, Arc::new(BooleanArray::from(flags))))
     }
 }
 
@@ -198,7 +165,7 @@ fn make_summary_system() -> impl System {
             .reads(Order::AMOUNT)
             .reads(Order::USD_AMOUNT)
             .reads(Order::EXPRESS)
-            .write_resource::<Summary>(),
+            .writes_resource::<Summary>(),
         |data| {
             let rows;
             let mut express = 0usize;
@@ -243,27 +210,23 @@ fn make_summary_system() -> impl System {
 
 #[tokio::main]
 async fn main() -> Result<(), SaciError> {
-    let mut pipeline = Pipeline::builder("first-pipeline")
-        .with::<Order>()
-        .with_resource(FxRates {
+    let mut pipeline = Pipeline::new("first-pipeline")
+        .component::<Order>()
+        .resource(FxRates {
             eur: 1.08,
             gbp: 1.27,
             jpy: 0.0067,
         })
-        .with_system(SeedOrders)
-        .with_parallel_system(ConvertCurrency)
-        .with_parallel_system(FlagExpress)
-        .with_system(make_summary_system())
-        .build();
+        .system(SeedOrders)
+        .parallel_system(ConvertCurrency)
+        .parallel_system(FlagExpress)
+        .system(make_summary_system());
 
     pipeline.run().await?;
 
-    println!("stages: {:?}", pipeline.stages().unwrap_or_default());
+    println!("stages: {:?}", pipeline.plan()?.to_vec());
 
-    let summary = pipeline
-        .data()
-        .get_resource::<Summary>()
-        .ok_or_else(|| SaciError::generic("Summary resource missing"))?;
+    let summary = pipeline.data().resource::<Summary>()?;
     println!(
         "{} orders, {} express, {:.2} USD total",
         summary.rows, summary.express, summary.total_usd

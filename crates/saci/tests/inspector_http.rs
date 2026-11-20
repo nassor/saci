@@ -110,8 +110,8 @@ struct Scale;
 impl System for Scale {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("scale")
-            .read("Reading", "raw")
-            .write("Reading", "scaled")
+            .reads_named("Reading", "raw")
+            .writes_named("Reading", "scaled")
     }
 
     async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
@@ -182,10 +182,9 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     opentelemetry::global::set_meter_provider(provider.clone());
     saci::metrics::init();
 
-    let pipeline = Pipeline::builder("inspector-http")
-        .with::<Reading>()
-        .with_system(Scale)
-        .build();
+    let pipeline = Pipeline::new("inspector-http")
+        .component::<Reading>()
+        .system(Scale);
 
     // A `BuiltNode` list matching `FIXTURE`'s shape, standing in for what
     // `ServiceBuilder::build_all` would assemble from real connectors. The
@@ -196,10 +195,9 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     let (_tx_eu, src_eu) = ChannelSource::new(Arc::clone(&reading_schema), 1);
     let (_tx_us, src_us) = ChannelSource::new(Arc::clone(&reading_schema), 1);
     let (sink, _rx) = ChannelSink::new(Arc::clone(&reading_schema), 1);
-    let topology_pipeline = Pipeline::builder("inspector-http")
-        .with::<Reading>()
-        .with_system(Scale)
-        .build();
+    let topology_pipeline = Pipeline::new("inspector-http")
+        .component::<Reading>()
+        .system(Scale);
     let nodes = vec![
         BuiltNode {
             id: "orders-eu".to_string(),
@@ -266,9 +264,7 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     inspector.set_topology(build_topology(&config, &[nodes.as_slice()], 1));
 
     let mut dataset = Dataset::new();
-    dataset
-        .register_component::<Reading>()
-        .expect("register Reading");
+    dataset.register::<Reading>().expect("register Reading");
     dataset
         .append::<Reading>(&[Reading {
             raw: 1.0,

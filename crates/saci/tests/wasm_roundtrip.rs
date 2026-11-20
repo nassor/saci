@@ -45,7 +45,7 @@ fn counter_in_blob(blob: &[u8]) -> Option<u64> {
 }
 
 fn counter_value(dataset: &Dataset) -> Option<u64> {
-    let batch = dataset.batch_for(Counter::name())?;
+    let batch = dataset.batch_named(Counter::name()).ok()?;
     if batch.num_rows() == 0 {
         return None;
     }

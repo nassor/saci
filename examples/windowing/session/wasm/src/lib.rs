@@ -247,10 +247,7 @@ fn coalesce_from(open: &mut Vec<OpenSession>, idx: usize, gap_ms: i64) {
 /// Merge the batch into the open sessions and emit every session the
 /// watermark has left behind, the core of the demo's session logic.
 pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Sale>()
-        .ok_or_else(|| SaciError::generic("windowing: Sale component missing"))?
-        .clone();
+    let batch = data.batch::<Sale>()?.clone();
     let n = batch.num_rows();
 
     // An empty batch still runs the systems: emit nothing, change nothing.
@@ -284,11 +281,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| SaciError::generic("windowing: amount is not Float64"))?;
 
-    let state = data
-        .get_resource_mut::<ProcessorState<SessionState>>()
-        .ok_or_else(|| {
-            SaciError::generic("windowing: ProcessorState<SessionState> resource missing")
-        })?;
+    let state = data.resource_mut::<ProcessorState<SessionState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole SessionState.
     if state.rows.is_empty() {
@@ -385,25 +378,18 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
 /// Called lazily by the `export_pipeline!` macro on the first call to any WIT
 /// export, and constructed exactly once per component instance.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("windowing_session");
-    pipeline
-        .data
-        .register_component::<Sale>()
-        .expect("register Sale");
-    pipeline
-        .data
-        .register_component::<SessionTotal>()
-        .expect("register SessionTotal");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("accumulate")
-            .read_component("Sale")
-            .write_component("SessionTotal"),
-        |data| {
-            let geo = geometry();
-            accumulate_impl(data, &geo)
-        },
-    ));
-    pipeline
+    Pipeline::new("windowing_session")
+        .component::<Sale>()
+        .component::<SessionTotal>()
+        .system(system_fn(
+            SystemMeta::new("accumulate")
+                .reads_all::<Sale>()
+                .writes_all::<SessionTotal>(),
+            |data| {
+                let geo = geometry();
+                accumulate_impl(data, &geo)
+            },
+        ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -423,8 +409,8 @@ mod tests {
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Sale>().unwrap();
-        data.register_component::<SessionTotal>().unwrap();
+        data.register::<Sale>().unwrap();
+        data.register::<SessionTotal>().unwrap();
         <Stateful<SessionState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
         data
     }
@@ -441,7 +427,9 @@ mod tests {
     type Total = (i64, i64, String, i64, f64);
 
     fn totals(data: &Dataset) -> Vec<Total> {
-        let batch = data.batch_for("SessionTotal").expect("SessionTotal batch");
+        let batch = data
+            .batch_named("SessionTotal")
+            .expect("SessionTotal batch");
         let start = batch
             .column(0)
             .as_any()

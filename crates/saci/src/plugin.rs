@@ -15,8 +15,8 @@
 //!
 //! fn build() -> Pipeline {
 //!     let mut pipeline = Pipeline::new("my-plugin");
-//!     // pipeline.data.register_component::<MyComponent>().unwrap();
-//!     // pipeline.add_system(MySystem);
+//!     // pipeline.data_mut().register::<MyComponent>().unwrap();
+//!     // pipeline = pipeline.system(MySystem);
 //!     pipeline
 //! }
 //!
@@ -72,7 +72,7 @@
 //! # Error handling in user systems
 //!
 //! The generated `run_batch` converts a [`SaciError`] out of
-//! `Pipeline::run_on_with_stats` into a status the host understands:
+//! `Pipeline::run_on` into a status the host understands:
 //!
 //! | `SaciError` variant                                        | status      |
 //! |------------------------------------------------------------|-------------|
@@ -90,8 +90,8 @@
 #![deny(missing_docs)]
 
 pub use crate::{
-    Component, Dataset, Pipeline, PipelineBuilder, RetryMode, Row, RunStats, SaciError, SaciResult,
-    SchemaRegistry, System, SystemConfig, SystemMeta, WriteSet, system_fn,
+    Component, Dataset, Pipeline, RetryMode, Row, RunStats, SaciError, SaciResult, SchemaRegistry,
+    System, SystemMeta, WriteSet, system_fn,
 };
 
 // Arrow sub-crates plugin authors need to define `Component` schemas,

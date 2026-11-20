@@ -56,7 +56,7 @@ cargo run --release -p saci --features service,wasm-host,connector-channel --exa
 ```
 
 The harness knows each benchmark's package and features, so do not pass your
-own. `batch_vs_stream` needs the `io` feature, while `tpch_q6`,
+own. `batch_vs_stream` needs the `engine` feature, while `tpch_q6`,
 `tpch_q1`, `vs_datafusion_q6`, `parallelism_compute` and `ipc_checkpoint` are
 built with no extra features. Cargo's metadata hash encodes the feature set, so
 a different `--features` list produces a *different binary*.
@@ -667,7 +667,7 @@ sequential and single-thread rows, 1.6% on the parallel one.
 Two things carry that scaling. The first is chunking at 4 chunks per CPU rather
 than one, which gives rayon something to steal when SMT siblings and the two L3
 domains retire chunks at different rates. The second is a read-mostly lock on the
-merged-batch cache, since `run_slice` calls `batch_for` once per chunk and an
+merged-batch cache, since `run_slice` calls `batch_named` once per chunk and an
 exclusive lock there serialises the entire fan-out.
 
 The third bar is about correctness rather than speed. With the slice threshold

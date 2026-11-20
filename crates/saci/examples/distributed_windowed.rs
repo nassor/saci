@@ -17,23 +17,17 @@
 use std::sync::Arc;
 
 use arrow_array::{Float64Array, Int64Array, StringArray};
-use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use saci::SaciError;
-use saci::System;
-use saci::component::Component;
-use saci::dataset::Dataset;
 use saci::distributed::strategy::CheckpointStrategy;
 use saci::distributed::{DistributedRunner, KeyPartition, RedbSharedStore, RunnerConfig};
-use saci::pipeline::Pipeline;
-use saci::system::{SystemMeta, system_fn};
+use saci::prelude::*;
 use saci::windows::{
     ReduceAggregate, WindowAccumulator, WindowFunction, WindowResults, WindowSpec,
     WindowedSystemBuilder,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Component, Debug, Serialize, Deserialize)]
 struct SalesEvent {
     /// Unix timestamp in milliseconds.
     timestamp_ms: i64,
@@ -41,20 +35,6 @@ struct SalesEvent {
     category: String,
     /// Sale amount in USD.
     amount: f64,
-}
-
-impl Component for SalesEvent {
-    fn name() -> &'static str {
-        "SalesEvent"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("timestamp_ms", DataType::Int64, false),
-            Field::new("category", DataType::Utf8, false),
-            Field::new("amount", DataType::Float64, false),
-        ]))
-    }
 }
 
 fn make_sales_ipc(events: &[(i64, &str, f64)]) -> Vec<u8> {
@@ -156,7 +136,7 @@ async fn main() -> Result<(), SaciError> {
             amount: 1.0,
         };
         let mut mini = Dataset::new();
-        mini.register_component::<SalesEvent>()?;
+        mini.register::<SalesEvent>()?;
         mini.append::<SalesEvent>(&[row])?;
 
         let probe = WindowedSystemBuilder::new()
@@ -209,60 +189,60 @@ async fn main() -> Result<(), SaciError> {
     let lookup = Arc::new(hash_to_category);
     let lookup_report = Arc::clone(&lookup);
 
-    let mut pipeline = Pipeline::new("distributed-windowed");
-    pipeline.add_system(windowed);
-    pipeline.add_system(system_fn(
-        SystemMeta::new("report").read_resource::<WindowResults>(),
-        move |data: &mut Dataset| {
-            let Some(results) = data.get_resource::<WindowResults>() else {
-                return Ok(());
-            };
-            use arrow_array::{Array, cast::AsArray};
-            for batch in &results.batches {
-                if batch.num_rows() == 0 {
-                    continue;
-                }
-                let schema = batch.schema();
-                let Ok(wid_idx) = schema.index_of("window_id") else {
-                    continue;
+    let pipeline = Pipeline::new("distributed-windowed")
+        .system(windowed)
+        .system(system_fn(
+            SystemMeta::new("report").reads_resource::<WindowResults>(),
+            move |data: &mut Dataset| {
+                let Some(results) = data.get_resource::<WindowResults>() else {
+                    return Ok(());
                 };
-                let Ok(kh_idx) = schema.index_of("key_hash") else {
-                    continue;
-                };
-                let sum_idx = schema.fields().len() - 1;
-
-                let wid_col = batch
-                    .column(wid_idx)
-                    .as_primitive::<arrow_array::types::Int64Type>();
-                let kh_col = batch
-                    .column(kh_idx)
-                    .as_primitive::<arrow_array::types::Int64Type>();
-                let sum_col = batch
-                    .column(sum_idx)
-                    .as_primitive::<arrow_array::types::Float64Type>();
-
-                for row in 0..batch.num_rows() {
-                    let wid = wid_col.value(row);
-                    let kh = kh_col.value(row);
-                    let sum = if sum_col.is_valid(row) {
-                        sum_col.value(row)
-                    } else {
-                        0.0
+                use arrow_array::{Array, cast::AsArray};
+                for batch in &results.batches {
+                    if batch.num_rows() == 0 {
+                        continue;
+                    }
+                    let schema = batch.schema();
+                    let Ok(wid_idx) = schema.index_of("window_id") else {
+                        continue;
                     };
-                    let cat = lookup_report.get(&kh).copied().unwrap_or("<unknown>");
-                    let start_s = wid * 30;
-                    println!(
-                        "  window {:>3}s–{:>3}s  {:<14}  sum = {:.2}",
-                        start_s,
-                        start_s + 30,
-                        cat,
-                        sum
-                    );
+                    let Ok(kh_idx) = schema.index_of("key_hash") else {
+                        continue;
+                    };
+                    let sum_idx = schema.fields().len() - 1;
+
+                    let wid_col = batch
+                        .column(wid_idx)
+                        .as_primitive::<arrow_array::types::Int64Type>();
+                    let kh_col = batch
+                        .column(kh_idx)
+                        .as_primitive::<arrow_array::types::Int64Type>();
+                    let sum_col = batch
+                        .column(sum_idx)
+                        .as_primitive::<arrow_array::types::Float64Type>();
+
+                    for row in 0..batch.num_rows() {
+                        let wid = wid_col.value(row);
+                        let kh = kh_col.value(row);
+                        let sum = if sum_col.is_valid(row) {
+                            sum_col.value(row)
+                        } else {
+                            0.0
+                        };
+                        let cat = lookup_report.get(&kh).copied().unwrap_or("<unknown>");
+                        let start_s = wid * 30;
+                        println!(
+                            "  window {:>3}s–{:>3}s  {:<14}  sum = {:.2}",
+                            start_s,
+                            start_s + 30,
+                            cat,
+                            sum
+                        );
+                    }
                 }
-            }
-            Ok(())
-        },
-    ));
+                Ok(())
+            },
+        ));
 
     let config = RunnerConfig {
         // Both master batches, then stop.
@@ -290,8 +270,8 @@ async fn main() -> Result<(), SaciError> {
     // the accumulator load and save are skipped silently.
     let world_factory = || {
         let mut d = Dataset::new();
-        d.register_component::<SalesEvent>().unwrap();
-        d.register_component::<WindowAccumulator>().unwrap();
+        d.register::<SalesEvent>().unwrap();
+        d.register::<WindowAccumulator>().unwrap();
         d
     };
 

@@ -104,25 +104,14 @@ pub fn sum_f64(array: &ArrayRef) -> Result<f64, SaciError> {
 /// # Example
 ///
 /// ```rust
-/// use std::sync::Arc;
-/// use arrow_schema::{DataType, Field, Schema};
-/// use saci::component::Component;
-/// use saci::dataset::Dataset;
+/// use saci::prelude::*;
+/// use serde::{Deserialize, Serialize};
 ///
-/// #[derive(serde::Serialize, serde::Deserialize)]
+/// #[derive(Component, Serialize, Deserialize)]
 /// struct Price { value: f64 }
 ///
-/// impl Component for Price {
-///     fn name() -> &'static str { "Price" }
-///     fn schema() -> Arc<Schema> {
-///         Arc::new(Schema::new(vec![
-///             Field::new("value", DataType::Float64, false),
-///         ]))
-///     }
-/// }
-///
 /// let mut dataset = Dataset::new();
-/// dataset.register_component::<Price>();
+/// dataset.register::<Price>().unwrap();
 /// dataset.append::<Price>(&[Price { value: 1.0 }, Price { value: 2.0 }]).unwrap();
 ///
 /// let view = dataset.view::<Price>().unwrap();

@@ -902,15 +902,16 @@ impl RowKind {
         let schema = self.schema();
         let mut pipeline = Pipeline::new("matrix");
         pipeline
-            .data
-            .register_raw_component(component, Arc::clone(&schema));
+            .data_mut()
+            .register_schema(component, Arc::clone(&schema))
+            .unwrap();
         if self == Self::Order {
-            pipeline.add_system(system_fn(
+            pipeline = pipeline.system(system_fn(
                 SystemMeta::new("double_total")
-                    .read(component, "total")
-                    .write(component, "total"),
+                    .reads_named(component, "total")
+                    .writes_named(component, "total"),
                 move |data: &mut Dataset| {
-                    let Some(batch) = data.batch_for(component) else {
+                    let Ok(batch) = data.batch_named(component) else {
                         return Ok(());
                     };
                     if batch.num_rows() == 0 {
@@ -923,7 +924,11 @@ impl RowKind {
                             saci::error::SaciError::generic("matrix: Order.total is not Float64")
                         })?;
                     let doubled: Float64Array = totals.iter().map(|v| v.map(|v| v * 2.0)).collect();
-                    data.apply_write_set(WriteSet::new().put(component, "total", Arc::new(doubled)))
+                    data.apply_write_set(WriteSet::new().put_named(
+                        component,
+                        "total",
+                        Arc::new(doubled),
+                    ))
                 },
             ));
         }

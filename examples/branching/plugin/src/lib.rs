@@ -62,10 +62,7 @@ impl Component for Order {
 /// `examples/branching/branching.kdl`; an unrecognised priority or an empty
 /// batch routes the output nowhere.
 fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Order>()
-        .ok_or_else(|| SaciError::generic("branching: Order component missing"))?
-        .clone();
+    let batch = data.batch::<Order>()?.clone();
     let schema = batch.schema();
     let priority_idx = schema
         .index_of("priority")
@@ -95,16 +92,12 @@ fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
 /// Called lazily by the `export_plugin!` macro on the first `describe` or
 /// `run-batch` call, and constructed exactly once per loaded library.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("branching-plugin");
-    pipeline
-        .data
-        .register_component::<Order>()
-        .expect("register Order");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("route_batch").read("Order", "priority"),
-        route_batch,
-    ));
-    pipeline
+    Pipeline::new("branching-plugin")
+        .component::<Order>()
+        .system(system_fn(
+            SystemMeta::new("route_batch").reads_named("Order", "priority"),
+            route_batch,
+        ))
 }
 
 saci::export_plugin!(build);

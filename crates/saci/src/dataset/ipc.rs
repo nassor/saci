@@ -30,10 +30,82 @@ use arrow_schema::{DataType, Field, Schema};
 use crate::component::Component;
 use crate::error::SaciError;
 
-use super::{
-    ALIVE_BATCH_NAME, COMPONENT_NAME_KEY, Dataset, SCHEMA_VERSION_KEY, batch_to_ipc_bytes,
-    intern_component_name, ipc_stream_to_batch,
+use arrow_ipc::{
+    reader::StreamReader,
+    writer::{IpcWriteOptions, StreamWriter},
 };
+
+use super::{
+    ALIVE_BATCH_NAME, COMPONENT_NAME_KEY, Dataset, SCHEMA_VERSION_KEY, intern_component_name,
+};
+
+/// Capacity headroom for `batch_to_ipc_bytes` beyond the column buffers: the
+/// schema and record-batch flatbuffer messages, their continuation markers and
+/// length prefixes, the end-of-stream marker, and each buffer's padding to the
+/// IPC write alignment (64 bytes by default). Both flatbuffer messages carry
+/// one field node and two or more buffer descriptors per column, so the
+/// per-field term scales with the column count.
+const IPC_ENVELOPE_FIXED: usize = 1024;
+const IPC_ENVELOPE_PER_FIELD: usize = 256;
+
+/// Encode one `RecordBatch` as a standalone Arrow IPC stream.
+///
+/// The single `StreamWriter` call in the crate. `IpcWriteOptions::default()`
+/// fixes MetadataVersion V5, 8 byte alignment and no compression, which is
+/// what keeps the output readable by a hand written decoder in a language with
+/// no Arrow library.
+fn batch_to_ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>, SaciError> {
+    // Size the buffer up front. `StreamWriter` appends every column's buffer
+    // into `buf` via `extend_from_slice`, and growing from capacity 0 costs
+    // about twenty amortised doublings whose re-copies sum, by geometric
+    // series, to roughly the final size again.
+    //
+    // `get_array_memory_size` sums each buffer's *capacity*, not its sliced
+    // length, so it over-counts an over-allocated or sliced buffer.
+    //
+    // Net effect is a small over-estimate, which costs address space and
+    // nothing else. `Vec` still grows if the hint turns out short.
+    let mut buf = Vec::with_capacity(
+        batch.get_array_memory_size()
+            + batch.num_columns() * IPC_ENVELOPE_PER_FIELD
+            + IPC_ENVELOPE_FIXED,
+    );
+    let options = IpcWriteOptions::default();
+    {
+        let mut sw = StreamWriter::try_new_with_options(&mut buf, batch.schema_ref(), options)
+            .map_err(|e| crate::error::SaciError::generic(format!("IPC StreamWriter init: {e}")))?;
+        sw.write(batch).map_err(|e| {
+            crate::error::SaciError::generic(format!("IPC StreamWriter write: {e}"))
+        })?;
+        sw.finish().map_err(|e| {
+            crate::error::SaciError::generic(format!("IPC StreamWriter finish: {e}"))
+        })?;
+    }
+    Ok(buf)
+}
+
+/// Decode the first `RecordBatch` of an IPC stream straight out of `reader`.
+///
+/// Takes a reader rather than a `&[u8]`: `arrow-ipc`'s `MessageReader` already
+/// materialises the message body into an Arrow-owned `MutableBuffer`, so a
+/// caller-filled slice would copy the whole body twice.
+///
+/// Does not consume the stream's end-of-stream marker; it stops as soon as the
+/// first record-batch message is decoded. Callers that frame segments must
+/// drain the remainder themselves.
+///
+/// Not panic-safe on its own: some malformed buffer spans make arrow-rs
+/// assert rather than return `Err` (see `Buffer::slice_with_length`'s
+/// `# Panics`). Its one caller, [`Dataset::read_ipc`](super::Dataset::read_ipc),
+/// is the unwind boundary; a new caller decoding untrusted bytes must add one
+/// too.
+fn ipc_stream_to_batch<R: Read>(reader: R) -> Result<RecordBatch, SaciError> {
+    let mut sr = StreamReader::try_new(reader, None)
+        .map_err(|e| SaciError::generic(format!("IPC StreamReader init: {e}")))?;
+    sr.next()
+        .ok_or_else(|| SaciError::generic("IPC stream contained no batches"))?
+        .map_err(|e| SaciError::generic(format!("IPC StreamReader read: {e}")))
+}
 
 impl Dataset {
     /// Stamp a component's identity onto a copy of its batch schema.
@@ -348,8 +420,9 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use serde::{Deserialize, Serialize};
 
+    use super::batch_to_ipc_bytes;
     use crate::component::Component;
-    use crate::dataset::{ALIVE_BATCH_NAME, COMPONENT_NAME_KEY, Dataset, batch_to_ipc_bytes};
+    use crate::dataset::{ALIVE_BATCH_NAME, COMPONENT_NAME_KEY, Dataset};
     use crate::row::Row;
 
     #[derive(Serialize, Deserialize)]
@@ -373,7 +446,7 @@ mod tests {
     #[test]
     fn test_ipc_round_trip() {
         let mut ds = Dataset::new();
-        ds.register_component::<IpcOrder>().unwrap();
+        ds.register::<IpcOrder>().unwrap();
         for i in 0..500usize {
             ds.append::<IpcOrder>(&[IpcOrder {
                 id: i as u64,
@@ -487,7 +560,7 @@ mod tests {
         let restored = Dataset::read_ipc(&mut cursor).expect("shorter component decodes");
         assert_eq!(restored.rows(), 10);
         let orders = restored
-            .batch_for("IpcOrder")
+            .batch_named("IpcOrder")
             .expect("IpcOrder component present");
         assert_eq!(orders.num_rows(), 3);
     }
@@ -548,8 +621,8 @@ mod tests {
         }
 
         let mut ds = Dataset::new();
-        ds.register_component::<IpcOrder>().unwrap();
-        ds.register_component::<IpcWide>().unwrap();
+        ds.register::<IpcOrder>().unwrap();
+        ds.register::<IpcWide>().unwrap();
         for i in 0..300usize {
             ds.append::<IpcOrder>(&[IpcOrder {
                 id: i as u64,
@@ -574,8 +647,8 @@ mod tests {
         assert_eq!(restored.live_rows(), 299);
 
         // Both components survived with their values intact.
-        let orders = restored.column::<IpcOrder>("total").unwrap();
-        let wide = restored.column::<IpcWide>("b").unwrap();
+        let orders = restored.column_named(IpcOrder::name(), "total").unwrap();
+        let wide = restored.column_named(IpcWide::name(), "b").unwrap();
         assert_eq!(orders.len(), 300);
         assert_eq!(wide.len(), 300);
     }
@@ -583,7 +656,7 @@ mod tests {
     #[test]
     fn test_ipc_intern_on_repeated_reload() {
         let mut ds = Dataset::new();
-        ds.register_component::<IpcOrder>().unwrap();
+        ds.register::<IpcOrder>().unwrap();
         ds.append::<IpcOrder>(&[IpcOrder { id: 0, total: 0.0 }])
             .unwrap();
 

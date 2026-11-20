@@ -69,13 +69,16 @@ fn schema() -> Arc<Schema> {
 /// A pipeline that doubles `total` in place.
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("clickhouse_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
-    pipeline.add_system(system_fn(
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
+    pipeline = pipeline.system(system_fn(
         SystemMeta::new("double_total")
-            .read(COMPONENT, "total")
-            .write(COMPONENT, "total"),
+            .reads_named(COMPONENT, "total")
+            .writes_named(COMPONENT, "total"),
         |data: &mut Dataset| {
-            let Some(batch) = data.batch_for(COMPONENT) else {
+            let Ok(batch) = data.batch_named(COMPONENT) else {
                 return Ok(());
             };
             if batch.num_rows() == 0 {
@@ -88,7 +91,7 @@ fn build_pipeline() -> Pipeline {
                 .downcast_ref::<Int64Array>()
                 .expect("int64 total");
             let doubled: Int64Array = totals.iter().map(|v| v.map(|v| v * 2)).collect();
-            data.apply_write_set(WriteSet::new().put(COMPONENT, "total", Arc::new(doubled)))
+            data.apply_write_set(WriteSet::new().put_named(COMPONENT, "total", Arc::new(doubled)))
         },
     ));
     pipeline

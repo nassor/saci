@@ -84,7 +84,7 @@ pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result
     let component = &args.component;
     let fn_name = &func.sig.ident;
     let system_name = fn_name.to_string();
-    let decode = decode_rows(component, &system_name);
+    let decode = decode_rows(component);
     let map_err = map_user_error();
 
     // `crate::saci_config_get` is emitted by `#[processor]` into the processor
@@ -106,8 +106,8 @@ pub(crate) fn expand_transform(args: TransformArgs, func: ItemFn) -> syn::Result
 
     let meta = quote! {
         ::saci::processor::__rt::SystemMeta::new(#system_name)
-            .read_component(<#component as ::saci::processor::__rt::Component>::name())
-            .write_component(<#component as ::saci::processor::__rt::Component>::name())
+            .reads_all_named(<#component as ::saci::processor::__rt::Component>::name())
+            .writes_all_named(<#component as ::saci::processor::__rt::Component>::name())
     };
 
     // Whole-component read *and* write over-declaration is always safe: the DAG
@@ -193,13 +193,13 @@ pub(crate) fn expand_fold(args: FoldArgs, func: ItemFn) -> syn::Result<TokenStre
     let FoldArgs { reads, state } = &args;
     let fn_name = &func.sig.ident;
     let system_name = fn_name.to_string();
-    let decode = decode_rows(reads, &system_name);
+    let decode = decode_rows(reads);
     let map_err = map_user_error();
 
     let meta = quote! {
         ::saci::processor::__rt::SystemMeta::new(#system_name)
-            .read_component(<#reads as ::saci::processor::__rt::Component>::name())
-            .write_resource::<::saci::processor::__rt::ProcessorState<#state>>()
+            .reads_all_named(<#reads as ::saci::processor::__rt::Component>::name())
+            .writes_resource::<::saci::processor::__rt::ProcessorState<#state>>()
     };
 
     // The rows are decoded into an owned `Vec` inside a block so the immutable
@@ -324,8 +324,8 @@ mod tests {
         assert!(out.contains("pub fn settle (row : & mut Order)"), "{out}");
         assert!(out.contains("pub fn settle_system ()"), "{out}");
         assert!(out.contains("struct __SaciSystem_settle"), "{out}");
-        assert!(out.contains("read_component"), "{out}");
-        assert!(out.contains("write_component"), "{out}");
+        assert!(out.contains("reads_all_named"), "{out}");
+        assert!(out.contains("writes_all_named"), "{out}");
         // The one-parameter form must not reach for the config getter.
         assert!(!out.contains("saci_config_get"), "{out}");
     }
@@ -356,7 +356,7 @@ mod tests {
             out.contains("ProcessorState :: < Ledger > :: get_or_insert_default"),
             "{out}"
         );
-        assert!(out.contains("write_resource"), "{out}");
+        assert!(out.contains("writes_resource"), "{out}");
         assert!(out.contains("fn ledger_system ()"), "{out}");
         // A fold hands the whole slice over once; it must not loop rows.
         assert!(!out.contains("for __saci_row"), "{out}");

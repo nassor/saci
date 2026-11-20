@@ -368,7 +368,7 @@ impl Sink for HttpSink {
     }
 
     /// Nothing to flush and no connection to close: each batch was one whole
-    /// request. Idempotent, so `run_with_io`'s unconditional finish is safe.
+    /// request. Idempotent, so `Pipeline::run`'s unconditional finish is safe.
     async fn finish(&mut self) -> Result<(), SaciError> {
         Ok(())
     }

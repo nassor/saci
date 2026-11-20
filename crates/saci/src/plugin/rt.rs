@@ -244,7 +244,7 @@ pub fn manifest_json<S: ProcessorStateSpec>(
     pipeline: &Pipeline,
     version: &str,
 ) -> Result<String, String> {
-    let registry = pipeline.data.schemas();
+    let registry = pipeline.data().schemas();
 
     let mut entries: Vec<(&'static str, std::sync::Arc<arrow_schema::Schema>)> = registry
         .iter()
@@ -371,7 +371,7 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
         }
 
         let pipeline = instance.slot.pipeline(build);
-        let stats = match pollster::block_on(pipeline.run_on_with_stats(&mut dataset)) {
+        let stats = match pollster::block_on(pipeline.run_on(&mut dataset)) {
             Ok(stats) => stats,
             Err(e) => {
                 let (is_retryable, message) = classify_run_error(&e);
@@ -431,7 +431,7 @@ pub unsafe fn run_batch_impl<S: ProcessorStateSpec>(
                     rows_in,
                     rows_out,
                     systems_run: stats.systems_run as u32,
-                    retries: stats.retries_this_batch,
+                    retries: stats.retries,
                 },
                 routes: routes_buffer,
                 has_routes,
@@ -537,13 +537,11 @@ mod tests {
 
     #[test]
     fn manifest_json_sorts_components_and_carries_the_fingerprint() {
-        let mut pipeline = Pipeline::new("demo");
         // Two components registered out of alphabetical order, so the sort is
         // observable in the output.
-        pipeline.data.register_raw_component("Zeta", zeta_schema());
-        pipeline
-            .data
-            .register_raw_component("Alpha", alpha_schema());
+        let pipeline = Pipeline::new("demo")
+            .schema("Zeta", zeta_schema())
+            .schema("Alpha", alpha_schema());
 
         let json = manifest_json::<NoState>(&pipeline, "9.9.9").expect("manifest");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -568,7 +566,7 @@ mod tests {
         assert_eq!(fingerprint.len(), 8, "got {fingerprint}");
         assert_eq!(
             fingerprint,
-            fingerprint_hex(pipeline.data.schemas().fingerprint())
+            fingerprint_hex(pipeline.data().schemas().fingerprint())
         );
     }
 

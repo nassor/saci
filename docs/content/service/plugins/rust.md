@@ -122,13 +122,9 @@ components and systems are the plugin's, written exactly as in a
 use saci::plugin::prelude::*;
 
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("smoketest-plugin");
-    pipeline
-        .data
-        .register_component::<Counter>()
-        .expect("register Counter");
-    pipeline.add_system(AdvanceSystem);
-    pipeline
+    Pipeline::new("smoketest-plugin")
+        .component::<Counter>()
+        .system(AdvanceSystem)
 }
 
 saci::export_plugin!(build, state = Total);

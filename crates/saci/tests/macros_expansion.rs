@@ -68,14 +68,14 @@ pub fn totals(rows: &[Row], state: &mut Totals) -> saci::processor::Result<()> {
 
 fn seeded(rows: Vec<Row>) -> Dataset {
     let mut data = Dataset::new();
-    data.register_component::<Row>().expect("register Row");
+    data.register::<Row>().expect("register Row");
     data.append(&rows).expect("append rows");
     data.insert_resource(saci::processor::ProcessorState::<Totals>::default());
     data
 }
 
 fn rows_of(data: &Dataset) -> Vec<Row> {
-    <Row as Component>::from_record_batch(data.columns::<Row>().expect("Row registered"))
+    <Row as Component>::from_record_batch(data.batch::<Row>().expect("Row registered"))
         .expect("decode rows")
 }
 
@@ -145,10 +145,9 @@ fn a_transform_rewrites_every_row_in_place() {
         },
     ]);
 
-    let pipeline = Pipeline::builder("transform")
-        .with::<Row>()
-        .with_system(stamp_system())
-        .build();
+    let pipeline = Pipeline::new("transform")
+        .component::<Row>()
+        .system(stamp_system());
     block_on(pipeline.run_on(&mut data)).expect("run");
 
     let labels: Vec<String> = rows_of(&data).into_iter().map(|r| r.label).collect();
@@ -164,10 +163,9 @@ fn a_two_parameter_transform_reads_the_host_config() {
         valid: true,
     }]);
 
-    let pipeline = Pipeline::builder("config")
-        .with::<Row>()
-        .with_system(apply_fee_system())
-        .build();
+    let pipeline = Pipeline::new("config")
+        .component::<Row>()
+        .system(apply_fee_system());
     block_on(pipeline.run_on(&mut data)).expect("run");
 
     assert_eq!(rows_of(&data)[0].amount, 180.0);
@@ -182,28 +180,29 @@ fn a_transform_error_fails_the_batch_as_a_retryable_system_execution() {
         valid: false,
     }]);
 
-    let pipeline = Pipeline::builder("reject")
-        .with::<Row>()
-        .with_system(reject_invalid_system())
-        .build();
+    let pipeline = Pipeline::new("reject")
+        .component::<Row>()
+        .system(reject_invalid_system());
     let err = block_on(pipeline.run_on(&mut data)).expect_err("invalid row");
 
-    let (retryable, message) = saci::processor::__rt::classify_run_error(&err);
-    assert!(retryable, "a failing transform releases the claim: {err}");
+    assert!(
+        err.is_retryable(),
+        "a failing transform releases the claim: {err}"
+    );
+    let message = err.to_string();
     assert!(message.contains("row 7 is invalid"), "{message}");
 }
 
 #[test]
 fn a_fold_accumulates_into_the_processor_state_across_batches() {
-    let pipeline = Pipeline::builder("fold")
-        .with::<Row>()
-        .with_system(totals_system())
-        .build();
+    let pipeline = Pipeline::new("fold")
+        .component::<Row>()
+        .system(totals_system());
 
     let mut state = saci::processor::ProcessorState::<Totals>::default();
     for amount in [10.0, 32.0] {
         let mut data = Dataset::new();
-        data.register_component::<Row>().expect("register Row");
+        data.register::<Row>().expect("register Row");
         data.append(&[Row {
             id: 1,
             label: String::new(),
@@ -237,7 +236,7 @@ fn a_fold_accumulates_into_the_processor_state_across_batches() {
 #[test]
 fn a_fold_without_the_state_resource_is_an_error_not_silent_accumulation() {
     let mut data = Dataset::new();
-    data.register_component::<Row>().expect("register Row");
+    data.register::<Row>().expect("register Row");
     data.append(&[Row {
         id: 1,
         label: String::new(),
@@ -246,33 +245,43 @@ fn a_fold_without_the_state_resource_is_an_error_not_silent_accumulation() {
     }])
     .expect("append");
 
-    let pipeline = Pipeline::builder("fold")
-        .with::<Row>()
-        .with_system(totals_system())
-        .build();
+    let pipeline = Pipeline::new("fold")
+        .component::<Row>()
+        .system(totals_system());
     let err = block_on(pipeline.run_on(&mut data)).expect_err("no state resource");
+    assert_eq!(err.category(), "resource_not_found", "got: {err}");
     assert!(err.message().contains("Totals"), "got: {err}");
 }
 
 #[test]
 fn a_transform_declares_a_whole_component_read_and_write() {
     let meta = stamp_system().meta();
-    assert_eq!(meta.name, "stamp");
-    assert_eq!(meta.reads_components, ["Row"]);
-    assert_eq!(meta.writes_components, ["Row"]);
+    assert_eq!(meta.name(), "stamp");
+    assert_eq!(
+        format!("{meta:?}"),
+        format!(
+            "{:?}",
+            SystemMeta::new("stamp")
+                .reads_all::<Row>()
+                .writes_all::<Row>()
+        ),
+        "a transform reads and writes the whole component"
+    );
 }
 
 #[test]
 fn a_fold_declares_a_component_read_and_a_state_resource_write() {
     let meta = totals_system().meta();
-    assert_eq!(meta.name, "totals");
-    assert_eq!(meta.reads_components, ["Row"]);
-    assert!(meta.writes_components.is_empty());
+    assert_eq!(meta.name(), "totals");
     assert_eq!(
-        meta.writes_resources,
-        [std::any::TypeId::of::<
-            saci::processor::ProcessorState<Totals>,
-        >()]
+        format!("{meta:?}"),
+        format!(
+            "{:?}",
+            SystemMeta::new("totals")
+                .reads_all::<Row>()
+                .writes_resource::<saci::processor::ProcessorState<Totals>>()
+        ),
+        "a fold reads the component and writes the state resource"
     );
 }
 

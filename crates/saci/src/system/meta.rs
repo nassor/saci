@@ -6,11 +6,11 @@ use super::field::{FieldAccess, FieldRef};
 
 /// Metadata describing a [`System`](super::System)'s field-level data access.
 ///
-/// Declare reads and writes at field granularity via [`read`](Self::read) and
-/// [`write`](Self::write), or at component granularity via
-/// [`read_component`](Self::read_component) and
-/// [`write_component`](Self::write_component) for systems that touch every
-/// field.
+/// Declare reads and writes at field granularity with [`reads`](Self::reads)
+/// and [`writes`](Self::writes), or for every field of a component with
+/// [`reads_all`](Self::reads_all) and [`writes_all`](Self::writes_all). The
+/// `_named` forms take the component and field as strings, for a component
+/// whose schema exists only at runtime.
 ///
 /// Resource access is keyed by `TypeId`, because resources are Rust singletons
 /// rather than Arrow columns.
@@ -18,41 +18,35 @@ use super::field::{FieldAccess, FieldRef};
 /// # Example
 ///
 /// ```rust
-/// #
-/// # {
-/// use saci::system::SystemMeta;
+/// use saci::SystemMeta;
 ///
 /// struct MyResource;
 ///
 /// let meta = SystemMeta::new("enrichment")
-///     .read("Order", "id")
-///     .write("Order", "total")
-///     .read_resource::<MyResource>();
+///     .reads_named("Order", "id")
+///     .writes_named("Order", "total")
+///     .reads_resource::<MyResource>();
 ///
-/// assert_eq!(meta.name, "enrichment");
-/// assert_eq!(meta.reads.len(), 1);
-/// assert_eq!(meta.writes.len(), 1);
-/// assert_eq!(meta.reads_resources.len(), 1);
-/// # }
+/// assert_eq!(meta.name(), "enrichment");
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct SystemMeta {
     /// Human-readable system name used in diagnostics and scheduling.
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// Specific fields this system reads (shared access).
-    pub reads: Vec<FieldAccess>,
+    pub(crate) reads: Vec<FieldAccess>,
     /// Specific fields this system writes (exclusive access).
-    pub writes: Vec<FieldAccess>,
+    pub(crate) writes: Vec<FieldAccess>,
     /// Whole-component reads: expand to all fields of the named component
-    /// at validation time. Shortcut for systems that access every field.
-    pub reads_components: Vec<&'static str>,
+    /// at validation time.
+    pub(crate) reads_components: Vec<&'static str>,
     /// Whole-component writes: expand to all fields of the named component
     /// at validation time.
-    pub writes_components: Vec<&'static str>,
+    pub(crate) writes_components: Vec<&'static str>,
     /// Resource types this system reads (shared access, TypeId-keyed).
-    pub reads_resources: Vec<TypeId>,
+    pub(crate) reads_resources: Vec<TypeId>,
     /// Resource types this system writes (exclusive access, TypeId-keyed).
-    pub writes_resources: Vec<TypeId>,
+    pub(crate) writes_resources: Vec<TypeId>,
 }
 
 impl SystemMeta {
@@ -60,110 +54,73 @@ impl SystemMeta {
     pub fn new(name: &'static str) -> Self {
         Self {
             name,
-            reads: Vec::new(),
-            writes: Vec::new(),
-            reads_components: Vec::new(),
-            writes_components: Vec::new(),
-            reads_resources: Vec::new(),
-            writes_resources: Vec::new(),
+            ..Self::default()
         }
     }
 
-    /// Declare that this system reads `field` within `component`.
-    pub fn read(mut self, component: &'static str, field: &'static str) -> Self {
+    /// The system's name, used in diagnostics and scheduling.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Declare that this system reads one field of `C`.
+    pub fn reads<C: Component>(self, f: FieldRef<C>) -> Self {
+        self.reads_named(C::name(), f.name())
+    }
+
+    /// Declare that this system writes one field of `C`.
+    pub fn writes<C: Component>(self, f: FieldRef<C>) -> Self {
+        self.writes_named(C::name(), f.name())
+    }
+
+    /// Declare that this system reads every field of `C`.
+    pub fn reads_all<C: Component>(self) -> Self {
+        self.reads_all_named(C::name())
+    }
+
+    /// Declare that this system writes every field of `C`.
+    pub fn writes_all<C: Component>(self) -> Self {
+        self.writes_all_named(C::name())
+    }
+
+    /// Declare that this system reads `field` within the component named
+    /// `component`.
+    pub fn reads_named(mut self, component: &'static str, field: &'static str) -> Self {
         self.reads.push(FieldAccess { component, field });
         self
     }
 
-    /// Declare that this system writes `field` within `component`.
-    pub fn write(mut self, component: &'static str, field: &'static str) -> Self {
+    /// Declare that this system writes `field` within the component named
+    /// `component`.
+    pub fn writes_named(mut self, component: &'static str, field: &'static str) -> Self {
         self.writes.push(FieldAccess { component, field });
         self
     }
 
-    /// Declare that this system reads *all* fields of `component`.
-    ///
-    /// Equivalent to calling [`read`](Self::read) for every field in the
-    /// component's schema. Resolved to concrete `FieldAccess` entries during
-    /// pipeline validation.
-    pub fn read_component(mut self, component: &'static str) -> Self {
+    /// Declare that this system reads every field of the component named
+    /// `component`. Resolved to one access per field during pipeline
+    /// validation.
+    pub fn reads_all_named(mut self, component: &'static str) -> Self {
         self.reads_components.push(component);
         self
     }
 
-    /// Declare that this system writes *all* fields of `component`.
-    pub fn write_component(mut self, component: &'static str) -> Self {
+    /// Declare that this system writes every field of the component named
+    /// `component`.
+    pub fn writes_all_named(mut self, component: &'static str) -> Self {
         self.writes_components.push(component);
         self
     }
 
     /// Declare that this system reads resource type `R`.
-    pub fn read_resource<R: 'static>(mut self) -> Self {
+    pub fn reads_resource<R: 'static>(mut self) -> Self {
         self.reads_resources.push(TypeId::of::<R>());
         self
     }
 
     /// Declare that this system writes resource type `R`.
-    pub fn write_resource<R: 'static>(mut self) -> Self {
+    pub fn writes_resource<R: 'static>(mut self) -> Self {
         self.writes_resources.push(TypeId::of::<R>());
         self
-    }
-
-    /// Declare a read dependency on a typed field reference.
-    ///
-    /// Equivalent to `.read(C::name(), f.field)`, with the component name
-    /// taken from `C::name()` instead of a raw string.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// # use saci::system::{FieldRef, SystemMeta};
-    /// # use saci::component::Component;
-    /// # use std::sync::Arc;
-    /// # use arrow_schema::Schema;
-    /// # struct Order;
-    /// # impl Component for Order {
-    /// #     fn name() -> &'static str { "Order" }
-    /// #     fn schema() -> Arc<Schema> { Arc::new(Schema::empty()) }
-    /// # }
-    /// impl Order {
-    ///     pub const TOTAL: FieldRef<Order> = FieldRef::new("total");
-    /// }
-    ///
-    /// let meta = SystemMeta::new("calc").reads(Order::TOTAL);
-    /// assert_eq!(meta.reads[0].component, "Order");
-    /// assert_eq!(meta.reads[0].field, "total");
-    /// ```
-    pub fn reads<C: Component>(self, f: FieldRef<C>) -> Self {
-        self.read(C::name(), f.field)
-    }
-
-    /// Declare a write dependency on a typed field reference.
-    ///
-    /// Equivalent to `.write(C::name(), f.field)`, with the component name
-    /// taken from `C::name()` instead of a raw string.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// # use saci::system::{FieldRef, SystemMeta};
-    /// # use saci::component::Component;
-    /// # use std::sync::Arc;
-    /// # use arrow_schema::Schema;
-    /// # struct Order;
-    /// # impl Component for Order {
-    /// #     fn name() -> &'static str { "Order" }
-    /// #     fn schema() -> Arc<Schema> { Arc::new(Schema::empty()) }
-    /// # }
-    /// impl Order {
-    ///     pub const TOTAL: FieldRef<Order> = FieldRef::new("total");
-    /// }
-    ///
-    /// let meta = SystemMeta::new("calc").writes(Order::TOTAL);
-    /// assert_eq!(meta.writes[0].component, "Order");
-    /// assert_eq!(meta.writes[0].field, "total");
-    /// ```
-    pub fn writes<C: Component>(self, f: FieldRef<C>) -> Self {
-        self.write(C::name(), f.field)
     }
 }

@@ -44,7 +44,7 @@ use saci::SaciError;
 use saci::component::Component;
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
-use saci::system::{ParallelSystem, ResourceUpdate, SliceWriteSet, System, SystemMeta, WriteSet};
+use saci::system::{ParallelSystem, SliceWriteSet, System, SystemMeta, WriteSet};
 use serde::{Deserialize, Serialize};
 
 mod support;
@@ -378,14 +378,12 @@ struct FilterStage;
 impl ParallelSystem for FilterStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("q1_filter")
-            .read("Lineitem", "l_shipdate")
-            .write_resource::<FilterMask>()
+            .reads_named("Lineitem", "l_shipdate")
+            .writes_resource::<FilterMask>()
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Lineitem")
-            .ok_or_else(|| SaciError::generic("Lineitem not found"))?;
+        let batch = pipeline.batch_named("Lineitem")?;
         let sd_col = batch
             .column_by_name("l_shipdate")
             .ok_or_else(|| SaciError::generic("l_shipdate not found"))?;
@@ -395,41 +393,45 @@ impl ParallelSystem for FilterStage {
             .ok_or_else(|| SaciError::generic("l_shipdate wrong type"))?;
 
         let bool_array = Arc::new(shipdate_mask(sd_arr.values()));
-        let update = ResourceUpdate::new(FilterMask(bool_array));
 
-        Ok(WriteSet::new().with_resource(update))
+        Ok(WriteSet::new().with_resource(FilterMask(bool_array)))
+    }
+
+    fn sliced(&self) -> bool {
+        true
     }
 
     fn run_slice(
         &self,
         pipeline: &Dataset,
         rows: std::ops::Range<u32>,
-    ) -> Option<Result<SliceWriteSet, SaciError>> {
-        let batch = pipeline.batch_for("Lineitem")?;
-        let sd_col = batch.column_by_name("l_shipdate")?;
-        let sd_arr = sd_col.as_any().downcast_ref::<Int32Array>()?;
+    ) -> Result<SliceWriteSet, SaciError> {
+        let batch = pipeline.batch_named("Lineitem")?;
+        let sd_col = batch
+            .column_by_name("l_shipdate")
+            .ok_or_else(|| SaciError::generic("l_shipdate not found"))?;
+        let sd_arr = sd_col
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .ok_or_else(|| SaciError::generic("l_shipdate wrong type"))?;
         let start = rows.start as usize;
         let len = (rows.end - rows.start) as usize;
         let slice = sd_arr.slice(start, len);
         let slice_arr = slice.as_any().downcast_ref::<Int32Array>().unwrap();
         let bool_array: Arc<dyn arrow_array::Array> = Arc::new(shipdate_mask(slice_arr.values()));
-        Some(Ok(SliceWriteSet::new(rows).put(
-            "_filter_mask",
-            "mask",
-            bool_array,
-        )))
+        Ok(SliceWriteSet::new(rows).put_named("_filter_mask", "mask", bool_array))
     }
 
     fn merge_slices(&self, slices: Vec<SliceWriteSet>) -> Result<WriteSet, SaciError> {
         use arrow_select::concat::concat;
         let arrays: Vec<&dyn arrow_array::Array> = slices
             .iter()
-            .filter_map(|s| s.fields.get(&("_filter_mask", "mask")))
+            .filter_map(|s| s.get_named("_filter_mask", "mask"))
             .map(|a| a.as_ref())
             .collect();
         if arrays.is_empty() {
             let empty: Arc<BooleanArray> = Arc::new(BooleanArray::from(vec![false; 0]));
-            return Ok(WriteSet::new().with_resource(ResourceUpdate::new(FilterMask(empty))));
+            return Ok(WriteSet::new().with_resource(FilterMask(empty)));
         }
         let merged = concat(&arrays)
             .map_err(|e| SaciError::generic(format!("FilterStage merge error: {e}")))?;
@@ -437,8 +439,7 @@ impl ParallelSystem for FilterStage {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| SaciError::generic("FilterStage: merged array is not BooleanArray"))?;
-        let update = ResourceUpdate::new(FilterMask(Arc::new(bool_arr.clone())));
-        Ok(WriteSet::new().with_resource(update))
+        Ok(WriteSet::new().with_resource(FilterMask(Arc::new(bool_arr.clone()))))
     }
 }
 
@@ -497,18 +498,16 @@ struct ComputeStage;
 impl ParallelSystem for ComputeStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("q1_compute")
-            .read("Lineitem", "l_extendedprice")
-            .read("Lineitem", "l_discount")
-            .read("Lineitem", "l_tax")
-            .read_resource::<FilterMask>()
-            .write("LineitemDerived", "disc_price")
-            .write("LineitemDerived", "charge")
+            .reads_named("Lineitem", "l_extendedprice")
+            .reads_named("Lineitem", "l_discount")
+            .reads_named("Lineitem", "l_tax")
+            .reads_resource::<FilterMask>()
+            .writes_named("LineitemDerived", "disc_price")
+            .writes_named("LineitemDerived", "charge")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Lineitem")
-            .ok_or_else(|| SaciError::generic("Lineitem not found"))?;
+        let batch = pipeline.batch_named("Lineitem")?;
 
         let price_arr = batch
             .column_by_name("l_extendedprice")
@@ -533,12 +532,12 @@ impl ParallelSystem for ComputeStage {
             compute_derived(price_arr.values(), disc_arr.values(), tax_arr.values())?;
 
         Ok(WriteSet::new()
-            .put(
+            .put_named(
                 "LineitemDerived",
                 "disc_price",
                 Arc::new(Float64Array::from(disc_price)),
             )
-            .put(
+            .put_named(
                 "LineitemDerived",
                 "charge",
                 Arc::new(Float64Array::from(charge)),
@@ -553,29 +552,23 @@ struct AggregateStage;
 impl System for AggregateStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("q1_aggregate")
-            .read("Lineitem", "l_quantity")
-            .read("Lineitem", "l_extendedprice")
-            .read("Lineitem", "l_discount")
-            .read("Lineitem", "l_returnflag")
-            .read("Lineitem", "l_linestatus")
-            .read("LineitemDerived", "disc_price")
-            .read("LineitemDerived", "charge")
-            .read_resource::<FilterMask>()
-            .write_resource::<Q1Result>()
+            .reads_named("Lineitem", "l_quantity")
+            .reads_named("Lineitem", "l_extendedprice")
+            .reads_named("Lineitem", "l_discount")
+            .reads_named("Lineitem", "l_returnflag")
+            .reads_named("Lineitem", "l_linestatus")
+            .reads_named("LineitemDerived", "disc_price")
+            .reads_named("LineitemDerived", "charge")
+            .reads_resource::<FilterMask>()
+            .writes_resource::<Q1Result>()
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let mask = pipeline
-            .get_resource::<FilterMask>()
-            .ok_or_else(|| SaciError::generic("FilterMask resource not found"))?;
+        let mask = pipeline.resource::<FilterMask>()?;
         let mask_arr = mask.0.clone();
 
-        let li_batch = pipeline
-            .batch_for("Lineitem")
-            .ok_or_else(|| SaciError::generic("Lineitem not found"))?;
-        let ld_batch = pipeline
-            .batch_for("LineitemDerived")
-            .ok_or_else(|| SaciError::generic("LineitemDerived not found"))?;
+        let li_batch = pipeline.batch_named("Lineitem")?;
+        let ld_batch = pipeline.batch_named("LineitemDerived")?;
 
         let qty_arr = li_batch
             .column_by_name("l_quantity")
@@ -715,8 +708,8 @@ impl System for AggregateStage {
 
 fn build_pipeline(batch: &RecordBatch) -> Dataset {
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<Lineitem>().unwrap();
-    pipeline.register_component::<LineitemDerived>().unwrap();
+    pipeline.register::<Lineitem>().unwrap();
+    pipeline.register::<LineitemDerived>().unwrap();
 
     pipeline
         .append_record_batch("Lineitem", batch.clone())
@@ -836,13 +829,13 @@ fn bench_q1(c: &mut Criterion) {
 
     {
         let scalar_result = scalar_q1(&scalar_rows);
-        let mut wl = Pipeline::new("q1_check");
-        wl.data = build_pipeline(&batch);
-        wl.add_parallel_system(FilterStage);
-        wl.add_parallel_system(ComputeStage);
-        wl.add_system(AggregateStage);
+        let mut wl = Pipeline::new("q1_check")
+            .parallel_system(FilterStage)
+            .parallel_system(ComputeStage)
+            .system(AggregateStage);
+        *wl.data_mut() = build_pipeline(&batch);
         rt.block_on(wl.run()).unwrap();
-        let arrow_result = wl.data.get_resource::<Q1Result>().unwrap();
+        let arrow_result = wl.data().resource::<Q1Result>().unwrap();
         assert_results_match(&scalar_result, &arrow_result.0);
         println!(
             "[tpch_q1] correctness check passed ({} groups)",
@@ -882,7 +875,7 @@ fn bench_q1(c: &mut Criterion) {
                 let ws = rt
                     .block_on(FilterStage.run(std::hint::black_box(&ds_clean)))
                     .unwrap();
-                std::hint::black_box(ws.resource_updates.len())
+                std::hint::black_box(ws.len())
             })
         });
 
@@ -897,7 +890,7 @@ fn bench_q1(c: &mut Criterion) {
                 let ws = rt
                     .block_on(ComputeStage.run(std::hint::black_box(&ds_full)))
                     .unwrap();
-                std::hint::black_box(ws.fields.len())
+                std::hint::black_box(ws.len())
             })
         });
 
@@ -915,14 +908,14 @@ fn bench_q1(c: &mut Criterion) {
 
     group.bench_function("saci_pipeline", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("q1");
-            wl.data = build_pipeline(std::hint::black_box(&batch));
-            wl.add_parallel_system(FilterStage);
-            wl.add_parallel_system(ComputeStage);
-            wl.add_system(AggregateStage);
+            let mut wl = Pipeline::new("q1")
+                .parallel_system(FilterStage)
+                .parallel_system(ComputeStage)
+                .system(AggregateStage);
+            *wl.data_mut() = build_pipeline(std::hint::black_box(&batch));
             rt.block_on(wl.run()).unwrap();
             let result = wl
-                .data
+                .data()
                 .get_resource::<Q1Result>()
                 .map(|r| r.0.len())
                 .unwrap_or(0);

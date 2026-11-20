@@ -90,8 +90,8 @@ impl<S: Source + ?Sized> Source for Box<S> {
 /// Drain all batches from `source` into `dataset` under `component_name`.
 ///
 /// The component must already be registered (via
-/// [`register_component`](Dataset::register_component) or
-/// [`register_raw_component`](Dataset::register_raw_component)) before
+/// [`register`](Dataset::register) or
+/// [`register_schema`](Dataset::register_schema)) before
 /// calling this function.
 ///
 /// Returns the total number of rows appended.
@@ -103,7 +103,7 @@ impl<S: Source + ?Sized> Source for Box<S> {
 pub async fn drain_into_dataset<S: Source + ?Sized>(
     source: &mut S,
     dataset: &mut Dataset,
-    component_name: &'static str,
+    component_name: &str,
 ) -> Result<usize, SaciError> {
     let mut total = 0usize;
     while let Some(batch) = source.next_batch().await? {

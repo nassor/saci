@@ -27,10 +27,6 @@ use std::{
 
 use arrow_array::RecordBatch;
 use arrow_buffer::builder::BooleanBufferBuilder;
-use arrow_ipc::{
-    reader::StreamReader,
-    writer::{IpcWriteOptions, StreamWriter},
-};
 
 use crate::{resource::ResourceMap, schema::SchemaRegistry};
 
@@ -81,7 +77,7 @@ pub struct Dataset {
     merged_cache: RwLock<HashMap<&'static str, Box<RecordBatch>>>,
     /// Zero-row `RecordBatch` per component, built once at registration.
     ///
-    /// `clear()` needs an empty sentinel chunk per component so `batch_for`
+    /// `clear()` needs an empty sentinel chunk per component so `batch_named`
     /// keeps working on an emptied dataset. Cloning a prebuilt batch costs a
     /// few `Arc` bumps instead of building an empty Arrow array per column.
     empty_templates: HashMap<&'static str, RecordBatch>,
@@ -134,106 +130,7 @@ impl Default for Dataset {
     }
 }
 
-/// Fluent builder for [`Dataset`].
-///
-/// # Example
-///
-/// ```rust
-/// # {
-/// # use std::sync::Arc;
-/// # use arrow_schema::{DataType, Field, Schema};
-/// # use saci::component::Component;
-/// # use saci::dataset::{Dataset, DatasetBuilder};
-/// # use serde::{Serialize, Deserialize};
-/// # #[derive(Serialize, Deserialize)]
-/// # struct Order { id: u64 }
-/// # impl Component for Order {
-/// #     fn name() -> &'static str { "Order" }
-/// #     fn schema() -> Arc<Schema> {
-/// #         Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]))
-/// #     }
-/// # }
-/// struct Config { max: u32 }
-/// let dataset = Dataset::builder()
-///     .with::<Order>()
-///     .with_resource(Config { max: 100 })
-///     .build();
-/// # }
-/// ```
-pub struct DatasetBuilder(pub(crate) Dataset);
-
-/// Capacity headroom for `batch_to_ipc_bytes` beyond the column buffers: the
-/// schema and record-batch flatbuffer messages, their continuation markers and
-/// length prefixes, the end-of-stream marker, and each buffer's padding to the
-/// IPC write alignment (64 bytes by default). Both flatbuffer messages carry
-/// one field node and two or more buffer descriptors per column, so the
-/// per-field term scales with the column count.
-const IPC_ENVELOPE_FIXED: usize = 1024;
-const IPC_ENVELOPE_PER_FIELD: usize = 256;
-
-/// Encode one `RecordBatch` as a standalone Arrow IPC stream.
-///
-/// The single `StreamWriter` call in the crate. `IpcWriteOptions::default()`
-/// fixes MetadataVersion V5, 8 byte alignment and no compression, which is
-/// what keeps the output readable by a hand written decoder in a language with
-/// no Arrow library.
-pub(crate) fn batch_to_ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>, crate::error::SaciError> {
-    // Size the buffer up front. `StreamWriter` appends every column's buffer
-    // into `buf` via `extend_from_slice`, and growing from capacity 0 costs
-    // about twenty amortised doublings whose re-copies sum, by geometric
-    // series, to roughly the final size again.
-    //
-    // `get_array_memory_size` sums each buffer's *capacity*, not its sliced
-    // length, so it over-counts an over-allocated or sliced buffer.
-    //
-    // Net effect is a small over-estimate, which costs address space and
-    // nothing else. `Vec` still grows if the hint turns out short.
-    let mut buf = Vec::with_capacity(
-        batch.get_array_memory_size()
-            + batch.num_columns() * IPC_ENVELOPE_PER_FIELD
-            + IPC_ENVELOPE_FIXED,
-    );
-    let options = IpcWriteOptions::default();
-    {
-        let mut sw = StreamWriter::try_new_with_options(&mut buf, batch.schema_ref(), options)
-            .map_err(|e| crate::error::SaciError::generic(format!("IPC StreamWriter init: {e}")))?;
-        sw.write(batch).map_err(|e| {
-            crate::error::SaciError::generic(format!("IPC StreamWriter write: {e}"))
-        })?;
-        sw.finish().map_err(|e| {
-            crate::error::SaciError::generic(format!("IPC StreamWriter finish: {e}"))
-        })?;
-    }
-    Ok(buf)
-}
-
-/// Decode the first `RecordBatch` of an IPC stream straight out of `reader`.
-///
-/// Takes a reader rather than a `&[u8]`: `arrow-ipc`'s `MessageReader` already
-/// materialises the message body into an Arrow-owned `MutableBuffer`, so a
-/// caller-filled slice would copy the whole body twice.
-///
-/// Does not consume the stream's end-of-stream marker; it stops as soon as the
-/// first record-batch message is decoded. Callers that frame segments must
-/// drain the remainder themselves.
-///
-/// Not panic-safe on its own: some malformed buffer spans make arrow-rs
-/// assert rather than return `Err` (see `Buffer::slice_with_length`'s
-/// `# Panics`). Its one caller, [`Dataset::read_ipc`](super::Dataset::read_ipc),
-/// is the unwind boundary; a new caller decoding untrusted bytes must add one
-/// too.
-pub(crate) fn ipc_stream_to_batch<R: std::io::Read>(
-    reader: R,
-) -> Result<RecordBatch, crate::error::SaciError> {
-    let mut sr = StreamReader::try_new(reader, None)
-        .map_err(|e| crate::error::SaciError::generic(format!("IPC StreamReader init: {e}")))?;
-    sr.next()
-        .ok_or_else(|| crate::error::SaciError::generic("IPC stream contained no batches"))?
-        .map_err(|e| crate::error::SaciError::generic(format!("IPC StreamReader read: {e}")))
-}
-
 mod append;
-mod builder;
 mod chunks;
 mod forward;
 mod ipc;

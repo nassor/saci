@@ -332,7 +332,7 @@ impl WindowTracker {
                 continue;
             }
             let batch = dataset
-                .batch_for(name)
+                .batch_named(name)
                 .expect("registered component has a batch");
             let idx = schema.index_of(time_field).map_err(|e| {
                 SaciError::generic(format!("WindowTracker: time field lookup: {e}"))
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn advances_from_the_time_column_and_is_monotonic() {
         let mut dataset = Dataset::new();
-        dataset.register_component::<Trade>().unwrap();
+        dataset.register::<Trade>().unwrap();
         dataset
             .append::<Trade>(&[
                 Trade {
@@ -552,12 +552,14 @@ mod tests {
     #[test]
     fn skips_components_without_the_time_field_and_null_timestamps() {
         let mut dataset = Dataset::new();
-        dataset.register_component::<Trade>().unwrap();
+        dataset.register::<Trade>().unwrap();
         // A component with no time field: must be skipped, not an error.
-        dataset.register_raw_component(
-            "Audit",
-            Arc::new(Schema::new(vec![Field::new("note", DataType::Utf8, false)])),
-        );
+        dataset
+            .register_schema(
+                "Audit",
+                Arc::new(Schema::new(vec![Field::new("note", DataType::Utf8, false)])),
+            )
+            .unwrap();
         // A component whose time column carries nulls: the null's backing bits
         // must not advance the watermark.
         let null_schema = Arc::new(Schema::new(vec![Field::new(
@@ -565,7 +567,7 @@ mod tests {
             DataType::Int64,
             true,
         )]));
-        dataset.register_raw_component("NullTrade", null_schema);
+        dataset.register_schema("NullTrade", null_schema).unwrap();
 
         dataset
             .append::<Trade>(&[Trade {
@@ -599,7 +601,7 @@ mod tests {
         )]));
         let ts = TimestampMillisecondArray::from(vec![1_000, 2_000]);
         let mut dataset = Dataset::new();
-        dataset.register_raw_component("Event", schema.clone());
+        dataset.register_schema("Event", schema.clone()).unwrap();
         dataset
             .append_record_batch(
                 "Event",
@@ -624,7 +626,7 @@ mod tests {
         )]));
         let prices = Float64Array::from(vec![1.5, 2.5]);
         let mut dataset = Dataset::new();
-        dataset.register_raw_component("BadTime", schema.clone());
+        dataset.register_schema("BadTime", schema.clone()).unwrap();
         dataset
             .append_record_batch(
                 "BadTime",
@@ -641,7 +643,7 @@ mod tests {
     /// One arrival of `Trade` rows at the given timestamps.
     fn arrival(timestamps: &[i64]) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_component::<Trade>().unwrap();
+        dataset.register::<Trade>().unwrap();
         let rows: Vec<Trade> = timestamps
             .iter()
             .map(|&timestamp_ms| Trade {
@@ -774,7 +776,7 @@ mod tests {
         tracker.advance_from(&arrival(&[100_000])).unwrap();
 
         let mut empty = Dataset::new();
-        empty.register_component::<Trade>().unwrap();
+        empty.register::<Trade>().unwrap();
 
         // One short of the run, then an empty pass, then the arrival that
         // completes it: the report must still open, so the empty pass neither

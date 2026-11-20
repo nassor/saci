@@ -1,4 +1,4 @@
-#![cfg(feature = "runtime")]
+#![cfg(feature = "engine")]
 // Cross-pipeline DAG scheduling: order deps, data skip, priority, backpressure.
 
 use std::sync::{Arc, Mutex};
@@ -37,29 +37,29 @@ struct IngestSystem {
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("Transaction")
+        SystemMeta::new("ingest").writes_all::<Transaction>()
     }
     async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
         if !data.schemas().contains("Transaction") {
-            data.register_component::<Transaction>()?;
+            data.register::<Transaction>()?;
         }
         data.append::<Transaction>(&self.rows)?;
         Ok(())
     }
 }
 
-struct EnrichSystem;
+struct EnrichSystem {
+    runs: Arc<Mutex<usize>>,
+}
 
 #[async_trait]
 impl System for EnrichSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("enrich").read_component("Transaction")
+        SystemMeta::new("enrich").reads_all::<Transaction>()
     }
     async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
-        let batch = data
-            .columns::<Transaction>()
-            .expect("Transaction missing")
-            .clone();
+        *self.runs.lock().unwrap() += 1;
+        let batch = data.batch::<Transaction>()?.clone();
         let currency_col = batch
             .column(batch.schema().index_of("currency").unwrap())
             .as_any()
@@ -82,25 +82,24 @@ impl System for EnrichSystem {
             })
             .collect();
 
-        let ws = WriteSet::new().put("Transaction", "amount", Arc::new(usd));
+        let ws = WriteSet::new().put_named("Transaction", "amount", Arc::new(usd));
         data.apply_write_set(ws)
     }
 }
 
 struct ReportSystem {
     total: Arc<Mutex<f64>>,
+    runs: Arc<Mutex<usize>>,
 }
 
 #[async_trait]
 impl System for ReportSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("report").read("Transaction", "amount")
+        SystemMeta::new("report").reads_named("Transaction", "amount")
     }
     async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
-        let batch = data
-            .columns::<Transaction>()
-            .expect("Transaction missing")
-            .clone();
+        *self.runs.lock().unwrap() += 1;
+        let batch = data.batch::<Transaction>()?.clone();
         let amount_col = batch
             .column(batch.schema().index_of("amount").unwrap())
             .as_any()
@@ -131,6 +130,8 @@ impl System for BumpSystem {
 #[tokio::test]
 async fn test_order_dependency_chain_runs_sequentially() {
     let total = Arc::new(Mutex::new(0.0f64));
+    let enrich_runs = Arc::new(Mutex::new(0usize));
+    let report_runs = Arc::new(Mutex::new(0usize));
 
     let txns = vec![
         Transaction {
@@ -146,60 +147,56 @@ async fn test_order_dependency_chain_runs_sequentially() {
     ];
 
     let mut ingest = Pipeline::new("ingest");
-    ingest.data.register_component::<Transaction>().unwrap();
-    ingest.add_system(IngestSystem { rows: txns });
+    ingest.data_mut().register::<Transaction>().unwrap();
+    let ingest = ingest.system(IngestSystem { rows: txns });
 
     let mut enrich = Pipeline::new("enrich");
-    enrich.data.register_component::<Transaction>().unwrap();
-    enrich.add_system(EnrichSystem);
-
-    let mut report = Pipeline::new("report");
-    report.data.register_component::<Transaction>().unwrap();
-    report.add_system(ReportSystem {
-        total: Arc::clone(&total),
+    enrich.data_mut().register::<Transaction>().unwrap();
+    let enrich = enrich.system(EnrichSystem {
+        runs: Arc::clone(&enrich_runs),
     });
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline(ingest);
-    sched.add_pipeline_with_config(
-        enrich,
-        PipelineConfig::new().after("ingest", DependencyKind::Order),
-    );
-    sched.add_pipeline_with_config(
-        report,
-        PipelineConfig::new().after("enrich", DependencyKind::Order),
-    );
+    let mut report = Pipeline::new("report");
+    report.data_mut().register::<Transaction>().unwrap();
+    let report = report.system(ReportSystem {
+        total: Arc::clone(&total),
+        runs: Arc::clone(&report_runs),
+    });
+
+    let mut sched = Scheduler::new()
+        .pipeline(ingest)
+        .pipeline_with(enrich, PipelineConfig::new().after("ingest"))
+        .pipeline_with(report, PipelineConfig::new().after("enrich"));
 
     sched.tick().await.unwrap();
 
-    let enrich_stats = sched.get("enrich").unwrap().last_stats();
-    assert_eq!(enrich_stats.systems_run, 1);
+    assert_eq!(*enrich_runs.lock().unwrap(), 1);
+    assert_eq!(*report_runs.lock().unwrap(), 1);
 }
 
 #[tokio::test]
 async fn test_data_dependency_skips_report_when_upstream_produces_zero_rows() {
     let total = Arc::new(Mutex::new(0.0f64));
+    let report_runs = Arc::new(Mutex::new(0usize));
 
     let empty_enrich = Pipeline::new("empty_enrich");
 
     let mut report = Pipeline::new("report_data");
-    report.data.register_component::<Transaction>().unwrap();
-    report.add_system(ReportSystem {
+    report.data_mut().register::<Transaction>().unwrap();
+    let report = report.system(ReportSystem {
         total: Arc::clone(&total),
+        runs: Arc::clone(&report_runs),
     });
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline(empty_enrich);
-    sched.add_pipeline_with_config(
-        report,
-        PipelineConfig::new().after("empty_enrich", DependencyKind::Data),
-    );
+    let mut sched = Scheduler::new()
+        .pipeline(empty_enrich)
+        .pipeline_with(report, PipelineConfig::new().after_data("empty_enrich"));
 
     sched.tick().await.unwrap();
 
-    let report_stats = sched.get("report_data").unwrap().last_stats();
     assert_eq!(
-        report_stats.systems_run, 0,
+        *report_runs.lock().unwrap(),
+        0,
         "report should be skipped when upstream is empty"
     );
 }
@@ -209,29 +206,21 @@ async fn test_priority_ordering_runs_both_pipelines() {
     let count_high = Arc::new(Mutex::new(0usize));
     let count_low = Arc::new(Mutex::new(0usize));
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline_with_config(
-        {
-            let mut p = Pipeline::new("prio_high");
-            p.add_system(BumpSystem {
+    let mut sched = Scheduler::new()
+        .pipeline_with(
+            Pipeline::new("prio_high").system(BumpSystem {
                 name: "prio_high",
                 count: Arc::clone(&count_high),
-            });
-            p
-        },
-        PipelineConfig::new().priority(100),
-    );
-    sched.add_pipeline_with_config(
-        {
-            let mut p = Pipeline::new("prio_low");
-            p.add_system(BumpSystem {
+            }),
+            PipelineConfig::new().priority(100),
+        )
+        .pipeline_with(
+            Pipeline::new("prio_low").system(BumpSystem {
                 name: "prio_low",
                 count: Arc::clone(&count_low),
-            });
-            p
-        },
-        PipelineConfig::new().priority(-10),
-    );
+            }),
+            PipelineConfig::new().priority(-10),
+        );
 
     sched.tick().await.unwrap();
 
@@ -245,19 +234,12 @@ async fn test_backpressure_predicate_skips_then_runs_after_release() {
     let paused = Arc::new(Mutex::new(true));
     let paused_clone = Arc::clone(&paused);
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline_with_config(
-        {
-            let mut p = Pipeline::new("throttled");
-            p.add_system(BumpSystem {
-                name: "throttled",
-                count: Arc::clone(&count),
-            });
-            p
-        },
-        PipelineConfig::new().backpressure(BackpressureSpec::Predicate(Box::new(move |_p| {
-            *paused_clone.lock().unwrap()
-        }))),
+    let mut sched = Scheduler::new().pipeline_with(
+        Pipeline::new("throttled").system(BumpSystem {
+            name: "throttled",
+            count: Arc::clone(&count),
+        }),
+        PipelineConfig::new().pause_when(move |_p| *paused_clone.lock().unwrap()),
     );
 
     sched.tick().await.unwrap();

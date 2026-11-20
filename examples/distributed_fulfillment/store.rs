@@ -76,13 +76,19 @@ impl FulfillmentStore {
             // Components must be registered before rows are appended, so the
             // dataset from `Dataset::read_ipc` cannot be reused: it already
             // carries Order rows.
-            let mut dataset = Dataset::builder().with::<Order>().with::<Invoice>().build();
+            let mut dataset = Dataset::new();
+            dataset
+                .register::<Order>()
+                .expect("FulfillmentStore: register Order");
+            dataset
+                .register::<Invoice>()
+                .expect("FulfillmentStore: register Invoice");
 
             if let Some(ipc) = pending.lock().unwrap().take() {
                 let mut cursor = Cursor::new(ipc);
                 let tmp_world = Dataset::read_ipc(&mut cursor)
                     .expect("FulfillmentStore: corrupted master-batch IPC");
-                if let Some(batch) = tmp_world.columns::<Order>() {
+                if let Ok(batch) = tmp_world.batch::<Order>() {
                     let orders = Order::from_record_batch(batch)
                         .expect("FulfillmentStore: decode Order RecordBatch");
                     if !orders.is_empty() {

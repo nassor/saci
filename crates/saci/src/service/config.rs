@@ -52,7 +52,7 @@ use crate::config::one_or_many;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{SaciError, SaciResult};
-use crate::retry::{RetryMode, SystemConfig};
+use crate::retry::RetryMode;
 
 use super::flow::FlowSettings;
 use super::heal::HealSettings;
@@ -776,9 +776,9 @@ pub struct TransformerSpec {
 
 /// Retry policy for a source or sink node.
 ///
-/// An omitted `retry` block uses the same policy as
-/// `crate::retry::SystemConfig::default()`: 4 attempts (3 retries) with
-/// 100 ms base delay, 2.0x multiplier, 30 s cap and 0.1 jitter.
+/// An omitted `retry` block retries a connector call 3 times (4 attempts)
+/// with 100 ms base delay, 2.0x multiplier, 30 s cap and 0.1 jitter, the
+/// parameters of `RetryMode::exponential(3)`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
@@ -834,18 +834,16 @@ impl RetryConfig {
     }
 
     /// The engine's retry policy this config drives.
-    pub fn to_system_config(&self) -> SystemConfig {
+    pub fn to_retry_mode(&self) -> RetryMode {
         if self.max_attempts == 1 {
-            SystemConfig::minimal()
+            RetryMode::None
         } else {
-            SystemConfig {
-                retry_mode: RetryMode::ExponentialBackoff {
-                    max_retries: (self.max_attempts - 1) as usize,
-                    base_delay: Duration::from_millis(self.base_delay_ms),
-                    multiplier: self.multiplier,
-                    max_delay: Duration::from_millis(self.max_delay_ms),
-                    jitter: self.jitter,
-                },
+            RetryMode::ExponentialBackoff {
+                max_retries: (self.max_attempts - 1) as usize,
+                base_delay: Duration::from_millis(self.base_delay_ms),
+                multiplier: self.multiplier,
+                max_delay: Duration::from_millis(self.max_delay_ms),
+                jitter: self.jitter,
             }
         }
     }
@@ -4579,14 +4577,14 @@ workflow "w" {{
     }
 
     fn assert_exponential_backoff(
-        config: SystemConfig,
+        mode: RetryMode,
         max_retries: usize,
         base_delay_ms: u64,
         multiplier: f64,
         max_delay_ms: u64,
         jitter: f64,
     ) {
-        match config.retry_mode {
+        match mode {
             RetryMode::ExponentialBackoff {
                 max_retries: got_retries,
                 base_delay,
@@ -4611,7 +4609,7 @@ workflow "w" {{
         assert_eq!(wf.sources[0].retry, RetryConfig::default());
         assert_eq!(wf.sinks[0].retry, RetryConfig::default());
         assert_exponential_backoff(
-            wf.sources[0].retry.to_system_config(),
+            wf.sources[0].retry.to_retry_mode(),
             3,
             100,
             2.0,
@@ -4637,9 +4635,9 @@ workflow "w" {{
     #[test]
     fn max_attempts_one_disables_retrying() {
         let cfg = parse(&source_retry_kdl("retry max_attempts=1")).expect("parse should succeed");
-        let sys = cfg.workflows[0].sources[0].retry.to_system_config();
-        assert!(matches!(sys.retry_mode, RetryMode::None));
-        assert_eq!(sys.retry_mode.max_attempts(), 1);
+        let mode = cfg.workflows[0].sources[0].retry.to_retry_mode();
+        assert!(matches!(mode, RetryMode::None));
+        assert_eq!(mode.max_attempts(), 1);
     }
 
     #[test]
@@ -4648,7 +4646,7 @@ workflow "w" {{
             "retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=10000 jitter=0.1",
         ))
         .expect("parse should succeed");
-        let sys = cfg.workflows[0].sources[0].retry.to_system_config();
+        let sys = cfg.workflows[0].sources[0].retry.to_retry_mode();
         assert_exponential_backoff(sys, 7, 500, 2.0, 10_000, 0.1);
     }
 

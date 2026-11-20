@@ -354,9 +354,7 @@ impl Corpus {
 
 fn baseline_stream() -> (Vec<u8>, Dataset) {
     let mut dataset = Dataset::new();
-    dataset
-        .register_component::<Order>()
-        .expect("register Order");
+    dataset.register::<Order>().expect("register Order");
     dataset.append::<Order>(&fixture_rows()).expect("append");
     let mut bytes = Vec::new();
     dataset.write_ipc(&mut bytes).expect("write_ipc");

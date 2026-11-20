@@ -359,14 +359,8 @@ fn group_for<'a>(
 /// Merge both components of the batch into the open windows and emit every
 /// group whose window has closed.
 pub fn aggregate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), SaciError> {
-    let orders = data
-        .columns::<ClassifiedOrder>()
-        .ok_or_else(|| SaciError::generic("aggregate: ClassifiedOrder component missing"))?
-        .clone();
-    let payments = data
-        .columns::<Payment>()
-        .ok_or_else(|| SaciError::generic("aggregate: Payment component missing"))?
-        .clone();
+    let orders = data.batch::<ClassifiedOrder>()?.clone();
+    let payments = data.batch::<Payment>()?.clone();
 
     let order_time = column::<Int64Array>(&orders, "event_ms")?;
     let order_region = column::<StringArray>(&orders, "region")?;
@@ -375,11 +369,7 @@ pub fn aggregate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), Sa
     let payment_region = column::<StringArray>(&payments, "region")?;
     let payment_amount = column::<Float64Array>(&payments, "amount")?;
 
-    let state = data
-        .get_resource_mut::<ProcessorState<AggregateState>>()
-        .ok_or_else(|| {
-            SaciError::generic("aggregate: ProcessorState<AggregateState> resource missing")
-        })?;
+    let state = data.resource_mut::<ProcessorState<AggregateState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole state.
     if state.rows.is_empty() {
@@ -467,30 +457,20 @@ pub fn aggregate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), Sa
 /// Called lazily by the `export_pipeline!` macro on the first call to any WIT
 /// export, and constructed exactly once per component instance.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("integrity-aggregate");
-    pipeline
-        .data
-        .register_component::<ClassifiedOrder>()
-        .expect("register ClassifiedOrder");
-    pipeline
-        .data
-        .register_component::<Payment>()
-        .expect("register Payment");
-    pipeline
-        .data
-        .register_component::<RegionTotal>()
-        .expect("register RegionTotal");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("aggregate")
-            .read_component("ClassifiedOrder")
-            .read_component("Payment")
-            .write_component("RegionTotal"),
-        |data| {
-            let geo = geometry();
-            aggregate_impl(data, &geo)
-        },
-    ));
-    pipeline
+    Pipeline::new("integrity-aggregate")
+        .component::<ClassifiedOrder>()
+        .component::<Payment>()
+        .component::<RegionTotal>()
+        .system(system_fn(
+            SystemMeta::new("aggregate")
+                .reads_all::<ClassifiedOrder>()
+                .reads_all::<Payment>()
+                .writes_all::<RegionTotal>(),
+            |data| {
+                let geo = geometry();
+                aggregate_impl(data, &geo)
+            },
+        ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -511,9 +491,9 @@ mod tests {
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<ClassifiedOrder>().unwrap();
-        data.register_component::<Payment>().unwrap();
-        data.register_component::<RegionTotal>().unwrap();
+        data.register::<ClassifiedOrder>().unwrap();
+        data.register::<Payment>().unwrap();
+        data.register::<RegionTotal>().unwrap();
         <Stateful<AggregateState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
         data
     }
@@ -550,7 +530,7 @@ mod tests {
     type Total = (i64, String, i64, i64, f64, f64, i64);
 
     fn totals(data: &Dataset) -> Vec<Total> {
-        let batch = data.batch_for("RegionTotal").expect("RegionTotal batch");
+        let batch = data.batch_named("RegionTotal").expect("RegionTotal batch");
         let window_id = column::<Int64Array>(batch, "window_id").unwrap();
         let region = column::<StringArray>(batch, "region").unwrap();
         let order_count = column::<Int64Array>(batch, "order_count").unwrap();

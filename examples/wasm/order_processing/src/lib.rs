@@ -165,10 +165,7 @@ impl System for ValidateSystem {
     }
 
     async fn run(&self, dataset: &mut Dataset) -> SaciResult<()> {
-        let batch = dataset
-            .columns::<Transaction>()
-            .ok_or_else(|| SaciError::generic("Transaction batch not found"))?
-            .clone();
+        let batch = dataset.batch::<Transaction>()?.clone();
 
         let n;
         let valid_flags: Vec<bool>;
@@ -229,10 +226,7 @@ impl System for EnrichSystem {
     }
 
     async fn run(&self, dataset: &mut Dataset) -> SaciResult<()> {
-        let batch = dataset
-            .columns::<Transaction>()
-            .ok_or_else(|| SaciError::generic("Transaction batch not found"))?
-            .clone();
+        let batch = dataset.batch::<Transaction>()?.clone();
 
         let n;
         let usd_amounts: Vec<f64>;
@@ -353,12 +347,11 @@ pub fn build() -> Pipeline {
     #[cfg(not(target_arch = "wasm32"))]
     let rates = FxRates::DEFAULT;
 
-    Pipeline::builder("order_processing")
-        .with::<Transaction>()
-        .with_system(ValidateSystem)
-        .with_system(EnrichSystem { rates })
-        .with_system(make_report_system())
-        .build()
+    Pipeline::new("order_processing")
+        .component::<Transaction>()
+        .system(ValidateSystem)
+        .system(EnrichSystem { rates })
+        .system(make_report_system())
 }
 
 #[cfg(target_arch = "wasm32")]

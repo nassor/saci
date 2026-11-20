@@ -240,7 +240,7 @@ pub trait Sink: Send {
     directly off the runner's sink list on every pass, to back off when a sink's backlog
     grows. In a hand-built <code>Scheduler</code>,
     <code>Pipeline::sink_pending_rows(component)</code> surfaces it for a
-    <code>BackpressureSpec::Predicate</code> closure to consult, though nothing in this
+    <code>pause_when</code> closure to consult, though nothing in this
     repository calls it. Four built-in sinks implement it:
     <code>ChannelSink</code> (the row backlog of every batch still queued),
     <code>PostgresSink</code> (rows buffered but not yet copied),
@@ -268,8 +268,8 @@ pub trait Sink: Send {
     <pre><code class="language-rust">use std::sync::Arc;
 use arrow_array::{Array, Float64Array, RecordBatch};
 use arrow_schema::Schema;
-use async_trait::async_trait;
 use saci::SaciError;
+use saci::async_trait;
 use saci::io::Source;
 
 struct RampSource {
@@ -347,7 +347,7 @@ pub async fn drain_dataset&lt;K: Sink + ?Sized&gt;(
             drain_into_dataset calls next_batch four times to receive three batches and an
             EOF, appending each batch separately, so the component holds three chunks.
             drain_dataset then makes exactly one write_batch call with the merged batch and
-            never calls finish. Pipeline::run_with_io calls finish after every cycle, while
+            never calls finish. Pipeline::run calls finish after every cycle, while
             the standalone service runner calls it only on a one-shot exit or on
             cancellation.
         </desc>
@@ -385,7 +385,7 @@ pub async fn drain_dataset&lt;K: Sink + ?Sized&gt;(
             <rect class="row" x="260" y="72" width="134" height="18" rx="3"/>
             <text class="t-sm" x="268" y="85">Trade  3 chunks</text>
             <text class="t-sm" x="268" y="108">row_count = 3</text>
-            <text class="t-sm" x="268" y="126">batch_for merges</text>
+            <text class="t-sm" x="268" y="126">batch_named merges</text>
             <text class="t-sm" x="268" y="140">them into one</text>
 
             <path class="arw arw-data" d="M402 96 H456" marker-end="url(#io-bd)"/>
@@ -414,7 +414,7 @@ pub async fn drain_dataset&lt;K: Sink + ?Sized&gt;(
             <rect class="blk blk-ctl" x="0" y="192" width="318" height="92" rx="8"/>
             <rect class="hd hd-ctl" x="0" y="192" width="318" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="0" y="204" width="318" height="8"/>
-            <text class="t-lbl t-ctl" x="12" y="206">Pipeline::run_with_io</text>
+            <text class="t-lbl t-ctl" x="12" y="206">Pipeline::run</text>
             <text class="t-sm" x="12" y="228">after every call, so a file sink is</text>
             <text class="t-sm" x="12" y="242">one shot: run it twice and</text>
             <text class="t-sm" x="12" y="256">FileSink reports write_batch</text>
@@ -476,7 +476,7 @@ use saci::io::{Sink, drain_dataset, drain_into_dataset};
 use saci::transformer::parquet::ParquetTransformer;
 
 let mut data = Dataset::new();
-data.register_component::&lt;Trade&gt;()?;
+data.register::&lt;Trade&gt;()?;
 
 let parquet  = Arc::new(ParquetTransformer::new());
 let mut src  = FileSource::open_async(Path::new("in.parquet"), parquet.clone(), None).await?;
@@ -494,20 +494,19 @@ sink.finish().await?;</code></pre>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>drain sources, run systems, drain sinks, finish</em></div>
-    <pre><code class="language-rust">let mut pipeline = Pipeline::builder("etl")
-    .with::&lt;Trade&gt;()
-    .with_source("Trade", src)
-    .with_sink("Trade", sink)
-    .with_parallel_system(ScaleSystem)
-    .build();
+    <pre><code class="language-rust">let mut pipeline = Pipeline::new("etl")
+    .component::&lt;Trade&gt;()
+    .source("Trade", src)
+    .sink("Trade", sink)
+    .parallel_system(ScaleSystem);
 
-pipeline.run_with_io().await?;</code></pre>
+pipeline.run().await?;</code></pre>
 </div>
 
 <div class="note note-warn">
     <span class="note-label">Sharp edge</span>
     <p>
-        <code>run_with_io</code> calls <code>finish()</code> on every registered sink at the
+        <code>run</code> calls <code>finish()</code> on every attached sink at the
         end of <b>every</b> call. With a <code>FileSink</code> that makes it a one-shot
         API: the second call fails with <em>FileSink: write_batch called after finish</em>. For a
         long-running loop, drive the drains yourself. That is what

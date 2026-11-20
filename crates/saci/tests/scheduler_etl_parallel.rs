@@ -1,4 +1,4 @@
-#![cfg(feature = "runtime")]
+#![cfg(feature = "engine")]
 // Verifies the ParallelSystem path with disjoint field writes in stage 1.
 
 use std::sync::Arc;
@@ -19,7 +19,7 @@ struct IngestSystem;
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("Transaction")
+        SystemMeta::new("ingest").writes_all::<Transaction>()
     }
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
         let transactions = support::seed_transactions();
@@ -43,7 +43,7 @@ impl ParallelSystem for ValidateSystem {
         let n = txns.len();
         let valid_flags: Vec<bool> = (0..n).map(|i| amount_col.value(i) > 0.0).collect();
         let new_valid: Arc<dyn arrow_array::Array> = Arc::new(BooleanArray::from(valid_flags));
-        Ok(WriteSet::new().put("Transaction", "valid", new_valid))
+        Ok(WriteSet::new().put_named("Transaction", "valid", new_valid))
     }
 }
 
@@ -56,12 +56,10 @@ impl ParallelSystem for EnrichSystem {
             .reads(Transaction::AMOUNT)
             .reads(Transaction::CURRENCY)
             .writes(Transaction::USD_AMOUNT)
-            .read_resource::<FxRates>()
+            .reads_resource::<FxRates>()
     }
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let rates = pipeline
-            .get_resource::<FxRates>()
-            .ok_or_else(|| SaciError::generic("FxRates resource not found"))?;
+        let rates = pipeline.resource::<FxRates>()?;
         let txns = pipeline.view::<Transaction>()?;
         let amount_col = txns.f64(Transaction::AMOUNT)?;
         let currency_col = txns.str(Transaction::CURRENCY)?;
@@ -73,15 +71,15 @@ impl ParallelSystem for EnrichSystem {
             })
             .collect();
         let new_usd: Arc<dyn arrow_array::Array> = Arc::new(Float64Array::from(usd_amounts));
-        Ok(WriteSet::new().put("Transaction", "usd_amount", new_usd))
+        Ok(WriteSet::new().put_named("Transaction", "usd_amount", new_usd))
     }
 }
 
 fn make_report_system() -> impl System {
     system_fn(
         SystemMeta::new("report")
-            .read_component("Transaction")
-            .write_resource::<Report>(),
+            .reads_all::<Transaction>()
+            .writes_resource::<Report>(),
         |data| {
             let (n, valid_count, total_usd) = {
                 let txns = data.view::<Transaction>()?;
@@ -112,25 +110,24 @@ fn make_report_system() -> impl System {
 
 #[tokio::test]
 async fn test_scheduler_etl_parallel_pipeline_runs_and_produces_correct_report() {
-    let mut pipeline = Pipeline::builder("etl-parallel")
-        .with::<Transaction>()
-        .with_resource(FxRates {
+    let mut pipeline = Pipeline::new("etl-parallel")
+        .component::<Transaction>()
+        .resource(FxRates {
             eur: 1.08,
             gbp: 1.27,
             jpy: 0.0067,
             cad: 0.74,
         })
-        .with_system(IngestSystem)
-        .with_parallel_system(ValidateSystem)
-        .with_parallel_system(EnrichSystem)
-        .with_system(make_report_system())
-        .build();
+        .system(IngestSystem)
+        .parallel_system(ValidateSystem)
+        .parallel_system(EnrichSystem)
+        .system(make_report_system());
 
     pipeline.run().await.unwrap();
 
     let report = pipeline
         .data()
-        .get_resource::<Report>()
+        .resource::<Report>()
         .expect("Report resource missing after pipeline run");
 
     assert_eq!(report.total_rows, 9);
@@ -141,23 +138,22 @@ async fn test_scheduler_etl_parallel_pipeline_runs_and_produces_correct_report()
 
 #[tokio::test]
 async fn test_scheduler_etl_parallel_stage_layout_has_concurrent_stage() {
-    let mut pipeline = Pipeline::builder("etl-parallel-stages")
-        .with::<Transaction>()
-        .with_resource(FxRates {
+    let mut pipeline = Pipeline::new("etl-parallel-stages")
+        .component::<Transaction>()
+        .resource(FxRates {
             eur: 1.08,
             gbp: 1.27,
             jpy: 0.0067,
             cad: 0.74,
         })
-        .with_system(IngestSystem)
-        .with_parallel_system(ValidateSystem)
-        .with_parallel_system(EnrichSystem)
-        .with_system(make_report_system())
-        .build();
+        .system(IngestSystem)
+        .parallel_system(ValidateSystem)
+        .parallel_system(EnrichSystem)
+        .system(make_report_system());
 
     pipeline.run().await.unwrap();
 
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan().unwrap();
     // Stage 0: ingest; Stage 1: validate+enrich (disjoint writes); Stage 2: report
     assert_eq!(stages.len(), 3);
     assert_eq!(stages[1].len(), 2, "validate and enrich share stage 1");

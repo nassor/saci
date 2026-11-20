@@ -37,7 +37,7 @@ pub trait Sink: Send {
     /// consumers read it, and they never share a call path: a
     /// [`Scheduler`](crate::scheduler::Scheduler) driving a bare
     /// [`Pipeline`](crate::pipeline::Pipeline) can consult it from a
-    /// [`BackpressureSpec::Predicate`](crate::scheduler::BackpressureSpec)
+    /// [`PipelineConfig::pause_when`](crate::scheduler::PipelineConfig::pause_when)
     /// closure to skip a tick, and a host's own admission control can read a
     /// growing backlog as congestion. The service's adaptive flow control
     /// takes it straight off the sinks it owns, which is what governs a
@@ -78,18 +78,14 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
 ///
 /// # Errors
 ///
-/// Returns `SaciError::Generic` if the component is not registered in `dataset`,
-/// or the first error from `sink.write_batch()`.
+/// Returns [`SaciError::ComponentNotRegistered`] if the component is not
+/// registered in `dataset`, or the first error from `sink.write_batch()`.
 pub async fn drain_dataset<K: Sink + ?Sized>(
     dataset: &Dataset,
-    component_name: &'static str,
+    component_name: &str,
     sink: &mut K,
 ) -> Result<usize, SaciError> {
-    let batch = dataset.batch_for(component_name).ok_or_else(|| {
-        SaciError::generic(format!(
-            "drain_dataset: component '{component_name}' is not registered in the dataset"
-        ))
-    })?;
+    let batch = dataset.batch_named(component_name)?;
     if batch.num_rows() == 0 {
         return Ok(0);
     }

@@ -17,7 +17,7 @@
 SACI is a columnar batch processing engine for Rust, built on Apache Arrow. Each transform declares
 the Arrow fields it reads and writes, and SACI derives the execution order from those declarations:
 transforms that write different fields share a stage, the rest wait for their inputs, and a
-transform that fails is retried.
+transform that declares a retry mode is retried when it fails with a transient error.
 
 The `saci` crate is used in two ways:
 
@@ -179,7 +179,8 @@ Two crates are on crates.io:
 
 | Feature | What it adds |
 |---|---|
-| `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits |
+| `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits, tokio and rayon stage parallelism |
+| `derive` | `#[derive(Component)]`; included in `engine`, `processor` and `plugin` |
 | `connector-<name>`, `transformer-<format>` | One transport or one byte format each, in `saci::connector` and `saci::transformer` |
 | `processor` | The processor SDK and the canonical `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |

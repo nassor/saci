@@ -171,13 +171,16 @@ fn change_schema() -> Arc<Schema> {
 /// source's and the run is observable in the output table.
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("mariadb_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
-    pipeline.add_system(system_fn(
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
+    pipeline = pipeline.system(system_fn(
         SystemMeta::new("double_total")
-            .read(COMPONENT, "total")
-            .write(COMPONENT, "total"),
+            .reads_named(COMPONENT, "total")
+            .writes_named(COMPONENT, "total"),
         |data: &mut Dataset| {
-            let Some(batch) = data.batch_for(COMPONENT) else {
+            let Ok(batch) = data.batch_named(COMPONENT) else {
                 return Ok(());
             };
             if batch.num_rows() == 0 {
@@ -190,7 +193,7 @@ fn build_pipeline() -> Pipeline {
                 .downcast_ref::<Int64Array>()
                 .expect("int64 total");
             let doubled: Int64Array = totals.iter().map(|v| v.map(|v| v * 2)).collect();
-            data.apply_write_set(WriteSet::new().put(COMPONENT, "total", Arc::new(doubled)))
+            data.apply_write_set(WriteSet::new().put_named(COMPONENT, "total", Arc::new(doubled)))
         },
     ));
     pipeline
@@ -201,8 +204,9 @@ fn build_pipeline() -> Pipeline {
 fn passthrough_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("mariadb_service_passthrough");
     pipeline
-        .data
-        .register_raw_component(CHANGE_COMPONENT, change_schema());
+        .data_mut()
+        .register_schema(CHANGE_COMPONENT, change_schema())
+        .unwrap();
     pipeline
 }
 
@@ -443,7 +447,7 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
         })
         .expect("source node present");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema());
+    dataset.register_schema(COMPONENT, schema()).unwrap();
     let first = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("first cycle");
@@ -548,7 +552,9 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
         })
         .expect("source node present");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(CHANGE_COMPONENT, change_schema());
+    dataset
+        .register_schema(CHANGE_COMPONENT, change_schema())
+        .unwrap();
     saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
         .await
         .expect("first cycle");

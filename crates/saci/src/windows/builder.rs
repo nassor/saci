@@ -141,8 +141,8 @@ impl WindowedSystemBuilder {
         })?;
 
         let meta = SystemMeta::new("windowed")
-            .read_component(source_component)
-            .write_resource::<WindowResults>();
+            .reads_all_named(source_component)
+            .writes_resource::<WindowResults>();
 
         let watermark = self
             .allowed_lateness_ms

@@ -109,7 +109,7 @@ async fn test_tumbling_non_keyed_sum() {
         .collect();
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -204,7 +204,7 @@ async fn test_tumbling_keyed_sum() {
         .collect();
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<KeyedSource>().unwrap();
+    pipeline.register::<KeyedSource>().unwrap();
     pipeline.append::<KeyedSource>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -291,11 +291,9 @@ async fn test_windowed_system_in_pipeline() {
         .unwrap();
 
     let mut p = Pipeline::new("test");
-    p.data_mut()
-        .register_component::<SourceComponent>()
-        .unwrap();
+    p.data_mut().register::<SourceComponent>().unwrap();
     p.data_mut().append::<SourceComponent>(&rows).unwrap();
-    p.add_system(sys);
+    let mut p = p.system(sys);
     p.run().await.unwrap();
 
     let results = p
@@ -327,7 +325,7 @@ async fn test_windowed_system_in_pipeline() {
 #[tokio::test]
 async fn test_empty_world_no_panic() {
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
 
     let sys = WindowedSystemBuilder::new()
         .source("SourceComponent", "ts_ms")
@@ -382,7 +380,7 @@ async fn test_min_aggregation() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -441,7 +439,7 @@ async fn test_max_aggregation() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -512,7 +510,7 @@ async fn test_count_aggregation() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -585,7 +583,7 @@ async fn test_mean_aggregation() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -646,7 +644,7 @@ async fn test_mean_aggregation_two_windows() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -768,7 +766,7 @@ async fn test_session_single_key() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -884,7 +882,7 @@ async fn test_sliding_non_keyed_sum() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -976,11 +974,9 @@ async fn test_sliding_in_pipeline() {
         .unwrap();
 
     let mut p = Pipeline::new("test");
-    p.data_mut()
-        .register_component::<SourceComponent>()
-        .unwrap();
+    p.data_mut().register::<SourceComponent>().unwrap();
     p.data_mut().append::<SourceComponent>(&rows).unwrap();
-    p.add_system(sys);
+    let mut p = p.system(sys);
     p.run().await.unwrap();
 
     let results = p
@@ -1009,7 +1005,7 @@ async fn test_sliding_amplification_limit_error() {
     }];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
 
     // size=10^10, slide=1 → k=10^10, far exceeds 10^8 limit.
@@ -1079,7 +1075,7 @@ async fn test_session_multi_key() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<KeyedSource>().unwrap();
+    pipeline.register::<KeyedSource>().unwrap();
     pipeline.append::<KeyedSource>(&rows).unwrap();
 
     let sys = WindowedSystemBuilder::new()
@@ -1185,7 +1181,7 @@ async fn test_watermark_progression_out_of_order() {
             },
         ];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1202,7 +1198,7 @@ async fn test_watermark_progression_out_of_order() {
             value: 99.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1219,7 +1215,7 @@ async fn test_watermark_progression_out_of_order() {
             value: 77.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1260,7 +1256,7 @@ async fn test_allowed_lateness_boundary() {
             value: 1.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
     }
@@ -1272,7 +1268,7 @@ async fn test_allowed_lateness_boundary() {
             value: 55.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1293,7 +1289,7 @@ async fn test_allowed_lateness_boundary() {
             value: 42.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1343,7 +1339,7 @@ async fn test_window_refiring_on_late_data() {
             },
         ];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1368,7 +1364,7 @@ async fn test_window_refiring_on_late_data() {
             value: 5.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1419,7 +1415,7 @@ async fn test_side_output_routing() {
             value: 1.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
     }
@@ -1444,7 +1440,7 @@ async fn test_side_output_routing() {
             }, // beyond lateness
         ];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1526,7 +1522,7 @@ async fn test_process_window_fn_with_context() {
             },
         ];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1556,7 +1552,7 @@ async fn test_process_window_fn_with_context() {
             value: 3.0,
         }];
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<SourceComponent>().unwrap();
+        pipeline.register::<SourceComponent>().unwrap();
         pipeline.append::<SourceComponent>(&rows).unwrap();
         sys.run(&mut pipeline).await.unwrap();
 
@@ -1625,7 +1621,7 @@ async fn test_no_watermark_all_data_passes_through() {
     ];
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<SourceComponent>().unwrap();
+    pipeline.register::<SourceComponent>().unwrap();
     pipeline.append::<SourceComponent>(&rows).unwrap();
     sys.run(&mut pipeline).await.unwrap();
 

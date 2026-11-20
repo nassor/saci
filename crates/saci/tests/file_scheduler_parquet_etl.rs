@@ -28,13 +28,11 @@ struct ScaleSystem;
 impl ParallelSystem for ScaleSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("scale_price")
-            .read("Trade", "price")
-            .write("Trade", "price")
+            .reads_named("Trade", "price")
+            .writes_named("Trade", "price")
     }
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Trade")
-            .ok_or_else(|| SaciError::generic("Trade component not found"))?;
+        let batch = pipeline.batch_named("Trade")?;
         let prices = batch
             .column_by_name("price")
             .ok_or_else(|| SaciError::generic("price column missing"))?
@@ -43,7 +41,7 @@ impl ParallelSystem for ScaleSystem {
             .ok_or_else(|| SaciError::generic("price is not Float64"))?;
         let scaled: Float64Array =
             Float64Array::from_iter_values(prices.values().iter().map(|&p| p * 1.1));
-        Ok(WriteSet::new().put("Trade", "price", Arc::new(scaled)))
+        Ok(WriteSet::new().put_named("Trade", "price", Arc::new(scaled)))
     }
 }
 
@@ -53,13 +51,11 @@ struct RoundSystem;
 impl ParallelSystem for RoundSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("round_price")
-            .read("Trade", "price")
-            .write("Trade", "rounded")
+            .reads_named("Trade", "price")
+            .writes_named("Trade", "rounded")
     }
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Trade")
-            .ok_or_else(|| SaciError::generic("Trade component not found"))?;
+        let batch = pipeline.batch_named("Trade")?;
         let prices = batch
             .column_by_name("price")
             .ok_or_else(|| SaciError::generic("price column missing"))?
@@ -68,7 +64,7 @@ impl ParallelSystem for RoundSystem {
             .ok_or_else(|| SaciError::generic("price is not Float64"))?;
         let rounded: Int64Array =
             Int64Array::from_iter_values(prices.values().iter().map(|&p| p.round() as i64));
-        Ok(WriteSet::new().put("Trade", "rounded", Arc::new(rounded)))
+        Ok(WriteSet::new().put_named("Trade", "rounded", Arc::new(rounded)))
     }
 }
 
@@ -145,7 +141,8 @@ async fn test_parquet_etl_pipeline_reads_scales_rounds_and_writes() {
     let mut pipeline = Pipeline::new("parquet-etl");
     pipeline
         .data_mut()
-        .register_raw_component("Trade", full_schema.clone());
+        .register_schema("Trade", full_schema.clone())
+        .unwrap();
 
     let inner_src = FileSource::open_async(&input_path, Arc::new(ParquetTransformer::new()), None)
         .await
@@ -161,13 +158,13 @@ async fn test_parquet_etl_pipeline_reads_scales_rounds_and_writes() {
     )
     .unwrap();
 
-    pipeline
-        .add_parallel_system(ScaleSystem)
-        .add_parallel_system(RoundSystem)
-        .add_source("Trade", src)
-        .add_sink("Trade", sink);
+    pipeline = pipeline
+        .parallel_system(ScaleSystem)
+        .parallel_system(RoundSystem)
+        .source("Trade", src)
+        .sink("Trade", sink);
 
-    pipeline.run_with_io().await.unwrap();
+    pipeline.run().await.unwrap();
 
     assert_eq!(
         pipeline.data().rows(),
@@ -220,7 +217,8 @@ async fn test_parquet_etl_pipeline_runs_with_1000_rows() {
     let mut pipeline = Pipeline::new("parquet-etl-large");
     pipeline
         .data_mut()
-        .register_raw_component("Trade", full_schema.clone());
+        .register_schema("Trade", full_schema.clone())
+        .unwrap();
 
     let inner_src = FileSource::open_async(&input_path, Arc::new(ParquetTransformer::new()), None)
         .await
@@ -236,13 +234,13 @@ async fn test_parquet_etl_pipeline_runs_with_1000_rows() {
     )
     .unwrap();
 
-    pipeline
-        .add_parallel_system(ScaleSystem)
-        .add_parallel_system(RoundSystem)
-        .add_source("Trade", src)
-        .add_sink("Trade", sink);
+    pipeline = pipeline
+        .parallel_system(ScaleSystem)
+        .parallel_system(RoundSystem)
+        .source("Trade", src)
+        .sink("Trade", sink);
 
-    pipeline.run_with_io().await.unwrap();
+    pipeline.run().await.unwrap();
 
     assert_eq!(pipeline.data().rows(), 1_000);
 }

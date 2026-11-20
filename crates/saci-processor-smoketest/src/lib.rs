@@ -107,9 +107,7 @@ static INSTANCE_BATCHES: AtomicU64 = AtomicU64::new(0);
 /// discarded: the host builds its `WasiCtx` with no `inherit_*`, so only the
 /// invocation matters. A real processor logs through `host-io::log` instead.
 fn count_batches(data: &mut Dataset) -> Result<(), SaciError> {
-    let state = data
-        .get_resource_mut::<ProcessorState<Counter>>()
-        .ok_or_else(|| SaciError::generic("smoketest: ProcessorState<Counter> resource missing"))?;
+    let state = data.resource_mut::<ProcessorState<Counter>>()?;
 
     if COUNT_BY_INSTANCE.load(Ordering::Relaxed) {
         // Counts this instance's batches from its own memory, not from `prior`, so a test sees
@@ -154,14 +152,10 @@ pub fn build() -> Pipeline {
         None => "smoketest".to_string(),
     };
 
-    let mut pipeline = Pipeline::new(name);
-    pipeline
-        .data
-        .register_component::<Ping>()
-        .expect("register Ping");
+    let mut pipeline = Pipeline::new(name).component::<Ping>();
     // `Counter` is deliberately NOT registered: state lives in a resource, so
     // it stays out of `describe()` and out of the output IPC.
-    pipeline.add_system(system_fn(SystemMeta::new("count_batches"), count_batches));
+    pipeline = pipeline.system(system_fn(SystemMeta::new("count_batches"), count_batches));
     // The `route` config key ("a" or "a,b") installs a `RouteDecision`
     // resource, so the host delivers this batch's output only to the links
     // whose branch it names. Absent = legacy multicast.
@@ -171,7 +165,7 @@ pub fn build() -> Pipeline {
     let route: Option<String> = None;
     if let Some(route) = route {
         let branches: Vec<String> = route.split(',').map(str::to_string).collect();
-        pipeline.add_system(system_fn(
+        pipeline = pipeline.system(system_fn(
             SystemMeta::new("route_batch"),
             move |data: &mut Dataset| {
                 data.insert_resource(RouteDecision(branches.clone()));

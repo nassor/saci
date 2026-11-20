@@ -72,10 +72,10 @@ pub async fn load_accumulator_state(
     // Decode single-component IPC.
     let dataset = Dataset::read_ipc(&mut cp.payload.as_slice())?;
 
-    let batch = match dataset.batch_for(WindowAccumulator::name()) {
-        None => return Ok(None),
-        Some(b) if b.num_rows() == 0 => return Ok(None),
-        Some(b) => b.clone(),
+    let batch = match dataset.batch_named(WindowAccumulator::name()) {
+        Err(_) => return Ok(None),
+        Ok(b) if b.num_rows() == 0 => return Ok(None),
+        Ok(b) => b.clone(),
     };
 
     // Migrate using the version embedded in the IPC metadata.
@@ -103,7 +103,7 @@ pub async fn save_accumulator_state(
     use crate::SaciError;
 
     // If the component isn't in this dataset there's nothing to checkpoint.
-    if data.batch_for(WindowAccumulator::name()).is_none() {
+    if data.batch_named(WindowAccumulator::name()).is_err() {
         return Ok(());
     }
 
@@ -183,7 +183,7 @@ mod tests {
 
     fn make_world_with_accumulators(rows: Vec<WindowAccumulator>) -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<WindowAccumulator>().unwrap();
+        data.register::<WindowAccumulator>().unwrap();
         if !rows.is_empty() {
             data.append::<WindowAccumulator>(&rows).unwrap();
         }

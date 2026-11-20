@@ -241,8 +241,8 @@ where
                     Some(prior_id) => match load_accumulator_state(&self.store, prior_id).await {
                         Ok(Some(batch)) => {
                             if partition_data
-                                .batch_for(WindowAccumulator::name())
-                                .is_some()
+                                .batch_named(WindowAccumulator::name())
+                                .is_ok()
                             {
                                 let rows =
                                     WindowAccumulator::from_record_batch(&batch).map_err(|e| {
@@ -814,7 +814,7 @@ mod tests {
         let counter_clone = Arc::clone(&counter);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("increment"), move |_data| {
+        pipeline = pipeline.system(system_fn(SystemMeta::new("increment"), move |_data| {
             counter_clone.fetch_add(1, AtomicOrdering::Relaxed);
             Ok(())
         }));
@@ -893,7 +893,7 @@ mod tests {
         };
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let config = RunnerConfig {
             max_batches: Some(1),
@@ -986,7 +986,7 @@ mod tests {
         };
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let config = RunnerConfig {
             max_batches: Some(1),
@@ -1036,11 +1036,11 @@ mod tests {
         let run_count_clone = Arc::clone(&run_count);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(
+        pipeline = pipeline.system(system_fn(
             SystemMeta::new("append_accumulator"),
             move |data: &mut Dataset| {
                 let run = run_count_clone.fetch_add(1, AtomicOrdering::Relaxed);
-                if data.batch_for(WindowAccumulator::name()).is_some() {
+                if data.batch_named(WindowAccumulator::name()).is_ok() {
                     let row = WindowAccumulator {
                         version: Some(1),
                         source_component: "test".to_string(),
@@ -1062,7 +1062,7 @@ mod tests {
 
         let world_factory = || {
             let mut d = Dataset::new();
-            d.register_component::<WindowAccumulator>().unwrap();
+            d.register::<WindowAccumulator>().unwrap();
             d
         };
 
@@ -1104,12 +1104,12 @@ mod tests {
         let entry_rows_clone = Arc::clone(&entry_rows);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(
+        pipeline = pipeline.system(system_fn(
             SystemMeta::new("append_accumulator"),
             move |data: &mut Dataset| {
                 entry_rows_clone.lock().unwrap().push(data.rows() as u64);
                 let run = run_count_clone.fetch_add(1, AtomicOrdering::Relaxed);
-                if data.batch_for(WindowAccumulator::name()).is_some() {
+                if data.batch_named(WindowAccumulator::name()).is_ok() {
                     let row = WindowAccumulator {
                         version: Some(1),
                         source_component: "test".to_string(),
@@ -1131,7 +1131,7 @@ mod tests {
 
         let world_factory = || {
             let mut d = Dataset::new();
-            d.register_component::<WindowAccumulator>().unwrap();
+            d.register::<WindowAccumulator>().unwrap();
             d
         };
 
@@ -1159,7 +1159,8 @@ mod tests {
                 let dataset = Dataset::read_ipc(&mut c.payload.as_slice())
                     .expect("checkpoint payload is single-component IPC");
                 dataset
-                    .batch_for(WindowAccumulator::name())
+                    .batch_named(WindowAccumulator::name())
+                    .ok()
                     .map(|b| b.num_rows() as u64)
             })
             .collect();
@@ -1242,11 +1243,11 @@ mod tests {
         };
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let world_factory = || {
             let mut d = Dataset::new();
-            d.register_component::<WindowAccumulator>().unwrap();
+            d.register::<WindowAccumulator>().unwrap();
             d
         };
 
@@ -1286,7 +1287,7 @@ mod tests {
         store.register(0, 10);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let config = RunnerConfig {
             max_batches: Some(1),

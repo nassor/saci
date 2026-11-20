@@ -307,20 +307,10 @@ fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T, S
 /// A batch carrying only catalog rows produces no output and an empty
 /// [`RouteDecision`], so nothing is delivered downstream for it.
 pub fn classify_impl(data: &mut Dataset) -> Result<(), SaciError> {
-    let catalog = data
-        .columns::<Catalog>()
-        .ok_or_else(|| SaciError::generic("classify: Catalog component missing"))?
-        .clone();
-    let orders = data
-        .columns::<Order>()
-        .ok_or_else(|| SaciError::generic("classify: Order component missing"))?
-        .clone();
+    let catalog = data.batch::<Catalog>()?.clone();
+    let orders = data.batch::<Order>()?.clone();
 
-    let state = data
-        .get_resource_mut::<ProcessorState<CatalogState>>()
-        .ok_or_else(|| {
-            SaciError::generic("classify: ProcessorState<CatalogState> resource missing")
-        })?;
+    let state = data.resource_mut::<ProcessorState<CatalogState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole catalog.
     if state.rows.is_empty() {
@@ -408,27 +398,17 @@ pub fn classify_impl(data: &mut Dataset) -> Result<(), SaciError> {
 /// Called lazily by the `export_pipeline!` macro on the first call to any WIT
 /// export, and constructed exactly once per component instance.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("integrity-classify");
-    pipeline
-        .data
-        .register_component::<Catalog>()
-        .expect("register Catalog");
-    pipeline
-        .data
-        .register_component::<Order>()
-        .expect("register Order");
-    pipeline
-        .data
-        .register_component::<ClassifiedOrder>()
-        .expect("register ClassifiedOrder");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("classify")
-            .read_component("Order")
-            .read_component("Catalog")
-            .write_component("ClassifiedOrder"),
-        classify_impl,
-    ));
-    pipeline
+    Pipeline::new("integrity-classify")
+        .component::<Catalog>()
+        .component::<Order>()
+        .component::<ClassifiedOrder>()
+        .system(system_fn(
+            SystemMeta::new("classify")
+                .reads_all::<Order>()
+                .reads_all::<Catalog>()
+                .writes_all::<ClassifiedOrder>(),
+            classify_impl,
+        ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -441,9 +421,9 @@ mod tests {
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Catalog>().unwrap();
-        data.register_component::<Order>().unwrap();
-        data.register_component::<ClassifiedOrder>().unwrap();
+        data.register::<Catalog>().unwrap();
+        data.register::<Order>().unwrap();
+        data.register::<ClassifiedOrder>().unwrap();
         <Stateful<CatalogState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
         data
     }
@@ -473,7 +453,7 @@ mod tests {
     /// transformer would.
     fn emitted(data: &Dataset) -> Vec<(i64, f64, bool, String, i64)> {
         let batch = data
-            .batch_for("ClassifiedOrder")
+            .batch_named("ClassifiedOrder")
             .expect("ClassifiedOrder batch");
         let id = column::<Int64Array>(batch, "order_id").unwrap();
         let total = column::<Float64Array>(batch, "line_total").unwrap();

@@ -192,7 +192,7 @@ async fn a_write_after_finish_is_an_error_naming_the_sink() {
     };
     assert_eq!(err.message(), "FileSink: write_batch called after finish");
 
-    // A second finish is a no-op, which is what makes `run_with_io`'s
+    // A second finish is a no-op, which is what makes `Pipeline::run`'s
     // unconditional finish on every call safe.
     sink.finish().await.expect("finish is idempotent");
 }

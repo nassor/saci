@@ -206,17 +206,16 @@ is target-gated by hand.
 ```rust,name=The processor entry point
 #[processor(name = "settle", state = Ledger)]
 pub fn build() -> Pipeline {
-    Pipeline::builder("settle")
-        .with::<Order>()
-        .with_system(settle_system())
-        .with_system(ledger_system())
-        .build()
+    Pipeline::new("settle")
+        .component::<Order>()
+        .system(settle_system())
+        .system(ledger_system())
 }
 ```
 
 `settle_system()` and `ledger_system()` are what `#[transform]` and `#[fold]`
 generate from the two functions: one constructor per annotated function, named
-after it. `with::<Order>()` registers the row type, which is what a workflow's
+after it. `component::<Order>()` registers the row type, which is what a workflow's
 `component="Order"` is checked against.
 
 `state = Ledger` names the type carried across batches, declared in

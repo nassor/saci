@@ -1,11 +1,39 @@
 use std::sync::Arc;
 
-use crate::error::{SaciError, SaciResult};
-use crate::retry::SystemConfig;
+use crate::error::SaciError;
+use crate::retry::RetryMode;
 use crate::schema::SchemaRegistry;
 use crate::system::{FieldAccess, ParallelSystem, System, SystemMeta};
 
-use super::Pipeline;
+/// A pipeline's execution plan, built once per system set.
+pub(super) struct Plan {
+    /// System indices grouped into stages; a stage's systems never conflict.
+    pub(super) stages: Vec<Vec<usize>>,
+    /// Each system's retry mode, by system index.
+    pub(super) retries: Vec<RetryMode>,
+    /// Each system's access, expanded to fields, by system index.
+    #[cfg_attr(not(any(feature = "engine", feature = "tracing")), allow(dead_code))]
+    pub(super) metas: Vec<ExpandedMeta>,
+}
+
+impl Plan {
+    pub(super) fn build(
+        systems: &[SystemEntry],
+        schemas: &SchemaRegistry,
+    ) -> Result<Self, SaciError> {
+        let metas = systems
+            .iter()
+            .map(|entry| ExpandedMeta::from_meta(&entry.meta(), schemas))
+            .collect::<Result<Vec<_>, _>>()?;
+        let stages = build_stages(&metas);
+        let retries = systems.iter().map(SystemEntry::retry).collect();
+        Ok(Self {
+            stages,
+            retries,
+            metas,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OwnedFieldAccess {
@@ -138,31 +166,27 @@ impl SystemEntry {
         }
     }
 
-    pub(super) fn config(&self) -> SystemConfig {
+    pub(super) fn retry(&self) -> RetryMode {
         match self {
-            SystemEntry::Sequential(s) => s.config(),
-            SystemEntry::Parallel(s) => s.config(),
+            SystemEntry::Sequential(s) => s.retry(),
+            SystemEntry::Parallel(s) => s.retry(),
         }
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     pub(super) fn is_parallel(&self) -> bool {
         matches!(self, SystemEntry::Parallel(_))
     }
 }
 
-pub(super) fn build_stages_inner(
-    systems: &[SystemEntry],
-    metas: &[ExpandedMeta],
-) -> (Vec<Vec<usize>>, Vec<SystemConfig>) {
+fn build_stages(metas: &[ExpandedMeta]) -> Vec<Vec<usize>> {
     use std::collections::HashMap;
 
-    if systems.is_empty() {
-        return (Vec::new(), Vec::new());
+    if metas.is_empty() {
+        return Vec::new();
     }
 
-    let configs: Vec<SystemConfig> = systems.iter().map(|s| s.config()).collect();
-    let n = systems.len();
+    let n = metas.len();
 
     type FieldKey<'a> = (&'a str, &'a str);
 
@@ -285,54 +309,7 @@ pub(super) fn build_stages_inner(
         stages[level].push(i);
     }
 
-    (stages, configs)
-}
-
-impl Pipeline {
-    /// Validate all declared field access against registered schemas.
-    pub fn validate(&self) -> SaciResult<()> {
-        self.ensure_plan(self.data.schemas())?;
-        Ok(())
-    }
-
-    /// Return the stage groupings computed from the current system set.
-    pub fn stages(&self) -> Option<Vec<Vec<usize>>> {
-        self.stages.get().and_then(|r| r.as_ref().ok()).cloned()
-    }
-
-    /// Return the number of stages in the execution plan, or `None` if not yet built.
-    pub fn stage_count(&self) -> Option<usize> {
-        self.stages
-            .get()
-            .and_then(|r| r.as_ref().ok())
-            .map(|s| s.len())
-    }
-
-    pub(super) fn ensure_plan(&self, schemas: &SchemaRegistry) -> SaciResult<()> {
-        let metas_result = self.expanded_metas.get_or_init(|| {
-            self.systems
-                .iter()
-                .map(|entry| ExpandedMeta::from_meta(&entry.meta(), schemas))
-                .collect::<Result<Vec<_>, _>>()
-        });
-
-        if let Err(e) = metas_result {
-            return Err(e.clone());
-        }
-
-        let stages_result = self.stages.get_or_init(|| {
-            let metas = metas_result.as_ref().unwrap();
-            let (stages, configs) = build_stages_inner(&self.systems, metas);
-            let _ = self.configs.get_or_init(|| configs);
-            Ok(stages)
-        });
-
-        if let Err(e) = stages_result {
-            return Err(e.clone());
-        }
-
-        Ok(())
-    }
+    stages
 }
 
 #[cfg(test)]
@@ -368,59 +345,54 @@ mod tests {
 
     #[test]
     fn test_pipeline_validate_unknown_field_returns_error() {
-        let mut p = Pipeline::new("test");
-        p.data.register_component::<DagOrder>().unwrap();
-
         struct BadSystem;
         #[async_trait::async_trait]
         impl System for BadSystem {
             fn meta(&self) -> SystemMeta {
-                SystemMeta::new("bad").write("DagOrder", "nonexistent_field")
+                SystemMeta::new("bad").writes_named("DagOrder", "nonexistent_field")
             }
             async fn run(&self, _: &mut Dataset) -> crate::SaciResult<()> {
                 Ok(())
             }
         }
 
-        p.add_system(BadSystem);
-        let result = p.validate();
-        assert!(result.is_err());
+        let p = Pipeline::new("test")
+            .component::<DagOrder>()
+            .system(BadSystem);
+        assert!(p.validate().is_err());
     }
 
     #[test]
-    fn test_pipeline_stage_count_after_validate() {
-        let p = Pipeline::builder("staged")
-            .with::<DagOrder>()
-            .with_system(system_fn(
-                SystemMeta::new("s1").read("DagOrder", "id"),
+    fn test_pipeline_plan_after_validate() {
+        let p = Pipeline::new("staged")
+            .component::<DagOrder>()
+            .system(system_fn(
+                SystemMeta::new("s1").reads_named("DagOrder", "id"),
                 |_: &mut Dataset| Ok(()),
             ))
-            .with_system(system_fn(
-                SystemMeta::new("s2").write("DagOrder", "total"),
+            .system(system_fn(
+                SystemMeta::new("s2").writes_named("DagOrder", "total"),
                 |_: &mut Dataset| Ok(()),
-            ))
-            .build();
+            ));
 
         p.validate().unwrap();
-        assert!(p.stage_count().unwrap() >= 1);
+        assert!(!p.plan().unwrap().is_empty());
     }
 
     #[test]
     fn test_field_access_validation_write_missing_component() {
-        let mut p = Pipeline::new("conflict-test");
-
         struct WriteUnregistered;
         #[async_trait::async_trait]
         impl System for WriteUnregistered {
             fn meta(&self) -> SystemMeta {
-                SystemMeta::new("bad").write("UnregisteredComp", "field")
+                SystemMeta::new("bad").writes_named("UnregisteredComp", "field")
             }
             async fn run(&self, _: &mut Dataset) -> crate::SaciResult<()> {
                 Ok(())
             }
         }
 
-        p.add_system(WriteUnregistered);
+        let p = Pipeline::new("conflict-test").system(WriteUnregistered);
         assert!(p.validate().is_err());
     }
 }

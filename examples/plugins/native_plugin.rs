@@ -105,9 +105,7 @@ fn i64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array, 
 }
 
 fn print_rows(label: &str, dataset: &Dataset) -> Result<(), Box<dyn Error>> {
-    let batch = dataset
-        .batch_for(COMPONENT)
-        .ok_or("the returned dataset has no Counter component")?;
+    let batch = dataset.batch_named(COMPONENT)?;
     let id = i64_column(batch, "id")?;
     let seen = i64_column(batch, "seen")?;
     let rows: Vec<String> = (0..batch.num_rows())

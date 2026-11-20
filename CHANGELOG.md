@@ -3,6 +3,59 @@
 `saci` and `saci-macros` share one version. The release process is in `AGENTS.md`, under
 "Releases".
 
+## Unreleased
+
+### Breaking
+
+- Features: `runtime` and `io` are folded into `engine`; a feature that implied either implies
+  `engine`. A new `derive` feature carries `#[derive(Component)]` and is part of `engine`,
+  `processor` and `plugin`.
+- `#[derive(Component)]` works in every build (`saci::Component`, same name as the trait) and
+  declares one `FieldRef` constant per field, named after the field in upper case
+  (`Order::USD_AMOUNT`) and pointing at its serde column name. `#[saci(fields = false)]` opts out.
+  The derived `schema()` is traced once per process.
+- `Dataset`: `register_component` is `register`; `register_raw_component`,
+  `register_raw_component_versioned` and `register_named_component` are `register_schema` and
+  `register_schema_versioned`, which take any `&str` and return an error instead of panicking.
+  Reads return `SaciResult`: `columns::<C>()` is `batch::<C>()`, `batch_for(name)` is
+  `batch_named(name)`, `column::<C>("f")` is `column(C::F)` or `column_named("C", "f")`. New
+  `resource`, `resource_mut`, `take_resource` and `set_column`. `DatasetBuilder` is removed.
+- `SaciError`: `ComponentNotFound` and `EntityNotFound` are replaced by `ComponentNotRegistered` and
+  `FieldNotFound`; `is_retryable()` is new and `RetryExhausted` exposes its cause through
+  `std::error::Error::source`.
+- Retry: `SystemConfig` is removed. `System::retry()` and `ParallelSystem::retry()` return a
+  `RetryMode`, which defaults to `RetryMode::None`, and only an error whose `is_retryable()` is true
+  is retried. `RetryExhausted` is returned only after at least one retry ran; otherwise the error
+  comes back unwrapped. `RetryingSource`/`RetryingSink` and `run_with_retries*` take a `RetryMode`;
+  `service::RetryConfig::to_system_config` is `to_retry_mode`.
+- `SystemMeta`: `read`/`write` are `reads_named`/`writes_named`, `read_component`/`write_component`
+  are `reads_all::<C>()`/`writes_all::<C>()` or `reads_all_named`/`writes_all_named`,
+  `read_resource`/`write_resource` are `reads_resource`/`writes_resource`; the fields are private
+  (`name()` reads the name). `FieldRef::field` is `FieldRef::name()`.
+- `WriteSet`/`SliceWriteSet`: `put` takes a `FieldRef`, `put_named` takes strings,
+  `with_resource` takes the value; the fields are private behind `len`, `is_empty`, `get_named`,
+  `iter` and `SliceWriteSet::rows`. `ResourceUpdate` is no longer public.
+- `ParallelSystem`: `run_slice` returns `SaciResult<SliceWriteSet>` and is used when `sliced()`
+  returns `true`; `run` has a default that runs one slice over every row. New `run_sync` and
+  `parallel_fn`.
+- `Pipeline` is built with a consuming chain from `Pipeline::new`: `component`, `schema`,
+  `resource`, `system`, `parallel_system`, `source`, `sink`. `PipelineBuilder`, the public `data`
+  field, the `add_*` methods, `run_with_io`, `run_on_with_stats`, `last_stats`, `stages` and
+  `stage_count` are removed. `run`, `run_on` and `run_stream` return the call's `RunStats`
+  (`elapsed: Duration`, `retries`); `run` drains attached sources and fills attached sinks;
+  `plan()` returns the stage plan.
+- `Scheduler` is chained: `pipeline`, `pipeline_with`. `PipelineConfig::after(name)`,
+  `after_data(name)` and `pause_when(f)` replace `after(name, DependencyKind)` and
+  `BackpressureSpec`; a pipeline added after a tick runs on the next one.
+- Root exports: connector and transformer types are named by module path
+  (`saci::connector::file::FileSource`); `saci::async_trait` is re-exported, so a crate needs no
+  `async-trait` dependency; `saci::partition` and `saci::resource` are private.
+
+### Changed
+
+- `Dataset::append` drops the zero-row registration chunk, so a component read after one append
+  needs no concatenation; `clone_empty` keeps the prebuilt empty templates `clear` uses.
+
 ## 0.2.0 - 2026-11-19
 
 ### Breaking

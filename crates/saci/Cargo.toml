@@ -63,15 +63,15 @@ all = [
 
 # Engine
 
-# tokio and rayon stage parallelism. Cannot target wasm32-wasip3.
-runtime = ["dep:tokio", "dep:rayon", "dep:num_cpus"]
-# The Source/Sink traits and the schema cast helpers.
-io = ["runtime"]
-# The columnar engine: Dataset, Pipeline, System, Scheduler, Component, and the
-# Source/Sink traits.
-engine = ["io"]
+# The columnar engine: Dataset, Pipeline, System, Scheduler, Component, the
+# Source/Sink traits and the schema cast helpers, with tokio and rayon stage
+# parallelism. Cannot target wasm32-wasip3.
+engine = ["dep:tokio", "dep:rayon", "dep:num_cpus", "dep:arrow-cast", "derive"]
+# `#[derive(Component)]`, `#[transform]` and `#[fold]`. Needs no tokio, so a
+# wasm32-wasip3 processor carries it.
+derive = ["dep:saci-macros"]
 # Beam-style windowed aggregation.
-windows = ["dep:arrow-arith", "dep:fnv"]
+windows = ["dep:arrow-arith", "dep:arrow-cast", "dep:fnv"]
 tracing = ["dep:tracing"]
 # OpenTelemetry instruments: the service's own series and the connectors'.
 metrics = ["dep:opentelemetry"]
@@ -82,21 +82,21 @@ trace-context = ["tracing", "dep:opentelemetry", "dep:tracing-opentelemetry"]
 
 # A WebAssembly Component Model processor: Component Model Async execution on
 # wasm32-wasip3, built with `--no-default-features --features processor`.
-processor = ["dep:saci-macros"]
+processor = ["derive"]
 # A native plugin: a cdylib the host `dlopen`s.
-plugin = ["runtime", "dep:pollster", "dep:serde_json", "dep:base64"]
+plugin = ["engine", "dep:pollster", "dep:serde_json", "dep:base64"]
 
 # Contracts, pulled in by the features below; not meant to be named directly.
 config = ["dep:kdl", "dep:serde_json"]
-transformer-contract = ["runtime", "config"]
-connector-contract = ["io", "transformer-contract"]
+transformer-contract = ["engine", "config"]
+connector-contract = ["engine", "transformer-contract"]
 
 # Byte formats
-transformer-arrow-ipc = ["transformer-contract", "io"]
-transformer-avro = ["transformer-contract", "io", "dep:arrow-avro"]
+transformer-arrow-ipc = ["transformer-contract"]
+transformer-avro = ["transformer-contract", "dep:arrow-avro"]
 transformer-csv = ["transformer-contract", "dep:arrow-csv"]
 transformer-ndjson = ["transformer-contract", "dep:arrow-json"]
-transformer-parquet = ["transformer-contract", "io", "dep:parquet", "dep:bytes"]
+transformer-parquet = ["transformer-contract", "dep:parquet", "dep:bytes"]
 
 # Connectors. Kafka, NATS and UDP imply `transformer-ndjson` and TCP implies
 # `transformer-arrow-ipc` so the feature alone is runnable; every other
@@ -150,19 +150,19 @@ connector-saci = ["connector-contract", "tokio/net", "tokio/io-util"]
 # In-process telemetry: time-bounded ring buffers fed by a `tracing` layer and
 # an in-memory OpenTelemetry metric exporter, read back through the control
 # plane's JSON API.
-inspector = ["runtime", "tracing", "metrics", "dep:tracing-subscriber", "dep:opentelemetry_sdk"]
+inspector = ["engine", "tracing", "metrics", "dep:tracing-subscriber", "dep:opentelemetry_sdk"]
 distributed = [
-    "runtime", "dep:redb", "dep:uuid", "dep:serde_json", "dep:serde_bytes", "dep:hex",
+    "engine", "dep:redb", "dep:uuid", "dep:serde_json", "dep:serde_bytes", "dep:hex",
     "tokio/net", "tokio/io-util", "dep:tokio-util", "dep:fnv",
 ]
 distributed-raft = ["distributed", "dep:openraft", "dep:futures-util", "dep:postcard"]
 # Archival Parquet checkpoint store.
 parquet-checkpoint = ["distributed", "dep:parquet"]
 # The WebAssembly processor host.
-wasm-host = ["runtime", "dep:wasmtime", "dep:wasmtime-wasi", "dep:sha3", "dep:pollster"]
+wasm-host = ["engine", "dep:wasmtime", "dep:wasmtime-wasi", "dep:sha3", "dep:pollster"]
 # The native plugin host: dlopen a shared library exporting the plugin C ABI.
 # `sha3` is the optional content digest for the library file.
-plugin-host = ["runtime", "dep:libloading", "dep:base64", "dep:serde_json", "dep:sha3"]
+plugin-host = ["engine", "dep:libloading", "dep:base64", "dep:serde_json", "dep:sha3"]
 # Generator for the cross-language conformance corpus in
 # packages/arrow-ipc-conformance/. `arrow-ipc/lz4` is enabled only here, so a
 # normal build still refuses a compressed record batch: the corpus needs to
@@ -186,7 +186,7 @@ arrow-array   = { workspace = true }
 arrow-schema  = { workspace = true }
 arrow-buffer  = { workspace = true }
 arrow-select  = { workspace = true }
-arrow-cast    = { workspace = true }
+arrow-cast    = { workspace = true, optional = true }
 arrow-arith   = { workspace = true, optional = true }
 arrow-ord     = { workspace = true }
 arrow-ipc     = { workspace = true }
@@ -344,7 +344,12 @@ harness = false
 [[bench]]
 name = "batch_vs_stream"
 harness = false
-required-features = ["io"]
+required-features = ["engine"]
+
+[[bench]]
+name = "windows"
+harness = false
+required-features = ["windows"]
 
 [[bench]]
 name = "parallelism"

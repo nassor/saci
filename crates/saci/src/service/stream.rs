@@ -837,10 +837,10 @@ pub async fn run_stream(
                                     NodeRunKind::Sink => {
                                         let component = components[d]
                                             .expect("a sink node always declares a component");
-                                        if let Some(fwd) = datasets[i]
+                                        if let Ok(fwd) = datasets[i]
                                             .as_ref()
                                             .expect("processor dataset")
-                                            .batch_for(component)
+                                            .batch_named(component)
                                             .cloned()
                                             && fwd.num_rows() > 0
                                         {
@@ -1312,7 +1312,7 @@ mod tests {
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();
-                dataset.register_raw_component("Sale", sale_schema());
+                dataset.register_schema("Sale", sale_schema()).unwrap();
                 dataset
             }
         }
@@ -1500,7 +1500,7 @@ mod tests {
 
         fn template_dataset(&self) -> Dataset {
             let mut dataset = Dataset::new();
-            dataset.register_raw_component("V", schema());
+            dataset.register_schema("V", schema()).unwrap();
             dataset
         }
     }

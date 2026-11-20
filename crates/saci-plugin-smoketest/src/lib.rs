@@ -103,17 +103,13 @@ impl System for AdvanceSystem {
             None => 1,
         };
 
-        let batch = dataset
-            .columns::<Counter>()
-            .ok_or_else(|| SaciError::generic("smoketest: Counter batch not found"))?
-            .clone();
+        let batch = dataset.batch::<Counter>()?.clone();
         let rows = batch.num_rows();
 
         // The macro installs the state resource before any system runs, so its
         // absence is an SDK bug rather than a recoverable condition.
         let total = dataset
-            .get_resource::<ProcessorState<Total>>()
-            .ok_or_else(|| SaciError::generic("smoketest: ProcessorState<Total> resource missing"))?
+            .resource::<ProcessorState<Total>>()?
             .rows
             .first()
             .map_or(0, |t| t.total);
@@ -124,7 +120,7 @@ impl System for AdvanceSystem {
 
         let schema = batch.schema();
         let seen_idx = schema
-            .index_of(COUNTER_SEEN.field)
+            .index_of(COUNTER_SEEN.name())
             .map_err(|e| SaciError::generic(format!("smoketest: seen missing: {e}")))?;
         let new_seen: ArrayRef = Arc::new(Int64Array::from(seen));
 
@@ -142,11 +138,7 @@ impl System for AdvanceSystem {
             .map_err(|e| SaciError::generic(format!("smoketest: batch rebuild: {e}")))?;
         dataset.replace_batch::<Counter>(new_batch)?;
 
-        let state = dataset
-            .get_resource_mut::<ProcessorState<Total>>()
-            .ok_or_else(|| {
-                SaciError::generic("smoketest: ProcessorState<Total> resource missing")
-            })?;
+        let state = dataset.resource_mut::<ProcessorState<Total>>()?;
         let advanced = total + rows as i64;
         match state.rows.first_mut() {
             Some(existing) => existing.total = advanced,
@@ -168,19 +160,16 @@ impl System for AdvanceSystem {
 /// IPC format requires every registered component to hold exactly the dataset's
 /// row count, while state rows are independent of batch rows.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("smoketest-plugin");
-    pipeline
-        .data
-        .register_component::<Counter>()
-        .expect("register Counter");
-    pipeline.add_system(AdvanceSystem);
+    let mut pipeline = Pipeline::new("smoketest-plugin")
+        .component::<Counter>()
+        .system(AdvanceSystem);
 
     // The `smoketest.route` config key ("a" or "a,b") installs a
     // `RouteDecision` resource, so the host delivers this batch's output only
     // to the links whose branch it names. Absent = legacy multicast.
     if let Some(route) = saci_config_get(ROUTE_KEY) {
         let branches: Vec<String> = route.split(',').map(str::to_string).collect();
-        pipeline.add_system(system_fn(
+        pipeline = pipeline.system(system_fn(
             SystemMeta::new("route_batch"),
             move |data: &mut Dataset| {
                 data.insert_resource(RouteDecision(branches.clone()));

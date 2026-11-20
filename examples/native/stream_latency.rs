@@ -68,24 +68,23 @@ fn report(label: &str, mut samples: Vec<u64>) {
 
 /// One system: double the `v` column in place.
 fn doubling_pipeline(schema: Arc<Schema>) -> Pipeline {
-    let mut pipeline = Pipeline::new("stream_latency");
-    pipeline.data_mut().register_raw_component(COMP, schema);
-    pipeline.add_system(system_fn(
-        SystemMeta::new("double").read(COMP, "v").write(COMP, "v"),
-        |data| {
-            let batch = data
-                .batch_for(COMP)
-                .ok_or_else(|| SaciError::generic("Tick component missing"))?;
-            let col = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| SaciError::generic("Tick.v is not Int64"))?;
-            let doubled: Int64Array = col.iter().map(|v| v.map(|x| x * 2)).collect();
-            data.apply_write_set(WriteSet::new().put(COMP, "v", Arc::new(doubled)))
-        },
-    ));
-    pipeline
+    Pipeline::new("stream_latency")
+        .schema(COMP, schema)
+        .system(system_fn(
+            SystemMeta::new("double")
+                .reads_named(COMP, "v")
+                .writes_named(COMP, "v"),
+            |data| {
+                let batch = data.batch_named(COMP)?;
+                let col = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| SaciError::generic("Tick.v is not Int64"))?;
+                let doubled: Int64Array = col.iter().map(|v| v.map(|x| x * 2)).collect();
+                data.apply_write_set(WriteSet::new().put_named(COMP, "v", Arc::new(doubled)))
+            },
+        ))
 }
 
 async fn native_latency() -> Vec<u64> {

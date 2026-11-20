@@ -7,7 +7,7 @@
 //! component's `run-batch` export through wasmtime, while `NativePluginRuntime`
 //! calls the `run_batch` slot of a dlopened cdylib's `crate::plugin_abi` vtable.
 //!
-//! The trait only exists when the `runtime` feature is enabled. Processor builds
+//! The trait only exists when the `engine` feature is enabled. Processor builds
 //! (`--no-default-features --features processor`) use [`Pipeline`] directly through
 //! the sync executor in the processor SDK and never construct a `dyn PipelineRuntime`.
 
@@ -156,15 +156,15 @@ impl PipelineRuntime for Pipeline {
     }
 
     async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-        Pipeline::run_on(self, data).await
+        Pipeline::run_on(self, data).await.map(|_| ())
     }
 
     fn declared_components(&self) -> Vec<&str> {
-        self.data.schemas().iter().map(|(k, _)| *k).collect()
+        self.data().schemas().iter().map(|(k, _)| *k).collect()
     }
 
     fn template_dataset(&self) -> Dataset {
-        self.data.clone_empty()
+        self.data().clone_empty()
     }
 }
 
@@ -228,9 +228,9 @@ mod tests {
     #[test]
     fn declared_components_lists_registered_schemas() {
         let mut p = Pipeline::new("trio");
-        p.data_mut().register_component::<Alpha>().unwrap();
-        p.data_mut().register_component::<Beta>().unwrap();
-        p.data_mut().register_component::<Gamma>().unwrap();
+        p.data_mut().register::<Alpha>().unwrap();
+        p.data_mut().register::<Beta>().unwrap();
+        p.data_mut().register::<Gamma>().unwrap();
 
         let rt: Box<dyn PipelineRuntime> = Box::new(p);
         let mut names = rt.declared_components();
@@ -249,9 +249,9 @@ mod tests {
     #[test]
     fn template_dataset_preserves_registered_schemas() {
         let mut p = Pipeline::new("trio");
-        p.data_mut().register_component::<Alpha>().unwrap();
-        p.data_mut().register_component::<Beta>().unwrap();
-        p.data_mut().register_component::<Gamma>().unwrap();
+        p.data_mut().register::<Alpha>().unwrap();
+        p.data_mut().register::<Beta>().unwrap();
+        p.data_mut().register::<Gamma>().unwrap();
 
         let rt: Box<dyn PipelineRuntime> = Box::new(p);
         let tmpl = rt.template_dataset();

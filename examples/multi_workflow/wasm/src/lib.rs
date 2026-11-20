@@ -90,10 +90,7 @@ impl Component for Sale {
 /// `run-batch` Arrow IPC payload is a fully materialised dataset, not a
 /// stream.
 fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Sale>()
-        .ok_or_else(|| SaciError::generic("multi-workflow: Sale component missing"))?
-        .clone();
+    let batch = data.batch::<Sale>()?.clone();
     let schema = batch.schema();
     let amount_idx = schema
         .index_of("amount")
@@ -125,16 +122,12 @@ fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
 /// Called lazily by the `export_pipeline!` macro on the first call to any WIT
 /// export, and constructed exactly once per component instance.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("multi-workflow-router");
-    pipeline
-        .data
-        .register_component::<Sale>()
-        .expect("register Sale");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("route_batch").read("Sale", "amount"),
-        route_batch,
-    ));
-    pipeline
+    Pipeline::new("multi-workflow-router")
+        .component::<Sale>()
+        .system(system_fn(
+            SystemMeta::new("route_batch").reads_named("Sale", "amount"),
+            route_batch,
+        ))
 }
 
 #[cfg(target_arch = "wasm32")]

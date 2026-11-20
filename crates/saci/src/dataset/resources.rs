@@ -1,3 +1,5 @@
+use crate::error::{SaciError, SaciResult};
+
 use super::Dataset;
 
 impl Dataset {
@@ -15,6 +17,33 @@ impl Dataset {
     pub fn get_resource_mut<R: 'static>(&mut self) -> Option<&mut R> {
         self.resources.get_mut::<R>()
     }
+
+    /// Resource `R`.
+    ///
+    /// # Errors
+    ///
+    /// [`SaciError::ResourceNotFound`] naming `R` when it is absent.
+    pub fn resource<R: 'static>(&self) -> SaciResult<&R> {
+        self.resources
+            .get::<R>()
+            .ok_or_else(|| SaciError::resource_not_found(std::any::type_name::<R>()))
+    }
+
+    /// Resource `R`, mutably.
+    ///
+    /// # Errors
+    ///
+    /// [`SaciError::ResourceNotFound`] naming `R` when it is absent.
+    pub fn resource_mut<R: 'static>(&mut self) -> SaciResult<&mut R> {
+        self.resources
+            .get_mut::<R>()
+            .ok_or_else(|| SaciError::resource_not_found(std::any::type_name::<R>()))
+    }
+
+    /// Remove resource `R` and return it, or `None` if it was absent.
+    pub fn take_resource<R: 'static>(&mut self) -> Option<R> {
+        self.resources.remove::<R>()
+    }
 }
 
 #[cfg(test)]
@@ -29,20 +58,32 @@ mod tests {
     fn test_insert_and_get() {
         let mut ds = Dataset::new();
         ds.insert_resource(Cfg { threshold: 0.9 });
-        assert!((ds.get_resource::<Cfg>().unwrap().threshold - 0.9).abs() < 1e-9);
+        assert!((ds.resource::<Cfg>().unwrap().threshold - 0.9).abs() < 1e-9);
     }
 
     #[test]
     fn test_get_mut() {
         let mut ds = Dataset::new();
         ds.insert_resource(Cfg { threshold: 0.5 });
-        ds.get_resource_mut::<Cfg>().unwrap().threshold = 1.0;
+        ds.resource_mut::<Cfg>().unwrap().threshold = 1.0;
         assert!((ds.get_resource::<Cfg>().unwrap().threshold - 1.0).abs() < 1e-9);
     }
 
     #[test]
-    fn test_missing_returns_none() {
+    fn test_missing_is_resource_not_found() {
         let ds = Dataset::new();
+        assert!(ds.get_resource::<Cfg>().is_none());
+        let err = ds.resource::<Cfg>().err().unwrap();
+        assert_eq!(err.category(), "resource_not_found");
+        assert!(err.to_string().contains("Cfg"), "got: {err}");
+    }
+
+    #[test]
+    fn test_take_resource_removes_it() {
+        let mut ds = Dataset::new();
+        ds.insert_resource(Cfg { threshold: 0.3 });
+        let taken = ds.take_resource::<Cfg>().unwrap();
+        assert!((taken.threshold - 0.3).abs() < 1e-9);
         assert!(ds.get_resource::<Cfg>().is_none());
     }
 

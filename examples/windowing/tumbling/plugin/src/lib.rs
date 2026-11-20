@@ -165,10 +165,7 @@ fn geometry() -> WindowGeometry {
 /// Merge the batch into the open windows and emit every group whose window
 /// has closed, the core of the demo's windowing logic.
 pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Sale>()
-        .ok_or_else(|| SaciError::generic("windowing: Sale component missing"))?
-        .clone();
+    let batch = data.batch::<Sale>()?.clone();
     let n = batch.num_rows();
 
     // An empty batch still runs the systems: emit nothing, change nothing.
@@ -202,11 +199,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| SaciError::generic("windowing: amount is not Float64"))?;
 
-    let state = data
-        .get_resource_mut::<ProcessorState<WindowState>>()
-        .ok_or_else(|| {
-            SaciError::generic("windowing: ProcessorState<WindowState> resource missing")
-        })?;
+    let state = data.resource_mut::<ProcessorState<WindowState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole WindowState.
     if state.rows.is_empty() {
@@ -294,25 +287,18 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
 /// Called lazily by the `export_plugin!` macro on the first `describe` or
 /// `run-batch` call, and constructed exactly once per loaded library.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("windowing-tumbling-plugin");
-    pipeline
-        .data
-        .register_component::<Sale>()
-        .expect("register Sale");
-    pipeline
-        .data
-        .register_component::<WindowTotal>()
-        .expect("register WindowTotal");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("accumulate")
-            .read_component("Sale")
-            .write_component("WindowTotal"),
-        |data| {
-            let geo = geometry();
-            accumulate_impl(data, &geo)
-        },
-    ));
-    pipeline
+    Pipeline::new("windowing-tumbling-plugin")
+        .component::<Sale>()
+        .component::<WindowTotal>()
+        .system(system_fn(
+            SystemMeta::new("accumulate")
+                .reads_all::<Sale>()
+                .writes_all::<WindowTotal>(),
+            |data| {
+                let geo = geometry();
+                accumulate_impl(data, &geo)
+            },
+        ))
 }
 
 saci::export_plugin!(build, state = WindowState);
@@ -332,8 +318,8 @@ mod tests {
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Sale>().unwrap();
-        data.register_component::<WindowTotal>().unwrap();
+        data.register::<Sale>().unwrap();
+        data.register::<WindowTotal>().unwrap();
         <Stateful<WindowState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
         data
     }
@@ -350,7 +336,7 @@ mod tests {
     type Total = (i64, String, i64, f64);
 
     fn totals(data: &Dataset) -> Vec<Total> {
-        let batch = data.batch_for("WindowTotal").expect("WindowTotal batch");
+        let batch = data.batch_named("WindowTotal").expect("WindowTotal batch");
         let wid = batch
             .column(0)
             .as_any()

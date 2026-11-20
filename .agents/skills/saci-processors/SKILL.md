@@ -126,7 +126,8 @@ adapter step. `.cargo/config.toml` adds `-C target-feature=+simd128` for that ta
 every processor's core module ships the SIMD proposal; wasmtime enables it by default.
 
 `saci`'s Arrow crates, serde_arrow, serde, futures, async-trait, fnv and rand are unconditional;
-the default `engine` feature adds `runtime` (tokio, rayon, num_cpus), so a `wasm32-wasip3` processor
+the default `engine` feature adds tokio, rayon and num_cpus, and implies `derive` (the
+`#[derive(Component)]`, `#[transform]` and `#[fold]` macros), so a `wasm32-wasip3` processor
 build takes `default-features = false, features = ["processor"]`. The `processor` feature targets
 WASI 0.3 Component Model Async (requiring `wit-bindgen = { workspace = true }` with
 `features = ["async"]`) and exposes `Pipeline`, `System`, `Component` (the trait), `Config`,

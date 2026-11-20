@@ -108,7 +108,9 @@ impl PipelineRuntime for CounterRuntime {
 
     fn template_dataset(&self) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_raw_component(COMP, Arc::clone(&self.schema));
+        dataset
+            .register_schema(COMP, Arc::clone(&self.schema))
+            .unwrap();
         dataset
     }
 }
@@ -378,7 +380,7 @@ async fn stream_rotates_round_robin_across_two_sources() {
         }
         fn template_dataset(&self) -> Dataset {
             let mut dataset = Dataset::new();
-            dataset.register_raw_component(COMP, test_schema());
+            dataset.register_schema(COMP, test_schema()).unwrap();
             dataset
         }
     }
@@ -819,7 +821,7 @@ impl PipelineRuntime for BranchRuntime {
 
     fn template_dataset(&self) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_raw_component(COMP, test_schema());
+        dataset.register_schema(COMP, test_schema()).unwrap();
         dataset
     }
 }
@@ -942,7 +944,9 @@ async fn stream_windowed_processor_tracks_watermark_across_items() {
         }
         fn template_dataset(&self) -> Dataset {
             let mut dataset = Dataset::new();
-            dataset.register_raw_component(COMP, Arc::clone(&self.schema));
+            dataset
+                .register_schema(COMP, Arc::clone(&self.schema))
+                .unwrap();
             dataset
         }
     }

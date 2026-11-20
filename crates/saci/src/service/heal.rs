@@ -53,7 +53,7 @@ use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentit
 use crate::error::SaciError;
 use crate::io::retry::{RetryingSink, RetryingSource};
 use crate::io::{sink::Sink, source::Source};
-use crate::retry::{RetryMode, SystemConfig};
+use crate::retry::RetryMode;
 use crate::transformer::Transformer;
 
 use super::factories::missing_factory_error;
@@ -177,7 +177,7 @@ pub(crate) struct Rebuilder {
     /// The retry policy the built instance is wrapped in. `None` for a source
     /// in `run_mode kind="stream"`, where the runner's own re-poll is the
     /// retry loop.
-    retry: Option<SystemConfig>,
+    retry: Option<RetryMode>,
 }
 
 impl Rebuilder {
@@ -191,7 +191,7 @@ impl Rebuilder {
         config: ConfigValue,
         transformer: Option<Arc<dyn Transformer>>,
         channels: Option<Arc<dyn ChannelBridge>>,
-        retry: Option<SystemConfig>,
+        retry: Option<RetryMode>,
     ) -> Self {
         Self {
             registry,

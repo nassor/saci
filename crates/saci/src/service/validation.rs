@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn source_to_processor_missing_declared_component_is_rejected() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         // The source claims to feed "Nonexistent", which the processor never declares.
         let mut src = source_node("in", "Nonexistent", order_schema());
         src.downstream.push(BuiltEdge {
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn source_to_processor_with_matching_component_and_schema_is_valid() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         let mut src = source_node("in", "Order", order_schema());
         src.downstream.push(BuiltEdge {
             node: 1,
@@ -652,10 +652,7 @@ mod tests {
     #[test]
     fn source_to_processor_with_schema_mismatch_is_rejected() {
         let mut pipeline = Pipeline::new("p");
-        pipeline
-            .data_mut()
-            .register_component::<OrderAlt>()
-            .unwrap();
+        pipeline.data_mut().register::<OrderAlt>().unwrap();
         let mut src = source_node("in", "Order", order_schema());
         src.downstream.push(BuiltEdge {
             node: 1,
@@ -669,9 +666,9 @@ mod tests {
     #[test]
     fn processor_to_processor_superset_is_valid() {
         let mut upstream = Pipeline::new("up");
-        upstream.data_mut().register_component::<Order>().unwrap();
+        upstream.data_mut().register::<Order>().unwrap();
         let mut downstream = Pipeline::new("down");
-        downstream.data_mut().register_component::<Order>().unwrap();
+        downstream.data_mut().register::<Order>().unwrap();
 
         let mut up_node = processor_node("up", upstream);
         up_node.downstream.push(BuiltEdge {
@@ -688,16 +685,19 @@ mod tests {
         // Non-empty but not "Order": an empty `declared_components()` opts
         // the edge out of every check, so upstream must declare something
         // else to exercise the superset rule rather than the empty-set one.
-        upstream.data_mut().register_raw_component(
-            "Invoice",
-            Arc::new(Schema::new(vec![Field::new(
-                "total",
-                DataType::Float64,
-                false,
-            )])),
-        );
+        upstream
+            .data_mut()
+            .register_schema(
+                "Invoice",
+                Arc::new(Schema::new(vec![Field::new(
+                    "total",
+                    DataType::Float64,
+                    false,
+                )])),
+            )
+            .unwrap();
         let mut downstream = Pipeline::new("down");
-        downstream.data_mut().register_component::<Order>().unwrap();
+        downstream.data_mut().register::<Order>().unwrap();
 
         let mut up_node = processor_node("up", upstream);
         up_node.downstream.push(BuiltEdge {
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn processor_to_sink_with_matching_component_is_valid() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         let mut proc = processor_node("p", pipeline);
         proc.downstream.push(BuiltEdge {
             node: 1,
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn processor_to_sink_missing_component_is_rejected() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         let mut proc = processor_node("p", pipeline);
         proc.downstream.push(BuiltEdge {
             node: 1,
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn entry_point_processor_with_no_inbound_edge_needs_no_coverage() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         let proc = processor_node("p", pipeline);
         validate_workflow_graph("w", &[proc]).expect("entry point is exempt from coverage");
     }
@@ -750,15 +750,18 @@ mod tests {
     #[test]
     fn processor_fed_by_a_source_missing_a_declared_component_is_rejected() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
-        pipeline.data_mut().register_raw_component(
-            "Invoice",
-            Arc::new(Schema::new(vec![Field::new(
-                "total",
-                DataType::Float64,
-                false,
-            )])),
-        );
+        pipeline.data_mut().register::<Order>().unwrap();
+        pipeline
+            .data_mut()
+            .register_schema(
+                "Invoice",
+                Arc::new(Schema::new(vec![Field::new(
+                    "total",
+                    DataType::Float64,
+                    false,
+                )])),
+            )
+            .unwrap();
 
         let mut src = source_node("in", "Order", order_schema());
         src.downstream.push(BuiltEdge {
@@ -840,10 +843,11 @@ mod tests {
     #[test]
     fn output_component_consumed_by_a_sink_is_covered() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         pipeline
             .data_mut()
-            .register_raw_component("WindowTotal", window_total_schema());
+            .register_schema("WindowTotal", window_total_schema())
+            .unwrap();
 
         let mut src = source_node("in", "Order", order_schema());
         src.downstream.push(BuiltEdge {
@@ -866,11 +870,14 @@ mod tests {
     #[test]
     fn component_neither_delivered_nor_consumed_is_rejected() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
-        pipeline.data_mut().register_raw_component(
-            "Ghost",
-            Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)])),
-        );
+        pipeline.data_mut().register::<Order>().unwrap();
+        pipeline
+            .data_mut()
+            .register_schema(
+                "Ghost",
+                Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)])),
+            )
+            .unwrap();
 
         let mut src = source_node("in", "Order", order_schema());
         src.downstream.push(BuiltEdge {
@@ -915,7 +922,7 @@ mod tests {
     #[test]
     fn window_time_field_missing_from_a_source_component_is_rejected() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         let mut src = source_node("in", "Order", order_schema());
         src.downstream.push(BuiltEdge {
             node: 1,
@@ -937,7 +944,8 @@ mod tests {
         let mut pipeline = Pipeline::new("p");
         pipeline
             .data_mut()
-            .register_raw_component("Order", timestamp_schema());
+            .register_schema("Order", timestamp_schema())
+            .unwrap();
         let mut src = source_node("in", "Order", timestamp_schema());
         src.downstream.push(BuiltEdge {
             node: 1,
@@ -956,10 +964,12 @@ mod tests {
         let mut upstream = Pipeline::new("up");
         upstream
             .data_mut()
-            .register_raw_component("Order", timestamp_schema());
+            .register_schema("Order", timestamp_schema())
+            .unwrap();
         let mut down = Pipeline::new("down");
         down.data_mut()
-            .register_raw_component("Order", timestamp_schema());
+            .register_schema("Order", timestamp_schema())
+            .unwrap();
 
         let mut up_node = processor_node("up", upstream);
         up_node.downstream.push(BuiltEdge {
@@ -975,9 +985,9 @@ mod tests {
         // agree on Order's schema (so the schema check passes), but neither
         // carries the window's time field.
         let mut upstream = Pipeline::new("up");
-        upstream.data_mut().register_component::<Order>().unwrap();
+        upstream.data_mut().register::<Order>().unwrap();
         let mut down = Pipeline::new("down");
-        down.data_mut().register_component::<Order>().unwrap();
+        down.data_mut().register::<Order>().unwrap();
 
         let mut up_node = processor_node("up", upstream);
         up_node.downstream.push(BuiltEdge {
@@ -996,7 +1006,7 @@ mod tests {
     #[test]
     fn window_on_an_entry_point_processor_needs_no_time_field() {
         let mut pipeline = Pipeline::new("p");
-        pipeline.data_mut().register_component::<Order>().unwrap();
+        pipeline.data_mut().register::<Order>().unwrap();
         let mut proc = processor_node("p", pipeline);
         proc.window = Some(window());
         validate_workflow_graph("w", &[proc]).expect("no inbound stream, no check");

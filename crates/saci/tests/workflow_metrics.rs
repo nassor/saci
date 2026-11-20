@@ -57,7 +57,7 @@ async fn two_linked_processors_write_independent_attributed_series() {
     // batch passes through byte-identical, matching a real link with no
     // re-encoding between two processors.
     let ping_batch = first_data
-        .batch_for("Ping")
+        .batch_named("Ping")
         .expect("first wrote its own Ping component")
         .clone();
     let mut second_data = second.template_dataset();

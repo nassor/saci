@@ -367,11 +367,10 @@ async fn main() -&gt; SaciResult&lt;()&gt; {
 
     // A template. Its own dataset, sources and sinks are never used: each
     // claim runs against whatever `world_factory` hands back.
-    let template = Pipeline::builder("order-processor")
-        .with::&lt;Order&gt;()
-        .with_system(ValidateOrder)
-        .with_system(PriceOrder)
-        .build();
+    let template = Pipeline::new("order-processor")
+        .component::&lt;Order&gt;()
+        .system(ValidateOrder)
+        .system(PriceOrder);
 
     let runner = DistributedRunner::new(
         store,

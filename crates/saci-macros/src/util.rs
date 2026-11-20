@@ -167,16 +167,10 @@ impl SystemImpl<'_> {
 ///
 /// Emitted as a block so the immutable borrow of `__saci_data` ends before the
 /// generated body needs it mutably.
-pub(crate) fn decode_rows(component: &syn::Type, system_name: &str) -> TokenStream {
+pub(crate) fn decode_rows(component: &syn::Type) -> TokenStream {
     quote! {
         {
-            let __saci_batch = __saci_data
-                .columns::<#component>()
-                .ok_or_else(|| ::saci::processor::__rt::SaciError::generic(format!(
-                    "{}: component '{}' is not registered on the batch dataset",
-                    #system_name,
-                    <#component as ::saci::processor::__rt::Component>::name(),
-                )))?;
+            let __saci_batch = __saci_data.batch::<#component>()?;
             <#component as ::saci::processor::__rt::Component>::from_record_batch(__saci_batch)?
         }
     }

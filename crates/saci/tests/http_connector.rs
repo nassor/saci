@@ -51,7 +51,10 @@ fn schema() -> Arc<Schema> {
 
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("http_connector");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 

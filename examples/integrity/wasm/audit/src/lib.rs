@@ -184,10 +184,7 @@ fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T, S
 
 /// Turn every audit change in the batch into a verdict.
 pub fn verify_impl(data: &mut Dataset) -> Result<(), SaciError> {
-    let rows = data
-        .columns::<AuditRow>()
-        .ok_or_else(|| SaciError::generic("audit: AuditRow component missing"))?
-        .clone();
+    let rows = data.batch::<AuditRow>()?.clone();
     let n = rows.num_rows();
     if n == 0 {
         return Ok(());
@@ -231,22 +228,15 @@ pub fn verify_impl(data: &mut Dataset) -> Result<(), SaciError> {
 /// Called lazily by the `export_pipeline!` macro on the first call to any WIT
 /// export, and constructed exactly once per component instance.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("integrity-audit");
-    pipeline
-        .data
-        .register_component::<AuditRow>()
-        .expect("register AuditRow");
-    pipeline
-        .data
-        .register_component::<AuditVerdict>()
-        .expect("register AuditVerdict");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("verify_audit")
-            .read_component("AuditRow")
-            .write_component("AuditVerdict"),
-        verify_impl,
-    ));
-    pipeline
+    Pipeline::new("integrity-audit")
+        .component::<AuditRow>()
+        .component::<AuditVerdict>()
+        .system(system_fn(
+            SystemMeta::new("verify_audit")
+                .reads_all::<AuditRow>()
+                .writes_all::<AuditVerdict>(),
+            verify_impl,
+        ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -273,11 +263,13 @@ mod tests {
 
     fn run(rows: &[AuditRow]) -> Vec<Verdict> {
         let mut data = Dataset::new();
-        data.register_component::<AuditRow>().unwrap();
-        data.register_component::<AuditVerdict>().unwrap();
+        data.register::<AuditRow>().unwrap();
+        data.register::<AuditVerdict>().unwrap();
         data.append::<AuditRow>(rows).unwrap();
         verify_impl(&mut data).unwrap();
-        let batch = data.batch_for("AuditVerdict").expect("AuditVerdict batch");
+        let batch = data
+            .batch_named("AuditVerdict")
+            .expect("AuditVerdict batch");
         let audit_id = column::<Int64Array>(batch, "audit_id").unwrap();
         let op = column::<StringArray>(batch, "op").unwrap();
         let ok = column::<BooleanArray>(batch, "ok").unwrap();

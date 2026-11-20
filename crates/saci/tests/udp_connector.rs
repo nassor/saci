@@ -56,7 +56,10 @@ fn schema() -> Arc<Schema> {
 
 fn build_pipeline(name: &str) -> Pipeline {
     let mut pipeline = Pipeline::new(name);
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 

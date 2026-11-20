@@ -798,7 +798,7 @@ impl ServiceBuilder {
             spec.config.clone(),
             bound,
             self.channels.clone(),
-            retry_sources.then(|| spec.retry.to_system_config()),
+            retry_sources.then(|| spec.retry.to_retry_mode()),
         )
         .with_identity(build.identity(workflow, &spec.id));
         let built = rebuilder.build_source()?;
@@ -861,7 +861,7 @@ impl ServiceBuilder {
             spec.config.clone(),
             bound,
             self.channels.clone(),
-            Some(spec.retry.to_system_config()),
+            Some(spec.retry.to_retry_mode()),
         )
         .with_identity(build.identity(workflow, &spec.id));
         let built = rebuilder.build_sink()?;
@@ -1714,7 +1714,7 @@ workflow "w" {
     #[test]
     fn test_boxed_system_runs_on_runtime() {
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system_boxed(Box::new(NoopSystem));
+        pipeline = pipeline.system_boxed(Box::new(NoopSystem));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async { pipeline.run().await }).unwrap();
     }

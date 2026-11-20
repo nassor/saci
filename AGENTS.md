@@ -276,9 +276,11 @@ The **default** is `engine` alone.
 
 Engine:
 
-- `engine` (**default**): the columnar engine plus the `Source`/`Sink` traits (implies `io`).
-- `runtime`: tokio and rayon stage parallelism. Cannot target wasm32-wasip3.
-- `io`: the `Source`/`Sink` traits and the schema cast helpers (implies `runtime`).
+- `engine` (**default**): the columnar engine with tokio and rayon stage parallelism, plus the
+  `Source`/`Sink` traits and the schema cast helpers. Implies `derive`. Cannot target
+  wasm32-wasip3.
+- `derive`: `#[derive(Component)]`, `#[transform]` and `#[fold]`. Needs no tokio, so a
+  wasm32-wasip3 processor carries it.
 - `windows`: windowed aggregation. `WindowedSystem`, watermarks, `WindowAccumulator`. The
   `WindowSpec` geometry enum sits outside the feature, in `window_spec.rs`, so a host parses a
   `window` declaration in every build; `saci::windows` re-exports it.
@@ -326,70 +328,83 @@ calls `saci::service::cli::main()`, or `main_with` to register its own factories
   Arrow `Schema`. Rows serialize via `serde_arrow`.
 - **`Dataset`** (`src/dataset.rs` plus the ten-file `src/dataset/` submodule): Arrow-backed
   columnar container. Each registered component holds a `Vec<RecordBatch>` of appended chunks, and
-  a read (`batch_for`, `column`, `view`) goes through `get_or_build_merged`, which concatenates
+  a read (`batch`, `batch_named`, `column`, `view`) goes through `get_or_build_merged`, which concatenates
   them once into a `merged_cache` entry; `chunks.rs` owns that merge. A component may hold fewer
   rows than the dataset's row count (a windowing processor's reduced result component), never more.
   Holds a `SchemaRegistry`, a `ResourceMap`, and an alive bitmap. Supports batch `append`, soft
-  delete (`mark_dead`), compaction, and IPC round-trip. Builder: `DatasetBuilder`. Canonical path:
+  delete (`mark_dead`), compaction, and IPC round-trip. Build one with `Dataset::new()` and
+  `register::<C>()`, or let `Pipeline::component::<C>()` do it. Canonical path:
   `saci::dataset::Dataset`.
 - **`Row`** (`src/row.rs`): stable row index (`u32`). Invalidated by `compact`.
 - **`Resource`** (`src/resource.rs`): boxed Rust singleton stored in `Dataset`, keyed by `TypeId`.
   Not columnar, and **not** serialized by `write_ipc`. The processor SDK relies on that to keep
   cross-batch state out of the data plane.
-- **`Source`/`Sink` traits** (`src/io/`, `io` feature): `Source::finish`, like `Sink::finish`, is
+- **`Source`/`Sink` traits** (`src/io/`, `engine` feature): `Source::finish`, like `Sink::finish`, is
   called once after the last `next_batch`, and defaults to nothing. It is where a source whose
   delivery is a commitment makes it durable, so a caller that dropped the source instead sees the
   same data again; every wrapper (`Box`, `CastingSource`, `RetryingSource`, `HealingSource`)
   forwards it, and the service's runners call it per exit path after the sinks are finished.
 - **`System` trait** (`src/system.rs`): `meta()` declares field-level read/write access,
-  `async fn run(&self, data: &mut Dataset)` does the work, `run_sync` is an optional sync fast path.
+  `async fn run(&self, data: &mut Dataset)` does the work, `run_sync` is an optional sync fast path,
+  and `retry()` returns the `RetryMode` for the system (default `RetryMode::None`).
   Written as a struct impl or via the `system_fn` closure helper.
 - **`Pipeline`** (`src/pipeline.rs` plus `src/pipeline/`): self-contained workload
-  `{ name, data: Dataset, systems, DAG stages, sources, sinks }`. Builds a conflict graph from
-  `SystemMeta`, topologically sorts it into stages, and runs them with per-system retry. Builder:
-  `PipelineBuilder`.
+  `{ name, data: Dataset, systems, DAG stages, sources, sinks }`, built as a consuming chain
+  (`Pipeline::new(..).component::<C>().system(..)`). Builds a conflict graph from
+  `SystemMeta`, topologically sorts it into stages, and runs them with per-system retry.
 - **`Scheduler`** (`src/scheduler.rs`): multi-pipeline orchestrator over `Vec<Pipeline>`. `tick()`
-  runs every pipeline once, walking a dependency DAG built from `PipelineConfig`. Reachable from
+  runs every pipeline once, walking a dependency DAG built from `PipelineConfig`
+  (`after`, `after_data`, `priority`, `pause_when`). Reachable from
   library code only: a `ServiceConfig` declares `workflow` nodes, and the runners walk
   `BuiltService::nodes` themselves, so the config-driven binary never builds one.
 
 #### Dataset API
 
 ```rust
+use saci::prelude::*;
+
+#[derive(Component, Serialize, Deserialize)]
+struct Price { id: i64, value: f64 }   // generates Price::ID and Price::VALUE (FieldRef consts)
+
 let mut dataset = Dataset::new();
-dataset.register_component::<Price>()?;          // must precede append
+dataset.register::<Price>()?;                    // must precede append
 dataset.append::<Price>(&rows)?;                 // returns Range<Row>
-let col = dataset.column::<Price>("value");      // -> Option<ArrayRef>
+let col = dataset.column(Price::VALUE)?;         // SaciResult<&ArrayRef>
+let batch = dataset.batch::<Price>()?;           // SaciResult<&RecordBatch>
+dataset.set_column(Price::VALUE, new_col)?;      // replace one column
+let rates = dataset.resource::<TaxRate>()?;      // SaciResult<&TaxRate>
 dataset.mark_dead(row);                          // soft delete
 dataset.compact();                               // filter dead rows
 dataset.write_ipc(&mut buf)?;                    // serialize
 let dataset2 = Dataset::read_ipc(&mut &buf[..])?;
 ```
 
+A schema known only at run time registers with `register_schema(name, schema)` and reads with
+`batch_named(name)` and `column_named(name, field)`. An unregistered component is
+`ComponentNotRegistered`; a missing field is `FieldNotFound`.
+
 #### Pipeline API
 
 ```rust
-// Inline construction
-let mut pipeline = Pipeline::new("etl");
-pipeline.data_mut().register_component::<Price>()?;
+let mut pipeline = Pipeline::new("etl")
+    .component::<Price>()
+    .resource(TaxRate(0.1))
+    .system(EnrichPrice);
 pipeline.data_mut().append::<Price>(&rows)?;
-pipeline.add_system(EnrichPrice);
-pipeline.run().await?;                           // validate + DAG + retry
-
-// Builder pattern
-let pipeline = Pipeline::builder("etl")
-    .with::<Price>()
-    .with_resource(TaxRate(0.1))
-    .with_system(EnrichPrice)
-    .build();
+let stats = pipeline.run().await?;               // validate + DAG + retry; returns RunStats
 ```
+
+`run()` drains every attached source (`.source(component, src)`) into its component, runs the
+stages, then writes each component to its sink (`.sink(component, sink)`) and calls `finish`.
+`RunStats` carries `rows_produced`, `systems_run`, `elapsed` and `retries`. A registration
+failure inside the chain surfaces from `validate()`, `plan()` and every `run*`.
 
 `run_on(&self, data: &mut Dataset)` is the escape hatch for hosts that own their own dataset. It
 executes the system DAG against an external dataset without touching the template pipeline's data,
-sources, or sinks. `run_on_with_stats` is the same call returning the per-call `RunStats`, which is
+sources, or sinks, and returns the per-call `RunStats`, which is
 how the processor SDK fills the WIT `run-metrics` record.
 
-**`PipelineRuntime`** (`src/runtime.rs`, `runtime` feature) is the host-side seam a swappable
+**`PipelineRuntime`** (`src/runtime.rs`, `engine` feature) is the host-side seam a swappable
 backend implements: `name`, `run_on`, `run_on_with_state`, `declared_components`,
 `descriptor_info`, `template_dataset`. `descriptor_info() -> RuntimeDescriptorInfo { name, version,
 stateful, schema_fingerprint }` has a default empty body and is the one generic way a host holding
@@ -409,11 +424,14 @@ pipeline uses this to build a conflict graph and group non-conflicting systems i
 
 ```rust
 SystemMeta::new("enrich")
-    .read("Order", "id")
-    .write("Order", "total")
-    .read_component("Price")       // expands to all fields of Price
-    .read_resource::<TaxRate>();
+    .reads(Order::ID)
+    .writes(Order::TOTAL)
+    .reads_all::<Price>()          // every field of Price
+    .reads_resource::<TaxRate>();
 ```
+
+A component known only at run time uses `reads_named("Order", "id")`, `writes_named(..)`,
+`reads_all_named("Price")` and `writes_all_named(..)`. `writes_resource::<R>()` declares a write.
 
 Conflict rules (B registered after A):
 1. Write-after-read: A writes F, B reads F, so B depends on A
@@ -424,21 +442,28 @@ Conflict rules (B registered after A):
 System trait signatures:
 - `async fn run(&self, data: &mut Dataset) -> SaciResult<()>` for exclusive access
 - `async fn run(&self, data: &Dataset) -> SaciResult<WriteSet>` for `ParallelSystem`, a read-only
-  pass
+  pass. `WriteSet::put(Order::TOTAL, array)` writes a column, `put_named(component, field, array)`
+  takes runtime names, and `with_resource(value)` publishes a resource. A `ParallelSystem` that
+  implements `sliced() -> true` and `run_slice(data, rows)` gets `run` for free and runs row slices
+  in parallel on large batches. `parallel_fn(meta, |data| ..)` wraps a closure.
 
 #### Retry (`src/retry.rs`)
 
-`RetryMode`: `None`, `Fixed`, or `ExponentialBackoff` (default: 3 retries, 100 ms base, 2.0x
-multiplier, 30 s cap, 0.1 jitter). `SystemConfig` wraps a `RetryMode` and is returned by
-`System::config()`. Every system run goes through one of two drivers that share the attempt-counting
-core: `run_with_retries` (async, `tokio::time::sleep`) and `run_with_retries_blocking`
-(`std::thread::sleep`, for the rayon/`spawn_blocking` stage path).
+`RetryMode`: `None` (the default), `Fixed`, or `ExponentialBackoff` (`RetryMode::exponential(n)`:
+100 ms base, 2.0x multiplier, 30 s cap, 0.1 jitter). `System::retry()` and
+`ParallelSystem::retry()` return the mode. Only errors where `SaciError::is_retryable()` is true
+are retried; any other error returns at once, unwrapped. A failure after at least one retry is
+`RetryExhausted`. Every system run goes through one of two drivers that share the attempt-counting
+core and take `&RetryMode`: `run_with_retries` (async, `tokio::time::sleep`) and
+`run_with_retries_blocking` (`std::thread::sleep`, for the rayon/`spawn_blocking` stage path).
 
 #### Error types (`src/error.rs`)
 
-`SaciError` variants: `SystemExecution`, `ComponentNotFound`, `EntityNotFound`, `ResourceNotFound`,
+`SaciError` variants: `SystemExecution`, `ComponentNotRegistered`, `FieldNotFound`, `ResourceNotFound`,
 `Store`, `Scheduler`, `Configuration`, `RetryExhausted`, `Generic`. With the `distributed` feature:
 `Distributed`, `LeaseExpired`. Alias: `SaciResult<T>`. `PartialEq`/`Eq` are derived.
+`is_retryable()` is true for `SystemExecution`, `Store`, `RetryExhausted` and, under `distributed`,
+`Distributed` and `LeaseExpired`.
 
 #### Windowed aggregation (`src/windows/`, `windows` feature)
 

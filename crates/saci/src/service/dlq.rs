@@ -686,7 +686,7 @@ impl DeadLetterQueue {
             sink_config,
             Some(Arc::clone(&ipc)),
             None,
-            Some(RetryConfig::default().to_system_config()),
+            Some(RetryConfig::default().to_retry_mode()),
         );
         // No retry wrapper on the source half: a replay is one bounded drain,
         // and an error ends it rather than re-driving a store that is not

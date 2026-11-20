@@ -53,10 +53,9 @@ pub fn validate(row: &mut Order, config: &Config) -> Result<()> {
 /// Export the Quick Start validation pipeline as a `saci:pipeline@0.4.0` component.
 #[processor(name = "quickstart-validate")]
 pub fn build() -> Pipeline {
-    Pipeline::builder("quickstart-validate")
-        .with::<Order>()
-        .with_system(validate_system())
-        .build()
+    Pipeline::new("quickstart-validate")
+        .component::<Order>()
+        .system(validate_system())
 }
 
 #[cfg(test)]
@@ -83,14 +82,14 @@ mod tests {
     #[test]
     fn validates_orders_against_threshold() {
         let mut data = Dataset::new();
-        data.register_component::<Order>().expect("register Order");
+        data.register::<Order>().expect("register Order");
         data.append(&[sample(1, 0.0), sample(2, 25.0)])
             .expect("append");
 
         pollster::block_on(build().run_on(&mut data)).expect("run");
 
         let rows = <Order as Component>::from_record_batch(
-            data.columns::<Order>().expect("Order registered"),
+            data.batch::<Order>().expect("Order registered"),
         )
         .expect("decode");
         assert!(!rows[0].valid);

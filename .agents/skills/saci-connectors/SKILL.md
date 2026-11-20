@@ -27,7 +27,7 @@ connector built with none gets a configuration error naming itself. `Rebuilder` 
 heal rebuilds with the same identity; `builder.rs`'s `build_source_node`/`build_sink_node` pass
 `Some(...)` and `dlq.rs` passes `None`, because a dead-letter store is not a peer-facing node.
 
-The `io` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
+The `engine` feature provides the `Source`/`Sink` traits and the schema-cast helpers. A
 connector moves bytes and a transformer turns bytes into `RecordBatch`es and back, so transport and
 format are separate modules. Connectors, each `saci::connector::<name>`: `channel`, `clickhouse`,
 `file`, `http`, `kafka`, `mariadb`, `nats`, `opentelemetry`, `postgresql`, `redb`, `s3`, `saci`,
@@ -65,7 +65,7 @@ connector author implements.
 `Rebuilder` is the single connector-construction path: `build_source_node`/`build_sink_node`
 build the initial instance through it too, so a heal cannot drift from the first build. It
 captures `Arc<Registry>` plus the node's `type_name`, `config`, bound transformer, channel
-bridge and `Option<SystemConfig>` (`None` for a stream-mode source, matching
+bridge and `Option<RetryMode>` (`None` for a stream-mode source, matching
 `sources_take_retry_wrapper`).
 Which nodes are reached is the factory's answer, not a list here: `builder::resolve_heal`
 consults `SourceFactory::rebuildable`/`SinkFactory::rebuildable` for that node's own config.

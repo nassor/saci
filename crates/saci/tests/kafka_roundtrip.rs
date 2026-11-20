@@ -243,12 +243,12 @@ async fn json_roundtrip() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
     let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    assert_sample_values(dataset.batch_for(COMPONENT).expect("component present"));
+    assert_sample_values(dataset.batch_named(COMPONENT).expect("component present"));
 }
 
 #[tokio::test]
@@ -277,12 +277,12 @@ async fn arrow_ipc_roundtrip() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
     let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    let out = dataset.batch_for(COMPONENT).expect("component present");
+    let out = dataset.batch_named(COMPONENT).expect("component present");
     assert_eq!(out.schema().fields(), schema.fields());
     assert_sample_values(out);
 }
@@ -494,7 +494,9 @@ async fn offsets_commit_between_drains() {
     )
     .expect("source builds");
     let mut first_dataset = Dataset::new();
-    first_dataset.register_raw_component(COMPONENT, schema.clone());
+    first_dataset
+        .register_schema(COMPONENT, schema.clone())
+        .unwrap();
     let first = drain_into_dataset(&mut first_source, &mut first_dataset, COMPONENT)
         .await
         .expect("first drain");
@@ -513,7 +515,7 @@ async fn offsets_commit_between_drains() {
     )
     .expect("source builds");
     let mut second_dataset = Dataset::new();
-    second_dataset.register_raw_component(COMPONENT, schema);
+    second_dataset.register_schema(COMPONENT, schema).unwrap();
     let second = drain_into_dataset(&mut second_source, &mut second_dataset, COMPONENT)
         .await
         .expect("second drain");
@@ -691,7 +693,7 @@ async fn a_cancelled_poll_commits_nothing_it_did_not_hand_over() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema);
+    dataset.register_schema(COMPONENT, schema).unwrap();
     let rows = drain_into_dataset(&mut second, &mut dataset, COMPONENT)
         .await
         .expect("second drain");
@@ -1268,7 +1270,7 @@ async fn a_zero_batch_rows_hint_still_advances_the_source() {
     source.request_batch_rows(0);
 
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
     let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");

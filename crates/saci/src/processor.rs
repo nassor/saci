@@ -88,7 +88,7 @@
 //! # Error handling in user systems
 //!
 //! The macro-generated `run-batch` converts [`SaciError`] variants bubbling out
-//! of `Pipeline::run_on_with_stats` into the WIT `run-error` variant:
+//! of `Pipeline::run_on` into the WIT `run-error` variant:
 //!
 //! | `SaciError` variant                                                  | WIT `run-error`       |
 //! |----------------------------------------------------------------------|-----------------------|
@@ -109,8 +109,8 @@
 #![deny(missing_docs)]
 
 pub use crate::{
-    Component, Dataset, Pipeline, PipelineBuilder, RetryMode, Row, RunStats, SaciError, SaciResult,
-    SchemaRegistry, System, SystemConfig, SystemMeta, WriteSet, system_fn,
+    Component, Dataset, Pipeline, RetryMode, Row, RunStats, SaciError, SaciResult, SchemaRegistry,
+    System, SystemMeta, WriteSet, system_fn,
 };
 
 mod config;
@@ -125,7 +125,7 @@ pub use error::{Error, Result};
 /// directly. [`Component`](macro@Component) shares its name with the
 /// [`Component`](trait@Component) trait: derives live in the macro namespace,
 /// traits in the type namespace, so both are in scope at once.
-pub use saci_macros::{Component, fold, processor, transform};
+pub use saci_macros::{fold, processor, transform};
 
 // Arrow sub-crates processor authors need to define `Component` schemas,
 // re-surfaced at the workspace-pinned `=60.1.0` version so user crates do not
@@ -155,7 +155,7 @@ pub mod prelude {
     pub use crate::prelude::*;
 
     pub use crate::processor::{Config, Error, Result};
-    pub use saci_macros::{Component, fold, processor, transform};
+    pub use saci_macros::{fold, processor, transform};
 }
 
 /// Runtime glue referenced by [`export_pipeline!`](crate::export_pipeline) and by the `saci-macros`
@@ -296,7 +296,7 @@ macro_rules! export_pipeline {
                     use crate::bindings::saci::pipeline::types::ComponentDescriptor;
 
                     let pipeline = __SACI_PIPELINE.pipeline($build_fn);
-                    let registry = pipeline.data.schemas();
+                    let registry = pipeline.data().schemas();
 
                     // Sorted by component name, so the WIT
                     // `components: list<component-descriptor>` order is
@@ -362,7 +362,7 @@ macro_rules! export_pipeline {
                         .map_err(|e| RunError::Permanent(format!("state restore: {e}")))?;
 
                     let pipeline = __SACI_PIPELINE.pipeline($build_fn);
-                    let run_result = pipeline.run_on_with_stats(&mut dataset).await;
+                    let run_result = pipeline.run_on(&mut dataset).await;
 
                     let stats = match run_result {
                         Ok(stats) => stats,
@@ -394,7 +394,7 @@ macro_rules! export_pipeline {
                         rows_in,
                         rows_out,
                         systems_run: stats.systems_run as u32,
-                        retries: stats.retries_this_batch,
+                        retries: stats.retries,
                     };
 
                     Ok(RunResult {
@@ -443,7 +443,7 @@ mod tests {
     /// count.
     fn batch_dataset() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Counter>()
+        data.register::<Counter>()
             .expect("register unrelated component");
         data
     }

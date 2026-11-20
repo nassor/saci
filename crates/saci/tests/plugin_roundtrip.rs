@@ -119,7 +119,7 @@ fn seeded_dataset(runtime: &NativePluginRuntime, ids: &[i64]) -> Dataset {
 }
 
 fn column(dataset: &Dataset, field: &str) -> Vec<i64> {
-    let batch = dataset.batch_for(Counter::name()).expect("Counter batch");
+    let batch = dataset.batch_named(Counter::name()).expect("Counter batch");
     let array = batch
         .column_by_name(field)
         .unwrap_or_else(|| panic!("Counter.{field} column"));
@@ -149,7 +149,7 @@ async fn descriptor_comes_from_the_manifest() {
 
     let template = runtime.template_dataset();
     let batch = template
-        .batch_for("Counter")
+        .batch_named("Counter")
         .expect("Counter registered in the template");
     assert_eq!(batch.num_rows(), 0, "a template carries schemas, not rows");
 

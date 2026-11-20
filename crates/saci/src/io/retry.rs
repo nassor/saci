@@ -1,16 +1,16 @@
 //! Retry wrappers for [`Source`] and [`Sink`].
 //!
 //! [`RetryingSource`] and [`RetryingSink`] wrap any [`Source`] or [`Sink`]
-//! and run every fallible operation with the retry policy of a
-//! [`SystemConfig`], so a transient connector failure is retried with
-//! exponential backoff instead of failing the whole run. A source's
-//! `Ok(None)` (EOF) is not an error and is returned as-is.
+//! and run every fallible operation under a [`RetryMode`], so a transient
+//! connector failure is retried with exponential backoff instead of failing
+//! the whole run. A source's `Ok(None)` (EOF) is not an error and is returned
+//! as-is.
 //!
-//! The wrappers retry every error: `SaciError` carries no retryable
-//! classification, and connectors validate their configuration at build time,
-//! so a configuration error never surfaces at run time. The cost of retrying a
-//! permanent error is a bounded backoff window; a [`SystemConfig`] with
-//! [`RetryMode::None`](crate::retry::RetryMode::None) (one attempt) disables retrying.
+//! The wrappers retry every error kind, unlike a system's retry: connectors
+//! validate their configuration at build time, so a configuration error never
+//! surfaces at run time, and a connector's transport errors are not
+//! classified. The cost of retrying a permanent error is a bounded backoff
+//! window; [`RetryMode::None`] (one attempt) disables retrying.
 //!
 //! The host's `ServiceBuilder` applies these wrappers in the service: every
 //! config-driven sink, and every config-driven source except in stream mode,
@@ -26,31 +26,31 @@ use async_trait::async_trait;
 use crate::error::SaciError;
 use crate::io::sink::Sink;
 use crate::io::source::Source;
-use crate::retry::SystemConfig;
+use crate::retry::RetryMode;
 #[cfg(feature = "tracing")]
 use tracing::Instrument as _;
 
 /// A [`Source`] that retries failed [`next_batch`](Source::next_batch) and
 /// [`finish`](Source::finish) calls with exponential backoff.
 ///
-/// Each `next_batch` is retried up to `config.retry_mode.max_attempts()`
+/// Each `next_batch` is retried up to `mode.max_attempts()`
 /// times and either recovers or surfaces `SaciError::RetryExhausted`. A
 /// recovered call logs a warning carrying the retry count under the `tracing`
 /// feature. `Ok(None)` (EOF) passes through without retrying.
 pub struct RetryingSource<S: Source> {
     inner: S,
-    config: SystemConfig,
+    mode: RetryMode,
     what: String,
 }
 
 impl<S: Source> RetryingSource<S> {
-    /// Wrap `inner` with `config`'s retry policy.
+    /// Wrap `inner` with the retry policy `mode`.
     ///
     /// `what` names the node in log lines, typically the node id.
-    pub fn new(inner: S, config: SystemConfig, what: &str) -> Self {
+    pub fn new(inner: S, mode: RetryMode, what: &str) -> Self {
         Self {
             inner,
-            config,
+            mode,
             what: what.to_string(),
         }
     }
@@ -63,8 +63,8 @@ impl<S: Source + 'static> Source for RetryingSource<S> {
     }
 
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
-        let config = self.config;
-        let (batch, retries) = retry_source_next_batch(&config, &mut self.inner).await?;
+        let mode = self.mode;
+        let (batch, retries) = retry_source_next_batch(&mode, &mut self.inner).await?;
         log_recovered("source", &self.what, retries);
         Ok(batch)
     }
@@ -78,8 +78,8 @@ impl<S: Source + 'static> Source for RetryingSource<S> {
     }
 
     async fn finish(&mut self) -> Result<(), SaciError> {
-        let config = self.config;
-        let retries = retry_source_finish(&config, &mut self.inner).await?;
+        let mode = self.mode;
+        let retries = retry_source_finish(&mode, &mut self.inner).await?;
         log_recovered("source", &self.what, retries);
         Ok(())
     }
@@ -88,25 +88,25 @@ impl<S: Source + 'static> Source for RetryingSource<S> {
 /// A [`Sink`] that retries failed [`write_batch`](Sink::write_batch) and
 /// [`finish`](Sink::finish) calls with exponential backoff.
 ///
-/// Each call is retried up to `config.retry_mode.max_attempts()` times and
+/// Each call is retried up to `mode.max_attempts()` times and
 /// either recovers or surfaces `SaciError::RetryExhausted`. A recovered call
 /// logs a warning carrying the retry count under the `tracing` feature. A
 /// failed `finish` after a partial flush retries the flush, preserving the
 /// at-least-once semantics connectors already provide.
 pub struct RetryingSink<S: Sink> {
     inner: S,
-    config: SystemConfig,
+    mode: RetryMode,
     what: String,
 }
 
 impl<S: Sink> RetryingSink<S> {
-    /// Wrap `inner` with `config`'s retry policy.
+    /// Wrap `inner` with the retry policy `mode`.
     ///
     /// `what` names the node in log lines, typically the node id.
-    pub fn new(inner: S, config: SystemConfig, what: &str) -> Self {
+    pub fn new(inner: S, mode: RetryMode, what: &str) -> Self {
         Self {
             inner,
-            config,
+            mode,
             what: what.to_string(),
         }
     }
@@ -115,15 +115,15 @@ impl<S: Sink> RetryingSink<S> {
 #[async_trait]
 impl<S: Sink + 'static> Sink for RetryingSink<S> {
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
-        let config = self.config;
-        let retries = retry_sink_write_batch(&config, &mut self.inner, batch).await?;
+        let mode = self.mode;
+        let retries = retry_sink_write_batch(&mode, &mut self.inner, batch).await?;
         log_recovered("sink", &self.what, retries);
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<(), SaciError> {
-        let config = self.config;
-        let retries = retry_sink_finish(&config, &mut self.inner).await?;
+        let mode = self.mode;
+        let retries = retry_sink_finish(&mode, &mut self.inner).await?;
         log_recovered("sink", &self.what, retries);
         Ok(())
     }
@@ -161,10 +161,10 @@ fn attempt_span(attempt: usize, max_attempts: usize) -> tracing::Span {
 /// Semantics match `run_with_retries` exactly: same attempt counting, same
 /// `delay_for_attempt` delays, same `SaciError::RetryExhausted` wrapping.
 async fn retry_source_next_batch(
-    config: &SystemConfig,
+    mode: &RetryMode,
     inner: &mut dyn Source,
 ) -> Result<(Option<RecordBatch>, u32), SaciError> {
-    let max_attempts = config.retry_mode.max_attempts();
+    let max_attempts = mode.max_attempts();
     let mut attempt = 0usize;
     loop {
         let result = {
@@ -185,7 +185,7 @@ async fn retry_source_next_batch(
                     tracing::error!(error = %e, attempts = attempt, "retry exhausted, giving up");
                     return Err(SaciError::retry_exhausted(e, attempt));
                 }
-                if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                if let Some(delay) = mode.delay_for_attempt(attempt - 1) {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         error = %e,
@@ -205,11 +205,11 @@ async fn retry_source_next_batch(
 /// retries consumed. See [`retry_source_next_batch`] for why this loops
 /// directly instead of using [`run_with_retries`].
 async fn retry_sink_write_batch(
-    config: &SystemConfig,
+    mode: &RetryMode,
     inner: &mut dyn Sink,
     batch: &RecordBatch,
 ) -> Result<u32, SaciError> {
-    let max_attempts = config.retry_mode.max_attempts();
+    let max_attempts = mode.max_attempts();
     let mut attempt = 0usize;
     loop {
         let result = {
@@ -230,7 +230,7 @@ async fn retry_sink_write_batch(
                     tracing::error!(error = %e, attempts = attempt, "retry exhausted, giving up");
                     return Err(SaciError::retry_exhausted(e, attempt));
                 }
-                if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                if let Some(delay) = mode.delay_for_attempt(attempt - 1) {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         error = %e,
@@ -249,8 +249,8 @@ async fn retry_sink_write_batch(
 /// One `finish` pass through the retry policy, returning the number of retries
 /// consumed. See [`retry_source_next_batch`] for why this loops directly
 /// instead of using [`run_with_retries`].
-async fn retry_sink_finish(config: &SystemConfig, inner: &mut dyn Sink) -> Result<u32, SaciError> {
-    let max_attempts = config.retry_mode.max_attempts();
+async fn retry_sink_finish(mode: &RetryMode, inner: &mut dyn Sink) -> Result<u32, SaciError> {
+    let max_attempts = mode.max_attempts();
     let mut attempt = 0usize;
     loop {
         let result = {
@@ -271,7 +271,7 @@ async fn retry_sink_finish(config: &SystemConfig, inner: &mut dyn Sink) -> Resul
                     tracing::error!(error = %e, attempts = attempt, "retry exhausted, giving up");
                     return Err(SaciError::retry_exhausted(e, attempt));
                 }
-                if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                if let Some(delay) = mode.delay_for_attempt(attempt - 1) {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         error = %e,
@@ -290,11 +290,8 @@ async fn retry_sink_finish(config: &SystemConfig, inner: &mut dyn Sink) -> Resul
 /// One `finish` pass through the retry policy, returning the number of retries
 /// consumed. See [`retry_source_next_batch`] for why this loops directly
 /// instead of using [`run_with_retries`].
-async fn retry_source_finish(
-    config: &SystemConfig,
-    inner: &mut dyn Source,
-) -> Result<u32, SaciError> {
-    let max_attempts = config.retry_mode.max_attempts();
+async fn retry_source_finish(mode: &RetryMode, inner: &mut dyn Source) -> Result<u32, SaciError> {
+    let max_attempts = mode.max_attempts();
     let mut attempt = 0usize;
     loop {
         let result = {
@@ -315,7 +312,7 @@ async fn retry_source_finish(
                     tracing::error!(error = %e, attempts = attempt, "retry exhausted, giving up");
                     return Err(SaciError::retry_exhausted(e, attempt));
                 }
-                if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                if let Some(delay) = mode.delay_for_attempt(attempt - 1) {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         error = %e,
@@ -341,11 +338,10 @@ fn log_recovered(kind: &str, what: &str, retries: u32) {
     }
 }
 
-#[cfg(all(test, feature = "io"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::SaciError;
-    use crate::retry::RetryMode;
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -359,16 +355,14 @@ mod tests {
         RecordBatch::try_new(schema(), vec![Arc::new(Int64Array::from(vec![1_i64]))]).unwrap()
     }
 
-    fn fast_backoff(max_retries: usize) -> SystemConfig {
-        SystemConfig {
-            retry_mode: RetryMode::exponential_custom(
-                max_retries,
-                Duration::from_millis(1),
-                2.0,
-                Duration::from_millis(10),
-                0.0,
-            ),
-        }
+    fn fast_backoff(max_retries: usize) -> RetryMode {
+        RetryMode::exponential_custom(
+            max_retries,
+            Duration::from_millis(1),
+            2.0,
+            Duration::from_millis(10),
+            0.0,
+        )
     }
 
     struct FlakySource {
@@ -519,7 +513,7 @@ mod tests {
     async fn a_minimal_config_surfaces_the_first_error_immediately() {
         let mut source = RetryingSource::new(
             FlakySource::failing(usize::MAX),
-            SystemConfig::minimal(),
+            RetryMode::None,
             "test-source",
         );
         assert!(source.next_batch().await.is_err());

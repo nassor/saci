@@ -89,15 +89,7 @@ impl System for WindowedSystem {
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
         let pipeline = data;
-        let batch = pipeline
-            .batch_for(self.source_component)
-            .ok_or_else(|| {
-                SaciError::generic(format!(
-                    "WindowedSystem: component '{}' not registered",
-                    self.source_component
-                ))
-            })?
-            .clone();
+        let batch = pipeline.batch_named(self.source_component)?.clone();
 
         let n_rows = batch.num_rows();
         if n_rows == 0 {
@@ -412,7 +404,7 @@ impl System for WindowedSystem {
             use super::accumulator::WindowAccumulator;
             use crate::component::Component as _;
 
-            if pipeline.batch_for(WindowAccumulator::name()).is_some() {
+            if pipeline.batch_named(WindowAccumulator::name()).is_ok() {
                 self.flush_accumulator(pipeline, &on_time_batches)?;
             }
         }
@@ -490,7 +482,7 @@ pub(super) mod tests {
         ];
 
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<Trade>().unwrap();
+        pipeline.register::<Trade>().unwrap();
         pipeline.append::<Trade>(&trades).unwrap();
 
         let sys = WindowedSystemBuilder::new()
@@ -557,7 +549,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn test_empty_component_produces_empty_results() {
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<Trade>().unwrap();
+        pipeline.register::<Trade>().unwrap();
 
         let sys = WindowedSystemBuilder::new()
             .source("Trade", "timestamp_ms")
@@ -597,7 +589,7 @@ pub(super) mod tests {
 
         let result = sys.run(&mut pipeline).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().category(), "generic");
+        assert_eq!(result.unwrap_err().category(), "component_not_registered");
     }
 
     #[tokio::test]
@@ -608,7 +600,7 @@ pub(super) mod tests {
         }];
 
         let mut pipeline = Dataset::new();
-        pipeline.register_component::<Trade>().unwrap();
+        pipeline.register::<Trade>().unwrap();
         pipeline.append::<Trade>(&trades).unwrap();
 
         let sys = WindowedSystemBuilder::new()
@@ -671,7 +663,7 @@ pub(super) mod tests {
         .unwrap();
 
         let mut pipeline = Dataset::new();
-        pipeline.register_raw_component("NullTrade", schema);
+        pipeline.register_schema("NullTrade", schema).unwrap();
         pipeline.append_record_batch("NullTrade", batch).unwrap();
 
         let sys = WindowedSystemBuilder::new()

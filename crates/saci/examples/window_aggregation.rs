@@ -11,24 +11,17 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use arrow_array::{Array, cast::AsArray};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::system::{FieldRef, System, SystemMeta};
+use saci::prelude::*;
 
 use saci::windows::{
     ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowedSystemBuilder,
 };
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
 struct SalesEvent {
     /// Unix timestamp in milliseconds.
     timestamp_ms: i64,
@@ -38,31 +31,13 @@ struct SalesEvent {
     amount: f64,
 }
 
-impl Component for SalesEvent {
-    fn name() -> &'static str {
-        "SalesEvent"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("timestamp_ms", DataType::Int64, false),
-            Field::new("category", DataType::Utf8, false),
-            Field::new("amount", DataType::Float64, false),
-        ]))
-    }
-}
-
-impl SalesEvent {
-    const CATEGORY: FieldRef<SalesEvent> = FieldRef::new("category");
-}
-
 /// Loads seed sales events spanning three 30-second windows across two categories.
 struct IngestSystem;
 
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("SalesEvent")
+        SystemMeta::new("ingest").writes_all::<SalesEvent>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
@@ -133,7 +108,7 @@ impl System for BuildLookupSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("build_lookup")
             .reads(SalesEvent::CATEGORY)
-            .write_resource::<CategoryLookup>()
+            .writes_resource::<CategoryLookup>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
@@ -153,7 +128,7 @@ impl System for BuildLookupSystem {
                 amount: 1.0,
             };
             let mut mini = Dataset::new();
-            mini.register_component::<SalesEvent>()?;
+            mini.register::<SalesEvent>()?;
             mini.append::<SalesEvent>(&[row])?;
 
             let ws = W::new()
@@ -201,17 +176,13 @@ struct ReportSystem;
 impl System for ReportSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("report")
-            .read_resource::<WindowResults>()
-            .read_resource::<CategoryLookup>()
+            .reads_resource::<WindowResults>()
+            .reads_resource::<CategoryLookup>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-        let results = data
-            .get_resource::<WindowResults>()
-            .ok_or_else(|| SaciError::generic("WindowResults resource not found"))?;
-        let lookup = data
-            .get_resource::<CategoryLookup>()
-            .ok_or_else(|| SaciError::generic("CategoryLookup resource not found"))?;
+        let results = data.resource::<WindowResults>()?;
+        let lookup = data.resource::<CategoryLookup>()?;
 
         println!();
         println!("╔══════════════════════════════════════════════════════╗");
@@ -303,18 +274,17 @@ async fn main() -> Result<(), SaciError> {
         .allowed_lateness(5_000)
         .build()?;
 
-    let mut pipeline = Pipeline::builder("window_aggregation")
-        .with::<SalesEvent>()
-        .with_system(IngestSystem)
-        .with_system(BuildLookupSystem)
-        .with_system(windowed)
-        .with_system(ReportSystem)
-        .build();
+    let mut pipeline = Pipeline::new("window_aggregation")
+        .component::<SalesEvent>()
+        .system(IngestSystem)
+        .system(BuildLookupSystem)
+        .system(windowed)
+        .system(ReportSystem);
 
     println!("Running windowed aggregation pipeline...");
     pipeline.run().await?;
 
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan()?.to_vec();
     println!();
     println!("Stage layout:");
     for (i, stage) in stages.iter().enumerate() {

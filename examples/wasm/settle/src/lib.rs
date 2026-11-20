@@ -227,11 +227,10 @@ pub fn ledger(rows: &[Order], state: &mut Ledger) -> Result<()> {
 /// batch rows.
 #[processor(name = "settle", state = Ledger)]
 pub fn build() -> Pipeline {
-    Pipeline::builder("settle")
-        .with::<Order>()
-        .with_system(settle_system())
-        .with_system(ledger_system())
-        .build()
+    Pipeline::new("settle")
+        .component::<Order>()
+        .system(settle_system())
+        .system(ledger_system())
 }
 
 #[cfg(test)]
@@ -371,9 +370,9 @@ mod tests {
     fn the_pipeline_registers_only_order_and_sequences_the_two_systems() {
         let pipeline = build();
         assert_eq!(pipeline.name(), "settle");
-        assert!(pipeline.data.schemas().contains("Order"));
+        assert!(pipeline.data().schemas().contains("Order"));
         assert!(
-            !pipeline.data.schemas().contains("Ledger"),
+            !pipeline.data().schemas().contains("Ledger"),
             "state must not be a batch component"
         );
     }
@@ -384,7 +383,7 @@ mod tests {
     #[test]
     fn the_pipeline_settles_a_batch_and_folds_the_ledger() {
         let mut data = Dataset::new();
-        data.register_component::<Order>().expect("register Order");
+        data.register::<Order>().expect("register Order");
         data.append(&[
             Order {
                 usd_amount: 110.0,
@@ -406,7 +405,7 @@ mod tests {
         block_on(build().run_on(&mut data)).expect("run the pipeline");
 
         let settled = <Order as Component>::from_record_batch(
-            data.columns::<Order>().expect("Order registered"),
+            data.batch::<Order>().expect("Order registered"),
         )
         .expect("decode rows");
         let outcomes: Vec<&str> = settled.iter().map(|r| r.settlement.as_str()).collect();

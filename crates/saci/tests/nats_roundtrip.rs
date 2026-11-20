@@ -198,12 +198,12 @@ async fn core_ndjson_round_trips_through_a_subject() {
     sink.finish().await.expect("finish");
 
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
     let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    assert_sample_values(dataset.batch_for(COMPONENT).expect("component present"));
+    assert_sample_values(dataset.batch_named(COMPONENT).expect("component present"));
 }
 
 #[tokio::test]
@@ -474,12 +474,12 @@ async fn jetstream_round_trips_through_a_provisioned_stream() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
     let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    assert_sample_values(dataset.batch_for(COMPONENT).expect("component present"));
+    assert_sample_values(dataset.batch_named(COMPONENT).expect("component present"));
 }
 
 #[tokio::test]
@@ -1183,7 +1183,7 @@ async fn a_zero_batch_rows_hint_still_advances_the_source() {
     source.request_batch_rows(0);
 
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
     let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
@@ -1202,13 +1202,13 @@ async fn rows_in_stream(nats: &common::NatsContainer, stream: &str, durable: &st
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema());
+    dataset.register_schema(COMPONENT, schema()).unwrap();
     drain_into_dataset(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
-    match dataset.batch_for(COMPONENT) {
-        Some(batch) => ids_of(batch),
-        None => Vec::new(),
+    match dataset.batch_named(COMPONENT) {
+        Ok(batch) => ids_of(batch),
+        Err(_) => Vec::new(),
     }
 }
 

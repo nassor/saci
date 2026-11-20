@@ -157,7 +157,9 @@ impl PipelineRuntime for PassThrough {
 
     fn template_dataset(&self) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_raw_component(SALE, Arc::clone(&self.schema));
+        dataset
+            .register_schema(SALE, Arc::clone(&self.schema))
+            .unwrap();
         dataset
     }
 }

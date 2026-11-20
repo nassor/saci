@@ -2,78 +2,76 @@
 
 pub(crate) use dag::SystemEntry;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use crate::dataset::{Dataset, DatasetBuilder};
-use crate::error::SaciError;
-use crate::retry::SystemConfig;
+use arrow_schema::Schema;
 
-use self::dag::ExpandedMeta;
+use crate::component::Component;
+use crate::dataset::Dataset;
+#[cfg(feature = "engine")]
+use crate::dataset::intern_component_name;
+use crate::error::{SaciError, SaciResult};
+use crate::schema::SchemaRegistry;
+use crate::system::{ParallelSystem, System};
 
-#[cfg(feature = "io")]
+use self::dag::Plan;
+
+#[cfg(feature = "engine")]
 use crate::io::{Sink, Source};
 
-/// Statistics produced by the most recent [`run`](Pipeline::run) or
-/// [`run_with_io`](Pipeline::run_with_io) call.
+/// Statistics of one [`run`](Pipeline::run), [`run_on`](Pipeline::run_on)
+/// or [`run_stream`](Pipeline::run_stream) call.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct RunStats {
     /// Net change in live rows (positive = rows added, negative = rows deleted).
     pub rows_produced: isize,
-    /// Number of systems that ran during the tick.
+    /// Number of systems that ran.
     pub systems_run: usize,
-    /// Wall-clock milliseconds for the tick.
-    pub duration_millis: u64,
-    /// Total number of system retry attempts that occurred during this batch
-    /// (sum across all systems; one retry = one failed attempt before a
-    /// subsequent success). Populated by both `run()` and `run_on()`.
-    pub retries_this_batch: u32,
-}
-
-/// Holder of the last run's [`RunStats`], used like a `Cell` (`get` and `set` copy the value) but `Sync`, so a
-/// [`Pipeline`] can sit in a static that an SDK's exports share.
-#[derive(Debug, Default)]
-struct StatsCell(Mutex<RunStats>);
-
-impl StatsCell {
-    fn new(stats: RunStats) -> Self {
-        Self(Mutex::new(stats))
-    }
-
-    fn get(&self) -> RunStats {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn set(&self, stats: RunStats) {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = stats;
-    }
+    /// Wall-clock time of the call.
+    pub elapsed: Duration,
+    /// Total number of system retries during the call (sum across all
+    /// systems; one retry = one failed attempt before a later success).
+    pub retries: u32,
 }
 
 /// A self-contained workload: columnar data, systems, DAG plan, and optional
-/// IO sources/sinks.
+/// IO sources and sinks.
 ///
-/// `Pipeline` is the primary entry point for processing work. Build one with
-/// [`Pipeline::new`], register components on `data()`, add systems, then call
-/// [`run`](Self::run) or [`run_with_io`](Self::run_with_io).
+/// Build one with a chain from [`Pipeline::new`], then call
+/// [`run`](Self::run):
+///
+/// ```rust
+/// use saci::prelude::*;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Component, Serialize, Deserialize)]
+/// struct Order { id: u64 }
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> SaciResult<()> {
+/// let mut pipeline = Pipeline::new("orders")
+///     .component::<Order>()
+///     .system(system_fn(SystemMeta::new("noop").reads(Order::ID), |_| Ok(())));
+/// pipeline.data_mut().append(&[Order { id: 1 }])?;
+/// let stats = pipeline.run().await?;
+/// assert_eq!(stats.systems_run, 1);
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// For running many pipelines from one process, see `Scheduler`.
 pub struct Pipeline {
     name: Arc<str>,
-    /// Owned columnar data for this workload.
-    pub data: Dataset,
+    data: Dataset,
     systems: Vec<SystemEntry>,
-    stages: OnceLock<Result<Vec<Vec<usize>>, SaciError>>,
-    expanded_metas: OnceLock<Result<Vec<ExpandedMeta>, SaciError>>,
-    configs: OnceLock<Vec<SystemConfig>>,
-    last_stats: StatsCell,
-    #[cfg(feature = "io")]
+    plan: OnceLock<Result<Plan, SaciError>>,
+    /// The first construction error, returned by every later `plan`,
+    /// `validate` and `run*` call.
+    pending_error: Option<SaciError>,
+    #[cfg(feature = "engine")]
     sources: Vec<(&'static str, Box<dyn Source>)>,
-    #[cfg(feature = "io")]
+    #[cfg(feature = "engine")]
     sinks: Vec<(&'static str, Box<dyn Sink>)>,
 }
 
@@ -84,23 +82,90 @@ impl Pipeline {
             name: name.into(),
             data: Dataset::new(),
             systems: Vec::new(),
-            stages: OnceLock::new(),
-            expanded_metas: OnceLock::new(),
-            configs: OnceLock::new(),
-            last_stats: StatsCell::new(RunStats::default()),
-            #[cfg(feature = "io")]
+            plan: OnceLock::new(),
+            pending_error: None,
+            #[cfg(feature = "engine")]
             sources: Vec::new(),
-            #[cfg(feature = "io")]
+            #[cfg(feature = "engine")]
             sinks: Vec::new(),
         }
     }
 
-    /// Stats from the most recent [`run`](Self::run), [`run_on`](Self::run_on),
-    /// or [`run_with_io`](Self::run_with_io) call.
-    ///
-    /// Returns `RunStats::default()` before the first run.
-    pub fn last_stats(&self) -> RunStats {
-        self.last_stats.get()
+    /// Keep the first construction error; later ones are consequences of it.
+    fn record(&mut self, result: SaciResult<()>) {
+        if let Err(e) = result
+            && self.pending_error.is_none()
+        {
+            self.pending_error = Some(e);
+        }
+    }
+
+    /// Register component `C` in the pipeline's dataset. A failure surfaces
+    /// from the next [`validate`](Self::validate), [`plan`](Self::plan) or
+    /// run.
+    pub fn component<C: Component>(mut self) -> Self {
+        let result = self.data.register::<C>();
+        self.record(result);
+        self.plan = OnceLock::new();
+        self
+    }
+
+    /// Register a component by name with a schema known only at runtime.
+    pub fn schema(mut self, name: &str, schema: Arc<Schema>) -> Self {
+        let result = self.data.register_schema(name, schema);
+        self.record(result);
+        self.plan = OnceLock::new();
+        self
+    }
+
+    /// Insert (or replace) resource `R` in the pipeline's dataset.
+    pub fn resource<R: Send + Sync + 'static>(mut self, r: R) -> Self {
+        self.data.insert_resource(r);
+        self
+    }
+
+    /// Add a sequential [`System`].
+    pub fn system<S: System + 'static>(self, system: S) -> Self {
+        self.system_boxed(Box::new(system))
+    }
+
+    /// Add a [`ParallelSystem`].
+    pub fn parallel_system<S: ParallelSystem + 'static>(self, system: S) -> Self {
+        self.push(SystemEntry::Parallel(Arc::new(system)))
+    }
+
+    /// Add a pre-boxed sequential [`System`].
+    pub fn system_boxed(self, system: Box<dyn System>) -> Self {
+        self.push(SystemEntry::Sequential(system))
+    }
+
+    /// Add a pre-boxed [`ParallelSystem`].
+    pub fn parallel_system_boxed(self, system: Box<dyn ParallelSystem>) -> Self {
+        self.push(SystemEntry::Parallel(Arc::from(system)))
+    }
+
+    fn push(mut self, entry: SystemEntry) -> Self {
+        self.systems.push(entry);
+        self.plan = OnceLock::new();
+        self
+    }
+
+    /// Drain `source` into `component` at the start of every
+    /// [`run`](Self::run).
+    #[cfg(feature = "engine")]
+    pub fn source<S: Source + 'static>(mut self, component: &str, source: S) -> Self {
+        self.sources
+            .push((intern_component_name(component), Box::new(source)));
+        self
+    }
+
+    /// Write every row of `component` to `sink` at the end of every
+    /// [`run`](Self::run), then finish it.
+    #[cfg(feature = "engine")]
+    pub fn sink<K: Sink + 'static>(mut self, component: &str, sink: K) -> Self {
+        self.sinks
+            .push((intern_component_name(component), Box::new(sink)));
+        self
     }
 
     /// Return the pipeline name.
@@ -117,6 +182,60 @@ impl Pipeline {
     pub fn data_mut(&mut self) -> &mut Dataset {
         &mut self.data
     }
+
+    /// Validate every declared field access against the registered schemas.
+    ///
+    /// # Errors
+    ///
+    /// The first construction error, or a `Configuration` error naming the
+    /// access that matches no registered field.
+    pub fn validate(&self) -> SaciResult<()> {
+        self.plan().map(|_| ())
+    }
+
+    /// The execution plan: stages of system indices, each stage's systems
+    /// free of conflicting access.
+    ///
+    /// # Errors
+    ///
+    /// As [`validate`](Self::validate).
+    pub fn plan(&self) -> SaciResult<&[Vec<usize>]> {
+        ensure_plan(
+            &self.plan,
+            self.pending_error.as_ref(),
+            &self.systems,
+            self.data.schemas(),
+        )
+        .map(|plan| plan.stages.as_slice())
+    }
+
+    /// The [`pending_rows`](crate::io::Sink::pending_rows) value of the sink
+    /// attached to `component`, if any.
+    ///
+    /// `None` if no sink is attached for `component` or the sink does not
+    /// implement backpressure probing.
+    #[cfg(feature = "engine")]
+    pub fn sink_pending_rows(&self, component: &str) -> Option<usize> {
+        self.sinks
+            .iter()
+            .find(|(comp, _)| *comp == component)
+            .and_then(|(_, sink)| sink.pending_rows())
+    }
+}
+
+/// The cached plan, built from `systems` and `schemas` on first use.
+fn ensure_plan<'a>(
+    cell: &'a OnceLock<Result<Plan, SaciError>>,
+    pending_error: Option<&SaciError>,
+    systems: &[SystemEntry],
+    schemas: &SchemaRegistry,
+) -> SaciResult<&'a Plan> {
+    if let Some(e) = pending_error {
+        return Err(e.clone());
+    }
+    cell.get_or_init(|| Plan::build(systems, schemas))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 impl Default for Pipeline {
@@ -125,25 +244,41 @@ impl Default for Pipeline {
     }
 }
 
-/// Fluent builder for [`Pipeline`].
-pub struct PipelineBuilder {
-    pub(super) name: Arc<str>,
-    pub(super) data: DatasetBuilder,
-    pub(super) systems: Vec<SystemEntry>,
-    #[cfg(feature = "io")]
-    pub(super) sources: Vec<(&'static str, Box<dyn Source>)>,
-    #[cfg(feature = "io")]
-    pub(super) sinks: Vec<(&'static str, Box<dyn Sink>)>,
-}
-
-mod builder;
 mod dag;
 mod execution;
-mod registration;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use arrow_schema::{DataType, Field};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct RootOrder {
+        id: u64,
+    }
+    impl Component for RootOrder {
+        fn name() -> &'static str {
+            "RootOrder"
+        }
+        fn schema() -> Arc<Schema> {
+            Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]))
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct LateOrder {
+        id: u64,
+    }
+    impl Component for LateOrder {
+        fn name() -> &'static str {
+            "LateOrder"
+        }
+        fn schema() -> Arc<Schema> {
+            Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]))
+        }
+    }
 
     #[test]
     fn test_pipeline_name() {
@@ -153,30 +288,25 @@ mod tests {
 
     #[test]
     fn test_data_mut_accessible() {
-        use crate::component::Component;
-        use std::sync::Arc;
-
-        use arrow_schema::{DataType, Field, Schema};
-        use serde::{Deserialize, Serialize};
-
-        #[derive(Serialize, Deserialize)]
-        struct RootOrder {
-            id: u64,
-        }
-        impl Component for RootOrder {
-            fn name() -> &'static str {
-                "RootOrder"
-            }
-            fn schema() -> Arc<Schema> {
-                Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]))
-            }
-        }
-
-        let mut p = Pipeline::new("data-test");
-        p.data_mut().register_component::<RootOrder>().unwrap();
+        let mut p = Pipeline::new("data-test").component::<RootOrder>();
         p.data_mut()
             .append::<RootOrder>(&[RootOrder { id: 1 }])
             .unwrap();
         assert_eq!(p.data().rows(), 1);
+    }
+
+    /// Registering a component once rows exist fails inside the chain; the
+    /// error waits for `validate` and comes back from every later call.
+    #[test]
+    fn a_registration_error_surfaces_from_validate() {
+        let mut p = Pipeline::new("late").component::<RootOrder>();
+        p.data_mut()
+            .append::<RootOrder>(&[RootOrder { id: 1 }])
+            .unwrap();
+        let p = p.component::<LateOrder>();
+        let err = p.validate().unwrap_err();
+        assert_eq!(err.category(), "configuration");
+        assert!(err.to_string().contains("LateOrder"), "{err}");
+        assert_eq!(p.plan().unwrap_err(), err);
     }
 }

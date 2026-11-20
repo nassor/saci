@@ -191,10 +191,10 @@ async fn concurrent_runners_exactly_one_acks() {
     seed_batch(&store_a, 0).await;
     let store_b = store_a.clone();
 
-    let mut pipeline_a = Pipeline::new("runner-a");
-    pipeline_a.add_system(system_fn(SystemMeta::new("noop-a"), |_| Ok(())));
-    let mut pipeline_b = Pipeline::new("runner-b");
-    pipeline_b.add_system(system_fn(SystemMeta::new("noop-b"), |_| Ok(())));
+    let pipeline_a =
+        Pipeline::new("runner-a").system(system_fn(SystemMeta::new("noop-a"), |_| Ok(())));
+    let pipeline_b =
+        Pipeline::new("runner-b").system(system_fn(SystemMeta::new("noop-b"), |_| Ok(())));
 
     let config = RunnerConfig {
         max_batches: Some(1),

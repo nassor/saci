@@ -79,10 +79,7 @@ impl Component for Order {
 /// host's `run-batch` Arrow IPC payload is a fully materialised dataset, not a
 /// stream.
 fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Order>()
-        .ok_or_else(|| SaciError::generic("branching: Order component missing"))?
-        .clone();
+    let batch = data.batch::<Order>()?.clone();
     let schema = batch.schema();
     let priority_idx = schema
         .index_of("priority")
@@ -112,16 +109,12 @@ fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
 /// Called lazily by the `export_pipeline!` macro on the first call to any WIT
 /// export, and constructed exactly once per component instance.
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("branching");
-    pipeline
-        .data
-        .register_component::<Order>()
-        .expect("register Order");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("route_batch").read("Order", "priority"),
-        route_batch,
-    ));
-    pipeline
+    Pipeline::new("branching")
+        .component::<Order>()
+        .system(system_fn(
+            SystemMeta::new("route_batch").reads_named("Order", "priority"),
+            route_batch,
+        ))
 }
 
 #[cfg(target_arch = "wasm32")]

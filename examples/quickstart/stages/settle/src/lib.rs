@@ -71,10 +71,9 @@ pub fn settle(row: &mut Order, config: &Config) -> Result<()> {
 /// Export the Quick Start settlement pipeline as a `saci:pipeline@0.4.0` component.
 #[processor(name = "quickstart-settle")]
 pub fn build() -> Pipeline {
-    Pipeline::builder("quickstart-settle")
-        .with::<Order>()
-        .with_system(settle_system())
-        .build()
+    Pipeline::new("quickstart-settle")
+        .component::<Order>()
+        .system(settle_system())
 }
 
 #[cfg(test)]
@@ -101,7 +100,7 @@ mod tests {
     #[test]
     fn settles_holds_and_rejects_orders() {
         let mut data = Dataset::new();
-        data.register_component::<Order>().expect("register Order");
+        data.register::<Order>().expect("register Order");
         data.append(&[
             sample(1, 0.25, false),
             sample(2, 100.0, true),
@@ -112,7 +111,7 @@ mod tests {
         pollster::block_on(build().run_on(&mut data)).expect("run");
 
         let rows = <Order as Component>::from_record_batch(
-            data.columns::<Order>().expect("Order registered"),
+            data.batch::<Order>().expect("Order registered"),
         )
         .expect("decode");
 

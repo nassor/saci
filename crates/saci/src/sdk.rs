@@ -58,10 +58,10 @@ impl PipelineSlot {
     }
 }
 
-// A processor keeps its slot in a `static`, which needs `Pipeline: Send + Sync`. A processor builds without `io`; with
-// it a pipeline owns boxed sources and sinks, which are `Send` only (a native plugin keeps its slot in a heap
+// A processor keeps its slot in a `static`, which needs `Pipeline: Send + Sync`. A processor builds without `engine`;
+// with it a pipeline owns boxed sources and sinks, which are `Send` only (a native plugin keeps its slot in a heap
 // instance, not a static, so it does not need this).
-#[cfg(not(feature = "io"))]
+#[cfg(not(feature = "engine"))]
 const _: () = {
     const fn assert_sync<T: Sync>() {}
     assert_sync::<PipelineSlot>();
@@ -133,9 +133,9 @@ where
             Some(bytes) => {
                 let name = C::name();
                 let prior_data = Dataset::read_ipc(&mut &bytes[..])?;
-                match prior_data.batch_for(name) {
-                    None => Vec::new(),
-                    Some(batch) => {
+                match prior_data.batch_named(name) {
+                    Err(_) => Vec::new(),
+                    Ok(batch) => {
                         let on_disk = prior_data.schemas().get_version(name).unwrap_or(1);
                         let migrated = C::migrate(on_disk, batch.clone())?;
                         C::from_record_batch(&migrated)?
@@ -160,7 +160,7 @@ where
         // satisfies Dataset's "every component has row_count rows" invariant
         // whatever the batch's own row count is.
         let mut scratch = Dataset::new();
-        scratch.register_component::<C>()?;
+        scratch.register::<C>()?;
         if !state.rows.is_empty() {
             scratch.append::<C>(&state.rows)?;
         }
@@ -170,18 +170,10 @@ where
     }
 }
 
-/// Map a [`SaciError`] from [`Pipeline::run_on_with_stats`] into a
+/// Map a [`SaciError`] from [`Pipeline::run_on`] into a
 /// `(is_retryable, message)` pair an SDK turns into its own error type.
-///
-/// `retryable` only for [`SaciError::RetryExhausted`] and
-/// [`SaciError::SystemExecution`]; everything else, [`SaciError::Generic`]
-/// included, is permanent. A schema mismatch is never reported from a batch.
 pub fn classify_run_error(err: &SaciError) -> (bool, String) {
-    let is_retryable = matches!(
-        err,
-        SaciError::RetryExhausted { .. } | SaciError::SystemExecution(_)
-    );
-    (is_retryable, err.to_string())
+    (err.is_retryable(), err.to_string())
 }
 
 /// Serialize a single Arrow [`Schema`] as IPC schema-message bytes.
@@ -296,8 +288,8 @@ impl<C> Default for ProcessorState<C> {
 mod tests {
     use super::*;
 
-    /// A processor keeps its slot in a `static`, so a slot must be `Sync` when built without `io`.
-    #[cfg(not(feature = "io"))]
+    /// A processor keeps its slot in a `static`, so a slot must be `Sync` when built without `engine`.
+    #[cfg(not(feature = "engine"))]
     #[test]
     fn a_pipeline_slot_is_a_sync_static_without_io() {
         static SLOT: PipelineSlot = PipelineSlot::new();
@@ -347,10 +339,7 @@ mod tests {
         assert_eq!(second.name(), "first");
         assert!(std::ptr::eq(first, second));
         // Both shared borrows are live at once: nothing is locked while a run is in flight.
-        assert_eq!(
-            first.last_stats().systems_run,
-            second.last_stats().systems_run
-        );
+        assert_eq!(first.name(), second.name());
     }
 
     /// A single-row state component, as `#[fold]` expects.
