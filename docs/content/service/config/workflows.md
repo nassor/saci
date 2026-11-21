@@ -1,6 +1,6 @@
 +++
 title = "Workflows and links"
-description = "Six node kinds inside one workflow block, the links that wire them, and every key each kind takes."
+description = "Seven node kinds inside one workflow block, the links that wire them, and every key each kind takes."
 template = "page.html"
 weight = 1
 +++
@@ -73,20 +73,22 @@ only by a named branch.
 
 ## 1. Declare the nodes
 
-Six node kinds live inside `workflow`. Each but `link` opens with its id as the
-leading argument, unique across the whole process. Every node id, workflow id
-and branch name matches `^[A-Za-z0-9][A-Za-z0-9_-]*$` and is at most 64 bytes.
-Five of the six are in a `server` build. A `plugin` node needs one built with
-`--features server,plugin-host`: a build without it parses the file and then refuses it,
-naming that flag.
+Seven node kinds live inside `workflow`. Each but `link` opens with
+its id as the leading argument. Node ids are unique across the whole process; a
+`schema` id only within its workflow. Every node id,
+workflow id and branch name matches `^[A-Za-z0-9][A-Za-z0-9_-]*$` and is at most
+64 bytes. Six of the seven are in a `server` build. A `plugin` node needs one
+built with `--features server,plugin-host`: a build without it parses the file
+and then refuses it, naming that flag.
 
 | Node | Declares | Links |
 |---|---|---|
-| `transformer` | `format`, an optional `options` child | none: a source or sink names it |
-| `source` | `type`, `component`, optional `transformer`, optional `retry`, a `config` child | outbound only |
-| `wasm` | optional `module`, optional `sha3_256`, `config` and `window` children | inbound and outbound |
-| `plugin` | optional `library`, otherwise the same as `wasm`; needs a build with `--features plugin-host` | inbound and outbound |
-| `sink` | `type`, `component`, optional `transformer`, optional `retry`, a `config` child | inbound only |
+| `codec` | `format`, an optional `config` child | none: a source or sink names it |
+| `schema` | `field` children | none: a source or sink whose `component` is its id takes it |
+| `source` | `connector`, `component`, optional `codec`, optional `retry`, a `config` child | outbound only |
+| `wasm` | optional `path`, optional `sha3_256`, `config` and `window` children | inbound and outbound |
+| `plugin` | optional `path`, otherwise the same as `wasm`; needs a build with `--features plugin-host` | inbound and outbound |
+| `sink` | `connector`, `component`, optional `codec`, optional `retry`, a `config` child | inbound only |
 | `link` | `from`, `to`, optional `branch` | it is the edge |
 
 One source, one processor, one sink is the whole shape:
@@ -94,17 +96,17 @@ One source, one processor, one sink is the whole shape:
 ```kdl,name=A workflow with one source one processor and one sink
 workflow "orders" name="Orders" {
     // A declared byte format. Each source and sink that moves bytes names one.
-    transformer "orders_parquet" format="parquet"
+    codec "orders_parquet" format="parquet"
 
-    // type is the factory lookup key. component names the rows this node
+    // connector is the connector lookup key. component names the rows this node
     // produces, and the processor it feeds must declare that component.
-    source "orders_in" type="FileSource" component="Order" transformer="orders_parquet" {
+    source "orders_in" connector="file" component="Order" codec="orders_parquet" {
         // config is opaque: the connector reads it verbatim.
         config path="/data/in/orders.parquet"
     }
 
     // A wasm32-wasip3 component implementing the SACI world.
-    wasm "enrich" name="Order enrichment" module="pipelines/orders.wasm" {
+    wasm "enrich" name="Order enrichment" path="pipelines/orders.wasm" {
         // Optional integrity check, verified before the component is compiled.
         // A leading "sha3-256:" prefix is accepted.
         // sha3_256="6f1c...c4"
@@ -114,11 +116,11 @@ workflow "orders" name="Orders" {
         config fx_eur="1.08" batch_size="500"
     }
 
-    sink "orders_out" type="FileSink" component="Order" transformer="orders_parquet" {
-        // schema_fields is the output schema, where the format needs one.
+    sink "orders_out" connector="file" component="Order" codec="orders_parquet" {
+        // field lines are the output schema, where the format needs one.
         config path="/data/out/orders.parquet" {
-            schema_fields "id" type="Int64" nullable=#false
-            schema_fields "usd_amount" type="Float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "usd_amount" type="float64" nullable=#false
         }
     }
 
@@ -138,11 +140,37 @@ OK: workflow graph validated (components and schemas agree end to end)
   sinks:    1
 ```
 
+A `schema` node declares the fields once. A source or sink whose `component`
+equals the schema id and that declares no `field` lines of its own reads the
+schema's fields, and a node with its own `field` lines keeps them. Schema ids
+are unique within the workflow, and each schema declares at least one `field`.
+
+```kdl,name=One schema shared by a source and a sink
+workflow "orders" {
+    schema "Order" {
+        field "id" type="int64" nullable=#false
+        field "usd_amount" type="float64" nullable=#false
+    }
+
+    codec "orders_csv" format="csv"
+
+    source "orders_in" connector="file" component="Order" codec="orders_csv" {
+        config path="/data/in/orders.csv"
+    }
+
+    sink "orders_out" connector="file" component="Order" codec="orders_csv" {
+        config path="/data/out/orders.csv"
+    }
+
+    // wasm and link nodes as above
+}
+```
+
 ## 2. Connect them with links
 
 A `link` names two declared node ids. `from` is the upstream node and `to` the
-downstream one. A transformer id is never either of them: a transformer is a
-format that a source or a sink names, and it holds no place in the graph.
+downstream one. A `codec` or `schema` id is never either of them: those nodes declare a
+byte format or a field list that a source or a sink uses, and they hold no place in the graph.
 
 ```kdl,name=Two edges make the graph
 link from="orders_in" to="enrich"
@@ -184,14 +212,14 @@ deliver every component the downstream processor declares
 Every `sink` retries a failed write with exponential backoff before the error
 reaches the runner: 4 attempts, a 100 ms base delay, 2.0x growth, a 30 s cap
 and 0.1 jitter. A `source` takes the same wrapper everywhere except
-`run_mode kind="stream"`, where the stream runner's own re-poll already is the
+`run "stream"`, where the stream runner's own re-poll already is the
 retry loop. EOF from a source is not an error and is not retried.
 
 An optional `retry` child on a `source` or `sink` overrides the policy for that
 node. `max_attempts=1` disables retrying.
 
 ```kdl,name=A source that retries with a longer backoff
-source "orders_in" type="HttpSource" component="Order" transformer="orders_csv" {
+source "orders_in" connector="http" component="Order" codec="orders_csv" {
     retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=30000 jitter=0.1
     config url="https://api.example.com/orders.csv"
 }
@@ -233,14 +261,21 @@ is the runnable example.
 | `name` | string | the id | display name on the dashboard |
 | `dlq` | child block | none | this workflow's dead letter queue; see [Dead letter queue](@/service/operate/dead-letter-queue.md) |
 
-### transformer
+### codec
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| leading argument | string | required | the transformer id a source or sink names |
+| leading argument | string | required | the id a source or sink names as its `codec` |
 | `name` | string | the id | display name on the dashboard |
 | `format` | string | required | `csv`, `ndjson`, `parquet`, `avro` or `arrow-ipc`; see [Formats](@/service/formats/_index.md) |
-| `options` | child block | empty | handed to that format verbatim; the keys are on the format's own page |
+| `config` | child block | empty | handed to that format; the keys are on the format's own page, and a key the format does not read is an error |
+
+### schema
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| leading argument | string | required | the schema id, unique within the workflow |
+| `field` | repeated node | required | one column: the leading argument is its name, with `type`, `nullable`, `precision`, `scale`, `item` and `native_type` |
 
 ### source
 
@@ -248,9 +283,9 @@ is the runnable example.
 |---|---|---|---|
 | leading argument | string | required | the source id |
 | `name` | string | the id | display name on the dashboard |
-| `type` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
+| `connector` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
 | `component` | string | required | the rows this source produces, which its downstream processor must declare |
-| `transformer` | string | none | id of the `transformer` that decodes its bytes; omitted by a connector that carries rows already |
+| `codec` | string | none | id of the `codec` node whose format decodes its bytes; omitted by a connector that carries rows already |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
 | `flow_control` | child block | the top-level policy | admission override for this source; see [Flow control](@/service/operate/flow-control.md) |
 | `config` | child block | empty | read verbatim by the connector; the keys are on the connector's own page |
@@ -261,9 +296,9 @@ is the runnable example.
 |---|---|---|---|
 | leading argument | string | required | the sink id |
 | `name` | string | the id | display name on the dashboard |
-| `type` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
+| `connector` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
 | `component` | string | required | the rows this sink reads, which its upstream processor must declare |
-| `transformer` | string | none | id of the `transformer` that encodes its bytes; omitted by a connector that takes rows directly |
+| `codec` | string | none | id of the `codec` node whose format encodes its bytes; omitted by a connector that takes rows directly |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
 | `config` | child block | empty | read verbatim by the connector; the keys are on the connector's own page |
 
@@ -273,13 +308,12 @@ is the runnable example.
 |---|---|---|---|
 | leading argument | string | required | the processor node id |
 | `name` | string | the id | display name on the dashboard |
-| `module` | string | none | the `.wasm` component file, on a `wasm` node |
-| `library` | string | none | the shared library file, on a `plugin` node |
+| `path` | string | none | the `.wasm` component file on a `wasm` node, or the shared library file on a `plugin` node |
 | `sha3_256` | string | none | expected SHA3-256 hex digest of those bytes, checked before the artifact loads; a `sha3-256:` prefix is accepted |
 | `config` | child block | empty | strings the processor reads back at run time |
 | `window` | child block | none | event-time geometry; see [Windowing](@/service/processors/windowing/_index.md) |
 
-A node with no `module` and no `library` takes a processor supplied from code
+A node with no `path` takes a processor supplied from code
 instead: [Embedding saci-service](@/library/service/_index.md).
 
 ### link
@@ -310,7 +344,9 @@ is the workflow id in the message, and the quoted node ids are yours.
 | `workflow 'orders': declares no source, processor or sink node` | Declare at least one node inside the block. |
 | `workflow 'orders': source id 'bad/id' is invalid; ids must match ^[A-Za-z0-9][A-Za-z0-9_-]*$ and be at most 64 bytes` | Rename the node to letters, digits, `_` and `-`, starting with a letter or digit. |
 | `workflow 'orders': id 'shared' is declared twice, as source and as sink` | Give the two nodes different ids; every kind shares one namespace. |
-| `workflow 'orders': source 'orders_in' names transformer 'orders_csv', which is not declared` | Declare that `transformer` node, or correct the id the source names. |
+| `workflow 'orders': source 'orders_in' names codec 'orders_csv', which is not declared` | Declare that `codec` node, or correct the id the source names. |
+| `workflow 'orders': schema 'Order' is declared twice` | Rename one of the two `schema` nodes. |
+| `workflow 'orders': schema 'Order' declares no field` | Add a `field` line to the schema. |
 | `workflow 'orders': link 'enrich' -> 'enrich' links a node to itself` | Point `to` at a different node. |
 | `workflow 'orders': link names undeclared node 'enrich2'` | Correct the id, or declare the node the link names. |
 | `workflow 'orders': link 'orders_in' -> 'enrich' is declared twice` | Delete the duplicate `link`. |

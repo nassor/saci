@@ -1,15 +1,14 @@
-//! [`RedbSource`]: the entries of one redb table, read through a transformer.
+//! [`RedbSource`]: the entries of one redb table, read through a codec.
 //!
 //! The source lists the table's matching keys once, then walks that list one
-//! entry at a time. Each value is spooled into an unnamed tempfile, one
-//! dedicated OS thread drives the transformer's
-//! [`BatchReader`](crate::transformer::BatchReader) over that file, and
+//! entry at a time. Each value is copied out of the read transaction, one
+//! dedicated OS thread drives the codec's
+//! [`BatchReader`](crate::codec::BatchReader) over that copy, and
 //! [`Source::next_batch`] awaits the bounded channel the thread feeds. EOF is
 //! the key list exhausted; there is no re-scan or tail mode, so this is a
 //! finite source every run mode can drive.
 
 use std::collections::VecDeque;
-use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,9 +18,9 @@ use async_trait::async_trait;
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase, TableDefinition, TableError};
 use tokio::sync::mpsc;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::io::source::Source;
-use crate::transformer::Transformer;
+use crate::io::Source;
 
 use crate::connector::redb::config::RedbSourceConfig;
 
@@ -29,8 +28,8 @@ use crate::connector::redb::config::RedbSourceConfig;
 /// the `file` connector's.
 const CHANNEL_CAPACITY: usize = 4;
 
-/// redb [`Source`]. The transformer decodes; this type owns the database
-/// handle, the key list, the spool file, the reader thread and the channel.
+/// redb [`Source`]. The codec decodes; this type owns the database
+/// handle, the key list, the reader thread and the channel.
 ///
 /// # Example
 ///
@@ -40,7 +39,7 @@ const CHANNEL_CAPACITY: usize = 4;
 ///
 /// use arrow_schema::Schema;
 /// use saci::connector::redb::{RedbSource, RedbSourceConfig};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let config = RedbSourceConfig {
 ///     directory: PathBuf::from("/data/orders"),
@@ -51,12 +50,11 @@ const CHANNEL_CAPACITY: usize = 4;
 ///     check_integrity: false,
 ///     cache_size_bytes: None,
 ///     consume: false,
-///     schema_fields: Vec::new(),
 /// };
 /// let src = RedbSource::new(
 ///     config,
 ///     Arc::new(Schema::empty()),
-///     Arc::new(CsvTransformer::new(true)),
+///     Arc::new(CsvCodec::new()),
 /// )
 /// .unwrap();
 /// ```
@@ -67,7 +65,7 @@ pub struct RedbSource {
     key_suffix: String,
     check_integrity: bool,
     cache_size_bytes: Option<usize>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     declared: Arc<Schema>,
     /// `None` before the first batch opens the file and again at EOF.
     ///
@@ -104,7 +102,7 @@ impl RedbSource {
     pub fn new(
         config: RedbSourceConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         config.validate("RedbSource")?;
         Ok(Self {
@@ -114,7 +112,7 @@ impl RedbSource {
             key_suffix: config.key_suffix,
             check_integrity: config.check_integrity,
             cache_size_bytes: config.cache_size_bytes,
-            transformer,
+            codec,
             declared: schema,
             db: None,
             pending: None,
@@ -169,15 +167,15 @@ impl RedbSource {
         Ok(())
     }
 
-    /// Read one entry's bytes and hand the transformer a spool file over them.
+    /// Read one entry's bytes and hand the codec a reader over them.
     async fn open_entry(
         &self,
         key: String,
-    ) -> Result<Box<dyn crate::transformer::BatchReader>, SaciError> {
+    ) -> Result<Box<dyn crate::codec::BatchReader>, SaciError> {
         let db = Arc::clone(self.db.as_ref().expect("the file was just opened"));
         let path = self.path.clone();
         let table = self.table.clone();
-        let transformer = Arc::clone(&self.transformer);
+        let codec = Arc::clone(&self.codec);
         let declared = Arc::clone(&self.declared);
         tokio::task::spawn_blocking(move || {
             let definition: TableDefinition<&str, &[u8]> = TableDefinition::new(&table);
@@ -204,26 +202,14 @@ impl RedbSource {
                         path.display()
                     ))
                 })?;
-            let bytes = value.value();
-            let size = bytes.len();
-            // A spool file rather than a `Vec`: `Transformer::open_reader`
-            // takes a concrete `std::fs::File`, and the OS reclaims an unnamed
-            // tempfile on close.
-            let mut spool = tempfile::tempfile()
-                .map_err(|e| SaciError::generic(format!("RedbSource: spool file: {e}")))?;
-            spool
-                .write_all(bytes)
-                .map_err(|e| SaciError::generic(format!("RedbSource: spool write: {e}")))?;
-            spool
-                .rewind()
-                .map_err(|e| SaciError::generic(format!("RedbSource: spool rewind: {e}")))?;
+            // The value borrows the read transaction, which ends with this
+            // closure, while the reader outlives it: the codec gets a copy.
+            let bytes = value.value().to_vec();
 
             #[cfg(feature = "tracing")]
-            tracing::info!(key = %key, bytes = size, "RedbSource: entry spooled");
-            #[cfg(not(feature = "tracing"))]
-            let _ = size;
+            tracing::info!(key = %key, bytes = bytes.len(), "RedbSource: entry read");
 
-            transformer.open_reader(spool, Some(declared))
+            codec.open_reader(bytes.into(), Some(declared))
         })
         .await
         .map_err(|e| SaciError::generic(format!("RedbSource: spawn_blocking panic: {e}")))?
@@ -270,7 +256,7 @@ fn check_integrity(path: &std::path::Path, cache: Option<usize>) -> Result<(), S
 /// The keys of `table` that carry both `prefix` and `suffix`, in key order.
 ///
 /// The segment between the two is never parsed, so an entry another writer put
-/// in the same table under a matching name reaches the transformer and fails
+/// in the same table under a matching name reaches the codec and fails
 /// there by name rather than being skipped in silence.
 fn collect_keys(
     db: &ReadOnlyDatabase,
@@ -334,8 +320,8 @@ impl Source for RedbSource {
     /// # Errors
     ///
     /// A key leaves the list only when its entry's batch stream ends cleanly,
-    /// so every other outcome leaves it at the front: a scan error, a read or
-    /// spool error, a reader the entry's bytes refuse, and a decode error
+    /// so every other outcome leaves it at the front: a scan error, a read
+    /// error, a reader the entry's bytes refuse, and a decode error
     /// raised part way through the entry. A caller's retry therefore
     /// re-attempts that same entry rather than advancing past it, which
     /// replays the batches of that entry it had already handed over. That
@@ -441,9 +427,9 @@ impl Source for RedbSource {
             return Ok(());
         }
         // Both handles go before the exclusive write open. The decode thread
-        // holds only its spool file and the sender half, so dropping the
-        // receiver is what ends it; the database `Arc` never left the
-        // `spawn_blocking` that read the entry, so this is its last handle.
+        // holds only the sender half, so dropping the receiver is what ends
+        // it; the database `Arc` never left the `spawn_blocking` that read
+        // the entry, so this is its last handle.
         self.current = None;
         self.db = None;
         let path = self.path.clone();

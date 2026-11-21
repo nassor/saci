@@ -1,6 +1,6 @@
 // Tumbling window aggregation over a keyed source. Requires the `windows` feature.
 
-#![cfg(all(feature = "runtime", feature = "windows"))]
+#![cfg(all(feature = "engine", feature = "windows"))]
 
 use std::sync::Arc;
 
@@ -13,9 +13,8 @@ use saci::component::Component;
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
 use saci::system::{System, SystemMeta};
-use saci::windows::{
-    ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowedSystemBuilder,
-};
+use saci::window::WindowSpec;
+use saci::windows::{WindowFunction, WindowResults, WindowedSystem};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct SalesEvent {
@@ -42,7 +41,7 @@ struct IngestSystem;
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("SalesEvent")
+        SystemMeta::new("ingest").writes_all::<SalesEvent>()
     }
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
         let events = vec![
@@ -102,26 +101,20 @@ impl System for IngestSystem {
 
 #[tokio::test]
 async fn test_window_aggregation_produces_results_for_all_windows() {
-    let windowed = WindowedSystemBuilder::new()
-        .source("SalesEvent", "timestamp_ms")
-        .keyed_by(&["category"])
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "amount",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(5_000)
-        .build()
-        .unwrap();
+    let windowed = WindowedSystem::new_named(
+        "SalesEvent",
+        "timestamp_ms",
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("amount"),
+    )
+    .unwrap()
+    .key_by(["category"])
+    .allowed_lateness_ms(5_000);
 
-    let mut pipeline = Pipeline::builder("window_aggregation")
-        .with::<SalesEvent>()
-        .with_system(IngestSystem)
-        .with_system(windowed)
-        .build();
+    let mut pipeline = Pipeline::new("window_aggregation")
+        .component::<SalesEvent>()
+        .system(IngestSystem)
+        .system(windowed);
 
     pipeline.run().await.unwrap();
 
@@ -136,36 +129,27 @@ async fn test_window_aggregation_produces_results_for_all_windows() {
         "expected at least 3 window groups"
     );
     // Every timestamp sits inside its own window, so nothing is late.
-    assert!(
-        results.side_output.is_empty(),
-        "no events should be dropped"
-    );
+    assert!(results.dropped.is_empty(), "no events should be dropped");
 }
 
 #[tokio::test]
 async fn test_window_aggregation_stage_layout_is_valid() {
-    let windowed = WindowedSystemBuilder::new()
-        .source("SalesEvent", "timestamp_ms")
-        .keyed_by(&["category"])
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "amount",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .build()
-        .unwrap();
+    let windowed = WindowedSystem::new_named(
+        "SalesEvent",
+        "timestamp_ms",
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("amount"),
+    )
+    .unwrap()
+    .key_by(["category"]);
 
-    let mut pipeline = Pipeline::builder("window_stages")
-        .with::<SalesEvent>()
-        .with_system(IngestSystem)
-        .with_system(windowed)
-        .build();
+    let mut pipeline = Pipeline::new("window_stages")
+        .component::<SalesEvent>()
+        .system(IngestSystem)
+        .system(windowed);
 
     pipeline.run().await.unwrap();
 
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan().unwrap();
     assert!(stages.len() >= 2, "expected at least 2 stages");
 }

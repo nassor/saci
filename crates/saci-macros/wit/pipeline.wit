@@ -81,7 +81,7 @@ interface host-io {
     log: func(level: log-level, target: string, message: string);
 
     /// Increment or observe a named metric. The host records it as the
-    /// `saci_processor_metric` histogram, labelled `metric="<name>"`.
+    /// `saci_processor_custom` histogram, labelled `metric="<name>"`.
     /// Value is f64 to cover counters, gauges, and histograms.
     metric: func(name: string, value: f64);
 

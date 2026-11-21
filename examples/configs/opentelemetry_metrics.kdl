@@ -2,9 +2,9 @@
 // metrics over OTLP/HTTP.
 //
 // Run:
-//   cargo run --features server,connector-opentelemetry --bin saci-service -- validate \
+//   cargo run --features server,connector-otlp --bin saci-service -- validate \
 //     --config examples/configs/opentelemetry_metrics.kdl
-//   cargo run --features server,connector-opentelemetry --bin saci-service -- serve \
+//   cargo run --features server,connector-otlp --bin saci-service -- serve \
 //     --config examples/configs/opentelemetry_metrics.kdl
 //
 // The source listens where an OpenTelemetry SDK or collector exports to, and
@@ -12,10 +12,10 @@
 // is a bridge: point an exporter at port 4318 and a collector at 4319 and the
 // rows pass through field for field.
 //
-// Neither node declares a `transformer`: an OTLP request is the wire format,
+// Neither node declares a `codec`: an OTLP request is the wire format,
 // and the connector encodes and decodes it itself. Neither declares
-// `schema_fields` either, so both ends use the connector's canonical schema of
-// ten columns, one row per data point. Declaring `schema_fields` on the source
+// `field` lines either, so both ends use the connector's canonical schema of
+// ten columns, one row per data point. Declaring `field` lines on the source
 // projects each data point onto those columns instead, which is how a pipeline
 // reads only the part of a metric it acts on.
 //
@@ -42,15 +42,15 @@ node id=1 name="saci-opentelemetry" data_dir="${SACI_DATA_DIR:-/tmp/saci-opentel
 
 // The source never reaches EOF: it blocks until the next request arrives. Only
 // the stream runner can drive that, so config validation rejects
-// `type="OpenTelemetryMetricsSource"` in its push mode under any other run
+// `connector="otlp-metrics"` in its push mode under any other run
 // mode. A `mode kind="pull"` source with `stop_at_end` is the one shape that
-// runs under `one_shot`.
-run_mode kind="stream"
+// runs under `once`.
+run "stream"
 
 workflow "metrics" {
     // ---------------------------------------------------------------- source
 
-    source "metrics_in" type="OpenTelemetryMetricsSource" component="Metric" {
+    source "metrics_in" connector="otlp-metrics" component="Metric" {
         config {
             // Listen address. Port 4318 is the standard OTLP/HTTP port, so an
             // exporter needs no configuration of its own to reach this.
@@ -81,13 +81,13 @@ workflow "metrics" {
             // Reading a url instead of listening is the other mode:
             //   mode kind="pull" url="http://127.0.0.1:8888/metrics"
             // A repeating read stays live, so it needs the stream runner; add
-            // `stop_at_end=#true` to read once and finish under `one_shot`.
+            // `stop_at_end=#true` to read once and finish under `once`.
         }
     }
 
     // ------------------------------------------------------------------ sink
 
-    sink "metrics_out" type="OpenTelemetryMetricsSink" component="Metric" {
+    sink "metrics_out" connector="otlp-metrics" component="Metric" {
         config {
             // Endpoint every batch is posted to. A base url gains the standard
             // `/v1/metrics` path, so naming it in full works too.
@@ -118,10 +118,10 @@ workflow "metrics" {
     link from="metrics_in" to="metrics_out"
 }
 
-// HTTP control plane, on an ephemeral port. The OpenTelemetry connector emits
+// HTTP control plane, on an ephemeral port. The `otlp-metrics` connector emits
 // no series of its own: what reaches a dashboard is the service's `saci_*`
 // series, one workflow pass and one sink write at a time.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // One workflow.batch span opens per accepted request, so a live exporter at
 // any real rate needs sampling well below full to keep stdout and the

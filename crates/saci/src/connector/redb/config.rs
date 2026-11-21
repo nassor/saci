@@ -9,7 +9,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::connector::ConfigValue;
 use crate::error::SaciError;
 
 /// The file name used when the config names none.
@@ -88,7 +87,7 @@ pub struct RedbSourceConfig {
     #[serde(default)]
     pub cache_size_bytes: Option<usize>,
     /// Delete the entries this instance yielded at
-    /// [`Source::finish`](crate::io::source::Source::finish). Off by
+    /// [`Source::finish`](crate::io::Source::finish). Off by
     /// default: a source is a reader, and a second run over the same file
     /// reads the same entries.
     ///
@@ -99,10 +98,6 @@ pub struct RedbSourceConfig {
     /// takes the file for the duration of one delete transaction.
     #[serde(default)]
     pub consume: bool,
-    /// Declared Arrow schema. Required: `Source::schema()` is read at load
-    /// time by `validate_workflow_graph`, before the file is opened.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// Configuration for [`RedbSink`](crate::connector::redb::RedbSink).
@@ -146,10 +141,6 @@ pub struct RedbSinkConfig {
     /// after a crash is instant instead of a full-file walk.
     #[serde(default = "default_true")]
     pub quick_repair: bool,
-    /// Declared Arrow schema. Required, whatever the transformer: it is the
-    /// schema the rows are written with.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// Shared validation for the keys both halves declare.

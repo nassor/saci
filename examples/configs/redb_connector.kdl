@@ -1,9 +1,9 @@
 // SACI standalone service configuration writing rows into a redb file.
 //
 // Run:
-//   cargo run --features server,connector-file,connector-redb,transformer-csv --bin saci-service -- validate \
+//   cargo run --features server,connector-file,connector-redb,codec-csv --bin saci-service -- validate \
 //     --config examples/configs/redb_connector.kdl
-//   cargo run --features server,connector-file,connector-redb,transformer-csv --bin saci-service -- serve \
+//   cargo run --features server,connector-file,connector-redb,codec-csv --bin saci-service -- serve \
 //     --config examples/configs/redb_connector.kdl
 //
 // Both features are in the `server` bundle, so `cargo run --features server
@@ -17,18 +17,18 @@
 // service's own state store rather than as a connector.
 //
 // Reading the file back needs a separate run: redb locks the file exclusively
-// while RedbSink holds it, from the build until finish. A config that reads it
-// declares the matching half:
+// while the `redb` sink holds it, from the build until finish. A config that
+// reads it declares the matching half:
 //
-//   source "orders_in" type="RedbSource" component="orders" transformer="csv_fmt" {
+//   source "orders_in" connector="redb" component="orders" codec="csv_fmt" {
 //       config {
 //           directory "${SACI_REDB_DIR:-/tmp/saci-redb-connector}"
 //           file "orders.redb"
 //           key_prefix "orders/"
 //           key_suffix ".csv"
-//           schema_fields "id" type="Int64" nullable=#false
-//           schema_fields "amount" type="Float64" nullable=#true
-//           schema_fields "status" type="Utf8" nullable=#true
+//           field "id" type="int64" nullable=#false
+//           field "amount" type="float64" nullable=#true
+//           field "status" type="utf8" nullable=#true
 //       }
 //   }
 
@@ -36,21 +36,21 @@ mode "standalone"
 
 node id=1 name="saci-redb-connector" data_dir="${SACI_DATA_DIR:-/tmp/saci-redb-connector-node}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "orders" {
-    // One declared transformer serves both ends: FileSource reads csv bytes
-    // and RedbSink stores csv documents.
-    transformer "csv_fmt" format="csv" {
-        options has_headers=#true
+    // One declared codec serves both ends: the `file` source reads csv bytes
+    // and the `redb` sink stores csv documents.
+    codec "csv_fmt" format="csv" {
+        config has_headers=#true
     }
 
-    source "csv_orders" type="FileSource" component="orders" transformer="csv_fmt" {
+    source "csv_orders" connector="file" component="orders" codec="csv_fmt" {
         config {
             path "examples/configs/fixtures/orders.csv"
-            schema_fields "id" type="Int64" nullable=#false
-            schema_fields "amount" type="Float64" nullable=#true
-            schema_fields "status" type="Utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#true
+            field "status" type="utf8" nullable=#true
         }
     }
 
@@ -63,22 +63,22 @@ workflow "orders" {
     // `compact`, `durability "immediate"`, `two_phase_commit` and
     // `quick_repair` are all on by default; the defaults are what this
     // example wants, so it names none of them.
-    sink "orders_out" type="RedbSink" component="orders" transformer="csv_fmt" {
+    sink "orders_out" connector="redb" component="orders" codec="csv_fmt" {
         config {
             directory "${SACI_REDB_DIR:-/tmp/saci-redb-connector}"
             file "orders.redb"
             table "records"
             key_prefix "orders/"
             key_suffix ".csv"
-            schema_fields "id" type="Int64" nullable=#false
-            schema_fields "amount" type="Float64" nullable=#true
-            schema_fields "status" type="Utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#true
+            field "status" type="utf8" nullable=#true
         }
     }
 
     link from="csv_orders" to="orders_out"
 }
 
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 observability log_format="pretty" log_level="info" sample_ratio=1.0 error_sample_ratio=1.0

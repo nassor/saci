@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::SaciResult;
 use crate::error::SaciError;
@@ -84,8 +85,8 @@ impl ModuleResolver for LocalModuleResolver {
 /// ```no_run
 /// # #[cfg(all(feature = "service", feature = "wasm-host"))]
 /// # {
-/// use saci::service::config::WasmSpec;
-/// use saci::service::loader::{LocalModuleResolver, PipelineRuntimeLoader};
+/// use saci::service::WasmSpec;
+/// use saci::service::{LocalModuleResolver, PipelineRuntimeLoader};
 /// use saci::wasm_host::WasmEngine;
 ///
 /// let engine = WasmEngine::new().unwrap();
@@ -94,7 +95,7 @@ impl ModuleResolver for LocalModuleResolver {
 ///
 /// // WasmSpec comes from a declared workflow's `wasm` list (deserialized from config).
 /// # let spec = WasmSpec { id: "my-pipeline".into(), name: None,
-/// #     module: Some("transform.wasm".into()), sha3_256: None,
+/// #     path: Some("transform.wasm".into()), sha3_256: None,
 /// #     config: Default::default(),
 /// #     window: None };
 /// let runtime = loader.load("my-pipeline", &spec).unwrap();
@@ -103,26 +104,26 @@ impl ModuleResolver for LocalModuleResolver {
 pub struct PipelineRuntimeLoader<R = LocalModuleResolver> {
     engine: WasmEngine,
     resolver: R,
-    /// Epoch ticks before a single WASM call is interrupted.
-    epoch_deadline: u64,
+    /// Longest a single WASM call may run before it is interrupted.
+    timeout: Duration,
 }
 
 impl<R: ModuleResolver> PipelineRuntimeLoader<R> {
-    /// Default epoch deadline (100 ticks × 100 ms/tick = 10 s).
-    const DEFAULT_EPOCH_DEADLINE: u64 = 100;
+    /// Default call timeout.
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// Create a loader with the given engine and resolver.
     pub fn new(engine: WasmEngine, resolver: R) -> Self {
         Self {
             engine,
             resolver,
-            epoch_deadline: Self::DEFAULT_EPOCH_DEADLINE,
+            timeout: Self::DEFAULT_TIMEOUT,
         }
     }
 
-    /// Override the epoch deadline (in ticks) for timeout enforcement.
-    pub fn with_epoch_deadline(mut self, ticks: u64) -> Self {
-        self.epoch_deadline = ticks;
+    /// Override how long a single WASM call may run before it is interrupted.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -137,10 +138,10 @@ impl<R: ModuleResolver> PipelineRuntimeLoader<R> {
     /// Returns [`SaciError::SystemExecution`] if the processor's `describe()` call
     /// fails on the first instantiation.
     pub fn load(&self, pipeline_name: &str, spec: &WasmSpec) -> SaciResult<WasmPipelineRuntime> {
-        let module = spec.module.as_deref().ok_or_else(|| {
+        let module = spec.path.as_deref().ok_or_else(|| {
             SaciError::configuration(format!(
-                "wasm node '{pipeline_name}' declares no 'module'; supply a runtime through \
-                 ServiceBuilder::with_runtime instead"
+                "wasm node '{pipeline_name}' declares no 'path'; supply a runtime through \
+                 ServiceBuilder::runtime instead"
             ))
         })?;
         let bytes = self.resolver.resolve(module)?;
@@ -155,7 +156,7 @@ impl<R: ModuleResolver> PipelineRuntimeLoader<R> {
             pipeline_name.to_string(),
             &bytes,
             config,
-            self.epoch_deadline,
+            self.timeout,
         )?;
 
         // describe() eagerly, to populate the component-name cache and surface
@@ -202,7 +203,7 @@ mod tests {
         let spec = WasmSpec {
             id: "test".to_string(),
             name: None,
-            module: Some("missing.wasm".to_string()),
+            path: Some("missing.wasm".to_string()),
             sha3_256: None,
             config: HashMap::new(),
             window: None,
@@ -221,7 +222,7 @@ mod tests {
         let spec = WasmSpec {
             id: "p".to_string(),
             name: None,
-            module: None,
+            path: None,
             sha3_256: None,
             config: HashMap::new(),
             window: None,
@@ -230,7 +231,7 @@ mod tests {
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("'p'"), "unexpected error: {err}");
         assert!(
-            err.to_string().contains("with_runtime"),
+            err.to_string().contains("ServiceBuilder::runtime"),
             "unexpected error: {err}"
         );
     }
@@ -243,7 +244,7 @@ mod tests {
         let spec = WasmSpec {
             id: "test".to_string(),
             name: None,
-            module: Some("bad.wasm".to_string()),
+            path: Some("bad.wasm".to_string()),
             sha3_256: None,
             config: HashMap::new(),
             window: None,

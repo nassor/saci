@@ -77,7 +77,7 @@ pub async fn scalar_text(conn: &turso::Connection, sql: &str) -> String {
 }
 
 /// Run a source to EOF, returning the number of rows seen.
-pub async fn drain(source: &mut dyn saci::io::source::Source) -> usize {
+pub async fn drain(source: &mut dyn saci::io::Source) -> usize {
     let mut total = 0;
     while let Some(batch) = source.next_batch().await.expect("next_batch") {
         total += batch.num_rows();

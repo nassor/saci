@@ -14,7 +14,7 @@ value = "yes"
 label = "Per-message"
 value = "One message per row"
 [[extra.facts]]
-label = "Needs schema_fields"
+label = "Needs field lines"
 value = "Optional reading a stream, required on messages"
 [[extra.facts]]
 label = "In the server build"
@@ -25,8 +25,8 @@ that can work out its own schema.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="nd-t nd-d">
-        <title id="nd-t">An ndjson transformer decoding bytes into rows and encoding rows back into bytes</title>
-        <desc id="nd-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is ndjson. The upper arrow runs left to right and is the decode path, which infers a schema when none is declared. The lower arrow runs right to left and is the encode path, one JSON object per row.</desc>
+        <title id="nd-t">An ndjson codec decoding bytes into rows and encoding rows back into bytes</title>
+        <desc id="nd-d">Bytes on the left and rows on the right, with a codec in the middle whose format is ndjson. The upper arrow runs left to right and is the decode path, which infers a schema when none is declared. The lower arrow runs right to left and is the encode path, one JSON object per row.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>
@@ -41,9 +41,9 @@ that can work out its own schema.
             <rect class="blk blk-ctl" x="258" y="26" width="144" height="80" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="26" width="144" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="38" width="144" height="8"/>
-            <text class="t-lbl" x="270" y="41">transformer</text>
+            <text class="t-lbl" x="270" y="41">codec</text>
             <text class="t-sm t-ctl" x="270" y="62">format="ndjson"</text>
-            <text class="t-sm" x="270" y="80">options</text>
+            <text class="t-sm" x="270" y="80">config</text>
             <text class="t-sm" x="270" y="96">infer_max</text>
             <path class="arw arw-data" d="M254 86 H150" marker-end="url(#nd-a)"/>
             <text class="t-sm t-mid" x="202" y="104">encode</text>
@@ -55,8 +55,8 @@ that can work out its own schema.
             <rect class="hd hd-data" x="514" y="34" width="146" height="20" rx="8"/>
             <rect class="hd hd-data" x="514" y="46" width="146" height="8"/>
             <text class="t-lbl" x="526" y="49">rows</text>
-            <text class="t-sm" x="526" y="70">id    Int64</text>
-            <text class="t-sm" x="526" y="86">price Float64</text>
+            <text class="t-sm" x="526" y="70">id    int64</text>
+            <text class="t-sm" x="526" y="86">price float64</text>
         </g>
         <defs>
             <marker id="nd-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -74,11 +74,11 @@ that can work out its own schema.
 ## 1. Declare it
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>the options child is optional; infer_max is its one key</em></div>
+<div class="code-cap"><span>KDL</span><em>the config child is optional; infer_max is its one key</em></div>
 
 ```kdl
-transformer "orders_json" format="ndjson" {
-    options infer_max=4096
+codec "orders_json" format="ndjson" {
+    config infer_max=4096
 }
 ```
 
@@ -90,14 +90,14 @@ transformer "orders_json" format="ndjson" {
 <div class="code-cap"><span>KDL</span><em>a topic of JSON records, decoded against the declared columns</em></div>
 
 ```kdl
-source "orders_in" type="KafkaSource" component="Order" transformer="orders_json" {
+source "orders_in" connector="kafka" component="Order" codec="orders_json" {
     config {
         brokers "localhost:9092"
         topic "orders-raw"
         group_id "saci-orders"
         stop_at_end #true
 
-        schema_fields "id" type="int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
@@ -109,18 +109,18 @@ Any byte-carrying connector names it the same way: see
 
 ## 3. The schema it infers
 
-`schema_fields` is optional on a stream read. Leave it out and the reader works the schema out from
+`field` lines are optional on a stream read. Leave them out and the reader works the schema out from
 the first `infer_max` records; it still sees every record afterwards:
 
 <div class="code">
 <div class="code-cap"><span>KDL</span><em>a file source with no declared columns at all</em></div>
 
 ```kdl
-transformer "orders_json" format="ndjson" {
-    options infer_max=4096
+codec "orders_json" format="ndjson" {
+    config infer_max=4096
 }
 
-source "orders_in" type="FileSource" component="Order" transformer="orders_json" {
+source "orders_in" connector="file" component="Order" codec="orders_json" {
     config path="/data/orders.ndjson"
 }
 ```
@@ -150,6 +150,7 @@ objects decodes to several rows.
 |---|---|
 | `ndjson: option 'infer_max' must be an integer` | write `infer_max=4096`, not a string |
 | `ndjson: option 'infer_max' must be at least 1` | raise `infer_max` to 1 or more |
+| `ndjson: unknown option '{key}'` | remove the key; `infer_max` is the only one |
 
 ## Next
 

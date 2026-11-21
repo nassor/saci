@@ -169,7 +169,7 @@ fn extra_roots_verifier(
     )))
 }
 
-/// Build the server configuration the push listener terminates TLS with.
+/// Build the server configuration the listening source terminates TLS with.
 ///
 /// ALPN is the caller's: one listener offers `h2` and `http/1.1`, the QUIC
 /// endpoint offers `h3`, and both come from the same certificate.
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn a_server_config_loads_from_the_same_pair() {
         let (_dir, cert, key) = pair();
-        let config = load_server("HttpPushSource", &cert, &key).expect("server config");
+        let config = load_server("HttpListenSource", &cert, &key).expect("server config");
         assert!(config.alpn_protocols.is_empty(), "alpn is the caller's");
     }
 }

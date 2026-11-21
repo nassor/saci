@@ -24,30 +24,35 @@
 // Components and systems have no configuration representation: the processor
 // declares them through `describe()`. See crates/saci/src/service/registry.rs.
 
-// Cluster mode runs the distributed Raft runner.
+// Cluster mode runs the distributed Raft runner. A `cluster` block holds the
+// Raft settings and the member list; `mode "cluster"` requires it and takes no
+// `run` node.
 mode "cluster"
 
-// True on initial bring-up with an empty data_dir, false for a node joining an
-// existing cluster. The quoted form keeps the file valid KDL before
-// substitution; the loader accepts a string that parses as a bool.
-bootstrap "${SACI_BOOTSTRAP:-false}"
+cluster {
+    // True on initial bring-up with an empty data_dir, false for a node joining
+    // an existing cluster. The quoted form keeps the file valid KDL before
+    // substitution; the loader accepts a string that parses as a bool.
+    bootstrap "${SACI_BOOTSTRAP:-false}"
 
-// Invariant: lease_ttl_ms >= 3 * election_timeout_ms.
-// 30000 >= 3 * 1500 = 4500, so this holds.
-lease_ttl_ms 30000          // 30 s
-election_timeout_ms 1500    // 1.5 s
-heartbeat_interval_ms 300   // 300 ms, must be < election_timeout_ms
-snapshot_log_interval 10000 // snapshot every 10 000 committed log entries
+    // Invariant: lease_ttl_ms >= 3 * election_timeout_ms.
+    // 30000 >= 3 * 1500 = 4500, so this holds.
+    lease_ttl_ms 30000          // 30 s
+    election_timeout_ms 1500    // 1.5 s
+    heartbeat_interval_ms 300   // 300 ms, must be < election_timeout_ms
+    snapshot_log_interval 10000 // snapshot every 10 000 committed log entries
+
+    // All cluster members, including this node. IDs must match node id values,
+    // and each addr is the Raft transport address, not the HTTP control-plane
+    // port.
+    peer id=1 addr="10.0.0.1:9000"
+    peer id=2 addr="10.0.0.2:9000"
+    peer id=3 addr="10.0.0.3:9000"
+}
 
 // id is a u64; the quoted form accepts the substituted digits.
 // SACI_NODE_ID is 1, 2, or 3, set per instance via env var.
 node id="${SACI_NODE_ID}" name="saci-node-${SACI_NODE_ID}" data_dir="${SACI_DATA_DIR:-/tmp/saci-cluster}"
-
-// All cluster members, including this node. IDs must match node id values, and
-// each addr is the Raft transport address, not the HTTP control-plane port.
-peer id=1 addr="10.0.0.1:9000"
-peer id=2 addr="10.0.0.2:9000"
-peer id=3 addr="10.0.0.3:9000"
 
 // A cluster-mode workflow declares exactly one processor node and no source,
 // sink or link: the distributed runner ingests through `PartitionSource` and
@@ -55,11 +60,11 @@ peer id=3 addr="10.0.0.3:9000"
 // draining it into a locally-declared sink. Build the module with
 // `cargo build --release --target wasm32-wasip3`.
 workflow "events" {
-    wasm "process_events" module="pipelines/events.wasm"
+    wasm "process_events" path="pipelines/events.wasm"
 }
 
 // HTTP control plane; each node binds its own port.
-http bind="0.0.0.0:8080" disabled=#false
+http bind="0.0.0.0:8080" enabled=#true
 
 // JSON output suits structured log aggregators. Kept at a 50% grade: a
 // production Raft cluster's own span volume (append entries, elections,

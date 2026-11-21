@@ -163,7 +163,7 @@ carrying the window's bounds rather than an index:
 
 ```kdl,name=The block the processor declares
 window kind="sliding" size_ms=60000 slide_ms=15000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-    key_field "symbol"
+    key_fields "symbol"
 }
 ```
 
@@ -178,7 +178,7 @@ timestamp repeat. Every key of the block is listed under
 - Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`.
 - Docker for NATS and PostgreSQL.
 - NATS and PostgreSQL are both opt-in connectors: the commands below pass
-  `--features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host`.
+  `--features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host`.
 
 ## 1. Build the processor
 
@@ -194,7 +194,7 @@ The `window` block is checked at load time, and so is the agreement between the
 processor's `SlidingTotal` schema and the sink's declared fields.
 
 ```bash,name=Validate the sliding config
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate --config examples/windowing/sliding/sliding.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- validate --config examples/windowing/sliding/sliding.kdl --strict
 ```
 
 Runs the same on all three platforms. Expected output ends with `OK: all
@@ -209,7 +209,7 @@ docker compose -f examples/windowing/docker-compose.yml up -d
 Runs the same on all three platforms. One compose file serves all three
 windowing modes. It brings up `nats:2.11-alpine` and `postgres:18-alpine` and
 runs `schema.sql` on first initialisation, creating one table per mode.
-`PostgresSink` never issues `CREATE TABLE`, and PostgreSQL only runs init
+The `postgresql` sink never issues `CREATE TABLE`, and PostgreSQL only runs init
 scripts against an empty data directory, so a volume whose init ran without
 `sliding_window_totals` in `schema.sql` fails with `table ... does not exist`.
 Recreate it with `down -v` then `up -d`, or apply the SQL by hand:
@@ -230,7 +230,7 @@ Get-Content examples/windowing/schema.sql | docker compose -f examples/windowing
 ## 4. Start the service
 
 ```bash,name=Start the service
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/windowing/sliding/sliding.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- serve --config examples/windowing/sliding/sliding.kdl
 ```
 
 Runs the same on all three platforms. This config enables the inspector and

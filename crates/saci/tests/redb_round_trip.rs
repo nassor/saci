@@ -5,8 +5,8 @@
 
 #![cfg(all(
     feature = "connector-redb",
-    feature = "transformer-csv",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-parquet"
 ))]
 
 use std::sync::Arc;
@@ -15,14 +15,14 @@ use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use redb::{Database, ReadableDatabase, TableDefinition};
 
+use saci::codec::Codec;
+use saci::codec::csv::CsvCodec;
+use saci::codec::parquet::ParquetCodec;
 use saci::connector::redb::{
     DurabilityMode, RedbSink, RedbSinkConfig, RedbSource, RedbSourceConfig,
 };
-use saci::io::sink::Sink;
-use saci::io::source::Source;
-use saci::transformer::Transformer;
-use saci::transformer::csv::CsvTransformer;
-use saci::transformer::parquet::ParquetTransformer;
+use saci::io::Sink;
+use saci::io::Source;
 
 const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("records");
 
@@ -58,7 +58,6 @@ fn sink_config(dir: &std::path::Path) -> RedbSinkConfig {
         durability: DurabilityMode::Immediate,
         two_phase_commit: true,
         quick_repair: true,
-        schema_fields: Vec::new(),
     }
 }
 
@@ -72,7 +71,6 @@ fn source_config(dir: &std::path::Path) -> RedbSourceConfig {
         check_integrity: false,
         cache_size_bytes: None,
         consume: false,
-        schema_fields: Vec::new(),
     }
 }
 
@@ -157,7 +155,7 @@ fn keys(dir: &std::path::Path) -> Vec<String> {
 
 /// One csv document holding `ids`, as the sink would have written it.
 ///
-/// `Transformer::open_writer` takes ownership of a `'static` handle, so the
+/// `Codec::open_writer` takes ownership of a `'static` handle, so the
 /// bytes live behind an `Arc` this function keeps a second handle on.
 fn csv_document(ids: &[i64]) -> Vec<u8> {
     #[derive(Clone)]
@@ -175,8 +173,8 @@ fn csv_document(ids: &[i64]) -> Vec<u8> {
     }
 
     let buffer = SharedBuf(Arc::new(std::sync::Mutex::new(Vec::new())));
-    let transformer = CsvTransformer::new(true);
-    let mut writer = transformer
+    let codec = CsvCodec::new();
+    let mut writer = codec
         .open_writer(Box::new(buffer.clone()), schema())
         .expect("open csv writer");
     writer.write_batch(&batch(ids)).expect("write batch");
@@ -187,10 +185,10 @@ fn csv_document(ids: &[i64]) -> Vec<u8> {
 #[tokio::test]
 async fn sink_then_source_round_trip_through_parquet() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut sink = RedbSink::open(
+    let mut sink = RedbSink::new(
         sink_config(dir.path()),
         schema(),
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
     )
     .expect("open sink");
     for ids in [vec![1i64, 2], vec![3], vec![4, 5, 6]] {
@@ -201,7 +199,7 @@ async fn sink_then_source_round_trip_through_parquet() {
     let mut source = RedbSource::new(
         source_config(dir.path()),
         schema(),
-        Arc::new(ParquetTransformer::new()),
+        Arc::new(ParquetCodec::new()),
     )
     .expect("open source");
     assert_eq!(drain(&mut source).await, vec![1, 2, 3, 4, 5, 6]);
@@ -214,8 +212,7 @@ async fn durability_none_still_leaves_the_entries_in_the_file() {
         durability: DurabilityMode::None,
         ..sink_config(dir.path())
     };
-    let mut sink =
-        RedbSink::open(config, schema(), Arc::new(CsvTransformer::new(true))).expect("open sink");
+    let mut sink = RedbSink::new(config, schema(), Arc::new(CsvCodec::new())).expect("open sink");
     sink.write_batch(&batch(&[1, 2]))
         .await
         .expect("first batch");
@@ -226,7 +223,7 @@ async fn durability_none_still_leaves_the_entries_in_the_file() {
     let mut source = RedbSource::new(
         source_config(dir.path()),
         schema(),
-        Arc::new(CsvTransformer::new(true)),
+        Arc::new(CsvCodec::new()),
     )
     .expect("open source");
     assert_eq!(drain(&mut source).await, vec![1, 2, 3]);
@@ -241,19 +238,15 @@ async fn keys_resume_from_the_file_across_reopen() {
         ..sink_config(dir.path())
     };
 
-    let mut sink = RedbSink::open(
-        config.clone(),
-        schema(),
-        Arc::new(ParquetTransformer::new()),
-    )
-    .expect("open sink");
+    let mut sink =
+        RedbSink::new(config.clone(), schema(), Arc::new(ParquetCodec::new())).expect("open sink");
     sink.write_batch(&batch(&[1])).await.expect("first batch");
     sink.write_batch(&batch(&[2])).await.expect("second batch");
     sink.finish().await.expect("finish");
 
     // The second open proves `finish` released redb's exclusive file lock.
     let mut sink =
-        RedbSink::open(config, schema(), Arc::new(ParquetTransformer::new())).expect("reopen sink");
+        RedbSink::new(config, schema(), Arc::new(ParquetCodec::new())).expect("reopen sink");
     sink.write_batch(&batch(&[3])).await.expect("third batch");
     sink.finish().await.expect("finish again");
 
@@ -285,8 +278,7 @@ async fn a_foreign_key_sorting_above_the_prefix_does_not_reset_the_sequence() {
         key_suffix: ".csv".to_string(),
         ..sink_config(dir.path())
     };
-    let mut sink =
-        RedbSink::open(config, schema(), Arc::new(CsvTransformer::new(true))).expect("open sink");
+    let mut sink = RedbSink::new(config, schema(), Arc::new(CsvCodec::new())).expect("open sink");
     sink.write_batch(&batch(&[2])).await.expect("write batch");
     sink.finish().await.expect("finish");
 
@@ -313,7 +305,7 @@ async fn two_sources_read_one_file_at_the_same_time() {
     let mut first = RedbSource::new(
         source_config(dir.path()),
         schema(),
-        Arc::new(CsvTransformer::new(true)),
+        Arc::new(CsvCodec::new()),
     )
     .expect("build first source");
     let held = first
@@ -326,7 +318,7 @@ async fn two_sources_read_one_file_at_the_same_time() {
     let mut second = RedbSource::new(
         source_config(dir.path()),
         schema(),
-        Arc::new(CsvTransformer::new(true)),
+        Arc::new(CsvCodec::new()),
     )
     .expect("build second source");
     assert_eq!(drain(&mut second).await, vec![1, 2]);
@@ -343,7 +335,7 @@ async fn an_unclean_file_is_refused_by_name_and_check_integrity_recovers_it() {
     let mut source = RedbSource::new(
         source_config(dir.path()),
         schema(),
-        Arc::new(CsvTransformer::new(true)),
+        Arc::new(CsvCodec::new()),
     )
     .expect("build source");
     let Err(err) = source.next_batch().await else {
@@ -362,8 +354,8 @@ async fn an_unclean_file_is_refused_by_name_and_check_integrity_recovers_it() {
         check_integrity: true,
         ..source_config(dir.path())
     };
-    let mut source = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("build source");
+    let mut source =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("build source");
     assert_eq!(drain(&mut source).await, vec![1, 2]);
 }
 
@@ -384,8 +376,8 @@ async fn source_reads_only_entries_matching_prefix_and_suffix() {
         key_suffix: ".csv".to_string(),
         ..source_config(dir.path())
     };
-    let mut source = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut source =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
     assert_eq!(drain(&mut source).await, vec![1, 2]);
 }
 
@@ -395,7 +387,7 @@ async fn source_reports_a_missing_file() {
     let mut source = RedbSource::new(
         source_config(dir.path()),
         schema(),
-        Arc::new(CsvTransformer::new(true)),
+        Arc::new(CsvCodec::new()),
     )
     .expect("build source");
     let Err(err) = source.next_batch().await else {
@@ -411,12 +403,8 @@ async fn source_reports_a_missing_file() {
 #[tokio::test]
 async fn write_after_finish_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut sink = RedbSink::open(
-        sink_config(dir.path()),
-        schema(),
-        Arc::new(CsvTransformer::new(true)),
-    )
-    .expect("open sink");
+    let mut sink = RedbSink::new(sink_config(dir.path()), schema(), Arc::new(CsvCodec::new()))
+        .expect("open sink");
     sink.finish().await.expect("finish");
     let Err(err) = sink.write_batch(&batch(&[1])).await else {
         panic!("a write after finish must fail");
@@ -443,8 +431,8 @@ async fn consume_deletes_every_entry_a_full_drain_yielded() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut source = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut source =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
     assert_eq!(drain(&mut source).await, vec![1, 2, 3]);
     source.finish().await.expect("finish");
     assert!(keys(dir.path()).is_empty(), "finish must delete both keys");
@@ -453,8 +441,8 @@ async fn consume_deletes_every_entry_a_full_drain_yielded() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut second = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut second =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
     assert!(
         drain(&mut second).await.is_empty(),
         "a consumed file has nothing left to yield"
@@ -481,8 +469,8 @@ async fn consume_leaves_an_entry_the_drain_never_finished() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut source = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut source =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
 
     // The first call yields the first entry's only batch; the second ends
     // that entry's stream, which is what records its key, and opens the next
@@ -513,8 +501,8 @@ async fn a_consuming_source_dropped_without_finish_deletes_nothing() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut source = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut source =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
     assert_eq!(drain(&mut source).await, vec![1, 2, 3]);
     drop(source);
 
@@ -522,8 +510,8 @@ async fn a_consuming_source_dropped_without_finish_deletes_nothing() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut second = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut second =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
     assert_eq!(
         drain(&mut second).await,
         vec![1, 2, 3],
@@ -546,8 +534,8 @@ async fn a_second_finish_after_a_successful_one_is_a_no_op() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut source = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut source =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
     assert_eq!(drain(&mut source).await, vec![1, 2, 3]);
     source.finish().await.expect("first finish");
     assert!(
@@ -570,7 +558,7 @@ async fn a_second_finish_after_a_successful_one_is_a_no_op() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut reopened = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
+    let mut reopened = RedbSource::new(config, schema(), Arc::new(CsvCodec::new()))
         .expect("the file still opens after the extra finish");
     assert!(drain(&mut reopened).await.is_empty());
 }
@@ -590,8 +578,8 @@ async fn finish_before_any_next_batch_deletes_nothing() {
         consume: true,
         ..source_config(dir.path())
     };
-    let mut source = RedbSource::new(config, schema(), Arc::new(CsvTransformer::new(true)))
-        .expect("open source");
+    let mut source =
+        RedbSource::new(config, schema(), Arc::new(CsvCodec::new())).expect("open source");
     // No `next_batch` call at all: nothing was handed over whole, so there
     // is nothing for `finish` to record.
     source
@@ -624,7 +612,7 @@ async fn consume_false_leaves_every_entry_after_finish() {
     let mut source = RedbSource::new(
         source_config(dir.path()),
         schema(),
-        Arc::new(CsvTransformer::new(true)),
+        Arc::new(CsvCodec::new()),
     )
     .expect("open source");
     assert_eq!(drain(&mut source).await, vec![1, 2, 3]);

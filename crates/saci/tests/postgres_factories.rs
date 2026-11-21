@@ -1,25 +1,19 @@
-//! The config to factory path for `PostgresSource` and `PostgresSink`.
+//! The config to connector path for `PostgresSource` and `PostgresSink`.
 //!
-//! No database: both factories are synchronous and open no connection, so this
+//! No database: both roles are synchronous and open no connection, so this
 //! exercises exactly what `saci-service validate` does — env-var substitution,
 //! parsing, cross-field validation, and schema construction.
 
 #![cfg(all(feature = "connector-postgresql", feature = "service"))]
 
-use std::path::PathBuf;
-
 use arrow_schema::{DataType, TimeUnit};
 use saci::pipeline::Pipeline;
-use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
+use saci::service::ServiceConfig;
+use saci::service::{BuiltNodeKind, ServiceBuilder};
 
-/// Write `body` to a temp file and load it as a service config.
+/// Parse `body` as a service config.
 fn load(body: &str) -> Result<ServiceConfig, saci::error::SaciError> {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path: PathBuf = dir.path().join("service.kdl");
-    std::fs::write(&path, body).expect("write config");
-    ServiceConfig::load(&path)
+    ServiceConfig::from_kdl(body)
 }
 
 fn config_body(data_dir: &str) -> String {
@@ -29,10 +23,10 @@ mode "standalone"
 
 node id=1 name="saci-postgres-test" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "postgres-factories-test" {{
-    source "pg_orders" type="PostgresSource" component="OrderChange" {{
+    source "pg_orders" connector="postgresql" component="OrderChange" {{
         config {{
             name "pg_orders"
             batch_rows 256
@@ -44,16 +38,16 @@ workflow "postgres-factories-test" {{
 
             mode kind="cdc_logical" slot="saci_test_slot" publication="saci_test_pub" table="public.orders"
 
-            schema_fields "__op" type="utf8" nullable=#false
-            schema_fields "__commit_ts" type="timestamp_micros_utc"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "amount" type="decimal128" precision=18 scale=4
+            field "__op" type="utf8" nullable=#false
+            field "__commit_ts" type="timestamp_micros_utc"
+            field "id" type="int64" nullable=#false
+            field "amount" type="decimal128" precision=18 scale=4
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "pg_enriched" type="PostgresSink" component="EnrichedOrder" {{
+    sink "pg_enriched" connector="postgresql" component="EnrichedOrder" {{
         config {{
             name "pg_enriched"
             table "public.enriched_orders"
@@ -65,8 +59,8 @@ workflow "postgres-factories-test" {{
                 sslmode "disable"
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="decimal128" precision=12 scale=2
+            field "id" type="int64" nullable=#false
+            field "total" type="decimal128" precision=12 scale=2
         }}
     }}
 
@@ -74,7 +68,7 @@ workflow "postgres-factories-test" {{
     link from="transform" to="pg_enriched"
 }}
 
-http disabled=#true
+http enabled=#false
 "#
     )
 }
@@ -99,9 +93,9 @@ fn a_declared_source_and_sink_are_built_with_their_declared_schemas() {
     let config = load(&config_body(&data_dir)).expect("config loads");
 
     // `impl PipelineRuntime for Pipeline` means no wasm fixture is needed.
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(Pipeline::new("test")))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", Pipeline::new("test"))
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
@@ -163,10 +157,10 @@ fn a_misspelled_key_fails_the_build_as_a_configuration_error() {
     let body = config_body(&data_dir).replace("batch_rows 256", "batch_row 256");
     let config = load(&body).expect("config still parses: the typo is inside the config node");
 
-    // `BuiltService` is not `Debug`, so the rejection is destructured.
-    let Err(err) = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(Pipeline::new("test")))
-        .build_all(&config)
+    // `BuiltWorkflow` is not `Debug`, so the rejection is destructured.
+    let Err(err) = ServiceBuilder::new()
+        .runtime("transform", Pipeline::new("test"))
+        .build(&config)
     else {
         panic!("the typo must fail the build");
     };
@@ -186,9 +180,9 @@ fn a_cross_field_violation_fails_the_build() {
     );
     let config = load(&body).expect("config loads");
 
-    let Err(err) = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(Pipeline::new("test")))
-        .build_all(&config)
+    let Err(err) = ServiceBuilder::new()
+        .runtime("transform", Pipeline::new("test"))
+        .build(&config)
     else {
         panic!("the mode/notify combination must be rejected");
     };
@@ -197,18 +191,18 @@ fn a_cross_field_violation_fails_the_build() {
 }
 
 /// The shipped `examples/configs/postgresql.kdl` must parse and its two IO
-/// tables must be accepted by the factories.
+/// tables must be accepted by the connector.
 ///
 /// Gated on `wasm` because the example declares a `wasm` node, which the
-/// config parser only knows about with that feature on. The factories are
-/// driven directly rather than through `ServiceBuilder::build_all`, which would
+/// config parser only knows about with that feature on. The connector is
+/// driven directly rather than through `ServiceBuilder::build`, which would
 /// also try to load the module the example points at.
 #[cfg(feature = "wasm-host")]
 #[test]
 fn the_shipped_example_config_loads_and_its_io_tables_are_accepted() {
+    use saci::connector::postgresql::PostgresConnector;
+    use saci::service::Connector;
     use saci::service::ConnectorContext;
-    use saci::service::factories::{PostgresSinkFactory, PostgresSourceFactory};
-    use saci::service::registry::{SinkFactory, SourceFactory};
 
     // SAFETY: single-threaded test setup.
     unsafe {
@@ -218,17 +212,17 @@ fn the_shipped_example_config_loads_and_its_io_tables_are_accepted() {
         .expect("the shipped example must load");
     assert_eq!(config.workflows[0].sources.len(), 1);
     assert_eq!(config.workflows[0].sinks.len(), 1);
-    assert_eq!(config.workflows[0].sources[0].type_name, "PostgresSource");
-    assert_eq!(config.workflows[0].sinks[0].type_name, "PostgresSink");
+    assert_eq!(config.workflows[0].sources[0].connector, "postgresql");
+    assert_eq!(config.workflows[0].sinks[0].connector, "postgresql");
 
     // PostgreSQL declares its own schema, so it reads no `format` key and no
-    // bound transformer is needed.
+    // bound codec is needed.
     let ctx = ConnectorContext::new(None);
-    let source = PostgresSourceFactory
-        .build(&config.workflows[0].sources[0].config, &ctx)
+    let source = PostgresConnector
+        .source(&config.workflows[0].sources[0].config, &ctx)
         .expect("the example source table must be accepted");
-    let sink = PostgresSinkFactory
-        .build(&config.workflows[0].sinks[0].config, &ctx)
+    let sink = PostgresConnector
+        .sink(&config.workflows[0].sinks[0].config, &ctx)
         .expect("the example sink table must be accepted");
     // Three reserved cdc_logical columns plus the example's five declared
     // ones, against the sink's five.

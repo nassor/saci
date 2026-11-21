@@ -5,12 +5,12 @@
 //   export SACI_S3_ENDPOINT='http://127.0.0.1:9000'
 //   export SACI_S3_ACCESS_KEY='rustfsadmin'
 //   export SACI_S3_SECRET_KEY='rustfsadmin'
-//   cargo run --features server,connector-s3,transformer-csv,wasm-host --bin saci-service -- validate \
+//   cargo run --features server,connector-s3,codec-csv,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/s3.kdl
-//   cargo run --features server,connector-s3,transformer-csv,wasm-host --bin saci-service -- serve \
+//   cargo run --features server,connector-s3,codec-csv,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/s3.kdl
 //
-// Both ends speak the same csv format through one declared transformer. The
+// Both ends speak the same csv format through one declared codec. The
 // source lists `incoming/orders` once and drains every object in key order;
 // the sink accumulates rows in memory and uploads them as one timestamped
 // object when a flush threshold fires (here: every 50 000 rows, 128 MiB of
@@ -28,27 +28,27 @@ mode "standalone"
 node id=1 name="saci-s3" data_dir="${SACI_DATA_DIR:-/tmp/saci-s3}"
 
 // One pass through the workflow: the source reaches EOF when its listing is
-// exhausted, so the one_shot runner is the natural fit. A stream-mode run
-// would re-list nothing and simply end, so prefer one_shot. one_shot builds
+// exhausted, so `run "once"` is the natural fit. A stream-mode run
+// would re-list nothing and simply end, so prefer `once`. `once` builds
 // no flow-control controller for any source, so a `flow_control` block here
 // would be accepted but inert; kafka.kdl and nats.kdl (interval mode) or
 // redb.kdl (stream mode) are where that block does something.
-run_mode kind="one_shot"
+run "once"
 
 // One workflow declares the whole DAG: the byte format each end speaks, the
 // source, the processor, the sink, and the explicit links between them.
 workflow "orders" {
-    // The transformer that decodes/encodes each object. "csv" is one row per
-    // line, decoded against schema_fields below; "ndjson" and "parquet" work
-    // the same way (parquet carries its own schema, so a source over parquet
-    // should set schema_from "object" and may omit schema_fields).
-    transformer "orders_csv" name="Orders CSV" format="csv" {
-        options has_headers=#false
+    // The codec that decodes/encodes each object. "csv" is one row per
+    // line, decoded against the `field` lines below; "ndjson" and "parquet"
+    // work the same way (parquet carries its own schema, so a source over
+    // parquet should set schema_from "payload" and may omit `field` lines).
+    codec "orders_csv" name="Orders CSV" format="csv" {
+        config has_headers=#false
     }
 
     // ---------------------------------------------------------------- source
 
-    source "orders_in" type="S3Source" component="Order" transformer="orders_csv" {
+    source "orders_in" connector="s3" component="Order" codec="orders_csv" {
         config {
             // The path prefix listed. This is a byte prefix handed to the
             // service's list API: a trailing slash keeps it inside one
@@ -69,18 +69,18 @@ workflow "orders" {
             // The twelve-field Order schema shared with `examples/wasm/settle/`.
             // The schema must match the processor's declared component field for
             // field, in order.
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "currency" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
-            schema_fields "valid" type="boolean" nullable=#false
-            schema_fields "usd_amount" type="float64" nullable=#false
-            schema_fields "usd_amount_display" type="utf8" nullable=#false
-            schema_fields "risk_score" type="float64" nullable=#false
-            schema_fields "flagged" type="boolean" nullable=#false
-            schema_fields "fee" type="float64" nullable=#false
-            schema_fields "review_tier" type="int64" nullable=#false
-            schema_fields "settlement" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "currency" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
+            field "valid" type="boolean" nullable=#false
+            field "usd_amount" type="float64" nullable=#false
+            field "usd_amount_display" type="utf8" nullable=#false
+            field "risk_score" type="float64" nullable=#false
+            field "flagged" type="boolean" nullable=#false
+            field "fee" type="float64" nullable=#false
+            field "review_tier" type="int64" nullable=#false
+            field "settlement" type="utf8" nullable=#false
         }
     }
 
@@ -89,11 +89,11 @@ workflow "orders" {
     // The processor's `describe()` supplies the component list, so `component`
     // on the source and sink above and below must name components it declares.
 
-    wasm "process_orders" module="pipelines/orders.wasm"
+    wasm "process_orders" path="pipelines/orders.wasm"
 
     // ------------------------------------------------------------------ sink
 
-    sink "orders_out" type="S3Sink" component="Order" transformer="orders_csv" {
+    sink "orders_out" connector="s3" component="Order" codec="orders_csv" {
         config {
             prefix "processed/orders"
             // Appended to the generated key. Nothing is inferred from the
@@ -112,18 +112,18 @@ workflow "orders" {
                 allow_http #true
             }
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "currency" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
-            schema_fields "valid" type="boolean" nullable=#false
-            schema_fields "usd_amount" type="float64" nullable=#false
-            schema_fields "usd_amount_display" type="utf8" nullable=#false
-            schema_fields "risk_score" type="float64" nullable=#false
-            schema_fields "flagged" type="boolean" nullable=#false
-            schema_fields "fee" type="float64" nullable=#false
-            schema_fields "review_tier" type="int64" nullable=#false
-            schema_fields "settlement" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "currency" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
+            field "valid" type="boolean" nullable=#false
+            field "usd_amount" type="float64" nullable=#false
+            field "usd_amount_display" type="utf8" nullable=#false
+            field "risk_score" type="float64" nullable=#false
+            field "flagged" type="boolean" nullable=#false
+            field "fee" type="float64" nullable=#false
+            field "review_tier" type="int64" nullable=#false
+            field "settlement" type="utf8" nullable=#false
         }
     }
 
@@ -132,7 +132,7 @@ workflow "orders" {
 }
 
 // HTTP control plane. /metrics carries the service's own counters.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a 75% grade:
 // one bounded pass through a listing, then the process exits, so there is

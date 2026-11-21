@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 
 /// In-memory push sink backed by a tokio mpsc channel.
 ///
@@ -20,7 +20,7 @@ use crate::io::sink::Sink;
 /// use std::sync::Arc;
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::channel::ChannelSink;
-/// use saci::io::sink::Sink;
+/// use saci::io::Sink;
 ///
 /// # #[tokio::main]
 /// # async fn main() {
@@ -56,13 +56,13 @@ impl ChannelSink {
     /// `buffer` is the mpsc channel capacity.
     pub fn new(schema: Arc<Schema>, buffer: usize) -> (Self, mpsc::Receiver<RecordBatch>) {
         let (tx, rx) = mpsc::channel(buffer);
-        (Self::from_sender(schema, buffer, tx), rx)
+        (Self::with_sender(schema, buffer, tx), rx)
     }
 
     /// Wrap an existing sender half, paired with a receiver resolved
     /// elsewhere — the [`ChannelRegistry`](crate::connector::channel::registry::ChannelRegistry)
     /// bridge's sink-side constructor.
-    pub fn from_sender(schema: Arc<Schema>, buffer: usize, tx: mpsc::Sender<RecordBatch>) -> Self {
+    pub fn with_sender(schema: Arc<Schema>, buffer: usize, tx: mpsc::Sender<RecordBatch>) -> Self {
         Self {
             tx,
             schema,

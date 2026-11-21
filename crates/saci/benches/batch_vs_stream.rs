@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use criterion::{Criterion, criterion_group, criterion_main};
 use saci::SaciError;
 use saci::dataset::Dataset;
-use saci::io::source::Source;
+use saci::io::Source;
 use saci::pipeline::Pipeline;
 use saci::system::{
     ParallelSystem, STAGE_INLINE_THRESHOLD, System, SystemMeta, WriteSet, system_fn,
@@ -137,17 +137,15 @@ struct RevenueStage;
 impl ParallelSystem for RevenueStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("revenue")
-            .read(COMP, "shipdate")
-            .read(COMP, "quantity")
-            .read(COMP, "price")
-            .read(COMP, "discount")
-            .write(COMP, "revenue")
+            .reads_named(COMP, "shipdate")
+            .reads_named(COMP, "quantity")
+            .reads_named(COMP, "price")
+            .reads_named(COMP, "discount")
+            .writes_named(COMP, "revenue")
     }
 
     async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = data
-            .batch_for(COMP)
-            .ok_or_else(|| SaciError::generic("Tick component not found"))?;
+        let batch = data.batch_named(COMP)?;
         let sd = batch
             .column_by_name("shipdate")
             .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
@@ -166,7 +164,7 @@ impl ParallelSystem for RevenueStage {
             })
             .collect();
 
-        Ok(WriteSet::new().put(COMP, "revenue", Arc::new(out)))
+        Ok(WriteSet::new().put_named(COMP, "revenue", Arc::new(out)))
     }
 }
 
@@ -179,15 +177,13 @@ struct TaxStage;
 impl ParallelSystem for TaxStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("tax")
-            .read(COMP, "price")
-            .read(COMP, "discount")
-            .write(COMP, "taxed")
+            .reads_named(COMP, "price")
+            .reads_named(COMP, "discount")
+            .writes_named(COMP, "taxed")
     }
 
     async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = data
-            .batch_for(COMP)
-            .ok_or_else(|| SaciError::generic("Tick component not found"))?;
+        let batch = data.batch_named(COMP)?;
         let price = f64_col(batch, "price")?;
         let disc = f64_col(batch, "discount")?;
 
@@ -195,7 +191,7 @@ impl ParallelSystem for TaxStage {
             .map(|i| price.value(i) * (1.0 - disc.value(i)))
             .collect();
 
-        Ok(WriteSet::new().put(COMP, "taxed", Arc::new(out)))
+        Ok(WriteSet::new().put_named(COMP, "taxed", Arc::new(out)))
     }
 }
 
@@ -208,13 +204,11 @@ struct SumStage {
 #[async_trait]
 impl System for SumStage {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("sum").read(COMP, "revenue")
+        SystemMeta::new("sum").reads_named(COMP, "revenue")
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-        let batch = data
-            .batch_for(COMP)
-            .ok_or_else(|| SaciError::generic("Tick component not found"))?;
+        let batch = data.batch_named(COMP)?;
         let rev = f64_col(batch, "revenue")?;
         let mut sum = 0.0f64;
         for i in 0..rev.len() {
@@ -286,15 +280,15 @@ fn slice_into_items(parent: &RecordBatch, item_size: usize) -> Arc<Vec<RecordBat
 /// Batch mode: one invocation over the whole batch, via `Pipeline::run`.
 fn run_batch_mode(rt: &tokio::runtime::Runtime, parent: &RecordBatch) -> f64 {
     let total = Arc::new(Mutex::new(0.0f64));
-    let mut p = Pipeline::new("batch");
-    p.data.register_raw_component(COMP, tick_schema());
-    p.data
+    let mut p = Pipeline::new("batch")
+        .schema(COMP, tick_schema())
+        .parallel_system(RevenueStage)
+        .system(SumStage {
+            total: Arc::clone(&total),
+        });
+    p.data_mut()
         .append_record_batch(COMP, parent.slice(0, parent.num_rows()))
         .expect("append");
-    p.add_parallel_system(RevenueStage);
-    p.add_system(SumStage {
-        total: Arc::clone(&total),
-    });
     rt.block_on(p.run()).expect("batch run");
     *total.lock().unwrap()
 }
@@ -306,16 +300,17 @@ fn run_stream_mode(
     parallel_stage: bool,
 ) -> f64 {
     let total = Arc::new(Mutex::new(0.0f64));
-    let mut p = Pipeline::new("stream");
-    p.data.register_raw_component(COMP, tick_schema());
-    p.add_parallel_system(RevenueStage);
+    let mut p = Pipeline::new("stream")
+        .schema(COMP, tick_schema())
+        .parallel_system(RevenueStage);
     if parallel_stage {
-        p.add_parallel_system(TaxStage);
+        p = p.parallel_system(TaxStage);
     }
-    p.add_system(SumStage {
-        total: Arc::clone(&total),
-    });
-    p.add_source(COMP, ReplaySource::new(items, tick_schema()));
+    let mut p = p
+        .system(SumStage {
+            total: Arc::clone(&total),
+        })
+        .source(COMP, ReplaySource::new(items, tick_schema()));
     rt.block_on(p.run_stream()).expect("stream run");
     *total.lock().unwrap()
 }
@@ -324,16 +319,16 @@ fn run_stream_mode(
 /// stage. Used to probe the inline/dispatch boundary.
 fn run_two_parallel_stage(rt: &tokio::runtime::Runtime, parent: &RecordBatch) -> f64 {
     let total = Arc::new(Mutex::new(0.0f64));
-    let mut p = Pipeline::new("two_parallel");
-    p.data.register_raw_component(COMP, tick_schema());
-    p.data
+    let mut p = Pipeline::new("two_parallel")
+        .schema(COMP, tick_schema())
+        .parallel_system(RevenueStage)
+        .parallel_system(TaxStage)
+        .system(SumStage {
+            total: Arc::clone(&total),
+        });
+    p.data_mut()
         .append_record_batch(COMP, parent.clone())
         .expect("append");
-    p.add_parallel_system(RevenueStage);
-    p.add_parallel_system(TaxStage);
-    p.add_system(SumStage {
-        total: Arc::clone(&total),
-    });
     rt.block_on(p.run()).expect("two-parallel run");
     *total.lock().unwrap()
 }
@@ -480,16 +475,16 @@ fn bench_batch_vs_stream(c: &mut Criterion) {
     let one_row_items = slice_into_items(&parent.slice(0, 10_000), 1);
     group.bench_function("noop_system_10k_items", |b| {
         b.iter(|| {
-            let mut p = Pipeline::new("floor");
-            p.data.register_raw_component(COMP, tick_schema());
-            p.add_system(system_fn(
-                SystemMeta::new("noop").read(COMP, "price"),
-                |_| Ok(()),
-            ));
-            p.add_source(
-                COMP,
-                ReplaySource::new(Arc::clone(&one_row_items), tick_schema()),
-            );
+            let mut p = Pipeline::new("floor")
+                .schema(COMP, tick_schema())
+                .system(system_fn(
+                    SystemMeta::new("noop").reads_named(COMP, "price"),
+                    |_| Ok(()),
+                ))
+                .source(
+                    COMP,
+                    ReplaySource::new(Arc::clone(&one_row_items), tick_schema()),
+                );
             let stats = rt.block_on(p.run_stream()).expect("floor run");
             std::hint::black_box(stats.systems_run)
         })

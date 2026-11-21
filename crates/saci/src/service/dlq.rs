@@ -1,7 +1,7 @@
 //! The dead letter queue: what happens to a batch a sink refused.
 //!
 //! Without a `dlq` block a refused batch is logged, counted in
-//! [`StandaloneStats::iteration_errors`](super::standalone::StandaloneStats)
+//! [`WorkflowStats::iteration_errors`](super::standalone::WorkflowStats)
 //! and dropped. With one, the runner hands it to [`DeadLetterQueue`]'s
 //! `record`, which stores it as one row of a fixed envelope schema in a store
 //! the workflow named, and its `replay` reads those rows back and
@@ -17,7 +17,7 @@
 //!
 //! One letter is one row of [`envelope_schema`]. The failed batch travels in
 //! the `payload` column as one Arrow IPC stream, encoded by
-//! [`ArrowIpcTransformer`]: IPC is already the host to processor wire format,
+//! [`ArrowIpcCodec`]: IPC is already the host to processor wire format,
 //! reproduces the batch and its schema metadata exactly, and needs no encode
 //! pass over the values. The other seven columns are what
 //! the dashboard groups and filters on, so a reader never decodes a payload
@@ -48,6 +48,7 @@
 //! write-back loses the letters that failed again. A broker loses the same
 //! window the same way. The window is one replay wide in both cases.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -55,32 +56,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, BinaryArray, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::Schema;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::connector::{ConfigMap, ConfigValue, parse_schema_fields};
+use crate::codec::Codec;
+use crate::codec::arrow_ipc::ArrowIpcCodec;
+use crate::connector::{ConfigMap, ConfigValue, parse_fields, schema_of};
 use crate::error::{SaciError, SaciResult};
 use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
-use crate::io::sink::Sink;
-use crate::io::source::Source;
-use crate::transformer::Transformer;
-use crate::transformer::arrow_ipc::ArrowIpcTransformer;
+use crate::io::{Sink, Source};
+use crate::metrics::{SinkMetrics, WorkflowMetrics};
 
-use super::config::{DlqBlock, DlqReplayPoint, RetryConfig, ServiceConfig, WorkflowSpec};
+use super::config::{RetryConfig, ServiceConfig, WorkflowSpec, default_config};
 use super::heal::{HealSettings, Rebuilder};
 use super::registry::Registry;
 use super::sampling::DLQ_TARGET;
-use super::standalone::{NodeRunStats, StandaloneStats};
+use super::standalone::{NodeStats, WorkflowStats};
 
 /// One store the `dlq` block may name.
 pub(crate) struct DlqStoreKind {
-    /// The name the block names it by.
+    /// The name the block names it by, which is also the name of the
+    /// connector that serves both halves: the recording sink and the
+    /// replaying source.
     pub(crate) id: &'static str,
-    /// Connector `type` of the recording half.
-    pub(crate) sink_type: &'static str,
-    /// Connector `type` of the replaying half.
-    pub(crate) source_type: &'static str,
     /// Whether the sink half holds the store against its own source half, so
     /// the two can never be open at once.
     pub(crate) exclusive: bool,
@@ -100,22 +100,16 @@ pub(crate) struct DlqStoreKind {
 pub(crate) const DLQ_STORES: &[DlqStoreKind] = &[
     DlqStoreKind {
         id: "redb",
-        sink_type: "RedbSink",
-        source_type: "RedbSource",
         exclusive: true,
         confirms_end: true,
     },
     DlqStoreKind {
         id: "kafka",
-        sink_type: "KafkaSink",
-        source_type: "KafkaSource",
         exclusive: false,
         confirms_end: false,
     },
     DlqStoreKind {
         id: "nats",
-        sink_type: "NatsSink",
-        source_type: "NatsSource",
         exclusive: false,
         confirms_end: true,
     },
@@ -138,7 +132,7 @@ pub(crate) fn store_names() -> String {
 /// The envelope's columns, in order, as `(name, Arrow type string)`.
 ///
 /// One table for both forms the schema takes: the Arrow [`Schema`] the
-/// payload decoder projects onto, and the `schema_fields` array both store
+/// payload decoder projects onto, and the `field` entries both store
 /// halves are configured with. Deriving them from one list is what keeps a
 /// connector's declared schema and the batch the layer writes identical.
 const ENVELOPE_FIELDS: &[(&str, &str)] = &[
@@ -152,8 +146,8 @@ const ENVELOPE_FIELDS: &[(&str, &str)] = &[
     ("payload", "binary"),
 ];
 
-/// The envelope's `schema_fields` as a store half's config carries it.
-pub(crate) fn envelope_schema_fields() -> ConfigValue {
+/// The envelope's `field` entries as a store half's config carries them.
+pub(crate) fn envelope_field_config() -> ConfigValue {
     ConfigValue::Array(
         ENVELOPE_FIELDS
             .iter()
@@ -172,8 +166,9 @@ pub(crate) fn envelope_schema_fields() -> ConfigValue {
 pub fn envelope_schema() -> Arc<Schema> {
     static SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
         let mut config = ConfigMap::new();
-        config.insert("schema_fields".to_string(), envelope_schema_fields());
-        parse_schema_fields(&ConfigValue::Object(config), "dead letter envelope")
+        config.insert("field".to_string(), envelope_field_config());
+        parse_fields(&ConfigValue::Object(config), "dead letter envelope")
+            .and_then(|fields| schema_of(&fields))
             .expect("ENVELOPE_FIELDS names only supported Arrow types")
     });
     Arc::clone(&SCHEMA)
@@ -232,7 +227,7 @@ impl Letter {
     ///
     /// # Errors
     ///
-    /// Returns whatever [`Transformer::encode_messages`] refused the batch
+    /// Returns whatever [`Codec::encode_messages`] refused the batch
     /// with, and [`SaciError::Generic`] when it yielded no payload, which
     /// `arrow-ipc` never does: it splits `PerBatch`.
     pub(crate) fn from_failure(
@@ -240,7 +235,7 @@ impl Letter {
         sink: &str,
         component: &str,
         error: &SaciError,
-        ipc: &ArrowIpcTransformer,
+        ipc: &ArrowIpcCodec,
     ) -> Result<Self, SaciError> {
         let mut payloads = ipc.encode_messages(batch)?;
         let payload = payloads.pop().ok_or_else(|| {
@@ -343,7 +338,7 @@ impl Letter {
     pub(crate) fn payload_batch(
         &self,
         schema: Arc<Schema>,
-        ipc: &ArrowIpcTransformer,
+        ipc: &ArrowIpcCodec,
     ) -> Result<RecordBatch, SaciError> {
         let mut decoder = ipc.open_message_decoder(schema)?;
         decoder.push(&self.payload)?;
@@ -585,9 +580,9 @@ pub(crate) struct ReplayCtx<'a> {
     /// Every sink node's recovered flag, when it is healed.
     pub(crate) recovered: &'a [Option<Arc<AtomicBool>>],
     /// Per-node counters a delivered letter lands in.
-    pub(crate) node_stats: &'a mut [NodeRunStats],
+    pub(crate) node_stats: &'a mut [NodeStats],
     /// The run's counters.
-    pub(crate) stats: &'a mut StandaloneStats,
+    pub(crate) stats: &'a mut WorkflowStats,
     /// Shutdown, which ends a drain like an error does.
     pub(crate) cancel: &'a CancellationToken,
 }
@@ -609,7 +604,7 @@ pub struct DeadLetterQueue {
     sink_attempt: u32,
     /// When the next rebuild of the recording half may be tried.
     sink_down_until: Option<Instant>,
-    ipc: Arc<ArrowIpcTransformer>,
+    ipc: Arc<ArrowIpcCodec>,
     shared: Arc<DlqShared>,
     /// Whether the startup replay has run.
     started_once: bool,
@@ -623,6 +618,13 @@ pub struct DeadLetterQueue {
     /// error. Mirrors [`DlqSummary::known`], cached here so the pass path
     /// reads a bool instead of cloning the whole summary out of its lock.
     known: bool,
+    /// The workflow's own metric writers, for the pending gauge.
+    metrics: WorkflowMetrics,
+    /// One bound writer per sink a letter can name, so recording, replaying
+    /// and losing a letter build no attribute. Seeded with the workflow's
+    /// sinks and extended on the first letter that names another (a letter
+    /// recorded under an earlier config outlives the sink it was for).
+    sink_handles: HashMap<String, SinkMetrics>,
 }
 
 /// Counts and identity only: the two rebuilders hold trait objects that are
@@ -676,24 +678,24 @@ impl DeadLetterQueue {
         let injected = injected_keys(store, data_dir, &workflow.id);
         let sink_config = half_config(block, &block.sink, &injected.sink);
         let source_config = half_config(block, &block.source, &injected.source);
-        let ipc: Arc<dyn Transformer> = Arc::new(ArrowIpcTransformer::new());
+        let ipc: Arc<dyn Codec> = Arc::new(ArrowIpcCodec::new());
         let node_id = format!("{}/dlq", workflow.id);
 
         let sink_rebuilder = Rebuilder::new(
             registry.clone(),
-            store.sink_type,
+            store.id,
             &node_id,
             sink_config,
             Some(Arc::clone(&ipc)),
             None,
-            Some(RetryConfig::default().to_system_config()),
+            Some(RetryConfig::default().to_retry_mode()),
         );
         // No retry wrapper on the source half: a replay is one bounded drain,
         // and an error ends it rather than re-driving a store that is not
         // answering.
         let source_rebuilder = Rebuilder::new(
             registry.clone(),
-            store.source_type,
+            store.id,
             &node_id,
             source_config,
             Some(ipc),
@@ -725,13 +727,24 @@ impl DeadLetterQueue {
             sink: Some(sink),
             sink_attempt: 0,
             sink_down_until: None,
-            ipc: Arc::new(ArrowIpcTransformer::new()),
+            ipc: Arc::new(ArrowIpcCodec::new()),
             shared,
             started_once: false,
             pending_letters: 0,
             auto_attempt: 0,
             next_auto_replay: None,
             known,
+            metrics: crate::metrics::instruments().workflow(&workflow.id),
+            sink_handles: workflow
+                .sinks
+                .iter()
+                .map(|sink| {
+                    (
+                        sink.id.clone(),
+                        crate::metrics::instruments().sink(&sink.id),
+                    )
+                })
+                .collect(),
         })
     }
 
@@ -743,7 +756,7 @@ impl DeadLetterQueue {
         sink: &str,
         component: &str,
         error: &SaciError,
-        stats: &mut StandaloneStats,
+        stats: &mut WorkflowStats,
     ) {
         let rows = batch.num_rows() as u64;
         if self.sink.is_none() && !self.rebuild_record_half() {
@@ -794,7 +807,7 @@ impl DeadLetterQueue {
                 self.sink_attempt = 0;
                 self.pending_letters += 1;
                 stats.dead_letters_recorded += 1;
-                crate::metrics::instruments().dlq_recorded(sink, rows);
+                self.sink_metrics(sink).dlq_recorded(rows);
                 self.add_to_summary(&letter);
                 self.schedule_auto_replay();
                 #[cfg(feature = "tracing")]
@@ -1145,8 +1158,9 @@ impl DeadLetterQueue {
                         node_stats[index].batches += 1;
                         stats.sink_batches_written += 1;
                         stats.dead_letters_replayed += 1;
-                        crate::metrics::instruments().sink_write(&ids[index], rows);
-                        crate::metrics::instruments().dlq_replayed(&ids[index]);
+                        let metrics = self.sink_metrics(&ids[index]);
+                        metrics.write(rows);
+                        metrics.dlq_replayed();
                     }
                     Err(e) => {
                         refused.push(index);
@@ -1180,7 +1194,7 @@ impl DeadLetterQueue {
         if !self.reopen_record_half() {
             report.lost += retained.len() as u64;
             for letter in retained.iter() {
-                crate::metrics::instruments().dlq_lost(&letter.sink);
+                self.sink_metrics(&letter.sink).dlq_lost();
             }
             #[cfg(feature = "tracing")]
             tracing::error!(
@@ -1231,7 +1245,7 @@ impl DeadLetterQueue {
         for &index in lost.iter().rev() {
             let letter = retained.remove(index);
             report.lost += 1;
-            crate::metrics::instruments().dlq_lost(&letter.sink);
+            self.sink_metrics(&letter.sink).dlq_lost();
         }
     }
 
@@ -1313,8 +1327,17 @@ impl DeadLetterQueue {
 
     /// Count one letter the store would not take. The batch is gone: nothing
     /// is buffered in memory waiting for the store to come back.
-    fn count_lost(&self, sink: &str) {
-        crate::metrics::instruments().dlq_lost(sink);
+    fn count_lost(&mut self, sink: &str) {
+        self.sink_metrics(sink).dlq_lost();
+    }
+
+    /// The bound writers of sink `sink`, built on first use.
+    fn sink_metrics(&mut self, sink: &str) -> &SinkMetrics {
+        if !self.sink_handles.contains_key(sink) {
+            self.sink_handles
+                .insert(sink.to_owned(), crate::metrics::instruments().sink(sink));
+        }
+        &self.sink_handles[sink]
     }
 
     /// Put the schedule one backoff step out when nothing is scheduled.
@@ -1384,7 +1407,7 @@ impl DeadLetterQueue {
             now_unix_ms() + remaining.as_millis() as u64
         });
         summary.replay_pending = self.shared.has_request();
-        crate::metrics::instruments().dlq_pending(&self.workflow_id, summary.letters);
+        self.metrics.dlq_pending(summary.letters);
         self.shared.publish(summary);
     }
 }
@@ -1473,7 +1496,7 @@ pub(crate) fn half_config(
             config.insert((*key).to_string(), value.clone());
         }
     }
-    config.insert("schema_fields".to_string(), envelope_schema_fields());
+    config.insert("field".to_string(), envelope_field_config());
     ConfigValue::Object(config)
 }
 
@@ -1507,6 +1530,132 @@ fn validate_store_block(
         }
     }
     Ok(())
+}
+
+/// Where in a pass the runner replays a workflow's dead letters.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DlqReplayPoint {
+    /// At the head of the pass, before the first declared source is drained.
+    /// A replayed letter therefore reaches its sink ahead of anything new.
+    #[default]
+    BeforeSources,
+    /// After the last node of the pass wrote, before pacing. New arrivals go
+    /// first and a replay uses what is left of the pass.
+    AfterSources,
+}
+
+impl DlqReplayPoint {
+    /// The KDL string this point is written as, which is also what
+    /// `GET /api/dlq` reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DlqReplayPoint::BeforeSources => "before_sources",
+            DlqReplayPoint::AfterSources => "after_sources",
+        }
+    }
+}
+
+/// The store a [`DlqConfig`] names when the block names none.
+fn default_dlq_store() -> String {
+    "redb".to_string()
+}
+
+/// One workflow's dead letter queue: which store holds a refused batch, when
+/// the runner replays what is waiting, and the config both halves of that
+/// store are built from.
+///
+/// Every key outside `replay`, `source` and `sink` belongs to the store's
+/// connector and is shared by both halves. A key only one half accepts goes
+/// in that half's own block, which wins over the shared value:
+///
+/// ```kdl
+/// workflow "orders" {
+///     dlq "redb" {
+///         replay "after_sources"
+///         directory "/var/lib/saci/dlq"
+///         source { check_integrity #true }
+///     }
+/// }
+/// ```
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DlqBlock {
+    /// Which store backs the queue: `redb`, `kafka` or `nats`. From the
+    /// block's leading argument.
+    #[serde(rename = "id", default = "default_dlq_store")]
+    pub store: String,
+    /// Where in a pass a replay runs.
+    #[serde(default)]
+    pub replay: DlqReplayPoint,
+    /// Keys only the store's source half takes.
+    #[serde(default = "default_config")]
+    pub source: ConfigValue,
+    /// Keys only the store's sink half takes.
+    #[serde(default = "default_config")]
+    pub sink: ConfigValue,
+    /// Every other key, handed to both halves.
+    #[serde(flatten)]
+    pub config: ConfigMap,
+}
+
+impl Default for DlqBlock {
+    fn default() -> Self {
+        Self {
+            store: default_dlq_store(),
+            replay: DlqReplayPoint::default(),
+            source: default_config(),
+            sink: default_config(),
+            config: ConfigMap::new(),
+        }
+    }
+}
+
+/// A workflow's `dlq` declaration, in any of the three shapes KDL writes it.
+///
+/// `dlq` alone is an empty table, `dlq "redb"` a scalar and
+/// `dlq "redb" { ... }` a table carrying `id`, so the scalar form is the one
+/// case a derived `Deserialize` would refuse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DlqConfig(pub DlqBlock);
+
+/// Writes the scalar form (`dlq "redb"`) when only the store differs from the
+/// defaults, so a written config stays as short as a hand-written one.
+impl Serialize for DlqConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let defaults = DlqBlock {
+            store: self.0.store.clone(),
+            ..DlqBlock::default()
+        };
+        if self.0 == defaults {
+            serializer.serialize_str(&self.0.store)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DlqConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Through the value tree rather than an untagged enum, so a bad key
+        // inside the table form still names itself instead of collapsing
+        // into "data did not match any variant".
+        let value = ConfigValue::deserialize(deserializer)?;
+        match value {
+            ConfigValue::String(store) => Ok(DlqConfig(DlqBlock {
+                store,
+                ..DlqBlock::default()
+            })),
+            table => DlqBlock::deserialize(table)
+                .map(DlqConfig)
+                .map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "service"))]
@@ -1551,7 +1700,7 @@ mod tests {
 
     #[test]
     fn an_envelope_round_trips_a_batch_carrying_binary_columns() {
-        let ipc = ArrowIpcTransformer::new();
+        let ipc = ArrowIpcCodec::new();
         let original = payload_batch();
         let letter = Letter::from_failure(
             &original,
@@ -1614,20 +1763,20 @@ mod tests {
         assert_eq!(config["directory"], ConfigValue::from("/shared"));
         assert_eq!(config["check_integrity"], ConfigValue::Bool(true));
         assert_eq!(config["consume"], ConfigValue::Bool(true));
-        assert_eq!(config["schema_fields"], envelope_schema_fields());
+        assert_eq!(config["field"], envelope_field_config());
     }
 
     #[test]
-    fn a_declared_schema_fields_is_replaced_by_the_envelope() {
+    fn a_declared_field_is_replaced_by_the_envelope() {
         let block = DlqBlock {
-            config: match serde_json::json!({ "schema_fields": "nonsense" }) {
+            config: match serde_json::json!({ "field": "nonsense" }) {
                 ConfigValue::Object(map) => map,
                 _ => unreachable!("a literal object"),
             },
             ..DlqBlock::default()
         };
         let config = half_config(&block, &block.sink, &[]);
-        assert_eq!(config["schema_fields"], envelope_schema_fields());
+        assert_eq!(config["field"], envelope_field_config());
     }
 
     #[test]
@@ -1671,8 +1820,7 @@ mod tests {
         use crate::service::registry::Registry as R;
 
         let mut registry = R::new();
-        registry.register_sink(crate::connector::redb::RedbSinkFactory);
-        registry.register_source(crate::connector::redb::RedbSourceFactory);
+        registry.register(crate::connector::redb::RedbConnector);
         let registry = Arc::new(registry);
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -1707,7 +1855,7 @@ mod tests {
 
     /// A workflow declaring a store whose connector this binary does not
     /// carry must hear which `--features` flag supplies it, the same answer a
-    /// `sink` node naming `RedbSink` gets. This is what
+    /// `sink` node naming `redb` gets. This is what
     /// `--no-default-features --features service` reaches, where no connector
     /// is registered at all.
     #[test]
@@ -1721,7 +1869,7 @@ mod tests {
         )
         .expect_err("an empty registry supplies neither half");
         let message = err.to_string();
-        assert!(message.contains("RedbSource"), "got: {message}");
+        assert!(message.contains("'redb'"), "got: {message}");
         assert!(
             message.contains("--features connector-redb"),
             "the refusal must name the flag that supplies it: {message}"
@@ -1839,8 +1987,8 @@ mod tests {
         sinks: Vec<Option<Box<dyn Sink>>>,
         ids: Vec<String>,
         recovered: Vec<Option<Arc<AtomicBool>>>,
-        node_stats: Vec<NodeRunStats>,
-        stats: StandaloneStats,
+        node_stats: Vec<NodeStats>,
+        stats: WorkflowStats,
         cancel: CancellationToken,
     }
 
@@ -1851,8 +1999,8 @@ mod tests {
                 sinks: vec![Some(Box::new(sink))],
                 ids: vec!["out".to_string()],
                 recovered: vec![None],
-                node_stats: vec![NodeRunStats::default()],
-                stats: StandaloneStats::default(),
+                node_stats: vec![NodeStats::default()],
+                stats: WorkflowStats::default(),
                 cancel,
             }
         }
@@ -1875,21 +2023,20 @@ mod tests {
         dir: &Path,
         shared: &Arc<DlqShared>,
         block: DlqBlock,
-    ) -> (DeadLetterQueue, StandaloneStats) {
+    ) -> (DeadLetterQueue, WorkflowStats) {
         let mut registry = Registry::new();
-        registry.register_sink(crate::connector::redb::RedbSinkFactory);
-        registry.register_source(crate::connector::redb::RedbSourceFactory);
+        registry.register(crate::connector::redb::RedbConnector);
         let spec = spec_with(block);
         let queue = DeadLetterQueue::build(&spec, dir, &Arc::new(registry), Arc::clone(shared))
             .expect("the redb store opens");
-        (queue, StandaloneStats::default())
+        (queue, WorkflowStats::default())
     }
 
     /// Record one letter for sink `out`, carrying `batch`.
     #[cfg(feature = "connector-redb")]
     async fn record_batch(
         queue: &mut DeadLetterQueue,
-        stats: &mut StandaloneStats,
+        stats: &mut WorkflowStats,
         batch: &RecordBatch,
     ) {
         queue
@@ -1905,7 +2052,7 @@ mod tests {
 
     /// Record one two-row letter for sink `out`.
     #[cfg(feature = "connector-redb")]
-    async fn record_one(queue: &mut DeadLetterQueue, stats: &mut StandaloneStats) {
+    async fn record_one(queue: &mut DeadLetterQueue, stats: &mut WorkflowStats) {
         record_batch(queue, stats, &payload_batch()).await;
     }
 
@@ -2208,7 +2355,8 @@ mod tests {
         WorkflowSpec {
             id: "orders".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -2229,5 +2377,147 @@ mod tests {
         )
         .expect_err("the block is refused")
         .to_string()
+    }
+}
+
+#[cfg(all(test, feature = "service"))]
+mod config_tests {
+    use super::*;
+    use crate::service::config::test_support::parse;
+
+    /// The three shapes KDL writes a `dlq` block in.
+    fn dlq_kdl(block: &str) -> String {
+        format!(
+            r#"
+mode "standalone"
+
+node id=1 data_dir="/tmp/saci-test"
+
+workflow "orders" {{
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X"
+    link from="in" to="out"
+    {block}
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn every_dlq_shape_parses_to_the_same_defaults() {
+        for block in ["dlq", "dlq \"redb\""] {
+            let cfg = parse(&dlq_kdl(block)).unwrap_or_else(|e| panic!("{block}: {e}"));
+            let dlq = cfg.workflows[0].dlq.as_ref().expect("a declared block");
+            assert_eq!(dlq.0.store, "redb", "{block}");
+            assert_eq!(dlq.0.replay, DlqReplayPoint::BeforeSources, "{block}");
+            assert!(dlq.0.config.is_empty(), "{block}");
+            cfg.validate().unwrap_or_else(|e| panic!("{block}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_dlq_table_carries_the_store_the_replay_point_and_both_halves() {
+        let cfg = parse(&dlq_kdl(
+            r#"dlq "kafka" {
+        replay "after_sources"
+        brokers "broker:9092"
+        topic "saci-dlq-orders"
+        source { group_id "saci-dlq-orders" }
+        sink { acks "all" }
+    }"#,
+        ))
+        .expect("the table form parses");
+        cfg.validate().expect("a kafka store is valid");
+        let dlq = &cfg.workflows[0].dlq.as_ref().expect("a declared block").0;
+
+        assert_eq!(dlq.store, "kafka");
+        assert_eq!(dlq.replay, DlqReplayPoint::AfterSources);
+        assert_eq!(dlq.config["brokers"], ConfigValue::from("broker:9092"));
+        assert_eq!(dlq.config["topic"], ConfigValue::from("saci-dlq-orders"));
+        assert_eq!(dlq.source["group_id"], ConfigValue::from("saci-dlq-orders"));
+        assert_eq!(dlq.sink["acks"], ConfigValue::from("all"));
+        assert!(
+            !dlq.config.contains_key("source") && !dlq.config.contains_key("sink"),
+            "the half blocks are their own fields, not shared keys"
+        );
+    }
+
+    #[test]
+    fn an_unknown_dlq_store_is_refused_by_name() {
+        let cfg = parse(&dlq_kdl("dlq \"mongodb\"")).expect("any store name parses");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("dlq store 'mongodb' is not one of redb, kafka, nats"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_replay_point_is_refused_by_serde() {
+        let err = parse(&dlq_kdl("dlq \"redb\" { replay \"sometimes\" }"))
+            .expect_err("only the two declared points parse");
+        assert!(err.contains("sometimes"), "got: {err}");
+    }
+
+    #[test]
+    fn a_bad_typed_value_in_the_table_form_is_refused_with_a_specific_error() {
+        // `DlqConfig::deserialize` goes through the value tree rather than
+        // an untagged enum precisely so this stays a specific type-mismatch
+        // error naming the offending value, not the generic "data did not
+        // match any variant" an untagged enum's failed-branch collapse would
+        // give.
+        let err = parse(&dlq_kdl("dlq \"redb\" { replay 42 }"))
+            .expect_err("a number is not a legal replay point");
+        assert!(
+            err.contains("42") && err.contains("invalid type"),
+            "the bad value is still diagnosable: {err}"
+        );
+        assert!(
+            !err.contains("did not match any variant"),
+            "the value tree route must not collapse into the untagged-enum message: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_land_in_the_flattened_config_not_in_either_half() {
+        let cfg = parse(&dlq_kdl("dlq \"redb\" { directory \"/var/lib/saci/dlq\" }"))
+            .expect("an unrecognised top-level key is not a parse error");
+        let dlq = &cfg.workflows[0].dlq.as_ref().expect("a declared block").0;
+
+        assert_eq!(
+            dlq.config["directory"],
+            ConfigValue::from("/var/lib/saci/dlq"),
+            "an unknown top-level key lands in the flatten"
+        );
+        assert!(
+            !dlq.config.contains_key("source") && !dlq.config.contains_key("sink"),
+            "the half blocks never leak into the shared flatten"
+        );
+        assert_eq!(
+            dlq.source,
+            default_config(),
+            "no source block was declared, so the half stays at its empty default"
+        );
+        assert_eq!(
+            dlq.sink,
+            default_config(),
+            "no sink block was declared, so the half stays at its empty default"
+        );
+    }
+
+    #[test]
+    fn a_workflow_with_two_dlq_blocks_is_refused() {
+        // `dlq` carries plain `#[serde(default)]`, not `one_or_many`: a
+        // second declaration is not silently merged or last-wins, it turns
+        // the KDL value into a sequence `DlqConfig::deserialize` never
+        // matches (its `ConfigValue::String` arm aside, everything else,
+        // sequence included, falls through to `DlqBlock::deserialize`, which
+        // expects a map).
+        let raw = dlq_kdl("dlq \"redb\"\n    dlq \"kafka\"");
+        let err = parse(&raw).expect_err("a repeated dlq block is refused, not merged");
+        assert!(
+            err.contains("invalid type") && err.contains("sequence"),
+            "got: {err}"
+        );
     }
 }

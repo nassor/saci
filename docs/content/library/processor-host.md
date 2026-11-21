@@ -82,8 +82,9 @@ that overlap use different instances, an instance is dropped after a trap or a
 travels only through `checkpoint` and `prior`. The service builder never turns
 it on.
 
-A wasmtime epoch deadline bounds the call. `PipelineRuntimeLoader` sets 100
-ticks of 100 ms, so a component that will not return is interrupted after ten
+A wasmtime epoch deadline bounds the call. `PipelineRuntimeLoader` defaults to a
+10 second timeout, which `with_timeout` changes and which becomes 100 ticks of 100 ms,
+so a component that will not return is interrupted after ten
 seconds instead of wedging the runner.
 
 The call runs on a blocking thread rather than the async worker, and only Arrow
@@ -99,7 +100,7 @@ and costs about 1.7 s of one fast core for the 4 MB smoketest, so
 `WasmEngine::program` does it once per distinct set of bytes. Every later load of
 the same module is a `memcmp` plus an `Arc` clone, about 0.1 ms.
 
-The engine is shareable. `ServiceBuilder::with_wasm_engine` hands one engine to
+The engine is shareable. `ServiceBuilder::wasm_engine` hands one engine to
 several builders, and the ticker stops with the last clone rather than outliving
 it.
 
@@ -112,7 +113,7 @@ processor gets:
   and the processor's `target`. Without the `tracing` feature it falls back to
   stderr.
 - `metric` routes to the exporter the service layer owns, recording the
-  `saci_processor_metric` histogram under the name the processor passed. Names are
+  `saci_processor_custom` histogram under the name the processor passed. Names are
   processor-chosen, so distinct names are capped at `MAX_PROCESSOR_METRIC_NAMES`,
   256, and anything past that is dropped after one warning.
 - `get-config` is a lookup in the `wasm` node's `config` keys, cloned per call.
@@ -129,7 +130,7 @@ not as a capability grant, which is why the host builds its `WasiCtx` with no
 `run-metrics` numbers become the `saci_processor_batch_duration_seconds`,
 `saci_processor_rows_in_total`, `saci_processor_rows_out_total`,
 `saci_processor_systems_run_total` and `saci_processor_retries_total` series, which
-with `saci_processor_metric` are the six `saci_processor_*` series on `/metrics`.
+with `saci_processor_custom` are the six `saci_processor_*` series on `/metrics`.
 
 `routes` decides delivery. The host reads it after the systems run and delivers
 the output only to the links whose `branch` names one of those values; absent, it
@@ -163,7 +164,7 @@ host privileges, it cannot be interrupted, and a memory error in it is a memory
 error in the host. The ABI's `metric` callback writes no series of its own, and
 neither does the host on a plugin's behalf. A plugin gets the five
 `saci_processor_*` series its per-batch metrics carry, and
-`saci_processor_metric` stays empty, because only a component's
+`saci_processor_custom` stays empty, because only a component's
 `host-io::metric` writes it.
 
 [Plugins in a workflow](@/service/plugins/_index.md) is the node that names one,

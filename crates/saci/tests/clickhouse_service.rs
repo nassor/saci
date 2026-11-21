@@ -11,10 +11,8 @@ use arrow_array::Int64Array;
 use arrow_schema::{DataType, Field, Schema};
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::GenericImage;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -69,13 +67,16 @@ fn schema() -> Arc<Schema> {
 /// A pipeline that doubles `total` in place.
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("clickhouse_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
-    pipeline.add_system(system_fn(
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
+    pipeline = pipeline.system(system_fn(
         SystemMeta::new("double_total")
-            .read(COMPONENT, "total")
-            .write(COMPONENT, "total"),
+            .reads_named(COMPONENT, "total")
+            .writes_named(COMPONENT, "total"),
         |data: &mut Dataset| {
-            let Some(batch) = data.batch_for(COMPONENT) else {
+            let Ok(batch) = data.batch_named(COMPONENT) else {
                 return Ok(());
             };
             if batch.num_rows() == 0 {
@@ -88,7 +89,7 @@ fn build_pipeline() -> Pipeline {
                 .downcast_ref::<Int64Array>()
                 .expect("int64 total");
             let doubled: Int64Array = totals.iter().map(|v| v.map(|v| v * 2)).collect();
-            data.apply_write_set(WriteSet::new().put(COMPONENT, "total", Arc::new(doubled)))
+            data.apply_write_set(WriteSet::new().put_named(COMPONENT, "total", Arc::new(doubled)))
         },
     ));
     pipeline
@@ -101,10 +102,10 @@ mode "standalone"
 
 node id=1 name="saci-clickhouse-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "clickhouse-service-test" {{
-    source "orders_in" type="ClickhouseSource" component="{COMPONENT}" {{
+    source "orders_in" connector="clickhouse" component="{COMPONENT}" {{
         config {{
             name "orders_in"
             batch_rows 40
@@ -113,15 +114,15 @@ workflow "clickhouse-service-test" {{
 
             mode kind="polling" table="orders_in" cursor_column="id"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="ClickhouseSink" component="{COMPONENT}" {{
+    sink "orders_out" connector="clickhouse" component="{COMPONENT}" {{
         config {{
             name "orders_out"
             table "orders_out"
@@ -129,9 +130,9 @@ workflow "clickhouse-service-test" {{
 
             connection url="{url}" database="default"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -139,7 +140,7 @@ workflow "clickhouse-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -150,13 +151,11 @@ observability log_level="warn"
 fn test_clickhouse_service_config_builds_without_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(&path, config_kdl("http://127.0.0.1:8123", &data_dir)).expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config);
+    let config = ServiceConfig::from_kdl(&config_kdl("http://127.0.0.1:8123", &data_dir))
+        .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config);
     assert!(
         built.is_ok(),
         "ClickHouse service config builds cleanly without database connection"
@@ -167,13 +166,11 @@ fn test_clickhouse_service_config_builds_without_error() {
 fn test_clickhouse_service_config_invalid_url_is_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(&path, config_kdl("tcp://127.0.0.1:9000", &data_dir)).expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config);
+    let config = ServiceConfig::from_kdl(&config_kdl("tcp://127.0.0.1:9000", &data_dir))
+        .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config);
     assert!(
         built.is_err(),
         "ClickHouse service config with invalid url must be rejected at build time"
@@ -229,17 +226,15 @@ async fn a_clickhouse_source_and_sink_move_rows_through_the_standalone_runner() 
 
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(&path, config_kdl(&url, &data_dir)).expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(&url, &data_dir)).expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("standalone run succeeds");
 

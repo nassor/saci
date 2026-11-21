@@ -30,7 +30,7 @@
 //                         guest returns the smoketest's data plane unchanged,
 //                         so its output stream is byte-identical in shape and
 //                         size to the input one.
-//   wasm_round_trip       `PipelineRuntime::run_on_with_state` end to end,
+//   wasm_round_trip       `PipelineRuntime::run_batch` end to end,
 //                         through `spawn_blocking` on a multi-thread runtime:
 //                         production threading, checkpoint threaded back in
 //                         as `prior` so the fixture is stateful.
@@ -41,7 +41,7 @@
 //
 //   - The guest `run-batch` call on its own. `Store`, instance and the
 //     `SaciPipeline` bindings are all private, so the only way to call the
-//     export is `run_on_with_state`, which is `wasm_round_trip`. What the
+//     export is `run_batch`, which is `wasm_round_trip`. What the
 //     guest costs is `wasm_round_trip` minus `wasm_ipc_encode`,
 //     `wasm_ipc_decode` and `wasm_store_lifecycle`, plus the
 //     `spawn_blocking` hop and minus the
@@ -81,9 +81,9 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Rows per batch. Every row-dimensioned group is measured at each.
 const ROWS: [usize; 3] = [1, 1_024, 65_536];
 
-/// 60 epoch ticks of 100 ms = 6 s per call, the same budget the test fixture
+/// 6 s per call, the same budget the test fixture
 /// grants. A 65 536-row identity batch is three orders of magnitude inside it.
-const EPOCH_TICKS: u64 = 60;
+const CALL_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Host-side mirror of the `Ping` component the smoketest processor declares
 /// (`crates/saci-processor-smoketest/src/lib.rs`). `run-batch` is an identity
@@ -145,7 +145,7 @@ fn load_runtime(engine: &WasmEngine, bytes: &[u8]) -> WasmPipelineRuntime {
         "smoketest",
         bytes,
         HashMap::new(),
-        EPOCH_TICKS,
+        CALL_TIMEOUT,
     )
     .expect("WasmPipelineRuntime::from_bytes")
 }
@@ -264,10 +264,10 @@ fn bench_round_trip(
 
         group.bench_function(format!("{rows}_rows"), |b| {
             b.iter(|| {
-                let state = tokio_rt
-                    .block_on(runtime.run_on_with_state(&mut dataset, prior.as_deref()))
-                    .expect("run_on_with_state");
-                prior = state;
+                let output = tokio_rt
+                    .block_on(runtime.run_batch(&mut dataset, prior.as_deref()))
+                    .expect("run_batch");
+                prior = output.state;
                 std::hint::black_box(dataset.rows())
             });
         });
@@ -309,10 +309,12 @@ fn bench_wasm_boundary(c: &mut Criterion) {
     for rows in ROWS {
         let mut dataset = seeded_dataset(&runtime, rows);
         let input = encode(&dataset);
-        let state = tokio_rt
-            .block_on(runtime.run_on_with_state(&mut dataset, None))
-            .expect("run_on_with_state");
-        let checkpoint = state.expect("the smoketest is stateful and must return a checkpoint");
+        let output = tokio_rt
+            .block_on(runtime.run_batch(&mut dataset, None))
+            .expect("run_batch");
+        let checkpoint = output
+            .state
+            .expect("the smoketest is stateful and must return a checkpoint");
         assert_eq!(dataset.rows(), rows, "smoketest run-batch is an identity");
         println!(
             "[wasm_roundtrip] {} rows, input IPC {} B, output IPC {} B, checkpoint {} B",

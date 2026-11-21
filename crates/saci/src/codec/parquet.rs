@@ -1,0 +1,25 @@
+//! The `parquet` byte format for SACI.
+//!
+//! Parquet is self-describing, so [`ParquetCodec`] reads its schema from
+//! the file footer unless the config declared one, which becomes a column
+//! projection pushed into the reader. It is also the only format that reports
+//! `estimated_rows`, summed from row-group metadata without reading any data.
+//! Writes use Snappy compression.
+//!
+//! The message surface is one whole file per payload, so the shape is
+//! `PerBatch`: a Parquet file's footer is what makes it readable, and a
+//! payload has to carry it.
+//!
+//! ```kdl
+//! codec "pq" format="parquet"
+//!
+//! source "trades" connector="file" codec="pq" component="Trade" {
+//!     config path="/data/trades.parquet"
+//! }
+//! ```
+
+#![deny(missing_docs)]
+
+mod codec;
+
+pub use codec::{ParquetCodec, ParquetCodecFactory};

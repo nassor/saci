@@ -18,12 +18,12 @@ node id=1 name="saci-turso" data_dir="${SACI_DATA_DIR:-/tmp/saci-turso}"
 
 // Re-drain every 2 s. The polling source returns EOF once it is caught up, so
 // the interval runner drives it without the stream runner.
-run_mode kind="interval" interval_ms=2000
+run "interval" every_ms=2000
 
 workflow "orders" {
     // ---------------------------------------------------------------- source
 
-    source "turso_orders" type="TursoSource" component="OrderChange" {
+    source "turso_orders" connector="turso" component="OrderChange" {
         config {
             name "turso_orders"
             // Rows per emitted RecordBatch.
@@ -58,21 +58,21 @@ workflow "orders" {
             //
             mode kind="polling" table="orders" cursor_column="id"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "status" type="utf8" nullable=#true
             // SQLite is dynamically typed; a value that does not fit the
             // declared type is a loud error rather than a silent coercion.
-            schema_fields "total" type="float64" nullable=#true
+            field "total" type="float64" nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "process_orders" module="pipelines/orders.wasm"
+    wasm "process_orders" path="pipelines/orders.wasm"
 
     // ------------------------------------------------------------------ sink
 
-    sink "turso_enriched" type="TursoSink" component="EnrichedOrder" {
+    sink "turso_enriched" connector="turso" component="EnrichedOrder" {
         config {
             name "turso_enriched"
             table "enriched_orders"
@@ -95,9 +95,9 @@ workflow "orders" {
             //
             connection path="turso-example.db"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
-            schema_fields "total" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "status" type="utf8" nullable=#true
+            field "total" type="float64" nullable=#true
         }
     }
 
@@ -109,6 +109,6 @@ workflow "orders" {
 // saci_turso_source_rows_total, saci_turso_source_batches_total,
 // saci_turso_source_changes_total, saci_turso_sink_rows_written_total and
 // saci_turso_sink_flushes_total.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 observability log_format="pretty" log_level="info" sample_ratio=0.3 error_sample_ratio=1.0

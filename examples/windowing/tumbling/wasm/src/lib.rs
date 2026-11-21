@@ -21,27 +21,12 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::ProcessorState;
-use saci::processor::arrow_array::{Float64Array, Int64Array, StringArray};
-use saci::processor::arrow_schema::{DataType, Field, FieldRef, Schema};
-use saci::processor::prelude::*;
-use saci::processor::windows::WindowSpec;
+use saci::arrow_array::{Float64Array, Int64Array, StringArray};
+use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
+use saci::prelude::*;
+use saci::window::tumbling_id;
 
 /// One row of the demo workload: a sale at an instant in time.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -162,47 +147,24 @@ pub struct WindowGeometry {
 
 /// Read the geometry from the injected `window.*` config keys, falling back
 /// to the same defaults the KDL block's serde defaults use.
-#[cfg(target_arch = "wasm32")]
 fn geometry() -> WindowGeometry {
     WindowGeometry {
-        size_ms: saci_config_parse::<i64>("window.size_ms")
+        size_ms: sdk::host::config_parse::<i64>("window.size_ms")
             .and_then(Result::ok)
             .unwrap_or(30_000),
-        offset_ms: saci_config_parse::<i64>("window.offset_ms")
+        offset_ms: sdk::host::config_parse::<i64>("window.offset_ms")
             .and_then(Result::ok)
             .unwrap_or(0),
-        allowed_lateness_ms: saci_config_parse::<i64>("window.allowed_lateness_ms")
+        allowed_lateness_ms: sdk::host::config_parse::<i64>("window.allowed_lateness_ms")
             .and_then(Result::ok)
             .unwrap_or(0),
     }
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-fn geometry() -> WindowGeometry {
-    WindowGeometry {
-        size_ms: 30_000,
-        offset_ms: 0,
-        allowed_lateness_ms: 0,
-    }
-}
-
-/// Report a metric through `host-io::metric`; a no-op outside wasm, where the
-/// host bindings do not exist.
-#[cfg(target_arch = "wasm32")]
-fn report_metric(name: &str, value: f64) {
-    crate::bindings::saci::pipeline::host_io::metric(name, value);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn report_metric(_name: &str, _value: f64) {}
 
 /// Merge the batch into the open windows and emit every group whose window
 /// has closed, the core of the demo's windowing logic.
 pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Sale>()
-        .ok_or_else(|| SaciError::generic("windowing: Sale component missing"))?
-        .clone();
+    let batch = data.batch::<Sale>()?.clone();
     let n = batch.num_rows();
 
     // An empty batch still runs the systems: emit nothing, change nothing.
@@ -236,11 +198,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| SaciError::generic("windowing: amount is not Float64"))?;
 
-    let state = data
-        .get_resource_mut::<ProcessorState<WindowState>>()
-        .ok_or_else(|| {
-            SaciError::generic("windowing: ProcessorState<WindowState> resource missing")
-        })?;
+    let state = data.resource_mut::<sdk::State<WindowState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole WindowState.
     if state.rows.is_empty() {
@@ -274,7 +232,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
             late_rows += 1;
             continue;
         }
-        let wid = WindowSpec::assign_tumbling(ts, geo.size_ms, geo.offset_ms);
+        let wid = tumbling_id(ts, geo.size_ms, geo.offset_ms);
         let symbol = sym_col.value(i).to_string();
         let amount = amt_col.value(i);
         if let Some(open) = window_state
@@ -317,45 +275,36 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
     // The borrow through `state` ends here (NLL), before `data.append` below.
 
     data.append::<WindowTotal>(&emitted)?;
-    report_metric("window.open", open_count as f64);
-    report_metric("window.closed", closed as f64);
-    report_metric("window.late_rows", late_rows as f64);
+    sdk::host::metric("window.open", open_count as f64);
+    sdk::host::metric("window.closed", closed as f64);
+    sdk::host::metric("window.late_rows", late_rows as f64);
     Ok(())
 }
 
 /// Build the windowing demo pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
+#[processor]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("windowing_tumbling");
-    pipeline
-        .data
-        .register_component::<Sale>()
-        .expect("register Sale");
-    pipeline
-        .data
-        .register_component::<WindowTotal>()
-        .expect("register WindowTotal");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("accumulate")
-            .read_component("Sale")
-            .write_component("WindowTotal"),
-        |data| {
-            let geo = geometry();
-            accumulate_impl(data, &geo)
-        },
-    ));
-    pipeline
+    Pipeline::new("windowing_tumbling")
+        .state::<WindowState>()
+        .component::<Sale>()
+        .component::<WindowTotal>()
+        .system(system_fn(
+            SystemMeta::new("accumulate")
+                .reads_all::<Sale>()
+                .writes_all::<WindowTotal>(),
+            |data| {
+                let geo = geometry();
+                accumulate_impl(data, &geo)
+            },
+        ))
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build, state = WindowState);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci::processor::__rt::{ProcessorStateSpec, Stateful};
 
     fn geo() -> WindowGeometry {
         WindowGeometry {
@@ -367,9 +316,9 @@ mod tests {
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Sale>().unwrap();
-        data.register_component::<WindowTotal>().unwrap();
-        <Stateful<WindowState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
+        data.register::<Sale>().unwrap();
+        data.register::<WindowTotal>().unwrap();
+        build().restore_state(&mut data, None).unwrap();
         data
     }
 
@@ -385,7 +334,7 @@ mod tests {
     type Total = (i64, String, i64, f64);
 
     fn totals(data: &Dataset) -> Vec<Total> {
-        let batch = data.batch_for("WindowTotal").expect("WindowTotal batch");
+        let batch = data.batch_named("WindowTotal").expect("WindowTotal batch");
         let wid = batch
             .column(0)
             .as_any()
@@ -424,11 +373,11 @@ mod tests {
     /// the emitted totals, and the blob the next item resumes from.
     fn run_batch(prior: Option<&[u8]>, sales: &[Sale]) -> (Dataset, Vec<Total>, Option<Vec<u8>>) {
         let mut data = dataset_with_state();
-        <Stateful<WindowState> as ProcessorStateSpec>::restore(&mut data, prior).unwrap();
+        build().restore_state(&mut data, prior).unwrap();
         data.append::<Sale>(sales).unwrap();
         accumulate_impl(&mut data, &geo()).unwrap();
         let emitted = totals(&data);
-        let next = <Stateful<WindowState> as ProcessorStateSpec>::capture(&data).unwrap();
+        let next = build().capture_state(&data).unwrap();
         (data, emitted, next)
     }
 
@@ -479,7 +428,7 @@ mod tests {
         let (data, emitted, _) = run_batch(blob.as_deref(), &[sale(90_000, "AAPL", 99.0)]);
         assert!(emitted.is_empty());
         let state = data
-            .get_resource::<ProcessorState<WindowState>>()
+            .get_resource::<sdk::State<WindowState>>()
             .expect("state resource");
         assert_eq!(state.rows[0].open.len(), 1, "window 3 stays open");
         assert_eq!(state.rows[0].open[0].count, 1, "the late row was dropped");

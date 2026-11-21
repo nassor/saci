@@ -48,9 +48,7 @@ Inside the clone, it is a path dependency (`saci = "0.1"` selects the crates.io 
 saci = { path = "../crates/saci" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-async-trait = "0.1"
 arrow-array = "60.1"
-arrow-schema = "60.1"
 ```
 
 Add the `service` and `wasm-host` features when you also want the host (wasmtime and the HTTP
@@ -67,12 +65,18 @@ finishes.
 
 ## 3. Describe your data
 
-A `Component` is a plain Rust struct plus the Arrow schema for its fields. SACI
-stores one `RecordBatch` per component, so a field is a **column**, not a
-per-row lookup.
+A `Component` is a plain Rust struct. `#[derive(Component)]` generates its Arrow schema and one
+`FieldRef` constant per field. SACI stores one `RecordBatch` per component, so a field is a
+**column**, not a per-row lookup.
 
-```rust,name=The Order component and its Arrow schema
-#[derive(Serialize, Deserialize, Clone, Debug)]
+```rust,name=The Order component, its schema and field constants
+use std::sync::Arc;
+
+use arrow_array::{BooleanArray, Float64Array};
+use saci::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
 struct Order {
     id: u64,
     currency: String,
@@ -80,36 +84,12 @@ struct Order {
     usd_amount: f64,
     express: bool,
 }
-
-impl Component for Order {
-    fn name() -> &'static str {
-        "Order"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::UInt64, false),
-            Field::new("currency", DataType::Utf8, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("usd_amount", DataType::Float64, false),
-            Field::new("express", DataType::Boolean, false),
-        ]))
-    }
-}
 ```
 
 `FieldRef` constants are how a system names a column without a string literal
-at every call site. Declare one per field:
-
-```rust,name=One FieldRef constant per field
-impl Order {
-    const ID: FieldRef<Order> = FieldRef::new("id");
-    const CURRENCY: FieldRef<Order> = FieldRef::new("currency");
-    const AMOUNT: FieldRef<Order> = FieldRef::new("amount");
-    const USD_AMOUNT: FieldRef<Order> = FieldRef::new("usd_amount");
-    const EXPRESS: FieldRef<Order> = FieldRef::new("express");
-}
-```
+at every call site. The derive generates one per field, named after the field in upper case:
+`Order::ID`, `Order::CURRENCY`, `Order::AMOUNT`, `Order::USD_AMOUNT` and `Order::EXPRESS`.
+`use saci::prelude::*;` also brings in `async_trait`, so the project needs no dependency on it.
 
 [Dataset & Components](@/library/dataset.md) covers registration, appends, soft deletes
 and the IPC round trip. Step 3 is done when `cargo check` accepts the file.
@@ -125,7 +105,7 @@ struct SeedOrders;
 #[async_trait]
 impl System for SeedOrders {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("seed").write_component("Order")
+        SystemMeta::new("seed").writes_all::<Order>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
@@ -175,7 +155,7 @@ impl System for SeedOrders {
 }
 ```
 
-`write_component("Order")` means "writes every field of `Order`". That is the
+`writes_all::<Order>()` means "writes every field of `Order`". That is the
 strongest declaration there is, so nothing can share a stage with it, and this
 system lands alone in stage 0.
 
@@ -198,13 +178,11 @@ impl ParallelSystem for ConvertCurrency {
             .reads(Order::AMOUNT)
             .reads(Order::CURRENCY)
             .writes(Order::USD_AMOUNT)
-            .read_resource::<FxRates>()
+            .reads_resource::<FxRates>()
     }
 
     async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError> {
-        let rates = data
-            .get_resource::<FxRates>()
-            .ok_or_else(|| SaciError::generic("FxRates resource not found"))?;
+        let rates = data.resource::<FxRates>()?;
 
         let orders = data.view::<Order>()?;
         let amount = orders.f64(Order::AMOUNT)?;
@@ -213,7 +191,7 @@ impl ParallelSystem for ConvertCurrency {
             .map(|i| amount.value(i) * rates.rate_for(currency.value(i)))
             .collect();
 
-        Ok(WriteSet::new().put("Order", "usd_amount", Arc::new(Float64Array::from(values))))
+        Ok(WriteSet::new().put(Order::USD_AMOUNT, Arc::new(Float64Array::from(values))))
     }
 }
 ```
@@ -236,7 +214,7 @@ impl ParallelSystem for FlagExpress {
             .map(|i| amount.value(i) > 1000.0)
             .collect();
 
-        Ok(WriteSet::new().put("Order", "express", Arc::new(BooleanArray::from(flags))))
+        Ok(WriteSet::new().put(Order::EXPRESS, Arc::new(BooleanArray::from(flags))))
     }
 }
 ```
@@ -285,7 +263,7 @@ fn make_summary_system() -> impl System {
             .reads(Order::AMOUNT)
             .reads(Order::USD_AMOUNT)
             .reads(Order::EXPRESS)
-            .write_resource::<Summary>(),
+            .writes_resource::<Summary>(),
         |data| {
             let rows;
             let mut express = 0usize;
@@ -335,32 +313,28 @@ accepts the systems.
 
 ## 5. Assemble the pipeline
 
-Register the component, install the resource, add the systems, run.
+Add the component, install the resource, add the systems, run.
 
 ```rust,name=Assemble the pipeline and run it
 #[tokio::main]
 async fn main() -> Result<(), SaciError> {
-    let mut pipeline = Pipeline::builder("first-pipeline")
-        .with::<Order>()
-        .with_resource(FxRates {
+    let mut pipeline = Pipeline::new("first-pipeline")
+        .component::<Order>()
+        .resource(FxRates {
             eur: 1.08,
             gbp: 1.27,
             jpy: 0.0067,
         })
-        .with_system(SeedOrders)
-        .with_parallel_system(ConvertCurrency)
-        .with_parallel_system(FlagExpress)
-        .with_system(make_summary_system())
-        .build();
+        .system(SeedOrders)
+        .parallel_system(ConvertCurrency)
+        .parallel_system(FlagExpress)
+        .system(make_summary_system());
 
     pipeline.run().await?;
 
-    println!("stages: {:?}", pipeline.stages().unwrap_or_default());
+    println!("stages: {:?}", pipeline.plan()?.to_vec());
 
-    let summary = pipeline
-        .data()
-        .get_resource::<Summary>()
-        .ok_or_else(|| SaciError::generic("Summary resource missing"))?;
+    let summary = pipeline.data().resource::<Summary>()?;
     println!(
         "{} orders, {} express, {:.2} USD total",
         summary.rows, summary.express, summary.total_usd
@@ -391,18 +365,18 @@ stages: [[0], [1, 2], [3]]
 5 orders, 2 express, 10568.44 USD total
 ```
 
-`pipeline.stages()` returns `Vec<Vec<usize>>`: one inner vector per stage,
+`pipeline.plan()` returns the stages as `&[Vec<usize>]`: one inner vector per stage,
 holding system indices in **registration order**. The line above reads
 `[[0], [1, 2], [3]]`, which is:
 
-- Stage 0, `SeedOrders` alone, because `write_component` collides with
+- Stage 0, `SeedOrders` alone, because `writes_all` collides with
   everything.
 - Stage 1, `ConvertCurrency` and `FlagExpress` together, because their writes
   are disjoint. Five rows runs them in sequence, and a batch of 100_000 or more
   would run them at once.
 - Stage 2, the summary closure, because it reads both columns stage 1 wrote.
 
-`stages()` returns `None` until the first `run()` builds the plan.
+`plan()` builds the plan on first call and caches it.
 [Pipeline](@/library/pipeline.md) covers the conflict graph, the topological sort and
 per-system retry. Step 6 is done when the numbers above match yours.
 
@@ -515,51 +489,37 @@ crate-type = ["cdylib"]
 saci = { path = "../crates/saci", default-features = false, features = ["processor"] }
 serde = { version = "1", features = ["derive"] }
 
-# The bindings generator, wasm32-only like the `bindings` module in lib.rs.
+# The bindings generator, invoked by the `#[processor]` expansion on wasm32 only.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = "0.63.0"
+wit-bindgen = { version = "0.63.0", features = ["async"] }
 ```
 
 ```rust,name=Export the build function
 use saci::prelude::*;
 
-// The WIT bindings, generated from the same package the host compiles against.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
+#[processor]
 fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("order-pipeline");
-    pipeline.data.register_component::<Order>().expect("register Order");
-    pipeline.add_system(SeedOrders);
-    pipeline.add_system(ConvertCurrency);
-    pipeline.add_system(FlagExpress);
-    pipeline.add_system(make_summary_system());
-    pipeline
+    Pipeline::new("order-pipeline")
+        .component::<Order>()
+        .system(SeedOrders)
+        .system(ConvertCurrency)
+        .system(FlagExpress)
+        .system(make_summary_system())
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build);
 ```
 
-`export_pipeline!` writes the `describe` and `run-batch` exports plus the
-`saci_config_get` and `saci_config_parse` accessors, all referencing
-`crate::bindings`. That is why the bindings module and the wasm32-only
-`wit-bindgen` dependency live in this crate.
+`#[processor]` writes the WIT bindings and the `describe` and `run-batch`
+exports, all on wasm32 only. It takes no arguments: the pipeline's name,
+`order-pipeline`, is the name the component describes itself with and the
+name the host checks. The wasm32-only `wit-bindgen` dependency is the one the
+expansion calls.
 
 The `Order` component and the four systems from steps 3 to 5 move into this
-crate. Their `arrow_schema::` and `arrow_array::` imports become
-`saci::arrow_schema::` and `saci::arrow_array::`, because `saci` re-exports both
-crates directly rather than adding them as dependencies here.
+crate. Their `arrow_array::` imports become `saci::arrow_array::`, because `saci` re-exports
+the crate directly rather than adding it as a dependency here.
 
 The two `ParallelSystem` impls are re-declared as plain `System` impls, because
-the processor build has no `runtime` feature and refuses a `ParallelSystem` at
+the processor build has no `engine` feature and refuses a `ParallelSystem` at
 run time. Their column math is unchanged: compute the arrays, then land them
 with `data.apply_write_set` instead of returning a `WriteSet`. Build it for the
 wasm target, from inside the crate:

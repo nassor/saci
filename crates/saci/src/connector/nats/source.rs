@@ -45,9 +45,9 @@ use futures_util::StreamExt;
 use futures_util::stream::{SelectAll, select_all};
 use tokio::time::{Instant, timeout_at};
 
+use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::io::source::Source;
-use crate::transformer::Transformer;
+use crate::io::Source;
 
 use crate::connector::nats::config::{AckPolicyConfig, NatsSourceConfig, SourceMode};
 use crate::connector::nats::connect::{connect, jetstream_context};
@@ -146,7 +146,7 @@ enum Started {
 /// NATS drops a message published with no subscriber, so without that prime
 /// the first message on a second fan-in subject is lost.
 pub struct NatsSource {
-    /// Effective fetch size for the next collected window. `batch_size` from
+    /// Effective fetch size for the next collected window. `batch_rows` from
     /// config seeds this, but a host that sends
     /// [`Source::request_batch_rows`] overwrites it before the first poll, not
     /// after some initial one: under the service's flow control the
@@ -158,7 +158,7 @@ pub struct NatsSource {
     /// The payload codec. A decoder is opened per window rather than held for
     /// the source's life: `Source` is `Send + Sync`, and a decoder need only be
     /// `Send`.
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// How a JetStream message is acknowledged. [`AckMode::Never`] in core mode,
     /// which has no acks at all.
     ack_mode: AckMode,
@@ -188,17 +188,17 @@ impl NatsSource {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] when `cfg` fails validation or
-    /// `transformer` has no message codec.
+    /// `codec` has no message codec.
     pub fn new(
         cfg: NatsSourceConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         cfg.validate()?;
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "{WHAT}: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
         let ack_mode = match &cfg.mode {
@@ -230,7 +230,7 @@ impl NatsSource {
         Ok(Self {
             cfg,
             schema,
-            transformer,
+            codec,
             ack_mode,
             state: None,
             buffer: Vec::new(),
@@ -372,14 +372,14 @@ impl NatsSource {
     /// Feed a whole window through one decoder and take the batch out.
     ///
     /// Each push names the message it failed on, keeping per-message
-    /// attribution; the transformer names the format that rejected it. That
+    /// attribution; the codec names the format that rejected it. That
     /// attribution is also what [`retire_exhausted`](Self::retire_exhausted)
     /// bounds redelivery by, so the failure carries the offending message's
     /// index rather than only its label.
     fn decode_window(&self, received: &[Received]) -> Result<RecordBatch, DecodeFailure> {
         let whole_window = |error| DecodeFailure { index: None, error };
         let mut decoder = self
-            .transformer
+            .codec
             .open_message_decoder(Arc::clone(&self.schema))
             .map_err(whole_window)?;
         for (index, message) in received.iter().enumerate() {
@@ -479,7 +479,7 @@ impl NatsSource {
 /// whatever a cancelled call left in it.
 ///
 /// A live source blocks on its first message with no deadline, then keeps taking
-/// messages until `batch_size` or one `poll_timeout_ms` window; a message a
+/// messages until `batch_rows` or one `poll_timeout_ms` window; a message a
 /// cancelled call already took satisfies that blocking phase. A `stop_at_end`
 /// source bounds every receive by that window: core NATS has no end-of-stream
 /// signal, so "the window elapsed with nothing on it" is the only EOF a
@@ -497,7 +497,7 @@ async fn collect_core(
     }
 
     let deadline = Instant::now() + Duration::from_millis(cfg.poll_timeout_ms);
-    while buffer.len() < cfg.batch_size {
+    while buffer.len() < cfg.batch_rows {
         match timeout_at(deadline, subscribers.next()).await {
             Ok(Some(message)) => buffer.push(received_core(message)),
             // Every subscription ended, which the held client makes impossible
@@ -605,11 +605,11 @@ async fn collect_jetstream(
     loop {
         {
             // What this window still has room for, so a window resumed after a
-            // cancel asks for the rest of `batch_size` rather than for another
+            // cancel asks for the rest of `batch_rows` rather than for another
             // whole one. Never zero: a request for no messages is not a
             // request, and the `stop_at_end` path above already returned a
             // full carried window.
-            let room = cfg.batch_size.saturating_sub(buffer.len()).max(1);
+            let room = cfg.batch_rows.saturating_sub(buffer.len()).max(1);
             let batch = if cfg.stop_at_end {
                 let mut builder = consumer.fetch().max_messages(room).expires(window.expires);
                 if window.max_bytes > 0 {
@@ -753,14 +753,14 @@ impl Source for NatsSource {
         self.last_pending
     }
 
-    /// A plain field write: sets `cfg.batch_size`, which `collect` reads
+    /// A plain field write: sets `cfg.batch_rows`, which `collect` reads
     /// fresh off `self.cfg` on every call, so it takes effect on the very
     /// next `next_batch`. No reconnect, no re-subscription. The service
-    /// sends the hint ahead of the first poll, so `batch_size` in config is
+    /// sends the hint ahead of the first poll, so `batch_rows` in config is
     /// not a starting size; it is authoritative only where the host sends no
     /// hint, meaning flow control disabled for this source or a source
     /// feeding a windowed node.
     fn request_batch_rows(&mut self, rows: usize) {
-        self.cfg.batch_size = rows.max(1);
+        self.cfg.batch_rows = rows.max(1);
     }
 }

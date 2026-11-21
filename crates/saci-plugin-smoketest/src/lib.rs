@@ -1,23 +1,22 @@
 //! Minimal native plugin: the host-side load fixture and Arrow IPC round-trip
 //! fixture.
 //!
-//! It declares one data component and one system, and exercises
-//! `saci::export_plugin!` end to end through a real shared library.
+//! It declares one data component and one system, and exercises `#[plugin]`
+//! end to end through a real shared library.
 //!
 //! - `Counter` is the data plane. Its `id` field passes through untouched, so a
 //!   byte difference there indicates `arrow-ipc` drift between host and plugin.
-//! - `Total` is the cross-batch state, declared via
-//!   `export_plugin!(build, state = Total)`. It lives in a `ProcessorState<Total>`
-//!   resource, not a registered component, so it never appears in the output
-//!   IPC.
+//! - `Total` is the cross-batch state, declared with `.state::<Total>()`. It
+//!   lives in a `sdk::State<Total>` resource, not a registered component, so it
+//!   never appears in the output IPC.
 //! - `advance` writes `seen` as `(total + row + 1) * multiplier`, then adds the
 //!   batch's row count to `total`. Three rows therefore produce `1, 2, 3` on a
 //!   cold start and `4, 5, 6` on the next batch when the host threads the
 //!   checkpoint back in, which is unreachable unless the blob crossed the
 //!   boundary in both directions.
 //! - `multiplier` comes from the `smoketest.multiplier` config key, so a host
-//!   setting it to `10` observes `10, 20, 30` and proves
-//!   `[pipeline.plugin.config]` reached the plugin.
+//!   setting it to `10` observes `10, 20, 30` and proves the plugin node's
+//!   `config` reached the plugin.
 //!
 //! Build it with `cargo build -p saci-plugin-smoketest`.
 
@@ -25,10 +24,9 @@
 
 use std::sync::Arc;
 
-use saci::plugin::arrow_array::{ArrayRef, Int64Array, RecordBatch};
-use saci::plugin::arrow_schema::{DataType, Field, Schema};
-use saci::plugin::prelude::*;
-use saci::plugin::{ProcessorState, RouteDecision};
+use saci::arrow_array::{ArrayRef, Int64Array, RecordBatch};
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// Config key holding the factor applied to every `seen` value.
 const MULTIPLIER_KEY: &str = "smoketest.multiplier";
@@ -82,7 +80,7 @@ impl Component for Total {
 /// Numbers every row and advances the running total.
 struct AdvanceSystem;
 
-#[saci::plugin::prelude::async_trait]
+#[async_trait]
 impl System for AdvanceSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("advance")
@@ -93,7 +91,7 @@ impl System for AdvanceSystem {
     async fn run(&self, dataset: &mut Dataset) -> SaciResult<()> {
         // An absent or unparseable key means 1, so a plugin with no config
         // still produces a clean 1, 2, 3.
-        let multiplier = match saci_config_parse::<i64>(MULTIPLIER_KEY) {
+        let multiplier = match sdk::host::config_parse::<i64>(MULTIPLIER_KEY) {
             Some(Ok(value)) => value,
             Some(Err(e)) => {
                 return Err(SaciError::system_execution(format!(
@@ -103,17 +101,13 @@ impl System for AdvanceSystem {
             None => 1,
         };
 
-        let batch = dataset
-            .columns::<Counter>()
-            .ok_or_else(|| SaciError::generic("smoketest: Counter batch not found"))?
-            .clone();
+        let batch = dataset.batch::<Counter>()?.clone();
         let rows = batch.num_rows();
 
-        // The macro installs the state resource before any system runs, so its
-        // absence is an SDK bug rather than a recoverable condition.
+        // The pipeline declares `Total` as state, so the resource is installed
+        // before any system runs; its absence is an SDK bug.
         let total = dataset
-            .get_resource::<ProcessorState<Total>>()
-            .ok_or_else(|| SaciError::generic("smoketest: ProcessorState<Total> resource missing"))?
+            .resource::<sdk::State<Total>>()?
             .rows
             .first()
             .map_or(0, |t| t.total);
@@ -124,7 +118,7 @@ impl System for AdvanceSystem {
 
         let schema = batch.schema();
         let seen_idx = schema
-            .index_of(COUNTER_SEEN.field)
+            .index_of(COUNTER_SEEN.name())
             .map_err(|e| SaciError::generic(format!("smoketest: seen missing: {e}")))?;
         let new_seen: ArrayRef = Arc::new(Int64Array::from(seen));
 
@@ -142,19 +136,15 @@ impl System for AdvanceSystem {
             .map_err(|e| SaciError::generic(format!("smoketest: batch rebuild: {e}")))?;
         dataset.replace_batch::<Counter>(new_batch)?;
 
-        let state = dataset
-            .get_resource_mut::<ProcessorState<Total>>()
-            .ok_or_else(|| {
-                SaciError::generic("smoketest: ProcessorState<Total> resource missing")
-            })?;
+        let state = dataset.resource_mut::<sdk::State<Total>>()?;
         let advanced = total + rows as i64;
         match state.rows.first_mut() {
             Some(existing) => existing.total = advanced,
             None => state.rows.push(Total { total: advanced }),
         }
 
-        saci::plugin::host::metric("smoketest.rows", rows as f64);
-        saci::plugin::host::info(
+        sdk::host::metric("smoketest.rows", rows as f64);
+        sdk::host::info(
             "smoketest",
             &format!("numbered {rows} rows through {advanced}"),
         );
@@ -164,26 +154,26 @@ impl System for AdvanceSystem {
 
 /// Construct the smoketest pipeline.
 ///
-/// Registers only `Counter`. `Total` is state and must not be registered: the
-/// IPC format requires every registered component to hold exactly the dataset's
-/// row count, while state rows are independent of batch rows.
+/// Registers `Counter` and declares `Total` as state. `Total` is not
+/// registered: the IPC format requires every registered component to hold
+/// exactly the dataset's row count, while state rows are independent of batch
+/// rows.
+#[plugin]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("smoketest-plugin");
-    pipeline
-        .data
-        .register_component::<Counter>()
-        .expect("register Counter");
-    pipeline.add_system(AdvanceSystem);
+    let mut pipeline = Pipeline::new("smoketest-plugin")
+        .component::<Counter>()
+        .state::<Total>()
+        .system(AdvanceSystem);
 
     // The `smoketest.route` config key ("a" or "a,b") installs a
     // `RouteDecision` resource, so the host delivers this batch's output only
-    // to the links whose branch it names. Absent = legacy multicast.
-    if let Some(route) = saci_config_get(ROUTE_KEY) {
+    // to the links whose branch it names. Absent = every link.
+    if let Some(route) = sdk::host::config(ROUTE_KEY) {
         let branches: Vec<String> = route.split(',').map(str::to_string).collect();
-        pipeline.add_system(system_fn(
+        pipeline = pipeline.system(system_fn(
             SystemMeta::new("route_batch"),
             move |data: &mut Dataset| {
-                data.insert_resource(RouteDecision(branches.clone()));
+                data.insert_resource(sdk::RouteDecision::to(branches.iter().cloned()));
                 Ok(())
             },
         ));
@@ -193,5 +183,3 @@ pub fn build() -> Pipeline {
 
 /// Config key selecting the branch names this fixture's output is delivered to.
 const ROUTE_KEY: &str = "smoketest.route";
-
-saci::export_plugin!(build, state = Total);

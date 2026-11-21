@@ -1,15 +1,15 @@
 //! One transport, two formats, chosen in config: a CSV `FileSource` and an Avro
-//! `FileSink` over one component, driven by `run_standalone`.
+//! `FileSink` over one component, driven by `BuiltWorkflow::run`.
 //!
 //! One run covers the whole path a `format = "avro"` key travels: registration
-//! as a builtin, resolution out of the transformer registry, writing a
+//! as a builtin, resolution out of the codec registry, writing a
 //! deflate-compressed object container file, and reading it back.
 
 #![cfg(all(
     feature = "connector-file",
     feature = "service",
-    feature = "transformer-avro",
-    feature = "transformer-csv"
+    feature = "codec-avro",
+    feature = "codec-csv"
 ))]
 
 use std::sync::Arc;
@@ -18,14 +18,12 @@ use arrow_array::{Float64Array, Int64Array};
 use arrow_schema::{DataType, Field, Schema};
 use tokio_util::sync::CancellationToken;
 
-use saci::connector::file::FileSource;
-use saci::io::source::Source;
+use saci::codec::avro::AvroCodec;
+use saci::connector::file::{FileSource, FileSourceConfig};
+use saci::io::Source;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
-use saci::transformer::avro::AvroTransformer;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 
@@ -38,7 +36,10 @@ fn schema() -> Arc<Schema> {
 
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("avro_connector");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
@@ -55,31 +56,31 @@ mode "standalone"
 
 node id=1 name="saci-avro-connector" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "avro-connector-test" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
-    transformer "avro_fmt" format="avro" {{
-        options compression="deflate"
+    codec "avro_fmt" format="avro" {{
+        config compression="deflate"
     }}
 
-    source "orders_in" type="FileSource" component="{COMPONENT}" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="FileSink" component="{COMPONENT}" transformer="avro_fmt" {{
+    sink "orders_out" connector="file" component="{COMPONENT}" codec="avro_fmt" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -87,7 +88,7 @@ workflow "avro-connector-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -103,25 +104,20 @@ async fn a_csv_source_and_an_avro_sink_share_one_file_connector() {
     std::fs::write(&input_path, "id,total\n1,10.5\n2,20.25\n3,30.75\n4,40.0\n")
         .expect("write the csv fixture");
 
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(
-            &config_path_text(&input_path),
-            &config_path_text(&output_path),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
-        .expect("both formats resolve through the transformer registry")
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &config_path_text(&input_path),
+        &config_path_text(&output_path),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
+        .expect("both formats resolve through the codec registry")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -131,10 +127,10 @@ async fn a_csv_source_and_an_avro_sink_share_one_file_connector() {
     // A reader takes the codec from the container file header, so reading this
     // back with no compression of its own also proves the writer honoured the
     // `deflate` option.
-    let mut readback = FileSource::open(
-        &output_path,
-        Arc::new(AvroTransformer::new(None, None)),
+    let mut readback = FileSource::new(
+        FileSourceConfig::new(&output_path),
         None,
+        Arc::new(AvroCodec::new()),
     )
     .expect("the sink wrote a readable Avro file");
 

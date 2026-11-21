@@ -1,22 +1,22 @@
 //! The Kafka connector: a Kafka [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! [`KafkaSource`] consumes a topic (or several) with `rdkafka`'s
 //! `StreamConsumer`; [`KafkaSink`] produces to one with a `FutureProducer`.
 //! What a message payload means is the
-//! [`Transformer`](crate::transformer::Transformer) the node's `transformer` key
-//! names, and its [`MessageShape`](crate::transformer::MessageShape) decides
+//! [`Codec`](crate::codec::Codec) the node's `codec` key
+//! names, and its [`MessageShape`](crate::codec::MessageShape) decides
 //! whether a batch becomes one message per row or one message in total.
 //!
 //! Both sides are declarative: the Arrow schema is written in the service
 //! configuration, not introspected, because
-//! [`SourceFactory::build`]/[`SinkFactory::build`] are synchronous and open no
+//! [`Connector::source`] and [`Connector::sink`] are synchronous and open no
 //! connection.
 //!
-//! [`SourceFactory::build`]: crate::connector::factory::SourceFactory::build
-//! [`SinkFactory::build`]: crate::connector::factory::SinkFactory::build
+//! [`Connector::source`]: crate::connector::Connector::source
+//! [`Connector::sink`]: crate::connector::Connector::sink
 //!
 //! # Delivery semantics
 //!
@@ -32,6 +32,9 @@
 
 #![deny(missing_docs)]
 
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "kafka";
+
 pub mod admin;
 pub mod config;
 pub mod factory;
@@ -39,6 +42,6 @@ pub mod sink;
 pub mod source;
 
 pub use config::{KafkaSinkConfig, KafkaSourceConfig, TopicProvision};
-pub use factory::{KafkaSinkFactory, KafkaSourceFactory};
+pub use factory::KafkaConnector;
 pub use sink::KafkaSink;
 pub use source::KafkaSource;

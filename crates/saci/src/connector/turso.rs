@@ -1,7 +1,7 @@
 //! The Turso connector: a Turso [`Source`] and [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! Turso is an in-process, SQLite-compatible SQL database. The connector reaches
 //! it two ways: an embedded local database file
@@ -12,11 +12,11 @@
 //! optional `connection.remote` table chooses between them.
 //!
 //! Both halves are declarative: the Arrow schema is written in the service
-//! configuration, not introspected, because [`SourceFactory::build`] is
+//! configuration, not introspected, because [`Connector::source`] is
 //! synchronous and cannot open a connection. A declared column the table cannot
 //! fill is a loud error rather than a silent coercion.
 //!
-//! [`SourceFactory::build`]: crate::connector::factory::SourceFactory::build
+//! [`Connector::source`]: crate::connector::Connector::source
 //!
 //! # Source modes
 //!
@@ -123,7 +123,7 @@
 //! # Delivery semantics
 //!
 //! The `polling` and `cdc` cursors are committed at the start of the *next*
-//! fetch, because [`Source`](crate::io::source::Source) has no
+//! fetch, because [`Source`](crate::io::Source) has no
 //! acknowledgement hook. A crash mid-cycle replays that cycle: delivery is
 //! **at-least-once**, matching what the distributed layer already promises.
 //! Configure the sink `write_mode="upsert"` or `"ignore_conflicts"` to make
@@ -140,21 +140,21 @@
 //! # Configuration
 //!
 //! ```kdl
-//! source "turso_orders" type="TursoSource" component="OrderChange" {
+//! source "turso_orders" connector="turso" component="OrderChange" {
 //!     config name="turso_orders" batch_rows=8192 {
 //!         connection path="orders.db"
 //!         mode kind="polling" table="orders" cursor_column="id"
-//!         schema_fields "id" type="int64" nullable=#false
-//!         schema_fields "total" type="float64"
+//!         field "id" type="int64" nullable=#false
+//!         field "total" type="float64"
 //!     }
 //! }
 //!
-//! sink "turso_enriched" type="TursoSink" component="EnrichedOrder" {
+//! sink "turso_enriched" connector="turso" component="EnrichedOrder" {
 //!     config name="turso_enriched" table="enriched_orders" \
 //!         write_mode="upsert" conflict_columns="id" {
 //!         connection path="orders.db"
-//!         schema_fields "id" type="int64" nullable=#false
-//!         schema_fields "total" type="float64"
+//!         field "id" type="int64" nullable=#false
+//!         field "total" type="float64"
 //!     }
 //! }
 //! ```
@@ -185,6 +185,9 @@
 
 #![deny(missing_docs)]
 
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "turso";
+
 pub mod config;
 pub mod factory;
 pub mod sink;
@@ -198,9 +201,9 @@ mod types;
 
 pub use config::{
     CaptureConfig, CaptureMode, CdcMode, ConnectionConfig, CursorMode, DumpMode, EncryptionConfig,
-    FieldSpec, RemoteConfig, Retention, SourceMode, SyncConfig, TransactionMode, TursoFieldType,
-    TursoSinkConfig, TursoSourceConfig, WriteMode,
+    RemoteConfig, Retention, SourceMode, SyncConfig, TransactionMode, TursoSinkConfig,
+    TursoSourceConfig, WriteMode,
 };
-pub use factory::{TursoSinkFactory, TursoSourceFactory};
+pub use factory::TursoConnector;
 pub use sink::TursoSink;
 pub use source::TursoSource;

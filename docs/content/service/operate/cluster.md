@@ -100,37 +100,42 @@ the claim loop, the leases and the checkpoints.
 
 ## 2. Write the cluster config
 
-`mode "cluster"` changes the top of the document: drop `run_mode`, add the
-timings and the peer list. There is no `store` block, because cluster state
-lives in `node.data_dir`, and no `flow_control` block, because there is no
-source to pace.
+`mode "cluster"` requires a `cluster { }` block and refuses `run`. The block
+holds the timings and the peer list; `node` stays at the top level. There is no
+`store` block, because cluster state lives in `node.data_dir`, and no
+`flow_control` block, because there is no source to pace.
 
 ```kdl,name=The cluster header
 mode "cluster"
-bootstrap #true              // true on exactly one node, on first bring-up only
-lease_ttl_ms 30000
-election_timeout_ms 1500
-heartbeat_interval_ms 300
-snapshot_log_interval 10000  // snapshot, and purge behind it, every 10 000 entries
+
+cluster {
+    bootstrap #true              // true on exactly one node, on first bring-up only
+    lease_ttl_ms 30000
+    election_timeout_ms 1500
+    heartbeat_interval_ms 300
+    snapshot_log_interval 10000  // snapshot, and purge behind it, every 10 000 entries
+
+    // Every member, including this node. node.id must appear here.
+    // addr is the coordination transport address, not the HTTP control-plane port.
+    peer id=1 addr="10.0.0.1:9000"
+    peer id=2 addr="10.0.0.2:9000"
+    peer id=3 addr="10.0.0.3:9000"
+}
 
 // id is stable across restarts. data_dir is where this node's own state lives,
 // and it must be non-empty.
 node id=1 name="saci-1" data_dir="/var/lib/saci/data"
 
-// Every member, including this node. node.id must appear here.
-// addr is the coordination transport address, not the HTTP control-plane port.
-peer id=1 addr="10.0.0.1:9000"
-peer id=2 addr="10.0.0.2:9000"
-peer id=3 addr="10.0.0.3:9000"
-
 workflow "settle" {
-    wasm "settle" module="pipelines/settle.wasm" {
+    wasm "settle" path="pipelines/settle.wasm" {
         config fx_eur="1.08"
     }
 }
 
 http bind="0.0.0.0:8080"
 ```
+
+Every key in the table below sits inside the `cluster` block.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -212,15 +217,14 @@ saci-service cluster init --config node1.kdl
 and prints instructions. It starts nothing and writes nothing:
 
 ```text
-OK: config is valid and cluster.bootstrap = true
+OK: config is valid and cluster { bootstrap #true }
   node.id:  1
   peers:    3
 
 To bootstrap the cluster, start this node with:
   saci-service serve --config node1.kdl
 
-IMPORTANT: run `saci-service serve` on ONE node first. After the leader is
-elected, start the remaining nodes with bootstrap: false.
+IMPORTANT: run `saci-service serve` on ONE node first. After the leader is elected, start the remaining nodes with `bootstrap #false`.
 ```
 
 **Start node 1:**
@@ -261,12 +265,11 @@ saci-service serve --config node3.kdl
 ## 4. Check it
 
 ```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
-saci-service cluster status --addr http://10.0.0.1:8080
+saci-service cluster status --url http://10.0.0.1:8080
 ```
 
 ```text
 node 1  mode=cluster
-Note: cluster details are not available in v1. Full Raft metrics integration is planned for v1.1.
 ```
 
 The three gauges on `/metrics` carry the detail: `saci_raft_term`,
@@ -292,8 +295,7 @@ Every node reporting leader id `1` means the group agrees on its leader.
 
 ## 5. Add or remove a node
 
-`cluster join` and `cluster leave` do not change membership: both print this
-procedure and exit 0. Membership is a config edit plus a restart.
+Membership is a config edit plus a restart.
 
 **Adding a node**, which is also how a failed one is replaced:
 
@@ -395,11 +397,11 @@ action is required.
 | `name` | string | none | display name on the dashboard and in `/status` |
 | `data_dir` | string | required | where this node keeps its four files; must not be empty |
 
-### the cluster header
+### mode and the cluster block
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `mode` | string | `"standalone"` | `"cluster"` selects the distributed runner |
+| `mode` | string | `"standalone"` | `"cluster"` selects the distributed runner and requires the `cluster` block; `"standalone"` takes `run` and refuses a `cluster` block |
 | `bootstrap` | boolean | `#false` | create a fresh cluster here when `data_dir` is empty |
 | `lease_ttl_ms` | integer | 30000 | how long a claimed row range is held; at least three election timeouts |
 | `election_timeout_ms` | integer | 1500 | the floor of each node's randomised election timeout; the ceiling is twice it |
@@ -413,10 +415,16 @@ action is required.
 | `id` | integer | required | that member's node id, unique across the list |
 | `addr` | string | required | its coordination address, not its HTTP port |
 
+`peer` nodes sit inside the `cluster` block.
+
 ## When it refuses to start
 
 | Message | What to change |
 |---|---|
+| ``mode "cluster" takes no run node`` | Delete the `run` node; `run` is valid only with `mode "standalone"`. |
+| ``mode "cluster" requires a cluster block`` | Add the `cluster { }` block with its peers. |
+| ``mode "standalone" takes no cluster block`` | Delete the `cluster` block, or set `mode "cluster"`. |
+| ``mode must be "standalone" or "cluster"`` | Correct the `mode` value. |
 | ``mode "cluster" does not take a `store` block: cluster state lives in node.data_dir`` | Delete the `store` block. |
 | ``mode "cluster" does not take a `flow_control` block: a cluster workflow declares no source node, so there is no admission to govern`` | Delete the `flow_control` block. |
 | `cluster mode runs exactly one 'wasm' or 'plugin' node with no source, sink or link (3 node(s), 2 link(s) declared)` | Delete every `source`, `sink` and `link`, and leave one processor node. |

@@ -19,7 +19,7 @@ use testcontainers::core::{ExecCommand, IntoContainerPort};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
-use saci::connector::s3::S3ConnectionConfig;
+use saci::connector::s3::ConnectionConfig;
 
 const IMAGE: &str = "rustfs/rustfs";
 const TAG: &str = "1.0.0-rc.3";
@@ -57,8 +57,8 @@ impl S3Container {
 
     /// A connection config pointing at this container's bucket, credentials
     /// and HTTP endpoint.
-    pub fn connection(&self) -> S3ConnectionConfig {
-        S3ConnectionConfig {
+    pub fn connection(&self) -> ConnectionConfig {
+        ConnectionConfig {
             bucket: self.bucket.clone(),
             endpoint: Some(self.endpoint()),
             access_key_id: Some(ACCESS_KEY.to_string()),

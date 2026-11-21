@@ -1,12 +1,12 @@
 // SACI extension example: user-defined source and sink factories.
 //
-// This config does not run with the stock saci-service binary. MongoSource and
-// ClickHouseSink ship with no connector crate, so a custom binary must register
-// them through `ServiceBuilder::register_source` and `register_sink`.
+// This config does not run with the stock saci-service binary. The `mongo`
+// source and the `clickhouse-enriched` sink ship with no connector crate, so a
+// custom binary must register them through `ServiceBuilder::connector`.
 //
-// Sources and sinks are the only factory surface. A processor node is either a
-// WASM/native-plugin module, as below, or a `Box<dyn PipelineRuntime>` handed
-// to `ServiceBuilder::with_runtime` by the node's declared id.
+// Sources and sinks are the only connector surface. A processor node is either
+// a WASM/native-plugin module, as below, or a `PipelineRuntime` handed to
+// `ServiceBuilder::runtime` by the node's declared id.
 //
 // See examples/configs/README.md for building a custom binary.
 
@@ -16,13 +16,13 @@ node id=1 name="order-processor" data_dir="${SACI_DATA_DIR:-/var/lib/saci-orders
 
 // Idle cadence: re-run every 5 seconds when idle. A backlogged iteration
 // re-enters at once instead of waiting.
-run_mode kind="interval" interval_ms=5000
+run "interval" every_ms=5000
 
 // Adaptive flow control: shown here even though this config does not run
-// with the stock binary, so a fork wiring MongoSource/ClickHouseSink starts
-// from a workflow that already demonstrates the top-level block. Left near
-// the row defaults; only the epoch is shortened to react within a few
-// 5 s idle-cadence iterations instead of the 60 s default.
+// with the stock binary, so a fork wiring the `mongo` source and the
+// `clickhouse-enriched` sink starts from a workflow that already demonstrates
+// the top-level block. Left near the row defaults; only the epoch is shortened
+// to react within a few 5 s idle-cadence iterations instead of the 60 s default.
 flow_control {
     min_rows 1024
     max_rows 65536
@@ -33,22 +33,22 @@ flow_control {
 // One workflow declares the whole DAG: the source, the processor, the sink,
 // and the explicit links between them. The components the processor declares
 // through `describe()` are what `component` on the source and sink below must
-// name. A custom binary can call `ServiceBuilder::with_runtime` instead and
-// omit `module` on the `wasm` node.
+// name. A custom binary can call `ServiceBuilder::runtime` instead and
+// omit `path` on the `wasm` node.
 workflow "orders" {
-    // MongoSource reads from a MongoDB collection. It requires a registered
-    // MongoSourceFactory.
-    source "mongo_orders" type="MongoSource" component="orders" {
+    // The `mongo` connector reads from a MongoDB collection. It requires a
+    // registered `Connector` named `mongo`.
+    source "mongo_orders" connector="mongo" component="orders" {
         config uri="${MONGO_URI:-mongodb://localhost:27017}" database="orders_db" collection="orders_raw"
     }
 
-    wasm "process_orders" module="pipelines/order_processing.wasm" {
+    wasm "process_orders" path="pipelines/order_processing.wasm" {
         config strict="true" lookup_table="products"
     }
 
-    // ClickHouseSink writes enriched rows to a column store. It requires a
-    // registered ClickHouseSinkFactory.
-    sink "clickhouse_enriched_orders" type="ClickHouseSink" component="orders" {
+    // The `clickhouse-enriched` connector writes enriched rows to a column
+    // store. It requires a registered `Connector` named `clickhouse-enriched`.
+    sink "clickhouse_enriched_orders" connector="clickhouse-enriched" component="orders" {
         config url="${CLICKHOUSE_URL:-http://localhost:8123}" table="enriched_orders"
     }
 
@@ -56,7 +56,7 @@ workflow "orders" {
     link from="process_orders" to="clickhouse_enriched_orders"
 }
 
-http bind="0.0.0.0:8080" disabled=#false
+http bind="0.0.0.0:8080" enabled=#true
 
 // Kept at a 60% grade: a template with no registered factories never
 // actually runs, so this is illustrative of the key rather than tuned

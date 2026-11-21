@@ -149,8 +149,8 @@ the processor works in.
 | `slide_ms` | integer | required for sliding | how often a new window starts |
 | `offset_ms` | integer | `0` | alignment offset, tumbling and sliding only |
 | `gap_ms` | integer | required for session | event-time silence that ends a session |
-| `time_field` | string | required | the event-time column, `Int64` milliseconds or an Arrow timestamp type |
-| `key_field` | child node | none | the grouping keys, one child per key or several arguments on one child. Omit for a global aggregate |
+| `time_field` | string | required | the event-time column, `int64` milliseconds or an Arrow timestamp type |
+| `key_fields` | child node | none | the grouping keys, one child per key or several arguments on one child. Omit for a global aggregate |
 | `allowed_lateness_ms` | integer | `0` | how far behind the watermark a row may sit and still be counted |
 
 A geometry key that does not belong to the declared `kind` is a parse error, and so is an

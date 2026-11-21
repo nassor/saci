@@ -120,7 +120,7 @@ pub struct TopoNode {
     pub kind: String,
     /// Declared name, absent when the config named none.
     pub name: Option<String>,
-    /// Connector `type` for a source or sink, runtime kind for a processor.
+    /// Connector name for a source or sink, runtime kind for a processor.
     pub type_name: String,
     /// The component this node reads or writes. `None` for a processor.
     pub component: Option<String>,
@@ -171,9 +171,8 @@ pub struct BridgeEdge {
 pub const SOURCE_ATTR: &str = "source";
 /// The attribute key carrying a processor node's id on its metric series.
 ///
-/// Attribution is additive: every processor metric is recorded once with no
-/// attributes, which is the process-wide total a `/metrics` consumer has
-/// always seen, and once more under `processor="<id>"`.
+/// Every `saci_processor_*` sample is recorded once, under `processor="<id>"`;
+/// a process-wide total is the sum over the attribute.
 pub const PROCESSOR_ATTR: &str = "processor";
 /// The attribute key carrying a sink node's id on its metric series.
 pub const SINK_ATTR: &str = "sink";
@@ -181,10 +180,9 @@ pub const SINK_ATTR: &str = "sink";
 pub const BRANCH_ATTR: &str = "branch";
 /// The attribute key carrying a workflow's declared id on its metric series.
 ///
-/// Attribution is additive, as for the node keys: `saci_workflow_runs_total`
-/// and `saci_workflow_errors_total` are each recorded once unattributed — the
-/// process-wide total every `/metrics` consumer has always read — and once
-/// more under `workflow="<id>"`. Summing both forms double counts.
+/// `saci_workflow_passes_total` and `saci_workflow_pass_errors_total` are
+/// recorded once per event, under `workflow="<id>"`; a process-wide total is
+/// the sum over the attribute.
 pub const WORKFLOW_ATTR: &str = "workflow";
 
 /// What kind of instrument produced a series.
@@ -204,7 +202,7 @@ pub enum SeriesKind {
 /// One instrument's value at one export interval.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeriesPoint {
-    /// Instrument name, e.g. `saci_rows_processed_total`.
+    /// Instrument name, e.g. `saci_source_rows_total`.
     pub name: String,
     /// Which instrument kind it came from.
     pub kind: SeriesKind,
@@ -501,7 +499,7 @@ pub struct TraceDetail {
 /// `Starting`, `Pausing` and `Stopping` are transient: a control request that
 /// returns one of them was accepted but had not settled when the response was
 /// written. `Completed` is a runner that reached the end of its work on its
-/// own (a `one_shot` pass, or every source at EOF); `Stopped` is one an
+/// own (a `once` pass, or every source at EOF); `Stopped` is one an
 /// operator stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -725,7 +723,7 @@ mod tests {
             id: "orders-in".to_string(),
             kind: "source".to_string(),
             name: Some("Authorizations".to_string()),
-            type_name: "NatsSource".to_string(),
+            type_name: "nats".to_string(),
             component: Some("Order".to_string()),
             runtime: None,
             window: None,
@@ -741,7 +739,7 @@ mod tests {
     #[test]
     fn series_kind_is_lowercase_on_the_wire() {
         let point = SeriesPoint {
-            name: "saci_rows_processed_total".to_string(),
+            name: "saci_source_rows_total".to_string(),
             kind: SeriesKind::Counter,
             attrs: Vec::new(),
             value: 12.0,

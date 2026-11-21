@@ -35,32 +35,32 @@ use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::inspector::{Inspector, InspectorConfig};
 use saci::inspector_wire::{Snapshot, Topology};
 use saci::prelude::*;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind};
-use saci::service::config::ServiceConfig;
-use saci::service::http::{ServiceModeLabel, ServiceState};
-use saci::service::{build_router, build_topology};
+use saci::service::BuiltWorkflow;
+use saci::service::ServiceConfig;
+use saci::service::{ServiceBuilder, build_router, build_topology};
+use saci::service::{ServiceModeLabel, ServiceState};
 
 /// Two sources and one sink, with a password in one and a DSN in the other.
 ///
 /// Neither connector is built here: the topology comes from a hand-assembled
 /// `BuiltNode` list, matching this shape, plus the parsed config, which is
-/// exactly what `ServiceBuilder::build_all` assembles for real.
+/// exactly what `ServiceBuilder::build` assembles for real.
 const FIXTURE: &str = r#"
 mode "standalone"
 
 node id=42 data_dir="/tmp/saci-inspector-http"
 
 workflow "inspector-http" {
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders-eu" type="NatsSource" component="Reading" transformer="ndjson_fmt" {
+    source "orders-eu" connector="nats" component="Reading" codec="ndjson_fmt" {
         config {
             mode kind="core" subject="authorizations.eu"
             connection url="nats://localhost:4222" password="hunter2-eu"
         }
     }
 
-    source "orders-us" type="NatsSource" component="Reading" transformer="ndjson_fmt" {
+    source "orders-us" connector="nats" component="Reading" codec="ndjson_fmt" {
         config {
             mode kind="core" subject="authorizations.us"
             connection url="nats://localhost:4222" password="hunter2-us"
@@ -69,7 +69,7 @@ workflow "inspector-http" {
 
     wasm "scale" name="Scale"
 
-    sink "settlements" type="PostgresSink" component="Reading" {
+    sink "settlements" connector="postgresql" component="Reading" {
         config {
             table "public.settlements"
             write_mode "upsert"
@@ -110,8 +110,8 @@ struct Scale;
 impl System for Scale {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("scale")
-            .read("Reading", "raw")
-            .write("Reading", "scaled")
+            .reads_named("Reading", "raw")
+            .writes_named("Reading", "scaled")
     }
 
     async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
@@ -129,7 +129,6 @@ fn state_with(inspector: Option<Inspector>) -> ServiceState {
         prometheus_registry: Arc::new(prometheus::Registry::new()),
         liveness: Arc::new(AtomicU64::new(0)),
         ready: Arc::new(AtomicBool::new(true)),
-        cluster_probe: None,
         standalone_stats: None,
         inspector,
         lifecycle: None,
@@ -163,7 +162,7 @@ async fn serve(state: ServiceState) -> (String, CancellationToken) {
 #[tokio::test(flavor = "multi_thread")]
 async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     let config: ServiceConfig = serde::Deserialize::deserialize(
-        saci::service::config::from_kdl_str(FIXTURE).expect("fixture parses"),
+        saci::connector::from_kdl_str(FIXTURE).expect("fixture parses"),
     )
     .expect("fixture deserializes");
 
@@ -182,93 +181,48 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     opentelemetry::global::set_meter_provider(provider.clone());
     saci::metrics::init();
 
-    let pipeline = Pipeline::builder("inspector-http")
-        .with::<Reading>()
-        .with_system(Scale)
-        .build();
+    let pipeline = Pipeline::new("inspector-http")
+        .component::<Reading>()
+        .system(Scale);
 
     // A `BuiltNode` list matching `FIXTURE`'s shape, standing in for what
-    // `ServiceBuilder::build_all` would assemble from real connectors. The
+    // `ServiceBuilder::build` would assemble from real connectors. The
     // processor node owns a second, identically-built `Pipeline`: `build_topology`
     // takes ownership through `BuiltNode`, so the instance actually driven
     // below by `run_on` has to be a separate one.
     let reading_schema = Reading::schema();
-    let (_tx_eu, src_eu) = ChannelSource::new(Arc::clone(&reading_schema), 1);
-    let (_tx_us, src_us) = ChannelSource::new(Arc::clone(&reading_schema), 1);
+    let (src_eu, _tx_eu) = ChannelSource::new(Arc::clone(&reading_schema), 1);
+    let (src_us, _tx_us) = ChannelSource::new(Arc::clone(&reading_schema), 1);
     let (sink, _rx) = ChannelSink::new(Arc::clone(&reading_schema), 1);
-    let topology_pipeline = Pipeline::builder("inspector-http")
-        .with::<Reading>()
-        .with_system(Scale)
-        .build();
-    let nodes = vec![
-        BuiltNode {
-            id: "orders-eu".to_string(),
-            name: None,
-            type_name: "NatsSource".to_string(),
-            component: Some("Reading"),
-            kind: BuiltNodeKind::Source(Box::new(src_eu)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "orders-us".to_string(),
-            name: None,
-            type_name: "NatsSource".to_string(),
-            component: Some("Reading"),
-            kind: BuiltNodeKind::Source(Box::new(src_us)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "scale".to_string(),
-            name: Some("Scale".to_string()),
-            type_name: "native".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(topology_pipeline),
-                kind: "native",
-            },
-            downstream: vec![BuiltEdge {
-                node: 3,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "settlements".to_string(),
-            name: None,
-            type_name: "PostgresSink".to_string(),
-            component: Some("Reading"),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-    ];
+    let topology_pipeline = Pipeline::new("inspector-http")
+        .component::<Reading>()
+        .system(Scale);
+    let mut built = BuiltWorkflow::builder("inspector-http")
+        .source("orders-eu", "Reading", src_eu)
+        .source("orders-us", "Reading", src_us)
+        .processor("scale", topology_pipeline)
+        .sink("settlements", "Reading", sink)
+        .link("orders-eu", "scale")
+        .link("orders-us", "scale")
+        .link("scale", "settlements")
+        .build()
+        .expect("build workflow");
+    built.nodes[0].connector = "nats".to_string();
+    built.nodes[1].connector = "nats".to_string();
+    built.nodes[2].name = Some("Scale".to_string());
+    built.nodes[3].connector = "postgresql".to_string();
+    let nodes = built.nodes;
 
-    inspector.set_topology(build_topology(&config, &[nodes.as_slice()], 1));
+    let builder = ServiceBuilder::new();
+    inspector.set_topology(build_topology(
+        &config,
+        builder.registry(),
+        &[nodes.as_slice()],
+        1,
+    ));
 
     let mut dataset = Dataset::new();
-    dataset
-        .register_component::<Reading>()
-        .expect("register Reading");
+    dataset.register::<Reading>().expect("register Reading");
     dataset
         .append::<Reading>(&[Reading {
             raw: 1.0,
@@ -313,6 +267,13 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
     assert!(
         !body.contains("s3cret") && !body.contains("dsn"),
         "Postgres DSN leaked into /api/topology: {body}"
+    );
+    // The redaction checks above pass vacuously when no connector is asked, so
+    // with the two connectors compiled in, the allowlisted keys must render.
+    #[cfg(all(feature = "connector-nats", feature = "connector-postgresql"))]
+    assert!(
+        body.contains("authorizations.eu") && body.contains("public.settlements"),
+        "the allowlisted detail keys must render: {body}"
     );
 
     let topology: Topology = serde_json::from_str(&body).expect("topology decodes");
@@ -363,7 +324,7 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
 
     // ── /api/snapshot ────────────────────────────────────────────────────────
     let response = client
-        .get(format!("http://{addr}/api/snapshot?window_secs=60"))
+        .get(format!("http://{addr}/api/snapshot?window_ms=60000"))
         .send()
         .await
         .expect("GET /api/snapshot");
@@ -387,7 +348,7 @@ async fn inspector_api_serves_topology_snapshot_and_dashboard() {
 
     // Neither stub source nor the stub sink is ever drained in this test:
     // `run_on` is called directly against a hand-populated dataset. So no
-    // `saci_rows_processed_total`/`saci_sink_batches_written_total` sample
+    // `saci_source_rows_total`/`saci_sink_batches_total` sample
     // exists yet, and every edge is correctly omitted rather than reported
     // as a stand-in zero.
     assert!(

@@ -34,9 +34,9 @@ use postgres_protocol::IsNull as WireNull;
 use postgres_protocol::types::{ArrayDimension, array_to_sql};
 use tokio_postgres::types::{IsNull, Kind, ToSql, Type, to_sql_checked};
 
-use crate::connector::postgresql::config::{FieldSpec, PgFieldType};
 use crate::connector::postgresql::numeric::{i128_to_numeric, money_factor};
 use crate::connector::postgresql::values::{DATE_EPOCH_OFFSET_DAYS, TIMESTAMP_EPOCH_OFFSET_MICROS};
+use crate::connector::schema::{FieldSpec, FieldType};
 
 /// One column value, ready to be written in PostgreSQL binary format.
 #[derive(Debug, Clone, Copy)]
@@ -219,7 +219,7 @@ impl ToSql for PgValue<'_> {
 /// The PostgreSQL integer a declared integer column is written into.
 ///
 /// A target narrower than the declared Arrow width is range-checked per value
-/// rather than truncated, which is what `pg_type = "int2"` on an `int64` field
+/// rather than truncated, which is what `native_type = "int2"` on an `int64` field
 /// buys; a wider one is a free widening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IntTarget {
@@ -609,7 +609,7 @@ pub(crate) fn resolve_columns<'a>(
             .ok_or_else(|| {
                 SaciError::generic(format!(
                     "{what}: batch has no column '{}'; the batch schema must match the declared \
-                     schema_fields",
+                     fields",
                     spec.name
                 ))
             })?
@@ -633,7 +633,7 @@ pub(crate) fn resolve_columns<'a>(
 fn reader_kind<'a>(
     what: &'a str,
     spec: &'a FieldSpec,
-    ty: PgFieldType,
+    ty: FieldType,
     array: &'a dyn Array,
     target: &Type,
 ) -> Result<ReaderKind<'a>, SaciError> {
@@ -665,11 +665,11 @@ fn reader_kind<'a>(
     };
 
     Ok(match ty {
-        PgFieldType::Boolean => cast!(BooleanArray, ReaderKind::Boolean),
+        FieldType::Boolean => cast!(BooleanArray, ReaderKind::Boolean),
         // The target settles the wire width here, once per batch, so the
         // per-value path is one `PgValue` construction with no second-level
         // dispatch; only a pair that can actually overflow keeps its check.
-        PgFieldType::Int16 => {
+        FieldType::Int16 => {
             let array = downcast!(Int16Array);
             match integer(target)? {
                 IntTarget::I16 => ReaderKind::Int16(array),
@@ -678,7 +678,7 @@ fn reader_kind<'a>(
                 narrow @ IntTarget::U32 => ReaderKind::Int16Checked(array, narrow),
             }
         }
-        PgFieldType::Int32 => {
+        FieldType::Int32 => {
             let array = downcast!(Int32Array);
             match integer(target)? {
                 IntTarget::I32 => ReaderKind::Int32(array),
@@ -688,7 +688,7 @@ fn reader_kind<'a>(
                 }
             }
         }
-        PgFieldType::Int64 => {
+        FieldType::Int64 => {
             let array = downcast!(Int64Array);
             match integer(target)? {
                 IntTarget::I64 => ReaderKind::Int64(array),
@@ -697,21 +697,21 @@ fn reader_kind<'a>(
                 }
             }
         }
-        PgFieldType::Float32 => cast!(Float32Array, ReaderKind::Float32),
-        PgFieldType::Float64 => cast!(Float64Array, ReaderKind::Float64),
-        PgFieldType::Utf8 => cast!(StringArray, ReaderKind::Utf8),
-        PgFieldType::Json => ReaderKind::Json(downcast!(StringArray), *target == Type::JSONB),
-        PgFieldType::Binary => cast!(BinaryArray, ReaderKind::Binary),
-        PgFieldType::Date32 => cast!(Date32Array, ReaderKind::Date32),
-        PgFieldType::Time64Micros => cast!(Time64MicrosecondArray, ReaderKind::Time64),
-        PgFieldType::TimestampMicros | PgFieldType::TimestampMicrosUtc => {
+        FieldType::Float32 => cast!(Float32Array, ReaderKind::Float32),
+        FieldType::Float64 => cast!(Float64Array, ReaderKind::Float64),
+        FieldType::Utf8 => cast!(StringArray, ReaderKind::Utf8),
+        FieldType::Json => ReaderKind::Json(downcast!(StringArray), *target == Type::JSONB),
+        FieldType::Binary => cast!(BinaryArray, ReaderKind::Binary),
+        FieldType::Date32 => cast!(Date32Array, ReaderKind::Date32),
+        FieldType::Time64Micros => cast!(Time64MicrosecondArray, ReaderKind::Time64),
+        FieldType::TimestampMicros | FieldType::TimestampMicrosUtc => {
             cast!(TimestampMicrosecondArray, ReaderKind::Timestamp)
         }
-        PgFieldType::Uuid => cast!(FixedSizeBinaryArray, ReaderKind::Uuid),
-        PgFieldType::IntervalMonthDayNano => {
+        FieldType::Uuid => cast!(FixedSizeBinaryArray, ReaderKind::Uuid),
+        FieldType::IntervalMonthDayNano => {
             cast!(IntervalMonthDayNanoArray, ReaderKind::Interval)
         }
-        PgFieldType::Decimal128 => {
+        FieldType::Decimal128 => {
             let (_, scale) = spec.decimal_params()?;
             let typed = downcast!(Decimal128Array);
             if typed.scale() != scale {
@@ -730,7 +730,7 @@ fn reader_kind<'a>(
                 ReaderKind::Decimal128(typed, scale)
             }
         }
-        PgFieldType::List => {
+        FieldType::List => {
             let item = spec.item.ok_or_else(|| {
                 SaciError::configuration(format!(
                     "{what}: column '{}': type \"list\" requires 'item'",
@@ -757,6 +757,12 @@ fn reader_kind<'a>(
                 element: Box::new(element),
                 element_oid: element_type.oid(),
             }
+        }
+        other => {
+            return Err(SaciError::configuration(format!(
+                "{what}: column '{}' is declared type \"{other}\", which postgresql does not map",
+                spec.name
+            )));
         }
     })
 }
@@ -797,15 +803,15 @@ mod tests {
     use super::*;
     use crate::connector::postgresql::values::ColumnBuilder;
 
-    fn spec(name: &str, ty: PgFieldType) -> FieldSpec {
+    fn spec(name: &str, ty: FieldType) -> FieldSpec {
         FieldSpec {
             name: name.to_string(),
             ty,
             nullable: true,
-            precision: matches!(ty, PgFieldType::Decimal128).then_some(18),
-            scale: matches!(ty, PgFieldType::Decimal128).then_some(4),
+            precision: matches!(ty, FieldType::Decimal128).then_some(18),
+            scale: matches!(ty, FieldType::Decimal128).then_some(4),
             item: None,
-            pg_type: None,
+            native_type: None,
         }
     }
 
@@ -847,14 +853,14 @@ mod tests {
 
     #[test]
     fn integers_and_floats_round_trip_through_the_decoder() {
-        let cases: Vec<(PgFieldType, PgValue<'static>, Type)> = vec![
-            (PgFieldType::Boolean, PgValue::Bool(true), Type::BOOL),
-            (PgFieldType::Int16, PgValue::I16(-3), Type::INT2),
-            (PgFieldType::Int32, PgValue::I32(-70_000), Type::INT4),
-            (PgFieldType::Int64, PgValue::I64(i64::MIN), Type::INT8),
-            (PgFieldType::Float32, PgValue::F32(-1.5), Type::FLOAT4),
-            (PgFieldType::Float64, PgValue::F64(1e100), Type::FLOAT8),
-            (PgFieldType::Int64, PgValue::U32(u32::MAX), Type::OID),
+        let cases: Vec<(FieldType, PgValue<'static>, Type)> = vec![
+            (FieldType::Boolean, PgValue::Bool(true), Type::BOOL),
+            (FieldType::Int16, PgValue::I16(-3), Type::INT2),
+            (FieldType::Int32, PgValue::I32(-70_000), Type::INT4),
+            (FieldType::Int64, PgValue::I64(i64::MIN), Type::INT8),
+            (FieldType::Float32, PgValue::F32(-1.5), Type::FLOAT4),
+            (FieldType::Float64, PgValue::F64(1e100), Type::FLOAT8),
+            (FieldType::Int64, PgValue::U32(u32::MAX), Type::OID),
         ];
         for (declared, value, ty) in cases {
             let buf = encoded(value, &ty);
@@ -891,7 +897,7 @@ mod tests {
             Field::new("doc", DataType::Utf8, true),
             Arc::new(StringArray::from(vec![Some(text)])),
         );
-        let specs = [spec("doc", PgFieldType::Json)];
+        let specs = [spec("doc", FieldType::Json)];
 
         let plain = reader(&specs, &batch, Type::JSON);
         let buf = encoded(plain[0].value(0).unwrap(), &Type::JSON);
@@ -915,8 +921,7 @@ mod tests {
             &Type::NUMERIC,
         );
         let mut builder =
-            ColumnBuilder::new(&spec("c", PgFieldType::Decimal128), 1, Type::NUMERIC.oid())
-                .unwrap();
+            ColumnBuilder::new(&spec("c", FieldType::Decimal128), 1, Type::NUMERIC.oid()).unwrap();
         builder.push("c", Some(&buf)).unwrap();
         let array = builder.finish();
         let decimals = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
@@ -956,10 +961,10 @@ mod tests {
 
         // Declared in a different order than the batch: resolution is by name.
         let specs = [
-            spec("id", PgFieldType::Int64),
-            spec("label", PgFieldType::Utf8),
-            spec("uid", PgFieldType::Uuid),
-            spec("at", PgFieldType::Time64Micros),
+            spec("id", FieldType::Int64),
+            spec("label", FieldType::Utf8),
+            spec("uid", FieldType::Uuid),
+            spec("at", FieldType::Time64Micros),
         ];
         let targets = [Type::INT8, Type::TEXT, Type::UUID, Type::TIME];
         let readers = resolve_columns("PostgresSink", &batch, &specs, &targets).unwrap();
@@ -984,7 +989,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-        let specs = [spec("other", PgFieldType::Int64)];
+        let specs = [spec("other", FieldType::Int64)];
         let err = resolve_columns("PostgresSink", &batch, &specs, &[Type::INT8]).unwrap_err();
         assert!(err.message().contains("'other'"), "{}", err.message());
     }
@@ -1000,14 +1005,14 @@ mod tests {
             .with_precision_and_scale(18, 2)
             .unwrap();
         let batch = RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap();
-        let specs = [spec("amount", PgFieldType::Decimal128)];
+        let specs = [spec("amount", FieldType::Decimal128)];
         let err = resolve_columns("PostgresSink", &batch, &specs, &[Type::NUMERIC]).unwrap_err();
         assert!(err.message().contains("scale"), "{}", err.message());
     }
 
     #[test]
     fn a_narrowed_integer_names_the_column_the_row_and_the_value() {
-        let specs = [spec("small", PgFieldType::Int64)];
+        let specs = [spec("small", FieldType::Int64)];
         // One case per edge the width check alone would miss: past int2's
         // range, past int4's, past oid's unsigned range, and negative into an
         // unsigned oid.
@@ -1054,7 +1059,7 @@ mod tests {
                 IntervalMonthDayNanoType::make_value(0, 0, 1),
             ])),
         );
-        let specs = [spec("span", PgFieldType::IntervalMonthDayNano)];
+        let specs = [spec("span", FieldType::IntervalMonthDayNano)];
         let readers = reader(&specs, &batch, Type::INTERVAL);
 
         let buf = encoded(readers[0].value(0).unwrap(), &Type::INTERVAL);
@@ -1069,7 +1074,7 @@ mod tests {
 
     #[test]
     fn money_rescales_the_declared_scale_and_refuses_a_lost_digit() {
-        let mut amount = spec("amount", PgFieldType::Decimal128);
+        let mut amount = spec("amount", FieldType::Decimal128);
         amount.precision = Some(19);
         amount.scale = Some(4);
         let array = Decimal128Array::from(vec![Some(12_345_600i128), Some(1i128)])
@@ -1104,8 +1109,8 @@ mod tests {
         builder.append_null();
         let array = builder.finish();
 
-        let mut tags = spec("tags", PgFieldType::List);
-        tags.item = Some(PgFieldType::Utf8);
+        let mut tags = spec("tags", FieldType::List);
+        tags.item = Some(FieldType::Utf8);
         let batch = one_column(
             Field::new(
                 "tags",
@@ -1144,8 +1149,8 @@ mod tests {
         builder.append(true);
         let array = builder.finish();
 
-        let mut ids = spec("ids", PgFieldType::List);
-        ids.item = Some(PgFieldType::Int32);
+        let mut ids = spec("ids", FieldType::List);
+        ids.item = Some(FieldType::Int32);
         let batch = one_column(
             Field::new(
                 "ids",
@@ -1187,8 +1192,8 @@ mod tests {
         builder.append(true);
         let array = builder.finish();
 
-        let mut spans = spec("spans", PgFieldType::List);
-        spans.item = Some(PgFieldType::IntervalMonthDayNano);
+        let mut spans = spec("spans", FieldType::List);
+        spans.item = Some(FieldType::IntervalMonthDayNano);
         let batch = one_column(
             Field::new(
                 "spans",

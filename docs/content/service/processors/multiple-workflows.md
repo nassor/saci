@@ -102,30 +102,30 @@ PostgreSQL.
 
 ## 1. Declare two workflows
 
-Two `workflow` blocks in one file, each with its own id. Every node id, transformers included,
+Two `workflow` blocks in one file, each with its own id. Every node id, `codec` ids included,
 is unique across the whole file rather than within one workflow, and every `link` names two
 nodes of its own workflow.
 
 ```kdl,name=Two workflows, one process
-run_mode kind="stream"
+run "stream"
 
 workflow "route" {
-    source "orders_in" type="NatsSource" component="Sale" transformer="ndjson_fmt" { /* ... */ }
-    wasm "router" module="target/wasm32-wasip3/release/multi_workflow_router_wasm.wasm"
-    sink "rush_sales" type="PostgresSink" component="Sale" { /* ... */ }
+    source "orders_in" connector="nats" component="Sale" codec="ndjson_fmt" { /* ... */ }
+    wasm "router" path="target/wasm32-wasip3/release/multi_workflow_router_wasm.wasm"
+    sink "rush_sales" connector="postgresql" component="Sale" { /* ... */ }
 
     link from="orders_in" to="router"
     link from="router" to="rush_sales" branch="rush"
 }
 
 workflow "settle" {
-    source "offsets_in" type="NatsSource" component="Sale" transformer="settle_ndjson" { /* ... */ }
-    wasm "window_sales" module="target/wasm32-wasip3/release/windowing_tumbling_wasm.wasm" {
+    source "offsets_in" connector="nats" component="Sale" codec="settle_ndjson" { /* ... */ }
+    wasm "window_sales" path="target/wasm32-wasip3/release/windowing_tumbling_wasm.wasm" {
         window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-            key_field "symbol"
+            key_fields "symbol"
         }
     }
-    sink "window_totals" type="PostgresSink" component="WindowTotal" { /* ... */ }
+    sink "window_totals" connector="postgresql" component="WindowTotal" { /* ... */ }
 
     link from="offsets_in" to="window_sales"
     link from="window_sales" to="window_totals"
@@ -133,31 +133,31 @@ workflow "settle" {
 ```
 
 Each workflow gets its own runner, its own run and error counters, and its own card on the
-dashboard. A `transformer` declared in one workflow serves that workflow only, which is why
-`route` and `settle` each declare their own `ndjson` transformer.
+dashboard. A `codec` declared in one workflow serves that workflow only, which is why
+`route` and `settle` each declare their own `ndjson` codec.
 
 ## 2. Bridge them with a channel
 
-A `ChannelSink` in one workflow and a `ChannelSource` in another meet on a shared `name`. That
+A `channel` sink in one workflow and a `channel` source in another meet on a shared `name`. That
 is the only way a batch crosses a workflow boundary. Both halves declare the same `name`, the
-same `buffer` and the same `schema_fields`.
+same `buffer` and the same `field` lines.
 
 ```kdl,name=The two halves of one channel
 // In workflow "route": the standard branch leaves through the channel.
-sink "standard_bridge" type="ChannelSink" component="Sale" {
+sink "standard_bridge" connector="channel" component="Sale" {
     config name="standard" buffer=64 {
-        schema_fields "timestamp_ms" type="int64" nullable=#false
-        schema_fields "symbol" type="utf8" nullable=#false
-        schema_fields "amount" type="float64" nullable=#false
+        field "timestamp_ms" type="int64" nullable=#false
+        field "symbol" type="utf8" nullable=#false
+        field "amount" type="float64" nullable=#false
     }
 }
 
 // In workflow "settle": the same name picks up the other end.
-source "standard_in" type="ChannelSource" component="Sale" {
+source "standard_in" connector="channel" component="Sale" {
     config name="standard" buffer=64 {
-        schema_fields "timestamp_ms" type="int64" nullable=#false
-        schema_fields "symbol" type="utf8" nullable=#false
-        schema_fields "amount" type="float64" nullable=#false
+        field "timestamp_ms" type="int64" nullable=#false
+        field "symbol" type="utf8" nullable=#false
+        field "amount" type="float64" nullable=#false
     }
 }
 ```
@@ -211,14 +211,14 @@ Validate the config. The channel pairing is checked here, before any connector o
 Linux/macOS:
 
 ```bash,name=Validate the two-workflow config
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- validate \
   --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- validate --config examples/multi_workflow/multi_workflow.kdl --strict
 ```
 
 ```text,name=What validate prints
@@ -231,14 +231,14 @@ Then serve it, and publish into both subjects from a second terminal:
 Linux/macOS:
 
 ```bash,name=Serve the config
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- serve \
   --config examples/multi_workflow/multi_workflow.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve --config examples/multi_workflow/multi_workflow.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- serve --config examples/multi_workflow/multi_workflow.kdl
 ```
 
 ```bash,name=Publish into both subjects
@@ -283,14 +283,14 @@ the time field, the key field, the lateness budget and the live watermark.
 
 | Message | What to change |
 |---|---|
-| `channel 'standard': declares a ChannelSink but no ChannelSource` | Add the source half, in whichever workflow consumes the stream. |
-| `channel 'standard': declares a ChannelSource but no ChannelSink` | Add the sink half, in whichever workflow produces the stream. |
-| `channel 'standard': more than one ChannelSink declared` | One name carries one writer. Give the second producer its own channel name. |
-| `channel 'standard': more than one ChannelSource declared` | One name carries one reader. Give the second consumer its own channel name. |
-| `channel 'standard': the paired ChannelSource and ChannelSink declare different schemas` | Make both halves' `schema_fields` lists identical, name for name and type for type. |
+| `channel 'standard': declares a channel sink but no channel source` | Add the source half, in whichever workflow consumes the stream. |
+| `channel 'standard': declares a channel source but no channel sink` | Add the sink half, in whichever workflow produces the stream. |
+| `channel 'standard': more than one channel sink declared` | One name carries one writer. Give the second producer its own channel name. |
+| `channel 'standard': more than one channel source declared` | One name carries one reader. Give the second consumer its own channel name. |
+| `channel 'standard': the paired ChannelSource and ChannelSink declare different schemas` | Make both halves' `field` lines identical, name for name and type for type. |
 | `channel 'standard': buffer 64 differs from the paired half's buffer 8` | Set the same `buffer` on both halves. |
-| `ChannelSource config requires a 'name' key naming the shared channel` | Give the source half a `name` in its `config` block. |
-| `ChannelSource config requires a 'schema_fields' list` | Declare the columns the channel carries. |
+| ``ChannelSource config: missing field `name` `` | Give the source half a `name` in its `config` block. |
+| `ChannelSource config requires at least one 'field' entry` | Declare the columns the channel carries. |
 
 ## Next
 

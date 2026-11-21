@@ -1,10 +1,10 @@
 //! [`HttpSource`]: one HTTP read, in one of three shapes.
 //!
 //! [`ReadMode::Document`] is one GET of a finite resource. The body is spooled
-//! to an unnamed temp file as it arrives and handed to the transformer's stream
-//! read surface: [`Transformer::open_reader`] takes a `std::fs::File` because
-//! parquet reads its footer before any row group. One dedicated OS thread then
-//! drives the [`BatchReader`](crate::transformer::BatchReader) and pushes batches
+//! to an unnamed temp file as it arrives and handed to the codec's stream
+//! read surface as a [`ReadInput::File`]: parquet reads its footer before any
+//! row group, so the body has to be seekable. One dedicated OS thread then
+//! drives the [`BatchReader`](crate::codec::BatchReader) and pushes batches
 //! down a bounded channel, so the executor never blocks on the decode. The
 //! source reports EOF when that stream ends and re-arms, so the next call
 //! issues a fresh GET: that is what makes `interval` re-read the resource on
@@ -14,18 +14,18 @@
 //!
 //! [`ReadMode::Lines`] and [`ReadMode::Events`] read a body that never ends:
 //! newline-delimited records, and `text/event-stream`. Each frame goes through
-//! the transformer's *message* surface rather than its stream surface, a window
-//! closes on `batch_size` frames or `poll_timeout`, and a body that does end is
+//! the codec's *message* surface rather than its stream surface, a window
+//! closes on `batch_rows` frames or `poll_timeout`, and a body that does end is
 //! reconnected to after `reconnect`. Both are live sources: only the stream
 //! runner can drive them, and the service's config validator refuses any
 //! other run mode.
 //!
 //! [`SchemaFrom`] decides what a document mode read hands the format:
-//! `schema_fields` verbatim, which `csv` needs and which `parquet`, `avro` and
-//! `arrow-ipc` project the body onto, or nothing at all, which leaves a
+//! `field` entries verbatim, which `csv` needs and which `parquet`, `avro` and
+//! `arrow-ipc` project the payload onto, or nothing at all, which leaves a
 //! self-describing format reading its own. The declared schema is what
 //! [`Source::schema`] reports either way, because the graph is validated before
-//! a request is made; with [`SchemaFrom::Body`] it is checked field for field
+//! a request is made; with [`SchemaFrom::Payload`] it is checked field for field
 //! against the schema the body turned out to carry, rather than used to project
 //! it. A streaming mode has no such choice: the message surface takes a
 //! required schema, opened before the first byte arrives.
@@ -41,10 +41,10 @@ use reqwest::{Method, Url};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::connector::NodeIdentity;
+use crate::codec::{Codec, ReadInput};
+use crate::connector::{NodeIdentity, SchemaFrom};
 use crate::error::SaciError;
-use crate::io::source::Source;
-use crate::transformer::Transformer;
+use crate::io::Source;
 
 use crate::connector::http::client::{self, Exchange, HttpClient, HttpVersion};
 use crate::connector::http::document::{self, CHANNEL_CAPACITY};
@@ -54,21 +54,6 @@ use crate::connector::http::tls::TlsFiles;
 
 /// The connector name every error and metric label of this half carries.
 const WHAT: &str = "HttpSource";
-
-/// Where the Arrow schema a source hands the format comes from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SchemaFrom {
-    /// `schema_fields` is handed to the format, including nothing when the
-    /// config declared none: what `csv` needs, and what `parquet`, `avro` and
-    /// `arrow-ipc` project the body onto.
-    #[default]
-    Config,
-    /// The format reads its own schema out of the response body, and that
-    /// schema must then equal `schema_fields` field for field. What a source
-    /// wants when the body's own schema is what it reads, `parquet` and `avro`
-    /// included.
-    Body,
-}
 
 /// Whether a document mode read follows `Link` headers past the first page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -83,25 +68,25 @@ pub enum Pagination {
 
 /// How a streaming read closes one batch.
 ///
-/// A window ends on whichever comes first: `batch_size` frames, or
+/// A window ends on whichever comes first: `batch_rows` frames, or
 /// `poll_timeout` since the window's first frame. `reconnect` is how long the
 /// reader waits before re-requesting a body that ended.
 #[derive(Debug, Clone, Copy)]
-pub struct Window {
+pub struct BatchWindow {
     /// Frames per batch. A decoder that cannot flush after refusing a frame,
     /// ndjson's among them, loses the open window's other frames with it, so a
-    /// smaller `batch_size` bounds that loss.
-    pub batch_size: usize,
+    /// smaller `batch_rows` bounds that loss.
+    pub batch_rows: usize,
     /// How long a partially filled window waits for its next frame.
     pub poll_timeout: Duration,
     /// How long to wait before re-requesting a body that ended or failed.
     pub reconnect: Duration,
 }
 
-impl Default for Window {
+impl Default for BatchWindow {
     fn default() -> Self {
         Self {
-            batch_size: 1_000,
+            batch_rows: 1_000,
             poll_timeout: Duration::from_secs(1),
             reconnect: Duration::from_secs(1),
         }
@@ -120,14 +105,14 @@ pub enum ReadMode {
         conditional: bool,
     },
     /// A body that never ends, one record per line.
-    Lines(Window),
+    Lines(BatchWindow),
     /// A `text/event-stream` body that never ends.
     Events {
         /// When set, only events whose `event:` field equals this are decoded;
         /// every other event, and every unnamed one, is skipped.
         event: Option<String>,
         /// Batch and reconnect geometry.
-        window: Window,
+        window: BatchWindow,
     },
 }
 
@@ -142,7 +127,7 @@ impl Default for ReadMode {
 
 /// What both client halves take: transport, TLS, headers and the budget.
 #[derive(Debug, Clone)]
-pub struct HttpClientOptions {
+pub struct HttpClientConfig {
     /// Which HTTP version to speak.
     pub http_version: HttpVersion,
     /// The `tls` block: a private CA to trust, a client identity to present.
@@ -157,7 +142,7 @@ pub struct HttpClientOptions {
     pub identity: Option<NodeIdentity>,
 }
 
-impl Default for HttpClientOptions {
+impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
             http_version: HttpVersion::default(),
@@ -169,19 +154,33 @@ impl Default for HttpClientOptions {
     }
 }
 
-/// Everything [`HttpSource::new`] takes past the url and the transformer.
-#[derive(Debug, Clone, Default)]
-pub struct HttpSourceOptions {
+/// What [`HttpSource::new`] takes past the schema and the codec.
+#[derive(Debug, Clone)]
+pub struct HttpSourceConfig {
+    /// The resource to read.
+    pub url: String,
     /// Transport, TLS, headers and the budget.
-    pub client: HttpClientOptions,
-    /// The schema the config declared, `None` when it declared none.
-    pub declared: Option<Arc<Schema>>,
+    pub client: HttpClientConfig,
     /// Where the schema handed to the format comes from.
     pub schema_from: SchemaFrom,
     /// What shape the resource is.
     pub mode: ReadMode,
     /// The largest body to accept, `None` for no cap.
     pub max_body_bytes: Option<usize>,
+}
+
+impl HttpSourceConfig {
+    /// A document mode read of `url` with the default client, the schema
+    /// handed to the format as declared, and no body cap.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            client: HttpClientConfig::default(),
+            schema_from: SchemaFrom::default(),
+            mode: ReadMode::default(),
+            max_body_bytes: None,
+        }
+    }
 }
 
 /// What the source and the reader task share: the transport and the target.
@@ -238,7 +237,7 @@ struct DocumentState {
 
 /// Streaming mode state: the reader task and the channel it feeds.
 struct StreamState {
-    window: Window,
+    window: BatchWindow,
     /// `Some` in [`ReadMode::Events`], carrying the optional event filter.
     events: Option<Option<String>>,
     batches: Option<mpsc::Receiver<Result<RecordBatch, SaciError>>>,
@@ -261,7 +260,7 @@ enum Engine {
 /// the config declared none, and never changes: nothing can be known about a
 /// body that has not arrived. Under [`SchemaFrom::Config`] a body carrying
 /// columns the declaration does not name is projected onto it;
-/// [`SchemaFrom::Body`] instead withholds the declaration, so the body's own
+/// [`SchemaFrom::Payload`] instead withholds the declaration, so the body's own
 /// schema governs and is compared against it once the body arrives.
 ///
 /// # Example
@@ -270,25 +269,25 @@ enum Engine {
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::{DataType, Field, Schema};
-/// use saci::connector::http::{HttpSource, HttpSourceOptions, SchemaFrom};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::connector::SchemaFrom;
+/// use saci::connector::http::{HttpSource, HttpSourceConfig};
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 /// // csv carries no schema of its own, so the declared one is required.
 /// let src = HttpSource::new(
-///     "https://example.invalid/orders.csv",
-///     Arc::new(CsvTransformer::new(true)),
-///     HttpSourceOptions {
-///         declared: Some(schema),
+///     HttpSourceConfig {
 ///         schema_from: SchemaFrom::Config,
-///         ..HttpSourceOptions::default()
+///         ..HttpSourceConfig::new("https://example.invalid/orders.csv")
 ///     },
+///     Some(schema),
+///     Arc::new(CsvCodec::new()),
 /// )
 /// .unwrap();
 /// ```
 pub struct HttpSource {
     request: Arc<Request>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// The schema the config declared, `None` when it declared none. What the
     /// format is handed depends on [`SchemaFrom`]: `Config` hands it over
     /// verbatim, `Body` withholds it so the body's own schema governs.
@@ -305,50 +304,51 @@ pub struct HttpSource {
 impl HttpSource {
     /// Prepare the source without making a request.
     ///
-    /// `url` is read on the first batch. In a streaming mode the transformer's
-    /// message decoder is opened here, against the declared schema, so a
-    /// format that cannot decode discrete messages is a configuration error
-    /// before a connection is opened rather than a reader that connects,
-    /// closes, and delivers nothing.
+    /// `config.url` is read on the first batch. `schema` is the declared
+    /// schema, `None` when the config declared none. In a streaming mode the
+    /// codec's message decoder is opened here, against it, so a format that
+    /// cannot decode discrete messages is a configuration error before a
+    /// connection is opened rather than a reader that connects, closes, and
+    /// delivers nothing.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] when [`SchemaFrom::Body`] is asked
+    /// Returns [`SaciError::Configuration`] when [`SchemaFrom::Payload`] is asked
     /// for without a declared schema to check the body against, when a
     /// streaming mode is asked for without one at all, when a streaming mode
-    /// is combined with `schema_from "body"`, when `http_version "3"` is
+    /// is combined with `schema_from "payload"`, when `http_version "3"` is
     /// pointed at a non-https url, when a header name or value is malformed,
     /// when a `tls` file is missing or malformed, or when the HTTP client
     /// cannot be built. No request is made.
     pub fn new(
-        url: &str,
-        transformer: Arc<dyn Transformer>,
-        options: HttpSourceOptions,
+        config: HttpSourceConfig,
+        schema: Option<Arc<Schema>>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
-        let HttpSourceOptions {
+        let HttpSourceConfig {
+            url,
             client: client_options,
-            declared,
             schema_from,
             mode,
             max_body_bytes,
-        } = options;
+        } = config;
 
         // Without a declared schema there is nothing for `Source::schema` to
         // report, so `validate_workflow_graph` would reject the link before a
         // request is ever made. Refusing here names the missing key instead.
-        if schema_from == SchemaFrom::Body && declared.is_none() {
+        if schema_from == SchemaFrom::Payload && schema.is_none() {
             return Err(SaciError::configuration(
-                "HttpSource: schema_from \"body\" needs a 'schema_fields' list to check the \
+                "HttpSource: schema_from \"payload\" needs a 'field' entry to check the \
                  body's own schema against",
             ));
         }
         let streaming = !matches!(mode, ReadMode::Document { .. });
-        if streaming && schema_from == SchemaFrom::Body {
+        if streaming && schema_from == SchemaFrom::Payload {
             return Err(SaciError::configuration(
-                "HttpSource: schema_from \"body\" applies to mode kind=\"document\" only",
+                "HttpSource: schema_from \"payload\" applies to mode kind=\"document\" only",
             ));
         }
-        let declared_for_stream = match (streaming, &declared) {
+        let declared_for_stream = match (streaming, &schema) {
             (false, _) => None,
             (true, Some(schema)) => Some(Arc::clone(schema)),
             (true, None) => {
@@ -357,18 +357,18 @@ impl HttpSource {
                     _ => "events",
                 };
                 return Err(SaciError::configuration(format!(
-                    "HttpSource: mode kind=\"{kind}\" needs a 'schema_fields' list: a message \
+                    "HttpSource: mode kind=\"{kind}\" needs a 'field' entry: a message \
                      decoder is built before the first byte arrives"
                 )));
             }
         };
-        client::require_https(WHAT, client_options.http_version, url)?;
+        client::require_https(WHAT, client_options.http_version, &url)?;
 
         // The answer depends on the schema and nothing else, so every
         // connection would get the same one. Asking here is what makes a
         // format with no message decoder a configuration error.
         if let Some(schema) = declared_for_stream {
-            transformer.open_message_decoder(schema)?;
+            codec.open_message_decoder(schema)?;
         }
 
         let mut headers = client_options.headers.clone();
@@ -423,16 +423,16 @@ impl HttpSource {
         Ok(Self {
             request: Arc::new(Request {
                 client,
-                url: url.to_string(),
+                url,
                 headers: client::header_map(WHAT, headers)?,
                 metrics: Instruments::new("source", client_options.identity.as_ref()),
             }),
-            transformer,
-            schema: match &declared {
+            codec,
+            schema: match &schema {
                 Some(schema) => Arc::clone(schema),
                 None => Arc::new(Schema::empty()),
             },
-            declared,
+            declared: schema,
             schema_from,
             max_body_bytes,
             engine,
@@ -451,7 +451,7 @@ struct Page {
 
 /// What decoding one page needs, the same for every page of one read.
 struct Decode {
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// What the format is handed, already resolved from the `schema_from`
     /// rule: the declaration verbatim, or nothing so a self-describing format
     /// reads its own.
@@ -483,7 +483,7 @@ async fn fetch_page(
     validators: &HeaderMap,
 ) -> Result<Option<Page>, SaciError> {
     let Decode {
-        transformer,
+        codec,
         declared,
         check,
         expected,
@@ -542,8 +542,8 @@ async fn fetch_page(
         document::open(
             WHAT,
             &source,
-            &transformer,
-            spool,
+            &codec,
+            ReadInput::File(spool),
             declared,
             check,
             &expected,
@@ -648,9 +648,9 @@ fn validators(state: &DocumentState) -> HeaderMap {
 /// reader then waits `reconnect` and asks again.
 async fn read_stream(
     request: Arc<Request>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
-    window: Window,
+    window: BatchWindow,
     events: Option<Option<String>>,
     cap: Option<usize>,
     tx: mpsc::Sender<Result<RecordBatch, SaciError>>,
@@ -692,7 +692,7 @@ async fn read_stream(
 
         let outcome = read_body(
             &request,
-            &transformer,
+            &codec,
             &schema,
             window,
             events.as_ref(),
@@ -720,14 +720,14 @@ enum BodyEnd {
     Reconnect,
 }
 
-/// Read one live body to its end, closing a window per `batch_size` frames or
+/// Read one live body to its end, closing a window per `batch_rows` frames or
 /// per `poll_timeout`.
 #[allow(clippy::too_many_arguments)]
 async fn read_body(
     request: &Arc<Request>,
-    transformer: &Arc<dyn Transformer>,
+    codec: &Arc<dyn Codec>,
     schema: &Arc<Schema>,
-    window: Window,
+    window: BatchWindow,
     events: Option<&Option<String>>,
     cap: Option<usize>,
     tx: &mpsc::Sender<Result<RecordBatch, SaciError>>,
@@ -735,7 +735,7 @@ async fn read_body(
     reconnect: &mut Duration,
     last_event_id: &mut Option<HeaderValue>,
 ) -> BodyEnd {
-    let mut frames = match Frames::open(&request.metrics, transformer, schema, tx, window) {
+    let mut frames = match Frames::open(&request.metrics, codec, schema, tx, window) {
         Ok(frames) => frames,
         Err(e) => {
             request.metrics.error("decode");
@@ -889,11 +889,11 @@ async fn read_body(
 /// the transport's own flow control stalls the server.
 struct Frames<'a> {
     metrics: &'a Instruments,
-    transformer: &'a Arc<dyn Transformer>,
+    codec: &'a Arc<dyn Codec>,
     schema: &'a Arc<Schema>,
     tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
-    window: Window,
-    decoder: Box<dyn crate::transformer::MessageDecoder>,
+    window: BatchWindow,
+    decoder: Box<dyn crate::codec::MessageDecoder>,
     /// Frames pushed since the last close.
     pushed: usize,
     /// When the open window's `poll_timeout` runs out, `None` while the
@@ -909,25 +909,25 @@ impl<'a> Frames<'a> {
     /// Returns the format's own error when the decoder cannot be built.
     fn open(
         metrics: &'a Instruments,
-        transformer: &'a Arc<dyn Transformer>,
+        codec: &'a Arc<dyn Codec>,
         schema: &'a Arc<Schema>,
         tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
-        window: Window,
+        window: BatchWindow,
     ) -> Result<Self, SaciError> {
         Ok(Self {
             metrics,
-            transformer,
+            codec,
             schema,
             tx,
             window,
-            decoder: transformer.open_message_decoder(Arc::clone(schema))?,
+            decoder: codec.open_message_decoder(Arc::clone(schema))?,
             pushed: 0,
             deadline: None,
         })
     }
 
     /// Decode every frame one chunk yielded, closing a window each time it
-    /// reaches `batch_size`.
+    /// reaches `batch_rows`.
     ///
     /// # Errors
     ///
@@ -944,7 +944,7 @@ impl<'a> Frames<'a> {
             if self.deadline.is_none() {
                 self.deadline = Some(Instant::now() + self.window.poll_timeout);
             }
-            if self.pushed >= self.window.batch_size {
+            if self.pushed >= self.window.batch_rows {
                 self.close().await?;
             }
         }
@@ -996,10 +996,7 @@ impl<'a> Frames<'a> {
 
     /// Replace the decoder, which a refused frame leaves holding part of one.
     async fn reopen(&mut self) -> Result<(), BodyEnd> {
-        match self
-            .transformer
-            .open_message_decoder(Arc::clone(self.schema))
-        {
+        match self.codec.open_message_decoder(Arc::clone(self.schema)) {
             Ok(decoder) => {
                 self.decoder = decoder;
                 Ok(())
@@ -1052,7 +1049,7 @@ impl Source for HttpSource {
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
         let Self {
             request,
-            transformer,
+            codec,
             declared,
             schema_from,
             schema,
@@ -1067,7 +1064,7 @@ impl Source for HttpSource {
                     state.batches = Some(rx);
                     state.task = Some(tokio::spawn(read_stream(
                         Arc::clone(request),
-                        Arc::clone(transformer),
+                        Arc::clone(codec),
                         Arc::clone(schema),
                         state.window,
                         state.events.clone(),
@@ -1097,12 +1094,12 @@ impl Source for HttpSource {
                     let page = fetch_page(
                         request,
                         Decode {
-                            transformer: Arc::clone(transformer),
+                            codec: Arc::clone(codec),
                             declared: match schema_from {
                                 SchemaFrom::Config => declared.clone(),
-                                SchemaFrom::Body => None,
+                                SchemaFrom::Payload => None,
                             },
-                            check: *schema_from == SchemaFrom::Body,
+                            check: *schema_from == SchemaFrom::Payload,
                             expected: Arc::clone(schema),
                             cap: *max_body_bytes,
                         },
@@ -1177,7 +1174,7 @@ mod tests {
         rows: Vec<i64>,
     }
 
-    impl crate::transformer::MessageDecoder for CleanDecoder {
+    impl crate::codec::MessageDecoder for CleanDecoder {
         fn push(&mut self, payload: &[u8]) -> Result<(), SaciError> {
             let text = String::from_utf8_lossy(payload);
             let row: i64 = text
@@ -1204,7 +1201,7 @@ mod tests {
 
     struct CleanFormat;
 
-    impl Transformer for CleanFormat {
+    impl Codec for CleanFormat {
         fn format(&self) -> &'static str {
             "stub"
         }
@@ -1212,7 +1209,7 @@ mod tests {
         fn open_message_decoder(
             &self,
             _schema: Arc<Schema>,
-        ) -> Result<Box<dyn crate::transformer::MessageDecoder>, SaciError> {
+        ) -> Result<Box<dyn crate::codec::MessageDecoder>, SaciError> {
             Ok(Box::new(CleanDecoder::default()))
         }
     }
@@ -1231,19 +1228,19 @@ mod tests {
 
     /// Every row of the window is a row the consumer takes: a frame the
     /// decoder refuses hands over what came before it and reports itself,
-    /// rather than dropping a window of up to `batch_size` rows.
+    /// rather than dropping a window of up to `batch_rows` rows.
     #[tokio::test]
     async fn a_refused_frame_hands_over_the_rows_before_it() {
         let metrics = Instruments::new("source", None);
-        let transformer: Arc<dyn Transformer> = Arc::new(CleanFormat);
+        let codec: Arc<dyn Codec> = Arc::new(CleanFormat);
         let schema = stub_schema();
         let (tx, mut rx) = mpsc::channel(8);
-        let window = Window {
-            batch_size: 1_000,
-            ..Window::default()
+        let window = BatchWindow {
+            batch_rows: 1_000,
+            ..BatchWindow::default()
         };
 
-        let mut decode = Frames::open(&metrics, &transformer, &schema, &tx, window).expect("open");
+        let mut decode = Frames::open(&metrics, &codec, &schema, &tx, window).expect("open");
         decode
             .push(frames(&["1", "2", "3", "oops", "5", "6"]))
             .await
@@ -1261,17 +1258,16 @@ mod tests {
     /// `arrow-json`'s tape keeps the partial record a failed decode left, so
     /// the decoder is replaced: one bad line costs its own window, not every
     /// frame of a body that never ends.
-    #[cfg(feature = "transformer-ndjson")]
+    #[cfg(feature = "codec-ndjson")]
     #[tokio::test]
     async fn a_refused_frame_does_not_end_the_decode() {
         let metrics = Instruments::new("source", None);
-        let transformer: Arc<dyn Transformer> =
-            Arc::new(crate::transformer::ndjson::NdjsonTransformer::default());
+        let codec: Arc<dyn Codec> = Arc::new(crate::codec::ndjson::NdjsonCodec::default());
         let schema = stub_schema();
         let (tx, mut rx) = mpsc::channel(8);
 
         let mut decode =
-            Frames::open(&metrics, &transformer, &schema, &tx, Window::default()).expect("open");
+            Frames::open(&metrics, &codec, &schema, &tx, BatchWindow::default()).expect("open");
         decode
             .push(frames(&[r#"{"id":1}"#, "not json", r#"{"id":2}"#]))
             .await

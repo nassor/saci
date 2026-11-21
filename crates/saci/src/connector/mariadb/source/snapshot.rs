@@ -94,7 +94,7 @@ pub(super) fn plan_keys(
     if !missing.is_empty() {
         return Err(SaciError::configuration(format!(
             "{what}: snapshot \"initial\" pages '{table}' by its primary key, so every key \
-             column must be declared in schema_fields (missing: {})",
+             column must be declared in 'field' entries (missing: {})",
             missing.join(", ")
         )));
     }
@@ -308,7 +308,7 @@ fn now_micros() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::mariadb::config::{FieldSpec, MariadbFieldType};
+    use crate::connector::schema::{FieldSpec, FieldType};
 
     fn table() -> TableRef {
         TableRef {
@@ -317,14 +317,15 @@ mod tests {
         }
     }
 
-    fn resolved(name: &str, ty: MariadbFieldType, family: Family) -> ResolvedColumn {
+    fn resolved(name: &str, ty: FieldType, family: Family) -> ResolvedColumn {
         let mut column = ResolvedColumn::synthetic(&FieldSpec {
             name: name.to_string(),
             ty,
             nullable: true,
             precision: None,
             scale: None,
-            mariadb_type: None,
+            item: None,
+            native_type: None,
         });
         column.family = family;
         column
@@ -390,8 +391,8 @@ mod tests {
     #[test]
     fn keys_resolve_to_their_select_positions_whatever_the_case() {
         let data = [
-            resolved("note", MariadbFieldType::Utf8, Family::Text),
-            resolved("ID", MariadbFieldType::Int64, Family::Integer(64)),
+            resolved("note", FieldType::Utf8, Family::Text),
+            resolved("ID", FieldType::Int64, Family::Integer(64)),
         ];
         let key = plan_keys("MariadbSource", &table(), &["id".to_string()], &data).expect("key");
         assert_eq!(key, vec![1]);
@@ -409,7 +410,7 @@ mod tests {
 
     #[test]
     fn an_undeclared_key_column_is_named() {
-        let data = [resolved("note", MariadbFieldType::Utf8, Family::Text)];
+        let data = [resolved("note", FieldType::Utf8, Family::Text)];
         let err = plan_keys(
             "MariadbSource",
             &table(),
@@ -420,7 +421,7 @@ mod tests {
         let text = err.message();
         assert!(
             text.contains(
-                "every key column must be declared in schema_fields (missing: 'id', 'region')"
+                "every key column must be declared in 'field' entries (missing: 'id', 'region')"
             ),
             "{text}"
         );
@@ -429,8 +430,8 @@ mod tests {
     #[test]
     fn a_decimal_float_or_double_key_is_refused() {
         for (family, ty) in [
-            (Family::Decimal, MariadbFieldType::Utf8),
-            (Family::Float, MariadbFieldType::Float64),
+            (Family::Decimal, FieldType::Utf8),
+            (Family::Float, FieldType::Float64),
         ] {
             let data = [resolved("k", ty, family)];
             let err = plan_keys("MariadbSource", &table(), &["k".to_string()], &data)

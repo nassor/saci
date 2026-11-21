@@ -14,9 +14,10 @@
 use crate::error::SaciError;
 use serde::{Deserialize, Serialize};
 
-use crate::connector::mariadb::config::{FieldSpec, MariadbFieldType};
+use crate::connector::mariadb::config::{SUPPORTED_TYPES, int_bits, is_unsigned_int};
+use crate::connector::schema::{FieldSpec, FieldType};
 
-use MariadbFieldType as T;
+use FieldType as T;
 
 /// How a column's rows reach the connector, which decides what it may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,10 +75,10 @@ struct TypeRow {
     family: Family,
     /// The declared type a column of this type maps to when nothing else is
     /// said. An unsigned integer column takes the unsigned variant.
-    default: MariadbFieldType,
+    default: FieldType,
     /// Every declared type this type fills, [`default`](Self::default) first,
     /// listed as for a signed column. [`fills`] derives the unsigned form.
-    accepts: &'static [MariadbFieldType],
+    accepts: &'static [FieldType],
     /// Whether the row binlog carries this type in a form [`crate::connector::mariadb::values`]
     /// decodes.
     binlog: bool,
@@ -86,8 +87,8 @@ struct TypeRow {
 const fn row(
     data_type: &'static str,
     family: Family,
-    default: MariadbFieldType,
-    accepts: &'static [MariadbFieldType],
+    default: FieldType,
+    accepts: &'static [FieldType],
     binlog: bool,
 ) -> TypeRow {
     TypeRow {
@@ -101,9 +102,9 @@ const fn row(
 
 /// `char`, `varchar` and the text types read as text, a JSON document, or
 /// bytes.
-const TEXT: &[MariadbFieldType] = &[T::Utf8, T::Json, T::Binary];
-/// Bytes only.
-const BYTES: &[MariadbFieldType] = &[T::Binary];
+const TEXT: &[FieldType] = &[T::Utf8, T::Json, T::Binary];
+
+const BYTES: &[FieldType] = &[T::Binary];
 
 /// The canonical table, sorted by `data_type` so a lookup is a binary search.
 #[rustfmt::skip]
@@ -171,7 +172,7 @@ pub(crate) fn data_type_is_known(data_type: &str) -> bool {
 }
 
 /// The unsigned variant of a signed integer type, the type itself otherwise.
-fn unsigned_variant(ty: MariadbFieldType) -> MariadbFieldType {
+fn unsigned_variant(ty: FieldType) -> FieldType {
     match ty {
         T::Int8 => T::UInt8,
         T::Int16 => T::UInt16,
@@ -188,15 +189,15 @@ fn unsigned_variant(ty: MariadbFieldType) -> MariadbFieldType {
 /// signed or unsigned type at least as wide for its own signedness, and for an
 /// unsigned column also a signed type strictly wider. A signed column never
 /// fills an unsigned type, which a negative value would not fit.
-fn fills(row: &TypeRow, unsigned: bool, declared: MariadbFieldType) -> bool {
+fn fills(row: &TypeRow, unsigned: bool, declared: FieldType) -> bool {
     let Family::Integer(bits) = row.family else {
         return row.accepts.contains(&declared);
     };
     match declared {
         T::Utf8 => true,
         T::Boolean => bits == 8,
-        other => match other.int_bits() {
-            Some(width) if other.is_unsigned_int() => unsigned && width >= bits,
+        other => match int_bits(other) {
+            Some(width) if is_unsigned_int(other) => unsigned && width >= bits,
             Some(width) if unsigned => width > bits,
             Some(width) => width >= bits,
             None => false,
@@ -214,7 +215,7 @@ fn options(row: &TypeRow, unsigned: bool) -> String {
     };
     let mut names = vec![default];
     names.extend(
-        MariadbFieldType::ALL
+        SUPPORTED_TYPES
             .into_iter()
             .filter(|ty| *ty != default && fills(row, unsigned, *ty)),
     );
@@ -308,13 +309,14 @@ impl ResolvedColumn {
             T::Time64Micros => Family::Time,
             T::TimestampMicros => Family::DateTime,
             T::TimestampMicrosUtc => Family::Timestamp,
+            other => unreachable!("{other} is refused by validate_fields"),
         };
         Self {
             spec: spec.clone(),
             ordinal: 0,
             family,
             data_type: "",
-            unsigned: spec.ty.is_unsigned_int(),
+            unsigned: is_unsigned_int(spec.ty),
             fractional: 6,
             labels: Vec::new(),
         }
@@ -392,11 +394,11 @@ fn resolve(
     column: &CatalogColumn,
     access: Access,
 ) -> Result<ResolvedColumn, String> {
-    if let Some(asserted) = &spec.mariadb_type
+    if let Some(asserted) = &spec.native_type
         && !asserted.eq_ignore_ascii_case(&column.data_type)
     {
         return Err(format!(
-            "mariadb_type '{asserted}' is declared but the server column is '{}'",
+            "native_type '{asserted}' is declared but the server column is '{}'",
             column.data_type
         ));
     }
@@ -411,7 +413,7 @@ fn resolve(
         if !row.binlog {
             return Err(format!(
                 "a '{}' column cannot be read from the binlog, which carries it as raw bytes; \
-                 leave it out of schema_fields or read with mode kind \"polling\"",
+                 leave it out of 'field' entries or read with mode kind \"polling\"",
                 row.data_type
             ));
         }
@@ -439,7 +441,7 @@ fn resolve(
         ));
     }
 
-    if row.family == Family::Decimal && spec.ty == MariadbFieldType::Decimal128 {
+    if row.family == Family::Decimal && spec.ty == FieldType::Decimal128 {
         check_decimal(spec, column, access)?;
     }
 
@@ -580,14 +582,15 @@ pub(crate) fn enum_labels(column_type: &str) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
-    fn spec(name: &str, ty: MariadbFieldType) -> FieldSpec {
+    fn spec(name: &str, ty: FieldType) -> FieldSpec {
         FieldSpec {
             name: name.to_string(),
             ty,
             nullable: true,
             precision: matches!(ty, T::Decimal128).then_some(10),
             scale: matches!(ty, T::Decimal128).then_some(2),
-            mariadb_type: None,
+            item: None,
+            native_type: None,
         }
     }
 
@@ -622,7 +625,7 @@ mod tests {
 
     /// Resolve one declared type over one column.
     fn check(
-        ty: MariadbFieldType,
+        ty: FieldType,
         column: &CatalogColumn,
         access: Access,
     ) -> Result<ResolvedColumn, SaciError> {
@@ -636,8 +639,8 @@ mod tests {
         .map(|mut resolved| resolved.remove(0))
     }
 
-    fn fills_all(column: &CatalogColumn, accepted: &[MariadbFieldType], access: Access) {
-        for ty in MariadbFieldType::ALL {
+    fn fills_all(column: &CatalogColumn, accepted: &[FieldType], access: Access) {
+        for ty in SUPPORTED_TYPES {
             let result = check(ty, column, access);
             assert_eq!(
                 result.is_ok(),
@@ -818,7 +821,7 @@ mod tests {
             .iter()
             .filter(|row| matches!(row.family, Family::Integer(_)))
         {
-            let derived: Vec<MariadbFieldType> = MariadbFieldType::ALL
+            let derived: Vec<FieldType> = SUPPORTED_TYPES
                 .into_iter()
                 .filter(|ty| fills(row, false, *ty))
                 .collect();
@@ -1151,10 +1154,10 @@ mod tests {
     }
 
     #[test]
-    fn mariadb_type_asserts_the_server_type_in_any_case() {
+    fn native_type_asserts_the_server_type_in_any_case() {
         let column = col("c", "varchar", "varchar(20)");
         let mut declared = spec("c", T::Utf8);
-        declared.mariadb_type = Some("VARCHAR".to_string());
+        declared.native_type = Some("VARCHAR".to_string());
         validate_columns(
             "MariadbSource",
             Access::Query,
@@ -1162,11 +1165,11 @@ mod tests {
             std::slice::from_ref(&column),
         )
         .expect("same type, any case");
-        declared.mariadb_type = Some("text".to_string());
+        declared.native_type = Some("text".to_string());
         let err =
             validate_columns("MariadbSource", Access::Query, [&declared], &[column]).unwrap_err();
         let message = err.message();
-        assert!(message.contains("mariadb_type 'text'"), "{message}");
+        assert!(message.contains("native_type 'text'"), "{message}");
         assert!(message.contains("'varchar'"), "{message}");
     }
 

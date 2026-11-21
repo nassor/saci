@@ -1,6 +1,6 @@
 +++
 title = "File"
-description = "One transport for every local file. The byte format is a declared transformer, named by the required transformer key."
+description = "One transport for every local file. The byte format is a declared codec, named by the required codec key."
 template = "subpage.html"
 weight = 1
 aliases = ["/connectors/file/"]
@@ -85,15 +85,15 @@ to a second file.
 
 ## 1. Declare the format
 
-A file carries bytes, so the node names a declared `transformer` and that transformer names the
-format. Nothing is inferred from the extension.
+A file carries bytes, so the node names a declared `codec` node, and that node's `format`
+names the byte format. Nothing is inferred from the extension.
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>one declared transformer serves both halves</em></div>
+<div class="code-cap"><span>KDL</span><em>one declared codec serves both halves</em></div>
 
 ```kdl
-transformer "orders_csv" format="csv" {
-    options has_headers=#true
+codec "orders_csv" format="csv" {
+    config has_headers=#true
 }
 ```
 
@@ -102,7 +102,7 @@ transformer "orders_csv" format="csv" {
 Pick from [csv](@/service/formats/csv.md), [ndjson](@/service/formats/ndjson.md),
 [parquet](@/service/formats/parquet.md), [avro](@/service/formats/avro.md) and
 [arrow-ipc](@/service/formats/arrow-ipc.md). The format also decides what the source's
-`schema_fields` means: csv requires it, ndjson infers without it, and the other three read the
+`field` lines mean: csv requires them, ndjson infers without them, and the other three read the
 file's own schema when it is absent and project onto it when it is declared.
 
 ## 2. Read from a file: the source node
@@ -111,18 +111,18 @@ file's own schema when it is absent and project onto it when it is declared.
 <div class="code-cap"><span>KDL</span><em>path is the only key the transport itself needs</em></div>
 
 ```kdl
-source "orders_in" type="FileSource" component="Order" transformer="orders_csv" {
+source "orders_in" connector="file" component="Order" codec="orders_csv" {
     config path="/data/orders.csv" {
-        schema_fields "id" type="Int64" nullable=#false
-        schema_fields "amount" type="Float64"
-        schema_fields "status" type="Utf8"
+        field "id" type="int64" nullable=#false
+        field "amount" type="float64"
+        field "status" type="utf8"
     }
 }
 ```
 
 </div>
 
-`path` is the file to read. `component` names the row type the rows land in, and `transformer`
+`path` is the file to read. `component` names the row type the rows land in, and `codec`
 names the node declared in step 1. The source reads the file in batches, so a file larger than
 memory still runs.
 
@@ -132,20 +132,20 @@ memory still runs.
 <div class="code-cap"><span>KDL</span><em>truncate replaces the file instead of appending to it</em></div>
 
 ```kdl
-sink "orders_out" type="FileSink" component="Order" transformer="orders_csv" {
+sink "orders_out" connector="file" component="Order" codec="orders_csv" {
     config path="/data/orders-out.csv" {
         truncate #true
 
-        schema_fields "id" type="Int64" nullable=#false
-        schema_fields "amount" type="Float64"
-        schema_fields "status" type="Utf8"
+        field "id" type="int64" nullable=#false
+        field "amount" type="float64"
+        field "status" type="utf8"
     }
 }
 ```
 
 </div>
 
-A sink always declares `schema_fields`, whatever the format, because that is the schema the rows are
+A sink always declares `field` lines, whatever the format, because that is the schema the rows are
 written with. `truncate #true` empties the file when the config is built; the default keeps whatever
 is already in it and adds rows after.
 
@@ -158,7 +158,7 @@ processor module the config names.
 Runs the same on Linux, macOS and Windows (PowerShell):
 
 <div class="code">
-<div class="code-cap"><span>Shell</span><em>the source, the sink and the transformer, all built for real</em></div>
+<div class="code-cap"><span>Shell</span><em>the source, the sink and the codec, all built for real</em></div>
 
 ```text
 saci-service validate --config examples/configs/standalone.kdl --connectors-only
@@ -168,12 +168,12 @@ saci-service validate --config examples/configs/standalone.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
 
-Then run it. The config sets `run_mode kind="one_shot"`, so the process reads the file once and
+Then run it. The config sets `run "once"`, so the process reads the file once and
 exits:
 
 Runs the same on Linux, macOS and Windows (PowerShell):
@@ -241,30 +241,32 @@ Source:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `path` | string | required | the file to read |
-| `schema_fields` | list of fields | the format decides | the declared column list handed to the format |
+| `field` | lines | the format decides | the declared column list handed to the format |
 
 Sink:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `path` | string | required | the file to write |
-| `schema_fields` | list of fields | required | the schema the rows are written with |
+| `field` | lines | required | the schema the rows are written with |
 | `truncate` | bool | `#false` | replace the file on build instead of appending to it |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector, so a
-misspelled `truncate` silently keeps the default.
+An unrecognised key inside `config` is a configuration error naming the key, so a misspelled
+`truncate` is refused rather than defaulted. `field` lines sit beside these keys.
 
 ## When it refuses to start
 
 | Message | What to change |
 |---|---|
-| `FileSource config requires a 'path' string field` | add `path="..."` to the source's `config` |
-| `FileSink config requires a 'path' string field` | add `path="..."` to the sink's `config` |
-| `FileSource moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node, naming a declared `transformer` |
+| ``FileSource config: missing field `path` `` | add `path="..."` to the source's `config` |
+| ``FileSink config: missing field `path` `` | add `path="..."` to the sink's `config` |
+| ``FileSource config: unknown field `{key}`, expected `path` `` | fix the key's spelling, or drop it |
+| ``FileSink config: unknown field `{key}`, expected `path` or `truncate` `` | the same, for the sink |
+| `FileSource moves bytes and needs a 'codec' key naming a declared codec` | add `codec="<id>"` to the node, naming a declared `codec` |
 | `FileSource: cannot open {path:?}: {e}` | point `path` at a file that exists and is readable |
 | `FileSink: cannot create {path:?}: {e}` | create the parent directory, or fix the permissions, for a `truncate #true` sink |
 | `FileSink: cannot open {path:?} for append: {e}` | the same, for the default appending sink |
-| `FileSink config requires a 'schema_fields' list` | declare `schema_fields` in the sink's `config` |
+| `FileSink config requires at least one 'field' entry` | declare `field` lines in the sink's `config` |
 
 ## Next
 

@@ -1,10 +1,10 @@
-//! [`ServiceBuilder`]: assembles a [`BuiltService`] per workflow from config
+//! [`ServiceBuilder`]: assembles a [`BuiltWorkflow`] per workflow from config
 //! and registry.
 //!
 //! `ServiceBuilder` is the integration point between the configuration file and
 //! the SACI runtime. It holds a [`Registry`] of user-provided IO factories and,
 //! given a [`ServiceConfig`], instantiates every declared node of every
-//! declared `workflow`: sources, sinks, transformers, and `wasm`/`plugin`
+//! declared `workflow`: sources, sinks, codecs, and `wasm`/`plugin`
 //! processors.
 //!
 //! ## Usage
@@ -12,11 +12,11 @@
 //! ```rust
 //! # #[cfg(feature = "service")]
 //! # {
-//! use saci::service::builder::ServiceBuilder;
+//! use saci::service::ServiceBuilder;
 //! use saci::pipeline::Pipeline;
 //!
 //! let pipeline = Pipeline::new("my_pipeline");
-//! let _builder = ServiceBuilder::new().with_runtime("my-processor", Box::new(pipeline));
+//! let _builder = ServiceBuilder::new().runtime("my-processor", pipeline);
 //! # }
 //! ```
 
@@ -24,26 +24,32 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::{SaciError, SaciResult};
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
 use super::config::{
-    HealConfig, NodeKind, RunMode, ServiceConfig, ServiceMode, TransformerSpec, WorkflowSpec,
+    CodecSpec, HealConfig, NodeKind, RunMode, SchemaSpec, ServiceConfig, ServiceMode, StoreConfig,
+    WindowConfig, WorkflowSpec,
 };
 use super::dlq::{DeadLetterQueue, DlqRegistry, DlqShared};
-use super::factories::{missing_factory_error, missing_transformer_error};
+use super::factories::{lookup_connector, missing_codec_error};
+use super::flow::FlowPlan;
 use super::heal::{HealSettings, HealingSink, HealingSource, Rebuilder};
+use super::lifecycle::RunControl;
 #[cfg(feature = "wasm-host")]
 use super::loader::{LocalModuleResolver, PipelineRuntimeLoader};
 #[cfg(feature = "plugin-host")]
 use super::plugin_loader::load_plugin_runtime;
-use super::registry::{Registry, SinkFactory, SourceFactory, TransformerFactory};
-use crate::connector::{ChannelBridge, NodeIdentity};
+use super::redb_state::RedbStateClient;
+use super::registry::{CodecFactory, Connector, Rebuild, Registry, Role};
+use super::standalone::WorkflowStats;
+use crate::codec::Codec;
+use crate::connector::{ChannelBridge, ConfigValue, NodeIdentity};
 use crate::inspector::Inspector;
-use crate::transformer::Transformer;
 #[cfg(feature = "wasm-host")]
 use crate::wasm_host::WasmEngine;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use super::topology::build_topology;
 
@@ -52,28 +58,29 @@ use super::topology::build_topology;
 // neither feature there is no `wasm`/`plugin` node to build, so neither of the
 // two error paths that word this help text is compiled in.
 #[cfg(all(feature = "wasm-host", not(feature = "plugin-host")))]
-const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::with_runtime(id, ..) or set 'module' on the wasm node";
+const RUNTIME_SOURCE_HELP: &str =
+    "no runtime provided: call ServiceBuilder::runtime(id, ..) or set 'path' on the wasm node";
 #[cfg(all(feature = "plugin-host", not(feature = "wasm-host")))]
-const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::with_runtime(id, ..) \
-     or set 'library' on the plugin node";
+const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::runtime(id, ..) \
+     or set 'path' on the plugin node";
 #[cfg(all(feature = "wasm-host", feature = "plugin-host"))]
-const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::with_runtime(id, ..) \
-     or set 'module'/'library' on the node";
+const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::runtime(id, ..) \
+     or set 'path' on the node";
 
 /// Whether a config-driven source is handed to the runner wrapped in
-/// [`RetryingSource`](crate::io::retry::RetryingSource).
+/// [`RetryingSource`](crate::io::RetryingSource).
 ///
 /// Sinks always take their wrapper: a `write_batch` the runner cannot re-drive
 /// is lost rows. A source's answer depends on who owns its error policy.
 ///
-/// - Batch modes (`one_shot`, `interval`, `continuous`) pull each source
+/// - Batch modes (`once`, `interval`, `continuous`) pull each source
 ///   through `next_batch` themselves, under that source's admission credit: an
 ///   error there logs `source drain error (continuing)`, counts one
 ///   `iteration_errors`, marks the source failed and ends its drain for that
 ///   pass. The wrapper is what turns a transient failure into a retried read
 ///   instead of a source contributing nothing to the iteration. Cluster mode
 ///   declares no source node at all, so its answer never applies.
-/// - `run_mode kind="stream"` is itself the retry loop: `run_stream` polls the
+/// - `run "stream"` is itself the retry loop: the stream runner polls the
 ///   source once per item, and on an error logs it, counts it in
 ///   `iteration_errors` and re-polls after a cancellable
 ///   `SOURCE_ERROR_BACKOFF`. Wrapping there nests a second retry loop inside
@@ -83,7 +90,7 @@ const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::wit
 fn sources_take_retry_wrapper(config: &ServiceConfig) -> bool {
     !matches!(
         &config.mode,
-        ServiceMode::Standalone { config: sc } if sc.run_mode == RunMode::Stream
+        ServiceMode::Standalone { config: sc } if sc.run == RunMode::Stream
     )
 }
 
@@ -97,20 +104,20 @@ fn sources_take_retry_wrapper(config: &ServiceConfig) -> bool {
 /// `pause`/`resume` stay available: they keep the runner and every resource it
 /// holds alive.
 pub fn rebuild_blocker(workflow: &WorkflowSpec) -> Option<&'static str> {
-    if workflow.wasm.iter().any(|spec| spec.module.is_none()) {
+    if workflow.wasm.iter().any(|spec| spec.path.is_none()) {
         return Some(INJECTED_RUNTIME_BLOCKER);
     }
-    if workflow.plugin.iter().any(|spec| spec.library.is_none()) {
+    if workflow.plugin.iter().any(|spec| spec.path.is_none()) {
         return Some(INJECTED_RUNTIME_BLOCKER);
     }
     let channel_source = workflow
         .sources
         .iter()
-        .any(|spec| spec.type_name == "ChannelSource");
+        .any(|spec| spec.connector == "channel");
     let channel_sink = workflow
         .sinks
         .iter()
-        .any(|spec| spec.type_name == "ChannelSink");
+        .any(|spec| spec.connector == "channel");
     if channel_source || channel_sink {
         return Some(CHANNEL_BLOCKER);
     }
@@ -118,25 +125,25 @@ pub fn rebuild_blocker(workflow: &WorkflowSpec) -> Option<&'static str> {
 }
 
 /// A processor node with no artifact took its runtime from
-/// [`ServiceBuilder::with_runtime`], and `build_processor_node` *removes* it
+/// [`ServiceBuilder::runtime`], and `build_processor_node` *removes* it
 /// from the builder, so the second build of that workflow has nothing to give
 /// it.
 ///
 /// Unconditional because `rebuild_blocker` reads both processor vectors in
 /// every build, the same way the config declares them.
-const INJECTED_RUNTIME_BLOCKER: &str = "a processor node declares no module or library, so its \
-     runtime was supplied through ServiceBuilder::with_runtime and exists only once";
+const INJECTED_RUNTIME_BLOCKER: &str = "a processor node declares no path, so its \
+     runtime was supplied through ServiceBuilder::runtime and exists only once";
 
 /// `ChannelRegistry` latches each named half as it is built and refuses a
 /// second one, and the sink being the channel's only `Sender` is what gives
 /// the consumer a real EOF.
 const CHANNEL_BLOCKER: &str =
-    "a ChannelSource or ChannelSink is bound to one mpsc pair created once per process";
+    "a `channel` source or sink is bound to one mpsc pair created once per process";
 
 /// The self-healing policy one node runs under, or `None` when it is not
 /// wrapped at all.
 ///
-/// `rebuildable` is what the node's factory answered for its own config.
+/// `rebuild` is what the node's connector answered for its own config.
 /// Healing is on by default, so a connector that cannot be rebuilt is simply
 /// left alone under the inherited policy: a channel half appears in most
 /// multi-workflow configs and is not an event. A node that declares its
@@ -153,11 +160,11 @@ const CHANNEL_BLOCKER: &str =
 fn resolve_heal(
     local: Option<&HealConfig>,
     global: &HealConfig,
-    rebuildable: Result<(), &'static str>,
+    rebuild: Rebuild,
     workflow_id: &str,
     role: &str,
     node_id: &str,
-    type_name: &str,
+    connector: &str,
 ) -> SaciResult<Option<HealSettings>> {
     let settings = local
         .cloned()
@@ -166,13 +173,46 @@ fn resolve_heal(
     if !settings.enabled {
         return Ok(None);
     }
-    match rebuildable {
-        Ok(()) => Ok(Some(settings)),
-        Err(reason) if local.is_some() => Err(SaciError::configuration(format!(
+    match rebuild {
+        Rebuild::Yes => Ok(Some(settings)),
+        Rebuild::No(reason) if local.is_some() => Err(SaciError::configuration(format!(
             "workflow '{workflow_id}' {role} '{node_id}': heal is not available for \
-             type '{type_name}': {reason}"
+             connector '{connector}': {reason}"
         ))),
-        Err(_) => Ok(None),
+        Rebuild::No(_) => Ok(None),
+    }
+}
+
+/// Refuse a workflow that declares a live source outside `run "stream"`.
+///
+/// [`WorkflowSpec::validate`] already refuses one built from a connector this
+/// crate ships, because it has no registry to ask. This is the same rule
+/// asked of `registry`, so a connector an embedder registered answers for
+/// itself through [`Connector::live`].
+///
+/// # Errors
+///
+/// [`SaciError::Configuration`] naming the first source whose connector
+/// reports itself live while `run` is not [`RunMode::Stream`].
+fn refuse_live_sources(
+    registry: &Registry,
+    workflow: &WorkflowSpec,
+    run: &RunMode,
+) -> SaciResult<()> {
+    if *run == RunMode::Stream {
+        return Ok(());
+    }
+    match workflow.sources.iter().find(|spec| {
+        registry
+            .connector(&spec.connector)
+            .is_some_and(|connector| connector.live(&spec.config))
+    }) {
+        Some(spec) => Err(SaciError::configuration(format!(
+            "workflow '{}' source '{}': connector '{}' never reaches EOF; it requires \
+             standalone mode with run \"stream\"",
+            workflow.id, spec.id, spec.connector
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -184,7 +224,7 @@ fn resolve_heal(
 /// shared half.
 struct NodeBuild<'a> {
     registry: &'a Arc<Registry>,
-    transformers: &'a HashMap<String, Arc<dyn Transformer>>,
+    codecs: &'a HashMap<String, Arc<dyn Codec>>,
     heal: &'a HealConfig,
     /// `node.label()`, the service name a peer-facing connector announces.
     service: &'a str,
@@ -205,9 +245,9 @@ impl NodeBuild<'_> {
 /// declared workflow again, which is what the lifecycle plane's `start` and
 /// `restart` need.
 ///
-/// [`ServiceBuilder::build_all`] consumes the builder, so nothing it produced
+/// [`ServiceBuilder::build`] consumes the builder, so nothing it produced
 /// can be built twice; this keeps both halves alive instead.
-pub struct ServiceFactory {
+pub struct WorkflowFactory {
     builder: ServiceBuilder,
     registry: Arc<Registry>,
     retry_sources: bool,
@@ -217,36 +257,50 @@ pub struct ServiceFactory {
     data_dir: std::path::PathBuf,
     /// `node.label()`, the service name a peer-facing connector announces.
     service: String,
+    /// How every built workflow is run: the config's `run` node, or
+    /// [`RunMode::Continuous`] in cluster mode, where it is not read.
+    run: RunMode,
+    /// The flow-control policy the config resolves for every source.
+    flow: FlowPlan,
+    /// Whether a batch run threads processor state through the redb store
+    /// (`store "redb" { batch_resume #true }`).
+    batch_resume: bool,
 }
 
-impl ServiceFactory {
+impl WorkflowFactory {
     /// Build one declared workflow.
     ///
     /// Calling this twice for the same workflow is only sound once the
-    /// previous [`BuiltService`] has been dropped: a source or sink may hold
+    /// previous [`BuiltWorkflow`] has been dropped: a source or sink may hold
     /// an exclusive resource such as a listening port. See
     /// [`rebuild_blocker`] for the workflows where even that is not enough.
     ///
     /// # Errors
     ///
-    /// Whatever [`ServiceBuilder::build_all`] would return for this workflow.
-    pub fn build(&mut self, workflow: &WorkflowSpec) -> Result<BuiltService, SaciError> {
-        self.builder.build_one(
+    /// Whatever [`ServiceBuilder::build`] would return for this workflow.
+    pub fn build(&mut self, workflow: &WorkflowSpec) -> Result<BuiltWorkflow, SaciError> {
+        refuse_live_sources(&self.registry, workflow, &self.run)?;
+        let mut built = self.builder.build_one(
             &self.registry,
             workflow,
             self.retry_sources,
             &self.heal,
             &self.data_dir,
             &self.service,
-        )
+        )?;
+        built.run = self.run.clone();
+        built.flow = self.flow.clone();
+        built.batch_resume = self.batch_resume;
+        Ok(built)
     }
 
     /// Publish the topology of `built` into the inspector, if one is attached.
-    pub fn publish_topology(&self, config: &ServiceConfig, built: &[BuiltService]) {
+    pub fn publish_topology(&self, config: &ServiceConfig, built: &[BuiltWorkflow]) {
         if let Some(inspector) = &self.builder.inspector {
             let node_slices: Vec<&[BuiltNode]> = built.iter().map(|b| b.nodes.as_slice()).collect();
             inspector.set_topology(build_topology(
                 config,
+                &self.registry,
                 &node_slices,
                 inspector.topology().version + 1,
             ));
@@ -301,7 +355,7 @@ pub enum BuiltNodeKind {
 /// One declared outbound edge of a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltEdge {
-    /// Index into [`BuiltService::nodes`]. Always greater than the owning
+    /// Index into [`BuiltWorkflow::nodes`]. Always greater than the owning
     /// node's index, because `nodes` is in topological order.
     pub node: usize,
     /// Branch name this edge carries; `None` for an unlabelled link.
@@ -321,14 +375,17 @@ pub(crate) fn edge_selected(routes: &Option<Vec<String>>, branch: &Option<String
 }
 
 /// One assembled node of the workflow graph.
+#[non_exhaustive]
 pub struct BuiltNode {
     /// The declared id.
     pub id: String,
     /// Declared name, absent when the config named none.
     pub name: Option<String>,
-    /// Connector `type` for a source or sink; the runtime kind
-    /// (`"wasm"`/`"plugin"`/`"native"`) for a processor.
-    pub type_name: String,
+    /// The connector name for a source or sink (`file`, `kafka`, ..); the
+    /// runtime kind (`"wasm"`/`"plugin"`/`"native"`) for a processor. A node
+    /// added through [`BuiltWorkflowBuilder`] carries `"native"` (processor)
+    /// or `"custom"` (source or sink).
+    pub connector: String,
     /// Component a source writes or a sink reads. `None` for a processor.
     ///
     /// Leaked to `'static` once at build time: it is a span field and a
@@ -336,12 +393,12 @@ pub struct BuiltNode {
     pub component: Option<&'static str>,
     /// The constructed execution backend.
     pub kind: BuiltNodeKind,
-    /// Outbound edges into [`BuiltService::nodes`]. Always greater than this
+    /// Outbound edges into [`BuiltWorkflow::nodes`]. Always greater than this
     /// node's own index, because `nodes` is in topological order.
     pub downstream: Vec<BuiltEdge>,
     /// Artifact path for a `wasm`/`plugin` processor, for the topology
     /// detail. `None` for a source, a sink, or a processor whose runtime was
-    /// supplied through [`ServiceBuilder::with_runtime`].
+    /// supplied through [`ServiceBuilder::runtime`].
     pub artifact: Option<String>,
     /// A healed sink node's recovered flag: latched `true` the moment a
     /// rebuilt instance's first write succeeds, and cleared by whoever reads
@@ -351,25 +408,26 @@ pub struct BuiltNode {
     pub heal_recovered: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The node's windowing declaration, when its config declared a `window`
     /// block. `None` for a non-windowed processor and for every source or
-    /// sink. The runners use it to track the node's watermark; the topology
-    /// uses it to describe the node.
-    #[cfg(feature = "windows")]
-    pub window: Option<super::config::WindowConfig>,
+    /// sink. The runners read it to track the node's watermark when the
+    /// `windows` feature is on; the topology uses it to describe the node.
+    pub window: Option<WindowConfig>,
 }
 
-/// All runtime artifacts produced by [`ServiceBuilder::build_all`] for one
+/// All runtime artifacts produced by [`ServiceBuilder::build`] for one
 /// workflow.
 ///
-/// The caller owns these and drives them with a runner function
-/// (`run_standalone`, `run_cluster`).
+/// The caller owns these and drives them with [`run`](Self::run), or with
+/// `run_cluster` in cluster mode. A workflow assembled in code rather than
+/// from a config is built with [`BuiltWorkflow::builder`].
 ///
-/// `registry` is shared (via `Arc`) across every workflow one `build_all` call
+/// `registry` is shared (via `Arc`) across every workflow one `build` call
 /// produces, so that factory-allocated resources the sources and sinks point
 /// back to stay alive for the service lifetime.
 ///
 /// The `Debug` implementation reports counts only, because the node trait
 /// objects are not `Debug`.
-pub struct BuiltService {
+#[non_exhaustive]
+pub struct BuiltWorkflow {
     /// The workflow's declared id.
     pub workflow_id: String,
     /// The workflow's declared name, absent when the config named none.
@@ -378,7 +436,7 @@ pub struct BuiltService {
     /// node that links into it.
     pub nodes: Vec<BuiltNode>,
     /// The registry that built this service, shared across every workflow
-    /// `build_all` produced and retained for lifetime management.
+    /// `build` produced and retained for lifetime management.
     pub registry: Arc<Registry>,
     /// The inspector this build published its topology into, when enabled.
     /// Runners hand it to the HTTP layer, and record one
@@ -389,41 +447,385 @@ pub struct BuiltService {
     /// The runner owns it: `record` and `replay` both run inline between
     /// passes, so nothing else may touch it.
     pub dlq: Option<DeadLetterQueue>,
+    /// How [`run`](Self::run) drives the workflow, from the config's
+    /// `run` node. Not read in cluster mode.
+    pub(super) run: RunMode,
+    /// The flow-control policy each source node runs under.
+    pub(super) flow: FlowPlan,
+    /// Whether a batch run threads processor state through the redb store.
+    pub(super) batch_resume: bool,
 }
 
-impl std::fmt::Debug for BuiltService {
+impl std::fmt::Debug for BuiltWorkflow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BuiltService")
+        f.debug_struct("BuiltWorkflow")
             .field("workflow_id", &self.workflow_id)
             .field("nodes_count", &self.nodes.len())
             .finish_non_exhaustive()
     }
 }
 
-/// Assembles one [`BuiltService`] per declared workflow from a
+impl BuiltWorkflow {
+    /// Start assembling a workflow by hand, node by node.
+    ///
+    /// ```rust
+    /// # #[cfg(all(feature = "service", feature = "connector-channel"))]
+    /// # {
+    /// use saci::connector::channel::{ChannelSink, ChannelSource};
+    /// use saci::service::BuiltWorkflow;
+    /// # use arrow_schema::{DataType, Field, Schema};
+    /// # use std::sync::Arc;
+    /// # let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+    /// let (source, _tx) = ChannelSource::new(schema.clone(), 8);
+    /// let (sink, _rx) = ChannelSink::new(schema, 8);
+    /// let workflow = BuiltWorkflow::builder("w")
+    ///     .source("in", "T", source)
+    ///     .sink("out", "T", sink)
+    ///     .link("in", "out")
+    ///     .build()
+    ///     .unwrap();
+    /// // workflow.run(cancel).await drives it.
+    /// # let _ = workflow;
+    /// # }
+    /// ```
+    pub fn builder(id: impl Into<String>) -> BuiltWorkflowBuilder {
+        BuiltWorkflowBuilder {
+            id: id.into(),
+            name: None,
+            nodes: Vec::new(),
+            links: Vec::new(),
+            windows: Vec::new(),
+            run: RunMode::default(),
+            flow: None,
+            batch_resume: false,
+            inspector: None,
+            dlq: None,
+        }
+    }
+
+    /// Drive the workflow until its run mode finishes it or `options` cancel
+    /// it.
+    ///
+    /// [`RunMode::Stream`] runs one pass per admitted chunk of each arriving
+    /// source batch; every other mode runs repeated passes over every node in
+    /// topological order, paced by the mode. Returns [`WorkflowStats`]
+    /// on success, including on cancellation, which is a clean exit; `Err` is
+    /// reserved for an unrecoverable condition such as a stream workflow with
+    /// no source.
+    ///
+    /// `options` is a [`RunOptions`], or anything that converts into one: a
+    /// bare [`CancellationToken`] for an uncontrolled run, a [`RunControl`]
+    /// when the caller owns a pause gate.
+    ///
+    /// # Errors
+    ///
+    /// [`SaciError::Configuration`] for a stream workflow with no source, and
+    /// any error loading processor state from the store.
+    pub async fn run(self, options: impl Into<RunOptions>) -> SaciResult<WorkflowStats> {
+        let options = options.into();
+        match self.run {
+            RunMode::Stream => super::stream::run(self, options).await,
+            _ => super::standalone::run(self, options).await,
+        }
+    }
+}
+
+/// What a [`BuiltWorkflow::run`] call reads besides the workflow itself: the
+/// runner's cancellation and pause control, where it publishes live counters,
+/// and the store it persists processor state to.
+///
+/// A [`CancellationToken`] or a [`RunControl`] converts into one with
+/// everything else unset, so an uncontrolled run is `workflow.run(cancel)`.
+/// The default carries a token nothing cancels.
+#[derive(Default)]
+pub struct RunOptions {
+    pub(super) control: RunControl,
+    pub(super) live_stats: Option<Arc<RwLock<WorkflowStats>>>,
+    pub(super) state: Option<Arc<RedbStateClient>>,
+}
+
+impl RunOptions {
+    /// Options that run under `control` and publish and persist nothing.
+    pub fn new(control: impl Into<RunControl>) -> Self {
+        Self {
+            control: control.into(),
+            live_stats: None,
+            state: None,
+        }
+    }
+
+    /// Publish the run's counters into `stats` as it goes, so `GET /status`
+    /// sees current progress rather than only the final tally.
+    pub fn live_stats(mut self, stats: Arc<RwLock<WorkflowStats>>) -> Self {
+        self.live_stats = Some(stats);
+        self
+    }
+
+    /// Persist processor state and source cursors through `state`.
+    pub fn state(mut self, state: Arc<RedbStateClient>) -> Self {
+        self.state = Some(state);
+        self
+    }
+}
+
+impl From<CancellationToken> for RunOptions {
+    fn from(cancel: CancellationToken) -> Self {
+        Self::new(cancel)
+    }
+}
+
+impl From<RunControl> for RunOptions {
+    fn from(control: RunControl) -> Self {
+        Self::new(control)
+    }
+}
+
+/// Assembles a [`BuiltWorkflow`] by hand: declare nodes in flow order, link
+/// them, choose a run mode. Obtained from [`BuiltWorkflow::builder`].
+///
+/// Nodes keep declaration order, so a node must be declared after every node
+/// that links into it. A node added here is a native one: a source or sink
+/// is never wrapped in a retry or heal wrapper, and the workflow's registry
+/// is empty. [`build`](Self::build) does not run the graph validation
+/// [`ServiceBuilder::build`] applies to a configured workflow.
+pub struct BuiltWorkflowBuilder {
+    id: String,
+    name: Option<String>,
+    nodes: Vec<BuiltNode>,
+    links: Vec<(String, String, Option<String>)>,
+    windows: Vec<(String, WindowConfig)>,
+    run: RunMode,
+    flow: Option<FlowPlan>,
+    batch_resume: bool,
+    inspector: Option<Inspector>,
+    dlq: Option<DeadLetterQueue>,
+}
+
+impl BuiltWorkflowBuilder {
+    /// Set the workflow's declared name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    fn node(
+        mut self,
+        id: &str,
+        connector: &str,
+        component: Option<&'static str>,
+        kind: BuiltNodeKind,
+    ) -> Self {
+        self.nodes.push(BuiltNode {
+            id: id.to_string(),
+            name: None,
+            connector: connector.to_string(),
+            component,
+            kind,
+            downstream: Vec::new(),
+            artifact: None,
+            heal_recovered: None,
+            window: None,
+        });
+        self
+    }
+
+    /// Declare a source node `id` that writes `component`.
+    pub fn source(self, id: &str, component: &str, source: impl Source + 'static) -> Self {
+        self.node(
+            id,
+            "custom",
+            Some(intern_component_name(component)),
+            BuiltNodeKind::Source(Box::new(source)),
+        )
+    }
+
+    /// Declare a processor node `id` backed by `runtime`.
+    pub fn processor(self, id: &str, runtime: impl PipelineRuntime + 'static) -> Self {
+        self.node(
+            id,
+            "native",
+            None,
+            BuiltNodeKind::Processor {
+                runtime: Box::new(runtime),
+                kind: "native",
+            },
+        )
+    }
+
+    /// Declare a sink node `id` that reads `component`.
+    pub fn sink(self, id: &str, component: &str, sink: impl Sink + 'static) -> Self {
+        self.node(
+            id,
+            "custom",
+            Some(intern_component_name(component)),
+            BuiltNodeKind::Sink(Box::new(sink)),
+        )
+    }
+
+    /// Attach a `window` declaration to the processor node `processor_id`,
+    /// which the runners read to track that node's watermark when the
+    /// `windows` feature is on.
+    pub fn window(mut self, processor_id: &str, window: WindowConfig) -> Self {
+        self.windows.push((processor_id.to_string(), window));
+        self
+    }
+
+    /// Link node `from` to node `to`.
+    pub fn link(mut self, from: &str, to: &str) -> Self {
+        self.links.push((from.to_string(), to.to_string(), None));
+        self
+    }
+
+    /// Link node `from` to node `to` on the named `branch`, which a
+    /// processor's routing decision selects by name.
+    pub fn link_branch(mut self, from: &str, to: &str, branch: &str) -> Self {
+        self.links
+            .push((from.to_string(), to.to_string(), Some(branch.to_string())));
+        self
+    }
+
+    /// How [`BuiltWorkflow::run`] drives the workflow. The default is
+    /// [`RunMode::Continuous`].
+    pub fn run_mode(mut self, run: RunMode) -> Self {
+        self.run = run;
+        self
+    }
+
+    /// The flow-control policy for each source. Without one, a stream
+    /// workflow gets [`FlowPlan::stream_default`] and every other run mode the
+    /// batch defaults.
+    pub fn flow(mut self, flow: FlowPlan) -> Self {
+        self.flow = Some(flow);
+        self
+    }
+
+    /// Whether a batch run threads processor state through the redb store
+    /// handed to [`RunOptions::state`]. Off by default.
+    pub fn batch_resume(mut self, on: bool) -> Self {
+        self.batch_resume = on;
+        self
+    }
+
+    /// Record flow-control decisions into `inspector`.
+    pub fn inspector(mut self, inspector: Inspector) -> Self {
+        self.inspector = Some(inspector);
+        self
+    }
+
+    /// Give the workflow a dead letter queue.
+    pub fn dlq(mut self, dlq: DeadLetterQueue) -> Self {
+        self.dlq = Some(dlq);
+        self
+    }
+
+    /// Resolve every link and window to node indices and assemble the
+    /// workflow.
+    ///
+    /// # Errors
+    ///
+    /// [`SaciError::Configuration`] for a duplicate node id, a link or window
+    /// that names an undeclared node, a window on a node that is not a
+    /// processor, a link from a node to itself, and a link whose target was
+    /// declared before its origin.
+    pub fn build(self) -> SaciResult<BuiltWorkflow> {
+        let Self {
+            id,
+            name,
+            mut nodes,
+            links,
+            windows,
+            run,
+            flow,
+            batch_resume,
+            inspector,
+            dlq,
+        } = self;
+
+        let mut index: HashMap<String, usize> = HashMap::with_capacity(nodes.len());
+        for (i, node) in nodes.iter().enumerate() {
+            if index.insert(node.id.clone(), i).is_some() {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': duplicate node id '{}'",
+                    node.id
+                )));
+            }
+        }
+        let position = |node: &str| {
+            index.get(node).copied().ok_or_else(|| {
+                SaciError::configuration(format!(
+                    "workflow '{id}': link or window names undeclared node '{node}'"
+                ))
+            })
+        };
+
+        for (processor_id, window) in windows {
+            let i = position(&processor_id)?;
+            if !matches!(nodes[i].kind, BuiltNodeKind::Processor { .. }) {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': node '{processor_id}' is not a processor and takes no window"
+                )));
+            }
+            nodes[i].window = Some(window);
+        }
+
+        for (from, to, branch) in links {
+            let (f, t) = (position(&from)?, position(&to)?);
+            if f == t {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': node '{from}' cannot link to itself"
+                )));
+            }
+            if t < f {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{id}': declare nodes in flow order: '{to}' comes before '{from}'"
+                )));
+            }
+            nodes[f].downstream.push(BuiltEdge { node: t, branch });
+        }
+
+        let flow = flow.unwrap_or_else(|| match run {
+            RunMode::Stream => FlowPlan::stream_default(),
+            _ => FlowPlan::default(),
+        });
+        Ok(BuiltWorkflow {
+            workflow_id: id,
+            workflow_name: name,
+            nodes,
+            registry: Arc::new(Registry::new()),
+            inspector,
+            dlq,
+            run,
+            flow,
+            batch_resume,
+        })
+    }
+}
+
+/// Assembles one [`BuiltWorkflow`] per declared workflow from a
 /// [`ServiceConfig`] and a populated [`Registry`].
 ///
-/// Register IO factories first, optionally supply native runtimes for
-/// artifact-less processor nodes via [`with_runtime`](Self::with_runtime),
-/// then call [`build_all`](Self::build_all) with a loaded config.
+/// [`new`](Self::new) registers every compiled-in connector and codec;
+/// [`empty`](Self::empty) registers nothing. Optionally supply native runtimes
+/// for artifact-less processor nodes via [`runtime`](Self::runtime), then call
+/// [`build`](Self::build) with a loaded config.
 ///
 /// ## Example
 ///
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::builder::ServiceBuilder;
+/// use saci::service::ServiceBuilder;
 /// use saci::pipeline::Pipeline;
 ///
 /// let pipeline = Pipeline::new("my_pipeline");
-/// let _builder = ServiceBuilder::new().with_runtime("my-processor", Box::new(pipeline));
-/// // builder.build_all(&config) would return Ok(vec![BuiltService { ... }])
+/// let _builder = ServiceBuilder::new().runtime("my-processor", pipeline);
+/// // builder.build(&config) would return Ok(vec![BuiltWorkflow { ... }])
 /// # }
 /// ```
 pub struct ServiceBuilder {
     registry: Registry,
     /// Native runtimes keyed by the processor node id they back. Consumed by
-    /// [`build_all`](Self::build_all) for a `wasm`/`plugin` node declared with
+    /// [`build`](Self::build) for a `wasm`/`plugin` node declared with
     /// no artifact.
     runtimes: HashMap<String, Box<dyn PipelineRuntime>>,
     #[cfg(feature = "wasm-host")]
@@ -438,8 +840,14 @@ pub struct ServiceBuilder {
 }
 
 impl ServiceBuilder {
-    /// Create a new builder with an empty registry and no runtimes.
+    /// Create a builder with every compiled-in connector and codec registered,
+    /// plus the default channel registry when `connector-channel` is enabled.
     pub fn new() -> Self {
+        super::factories::register_builtin_factories(Self::empty())
+    }
+
+    /// Create a builder with an empty registry and no runtimes.
+    pub fn empty() -> Self {
         Self {
             registry: Registry::new(),
             runtimes: HashMap::new(),
@@ -456,32 +864,32 @@ impl ServiceBuilder {
     ///
     /// Without it a queue still records and replays; only
     /// `GET /api/dlq` and the replay endpoints have nothing to address.
-    pub fn with_dlq_registry(mut self, registry: Arc<DlqRegistry>) -> Self {
+    pub fn dlq_registry(mut self, registry: Arc<DlqRegistry>) -> Self {
         self.dlq_registry = Some(registry);
         self
     }
 
     /// Supply the runtime for the processor node declared with id
-    /// `processor_id` and no `module`/`library` key.
+    /// `processor_id` and no `path` key.
     ///
-    /// Any `Box<dyn PipelineRuntime>` is accepted, typically `Box::new(pipeline)`
-    /// for a native [`Pipeline`](crate::pipeline::Pipeline).
-    pub fn with_runtime(
+    /// Any [`PipelineRuntime`] is accepted, typically a native
+    /// [`Pipeline`](crate::pipeline::Pipeline).
+    pub fn runtime(
         mut self,
         processor_id: impl Into<String>,
-        runtime: Box<dyn PipelineRuntime>,
+        runtime: impl PipelineRuntime + 'static,
     ) -> Self {
-        self.runtimes.insert(processor_id.into(), runtime);
+        self.runtimes.insert(processor_id.into(), Box::new(runtime));
         self
     }
 
     /// Publish the built topology into `inspector` during
-    /// [`build_all`](Self::build_all).
+    /// [`build`](Self::build).
     ///
     /// The builder is the only place that knows both the concrete runtime kind
     /// (before the `Box<dyn PipelineRuntime>` erases it) and the configured
     /// source and sink sets, which is exactly what the topology is.
-    pub fn with_inspector(mut self, inspector: Inspector) -> Self {
+    pub fn inspector(mut self, inspector: Inspector) -> Self {
         self.inspector = Some(inspector);
         self
     }
@@ -489,58 +897,36 @@ impl ServiceBuilder {
     /// Register the shared channel bridge every `ChannelSource`/`ChannelSink`
     /// node resolves its named half through.
     ///
-    /// `register_builtin_factories` attaches a default
+    /// [`new`](Self::new) attaches a default
     /// `crate::connector::channel::ChannelRegistry` automatically when
     /// `connector-channel` is enabled; call this to supply a different
     /// instance (for example, to share one registry across two independently
     /// built services).
-    pub fn with_channel_bridge(mut self, channels: Arc<dyn ChannelBridge>) -> Self {
+    pub fn channels(mut self, channels: Arc<dyn ChannelBridge>) -> Self {
         self.channels = Some(channels);
         self
     }
 
     /// Set the [`WasmEngine`] used to load every `wasm` node's module. If not
-    /// set and the workflow declares one, `build_all` creates a default engine
+    /// set and the workflow declares one, `build` creates a default engine
     /// automatically and shares it across every `wasm` node.
     #[cfg(feature = "wasm-host")]
-    pub fn with_wasm_engine(mut self, engine: WasmEngine) -> Self {
+    pub fn wasm_engine(mut self, engine: WasmEngine) -> Self {
         self.wasm_engine = Some(engine);
         self
     }
 
-    /// Register a source factory (builder-style chaining).
-    pub fn register_source<F: SourceFactory>(mut self, factory: F) -> Self {
-        self.registry.register_source(factory);
+    /// Register a connector (builder-style chaining).
+    ///
+    /// A connector registered under a name that is already taken replaces it.
+    pub fn connector<C: Connector>(mut self, connector: C) -> Self {
+        self.registry.register(connector);
         self
     }
 
-    /// Register a sink factory (builder-style chaining).
-    pub fn register_sink<F: SinkFactory>(mut self, factory: F) -> Self {
-        self.registry.register_sink(factory);
-        self
-    }
-
-    /// Register a transformer factory (builder-style chaining).
-    pub fn register_transformer<F: TransformerFactory>(mut self, factory: F) -> Self {
-        self.registry.register_transformer(factory);
-        self
-    }
-
-    /// Mutably register a source factory.
-    pub fn register_source_mut<F: SourceFactory>(&mut self, factory: F) -> &mut Self {
-        self.registry.register_source(factory);
-        self
-    }
-
-    /// Mutably register a sink factory.
-    pub fn register_sink_mut<F: SinkFactory>(&mut self, factory: F) -> &mut Self {
-        self.registry.register_sink(factory);
-        self
-    }
-
-    /// Mutably register a transformer factory.
-    pub fn register_transformer_mut<F: TransformerFactory>(&mut self, factory: F) -> &mut Self {
-        self.registry.register_transformer(factory);
+    /// Register a codec factory (builder-style chaining).
+    pub fn codec<F: CodecFactory>(mut self, factory: F) -> Self {
+        self.registry.register_codec(factory);
         self
     }
 
@@ -549,21 +935,27 @@ impl ServiceBuilder {
         &self.registry
     }
 
-    /// Assemble one [`BuiltService`] per workflow declared in `config`, in
+    /// The inner registry, for the built-in registration in
+    /// `register_builtin_factories`.
+    pub(crate) fn registry_mut(&mut self) -> &mut Registry {
+        &mut self.registry
+    }
+
+    /// Assemble one [`BuiltWorkflow`] per workflow declared in `config`, in
     /// declaration order, sharing one [`Registry`] and, when enabled, one
     /// [`Inspector`] topology across all of them.
     ///
     /// Every sink is wrapped in a
-    /// [`RetryingSink`](crate::io::retry::RetryingSink). Sources are
-    /// wrapped in a [`RetryingSource`](crate::io::retry::RetryingSource)
-    /// too, except under `run_mode kind="stream"`, where the stream runner's
+    /// [`RetryingSink`](crate::io::RetryingSink). Sources are
+    /// wrapped in a [`RetryingSource`](crate::io::RetryingSource)
+    /// too, except under `run "stream"`, where the stream runner's
     /// own re-poll is already the retry loop.
     ///
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] if any workflow fails to build; see
     /// `build_one` for the full list of failure modes.
-    pub fn build_all(self, config: &ServiceConfig) -> Result<Vec<BuiltService>, SaciError> {
+    pub fn build(self, config: &ServiceConfig) -> Result<Vec<BuiltWorkflow>, SaciError> {
         let mut factory = self.into_factory(config);
 
         let mut out = Vec::with_capacity(config.workflows.len());
@@ -579,53 +971,67 @@ impl ServiceBuilder {
     /// Freeze the registry and keep the builder, so any declared workflow can
     /// be built again later.
     ///
-    /// [`build_all`](Self::build_all) is this plus one
-    /// [`ServiceFactory::build`] per declared workflow and one
-    /// [`ServiceFactory::publish_topology`]; the lifecycle supervisor keeps the
+    /// [`build`](Self::build) is this plus one
+    /// [`WorkflowFactory::build`] per declared workflow and one
+    /// [`WorkflowFactory::publish_topology`]; the lifecycle supervisor keeps the
     /// factory instead, because `start` and `restart` rebuild one workflow at a
     /// time.
-    pub fn into_factory(mut self, config: &ServiceConfig) -> ServiceFactory {
+    pub fn into_factory(mut self, config: &ServiceConfig) -> WorkflowFactory {
         let registry = Arc::new(std::mem::replace(&mut self.registry, Registry::new()));
         let retry_sources = sources_take_retry_wrapper(config);
-        ServiceFactory {
+        let run = match &config.mode {
+            ServiceMode::Standalone { config: standalone } => standalone.run.clone(),
+            ServiceMode::Cluster { .. } => RunMode::Continuous,
+        };
+        let batch_resume = matches!(
+            &config.store,
+            Some(StoreConfig::Redb {
+                batch_resume: true,
+                ..
+            })
+        );
+        WorkflowFactory {
             builder: self,
             registry,
             retry_sources,
             heal: config.heal.clone(),
             data_dir: config.node.data_dir.clone(),
             service: config.node.label(),
+            run,
+            flow: FlowPlan::from_config(config),
+            batch_resume,
         }
     }
 
-    /// Build every declared source, sink and transformer across every
+    /// Build every declared source, sink and codec across every
     /// workflow, skipping processor nodes and the workflow-graph check that
     /// needs their built components.
     ///
-    /// Exercises the same connector factories [`build_all`](Self::build_all)
+    /// Exercises the same connector factories [`build`](Self::build)
     /// does: each node's `config` is deserialized into its connector-specific,
     /// `deny_unknown_fields` struct and run through that struct's own
     /// `validate()`. Every built-in connector's factory does this
     /// synchronously with no network or broker connection (`serve` connects
     /// lazily, on the first read or write), so this check needs no live
-    /// service and, unlike `build_all`, no processor artifact on disk either,
+    /// service and, unlike `build`, no processor artifact on disk either,
     /// which is what lets a template config naming a `pipelines/*.wasm`
     /// placeholder still have its connectors checked.
     ///
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] naming the workflow, node id and
-    /// offending key for the first source, sink or transformer that fails to
-    /// build. An unregistered factory type is one such error, exactly as it
-    /// is in `build_all`; the caller distinguishes it the same way
+    /// offending key for the first source, sink or codec that fails to
+    /// build. An unregistered connector name is one such error, exactly as it
+    /// is in `build`; the caller distinguishes it the same way
     /// (`saci-service validate`'s `is_unknown_factory_error`).
     pub fn build_connectors_only(mut self, config: &ServiceConfig) -> Result<(), SaciError> {
         let registry = Arc::new(std::mem::replace(&mut self.registry, Registry::new()));
         let service = config.node.label();
         for workflow in &config.workflows {
-            let transformers = build_transformers(&registry, &workflow.transformers)?;
+            let codecs = build_codecs(&registry, &workflow.codecs)?;
             let build = NodeBuild {
                 registry: &registry,
-                transformers: &transformers,
+                codecs: &codecs,
                 heal: &config.heal,
                 service: &service,
             };
@@ -644,12 +1050,12 @@ impl ServiceBuilder {
         Ok(())
     }
 
-    /// Assemble a [`BuiltService`] for one declared `workflow`.
+    /// Assemble a [`BuiltWorkflow`] for one declared `workflow`.
     ///
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] if:
-    /// - A transformer names an unregistered format.
+    /// - A codec names an unregistered format.
     /// - A source or sink names an unregistered connector `type`.
     /// - A source or sink factory returns an error.
     /// - A `wasm`/`plugin` node names a module/library that cannot be
@@ -658,7 +1064,7 @@ impl ServiceBuilder {
     ///   would create for it cannot be created, which on a 64-bit host means
     ///   the pooling allocator's address-space reservation was refused.
     /// - A `wasm`/`plugin` node declares neither an artifact nor a runtime
-    ///   registered for its id through [`with_runtime`](Self::with_runtime).
+    ///   registered for its id through [`runtime`](Self::runtime).
     /// - The links do not carry matching components and schemas end to end
     ///   (see [`validate_workflow_graph`](super::validation::validate_workflow_graph)).
     fn build_one(
@@ -669,11 +1075,11 @@ impl ServiceBuilder {
         heal: &HealConfig,
         data_dir: &std::path::Path,
         service: &str,
-    ) -> Result<BuiltService, SaciError> {
-        let transformers = build_transformers(registry, &workflow.transformers)?;
+    ) -> Result<BuiltWorkflow, SaciError> {
+        let codecs = build_codecs(registry, &workflow.codecs)?;
         let build = NodeBuild {
             registry,
-            transformers: &transformers,
+            codecs: &codecs,
             heal,
             service,
         };
@@ -725,13 +1131,18 @@ impl ServiceBuilder {
         // the graph first.
         let dlq = self.build_dlq(workflow, registry, data_dir)?;
 
-        Ok(BuiltService {
+        // `run`, `flow` and `batch_resume` are the factory's to fill: they
+        // come from the whole config, which this method never sees.
+        Ok(BuiltWorkflow {
             workflow_id: workflow.id.clone(),
             workflow_name: workflow.name.clone(),
             nodes,
             registry: registry.clone(),
             inspector: self.inspector.clone(),
             dlq,
+            run: RunMode::default(),
+            flow: FlowPlan::default(),
+            batch_resume: false,
         })
     }
 
@@ -774,31 +1185,25 @@ impl ServiceBuilder {
             .iter()
             .find(|s| s.id == id)
             .expect("nodes() id must resolve to a declared source");
-        let factory = build
-            .registry
-            .source(&spec.type_name)
-            .ok_or_else(|| missing_factory_error("source", &spec.type_name, &spec.id))?;
+        let connector = lookup_connector(build.registry, Role::Source, &spec.connector, &spec.id)?;
         let settings = resolve_heal(
             spec.heal.as_ref(),
             build.heal,
-            factory.rebuildable(&spec.config),
+            connector.rebuild(Role::Source, &spec.config),
             &workflow.id,
             "source",
             &spec.id,
-            &spec.type_name,
+            &spec.connector,
         )?;
-        let bound = spec
-            .transformer
-            .as_deref()
-            .map(|tid| build.transformers[tid].clone());
+        let bound = spec.codec.as_deref().map(|tid| build.codecs[tid].clone());
         let rebuilder = Rebuilder::new(
             build.registry.clone(),
-            &spec.type_name,
+            &spec.connector,
             &spec.id,
-            spec.config.clone(),
+            config_with_schema(&spec.config, &spec.component, &workflow.schemas),
             bound,
             self.channels.clone(),
-            retry_sources.then(|| spec.retry.to_system_config()),
+            retry_sources.then(|| spec.retry.to_retry_mode()),
         )
         .with_identity(build.identity(workflow, &spec.id));
         let built = rebuilder.build_source()?;
@@ -815,12 +1220,11 @@ impl ServiceBuilder {
         Ok(BuiltNode {
             id: spec.id.clone(),
             name: spec.name.clone(),
-            type_name: spec.type_name.clone(),
+            connector: spec.connector.clone(),
             component: Some(intern_component_name(&spec.component)),
             kind: BuiltNodeKind::Source(source),
             downstream: Vec::new(),
             artifact: None,
-            #[cfg(feature = "windows")]
             window: None,
             heal_recovered: None,
         })
@@ -837,31 +1241,25 @@ impl ServiceBuilder {
             .iter()
             .find(|s| s.id == id)
             .expect("nodes() id must resolve to a declared sink");
-        let factory = build
-            .registry
-            .sink(&spec.type_name)
-            .ok_or_else(|| missing_factory_error("sink", &spec.type_name, &spec.id))?;
+        let connector = lookup_connector(build.registry, Role::Sink, &spec.connector, &spec.id)?;
         let settings = resolve_heal(
             spec.heal.as_ref(),
             build.heal,
-            factory.rebuildable(&spec.config),
+            connector.rebuild(Role::Sink, &spec.config),
             &workflow.id,
             "sink",
             &spec.id,
-            &spec.type_name,
+            &spec.connector,
         )?;
-        let bound = spec
-            .transformer
-            .as_deref()
-            .map(|tid| build.transformers[tid].clone());
+        let bound = spec.codec.as_deref().map(|tid| build.codecs[tid].clone());
         let rebuilder = Rebuilder::new(
             build.registry.clone(),
-            &spec.type_name,
+            &spec.connector,
             &spec.id,
-            spec.config.clone(),
+            config_with_schema(&spec.config, &spec.component, &workflow.schemas),
             bound,
             self.channels.clone(),
-            Some(spec.retry.to_system_config()),
+            Some(spec.retry.to_retry_mode()),
         )
         .with_identity(build.identity(workflow, &spec.id));
         let built = rebuilder.build_sink()?;
@@ -876,13 +1274,12 @@ impl ServiceBuilder {
         Ok(BuiltNode {
             id: spec.id.clone(),
             name: spec.name.clone(),
-            type_name: spec.type_name.clone(),
+            connector: spec.connector.clone(),
             component: Some(intern_component_name(&spec.component)),
             kind: BuiltNodeKind::Sink(sink),
             downstream: Vec::new(),
             artifact: None,
             heal_recovered,
-            #[cfg(feature = "windows")]
             window: None,
         })
     }
@@ -962,10 +1359,10 @@ impl ServiceBuilder {
         // block the operator wrote, not a copy in the `config` node.
         let spec = config_with_window(spec.clone());
         let (runtime, kind, artifact): (Box<dyn PipelineRuntime>, &'static str, Option<String>) =
-            match &spec.module {
+            match &spec.path {
                 Some(module) => {
                     // Built at most once per builder and only for a node that
-                    // names a `module`, so a config with no module-backed wasm
+                    // names a `path`, so a config with no module-backed wasm
                     // node still reserves no address space. Fallible since the
                     // pooling instance allocator reserves ~1 TiB of address
                     // space per engine, which a process resource limit can
@@ -976,14 +1373,15 @@ impl ServiceBuilder {
                         None => {
                             let engine = WasmEngine::new().map_err(|e| {
                                 SaciError::configuration(format!(
-                                    "processor '{}': wasmtime engine creation failed: {e}. \
+                                    "processor '{}': {}. \
                                      The pooling instance allocator reserves ~1 TiB of address \
                                      space per engine, so this is usually a process \
                                      address-space limit (RLIMIT_AS / `ulimit -v`, common in \
                                      containers and CI sandboxes) or too many live engines in \
                                      one process; share one with \
-                                     `ServiceBuilder::with_wasm_engine`",
-                                    spec.id
+                                     `ServiceBuilder::wasm_engine`",
+                                    spec.id,
+                                    e.message()
                                 ))
                             })?;
                             self.wasm_engine = Some(engine.clone());
@@ -1009,12 +1407,11 @@ impl ServiceBuilder {
         Ok(BuiltNode {
             id: spec.id.clone(),
             name: spec.name.clone(),
-            type_name: kind.to_string(),
+            connector: kind.to_string(),
             component: None,
             kind: BuiltNodeKind::Processor { runtime, kind },
             downstream: Vec::new(),
             artifact,
-            #[cfg(feature = "windows")]
             window: spec.window.clone(),
             heal_recovered: None,
         })
@@ -1039,7 +1436,7 @@ impl ServiceBuilder {
         // `get_config` callback answers the geometry the operator declared.
         let spec = config_with_window(spec.clone());
         let (runtime, kind, artifact): (Box<dyn PipelineRuntime>, &'static str, Option<String>) =
-            match &spec.library {
+            match &spec.path {
                 Some(library) => {
                     let runtime = load_plugin_runtime(&spec, None)?
                         .with_identity(workflow_id.to_string(), spec.id.clone());
@@ -1058,12 +1455,11 @@ impl ServiceBuilder {
         Ok(BuiltNode {
             id: spec.id.clone(),
             name: spec.name.clone(),
-            type_name: kind.to_string(),
+            connector: kind.to_string(),
             component: None,
             kind: BuiltNodeKind::Processor { runtime, kind },
             downstream: Vec::new(),
             artifact,
-            #[cfg(feature = "windows")]
             window: spec.window.clone(),
             heal_recovered: None,
         })
@@ -1138,27 +1534,50 @@ impl Default for ServiceBuilder {
     }
 }
 
-/// Resolve every declared `transformer` node against `registry`, building one
+/// Resolve every declared `codec` node against `registry`, building one
 /// instance per declaration.
 ///
 /// # Errors
 ///
-/// Returns [`SaciError::Configuration`] when a transformer names an
-/// unregistered format, or when its factory rejects its `options`. The
+/// Returns [`SaciError::Configuration`] when a codec names an
+/// unregistered format, or when its factory rejects its `config`. The
 /// unregistered-format wording, feature hint included, belongs to
-/// [`missing_transformer_error`].
-fn build_transformers(
+/// [`missing_codec_error`].
+fn build_codecs(
     registry: &Registry,
-    specs: &[TransformerSpec],
-) -> SaciResult<HashMap<String, Arc<dyn Transformer>>> {
+    specs: &[CodecSpec],
+) -> SaciResult<HashMap<String, Arc<dyn Codec>>> {
     let mut out = HashMap::with_capacity(specs.len());
     for spec in specs {
-        let factory = registry.transformers().get(&spec.format).ok_or_else(|| {
-            missing_transformer_error(&spec.id, &spec.format, &registry.transformers().formats())
+        let factory = registry.codecs().get(&spec.format).ok_or_else(|| {
+            missing_codec_error(&spec.id, &spec.format, &registry.codecs().names())
         })?;
-        out.insert(spec.id.clone(), factory.build(&spec.options)?);
+        out.insert(spec.id.clone(), factory.build(&spec.config)?);
     }
     Ok(out)
+}
+
+/// `config` as the connector is built from it: with the workflow's schema for
+/// `component` filled in as the `field` entries when the node declares none of
+/// its own.
+///
+/// The clone is what the node's `Rebuilder` keeps, so a healed connector is
+/// rebuilt from the same entries as the first build. A node that declares its
+/// own `field` lines keeps them, and so does one whose `component` no
+/// declared schema names.
+fn config_with_schema(
+    config: &ConfigValue,
+    component: &str,
+    schemas: &[SchemaSpec],
+) -> ConfigValue {
+    let mut config = config.clone();
+    if let ConfigValue::Object(table) = &mut config
+        && !table.contains_key("field")
+        && let Some(schema) = schemas.iter().find(|schema| schema.id == component)
+    {
+        table.insert("field".to_string(), schema.field.clone());
+    }
+    config
 }
 
 #[cfg(all(test, feature = "service"))]
@@ -1171,18 +1590,13 @@ mod tests {
         HttpConfig, NodeConfig, ObservabilityConfig, RetryConfig, ServiceMode, SinkSpec,
         SourceSpec, StandaloneConfig, WorkflowSpec,
     };
-    use crate::service::registry::{SinkFactory, SourceFactory};
     use crate::system::{System, SystemMeta};
     use arrow_array::{Int32Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use async_trait::async_trait;
-    #[cfg(feature = "connector-saci")]
-    use std::io::Write;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    #[cfg(feature = "connector-saci")]
-    use tempfile::NamedTempFile;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -1199,32 +1613,23 @@ mod tests {
     }
 
     #[cfg(feature = "connector-channel")]
-    struct NoopSourceFactory;
+    struct NoopConnector;
     #[cfg(feature = "connector-channel")]
-    impl SourceFactory for NoopSourceFactory {
-        fn type_name(&self) -> &'static str {
-            "NoopSource"
+    impl Connector for NoopConnector {
+        fn name(&self) -> &'static str {
+            "noop"
         }
-        fn build(
+        fn source(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
         ) -> Result<Box<dyn Source>, SaciError> {
             use crate::connector::channel::ChannelSource;
             let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-            let (_tx, src) = ChannelSource::new(schema, 1);
+            let (src, _tx) = ChannelSource::new(schema, 1);
             Ok(Box::new(src))
         }
-    }
-
-    #[cfg(feature = "connector-channel")]
-    struct NoopSinkFactory;
-    #[cfg(feature = "connector-channel")]
-    impl SinkFactory for NoopSinkFactory {
-        fn type_name(&self) -> &'static str {
-            "NoopSink"
-        }
-        fn build(
+        fn sink(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
@@ -1260,7 +1665,8 @@ mod tests {
         WorkflowSpec {
             id: id.to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -1279,8 +1685,8 @@ mod tests {
             flow_control: None,
             id: "src1".to_string(),
             name: None,
-            type_name: "NoopSource".to_string(),
-            transformer: None,
+            connector: "noop".to_string(),
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1289,8 +1695,8 @@ mod tests {
             heal: None,
             id: "sink1".to_string(),
             name: None,
-            type_name: "NoopSink".to_string(),
-            transformer: None,
+            connector: "noop".to_string(),
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1302,10 +1708,9 @@ mod tests {
         });
         let config = base_config(workflow);
 
-        let service = ServiceBuilder::new()
-            .register_source(NoopSourceFactory)
-            .register_sink(NoopSinkFactory)
-            .build_all(&config)
+        let service = ServiceBuilder::empty()
+            .connector(NoopConnector)
+            .build(&config)
             .unwrap_or_else(|e| panic!("build failed: {e}"))
             .remove(0);
 
@@ -1333,21 +1738,21 @@ mod tests {
             flow_control: None,
             id: "bad_src".to_string(),
             name: None,
-            type_name: "GhostSource".to_string(),
-            transformer: None,
+            connector: "ghost".to_string(),
+            codec: None,
             component: "comp".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
         });
         let config = base_config(workflow);
 
-        let err = ServiceBuilder::new().build_all(&config).unwrap_err();
+        let err = ServiceBuilder::empty().build(&config).unwrap_err();
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("GhostSource"));
+        assert!(err.message().contains("ghost"));
     }
 
     /// A declared `plugin` node in a binary with no plugin host is refused by
-    /// name, through `build_all` rather than through the binary's gate.
+    /// name, through `build` rather than through the binary's gate.
     ///
     /// `validate_build_capabilities` is what an operator hits, and its own
     /// tests cover it. This covers the other caller: a library embedder
@@ -1369,14 +1774,14 @@ mod tests {
         workflow.plugin.push(super::super::config::PluginSpec {
             id: "audit".to_string(),
             name: None,
-            library: Some("libaudit.so".to_string()),
+            path: Some("libaudit.so".to_string()),
             sha3_256: None,
             config: HashMap::new(),
             window: None,
         });
         let config = base_config(workflow);
 
-        let err = ServiceBuilder::new().build_all(&config).unwrap_err();
+        let err = ServiceBuilder::empty().build(&config).unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(
             err.message().contains("--features plugin-host"),
@@ -1408,14 +1813,11 @@ mod tests {
         workflow.wasm.push(super::super::config::WasmSpec {
             id: "aggregate".to_string(),
             name: None,
-            module: Some("aggregate.wasm".to_string()),
+            path: Some("aggregate.wasm".to_string()),
             sha3_256: None,
             config: HashMap::new(),
             window: Some(super::super::config::WindowConfig {
-                spec: crate::window_spec::WindowSpec::Tumbling {
-                    size_ms: 30_000,
-                    offset_ms: 0,
-                },
+                spec: crate::window::WindowSpec::tumbling(30_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 0,
@@ -1423,7 +1825,7 @@ mod tests {
         });
         let config = base_config(workflow);
 
-        let err = ServiceBuilder::new().build_all(&config).unwrap_err();
+        let err = ServiceBuilder::empty().build(&config).unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(
             err.message().contains("--features windows"),
@@ -1452,14 +1854,11 @@ mod tests {
         workflow.wasm.push(super::super::config::WasmSpec {
             id: "aggregate".to_string(),
             name: None,
-            module: Some("aggregate.wasm".to_string()),
+            path: Some("aggregate.wasm".to_string()),
             sha3_256: None,
             config: HashMap::new(),
             window: Some(super::super::config::WindowConfig {
-                spec: crate::window_spec::WindowSpec::Tumbling {
-                    size_ms: 30_000,
-                    offset_ms: 0,
-                },
+                spec: crate::window::WindowSpec::tumbling(30_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 0,
@@ -1467,7 +1866,7 @@ mod tests {
         });
         let config = base_config(workflow);
 
-        let err = ServiceBuilder::new().build_all(&config).unwrap_err();
+        let err = ServiceBuilder::empty().build(&config).unwrap_err();
         assert!(
             err.message().contains("--features wasm"),
             "the host this build lacks outranks the block it would carry: {}",
@@ -1482,17 +1881,17 @@ mod tests {
             heal: None,
             id: "bad_sink".to_string(),
             name: None,
-            type_name: "GhostSink".to_string(),
-            transformer: None,
+            connector: "ghost".to_string(),
+            codec: None,
             component: "comp".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
         });
         let config = base_config(workflow);
 
-        let err = ServiceBuilder::new().build_all(&config).unwrap_err();
+        let err = ServiceBuilder::empty().build(&config).unwrap_err();
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("GhostSink"));
+        assert!(err.message().contains("ghost"));
     }
 
     #[cfg(feature = "wasm-host")]
@@ -1502,18 +1901,18 @@ mod tests {
         workflow.wasm.push(super::super::config::WasmSpec {
             id: "p".to_string(),
             name: None,
-            module: None,
+            path: None,
             sha3_256: None,
             config: std::collections::HashMap::new(),
             window: None,
         });
         let config = base_config(workflow);
 
-        let err = ServiceBuilder::new().build_all(&config).unwrap_err();
+        let err = ServiceBuilder::empty().build(&config).unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.message().contains("processor 'p'"), "got: {err}");
         assert!(
-            err.message().contains("ServiceBuilder::with_runtime"),
+            err.message().contains("ServiceBuilder::runtime"),
             "got: {err}"
         );
     }
@@ -1525,16 +1924,16 @@ mod tests {
         workflow.wasm.push(super::super::config::WasmSpec {
             id: "p".to_string(),
             name: None,
-            module: None,
+            path: None,
             sha3_256: None,
             config: std::collections::HashMap::new(),
             window: None,
         });
         let config = base_config(workflow);
 
-        let service = ServiceBuilder::new()
-            .with_runtime("p", Box::new(Pipeline::new("native-p")))
-            .build_all(&config)
+        let service = ServiceBuilder::empty()
+            .runtime("p", Pipeline::new("native-p"))
+            .build(&config)
             .unwrap_or_else(|e| panic!("build failed: {e}"))
             .remove(0);
 
@@ -1564,28 +1963,31 @@ mod tests {
             greeting: String,
         }
 
-        struct StrictSourceFactory;
-        impl SourceFactory for StrictSourceFactory {
-            fn type_name(&self) -> &'static str {
-                "StrictSource"
+        struct StrictConnector;
+        impl Connector for StrictConnector {
+            fn name(&self) -> &'static str {
+                "strict"
             }
-            fn build(
+            fn roles(&self) -> &'static [Role] {
+                &[Role::Source]
+            }
+            fn source(
                 &self,
                 config: &ConfigValue,
                 _ctx: &ConnectorContext,
             ) -> Result<Box<dyn Source>, SaciError> {
                 serde_json::from_value::<StrictSourceConfig>(config.clone())
-                    .map_err(|e| SaciError::configuration(format!("StrictSource config: {e}")))?;
+                    .map_err(|e| SaciError::configuration(format!("strict config: {e}")))?;
                 use crate::connector::channel::ChannelSource;
                 let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-                let (_tx, src) = ChannelSource::new(schema, 1);
+                let (src, _tx) = ChannelSource::new(schema, 1);
                 Ok(Box::new(src))
             }
         }
 
         // Source, processor and sink linked end to end, the same shape
-        // `build_all` walks, but the wasm node names a module this test
-        // never writes to disk, so `build_all` would fail trying to read it.
+        // `build` walks, but the wasm node names a module this test
+        // never writes to disk, so `build` would fail trying to read it.
         fn workflow_naming_a_missing_module(source_config: ConfigValue) -> WorkflowSpec {
             let mut workflow = empty_workflow("w");
             workflow.sources.push(SourceSpec {
@@ -1593,8 +1995,8 @@ mod tests {
                 flow_control: None,
                 id: "src1".to_string(),
                 name: None,
-                type_name: "StrictSource".to_string(),
-                transformer: None,
+                connector: "strict".to_string(),
+                codec: None,
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
                 config: source_config,
@@ -1603,8 +2005,8 @@ mod tests {
                 heal: None,
                 id: "sink1".to_string(),
                 name: None,
-                type_name: "NoopSink".to_string(),
-                transformer: None,
+                connector: "noop".to_string(),
+                codec: None,
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
                 config: ConfigValue::Object(ConfigMap::new()),
@@ -1612,7 +2014,7 @@ mod tests {
             workflow.wasm.push(super::super::config::WasmSpec {
                 id: "p".to_string(),
                 name: None,
-                module: Some("pipelines/does-not-exist.wasm".to_string()),
+                path: Some("pipelines/does-not-exist.wasm".to_string()),
                 sha3_256: None,
                 config: std::collections::HashMap::new(),
                 window: None,
@@ -1633,7 +2035,7 @@ mod tests {
         // Half 1: a valid connector config plus a processor artifact that
         // does not exist on disk. This is the whole reason
         // `build_connectors_only` exists: it must succeed here, where
-        // `build_all` would fail on the missing module before ever reaching
+        // `build` would fail on the missing module before ever reaching
         // the sink.
         let mut valid = ConfigMap::new();
         valid.insert(
@@ -1641,9 +2043,9 @@ mod tests {
             ConfigValue::String("hi".to_string()),
         );
         let config = base_config(workflow_naming_a_missing_module(ConfigValue::Object(valid)));
-        ServiceBuilder::new()
-            .register_source(StrictSourceFactory)
-            .register_sink(NoopSinkFactory)
+        ServiceBuilder::empty()
+            .connector(StrictConnector)
+            .connector(NoopConnector)
             .build_connectors_only(&config)
             .unwrap_or_else(|e| {
                 panic!("connectors-only build should skip the missing module: {e}")
@@ -1659,24 +2061,24 @@ mod tests {
             ConfigValue::String("x".to_string()),
         );
         let config = base_config(workflow_naming_a_missing_module(ConfigValue::Object(bad)));
-        let err = ServiceBuilder::new()
-            .register_source(StrictSourceFactory)
-            .register_sink(NoopSinkFactory)
+        let err = ServiceBuilder::empty()
+            .connector(StrictConnector)
+            .connector(NoopConnector)
             .build_connectors_only(&config)
             .expect_err(
                 "an unknown key in a connector's config must fail connectors-only validation",
             );
         assert!(
-            err.message().contains("StrictSource") && err.message().contains("no_such_key"),
+            err.message().contains("strict") && err.message().contains("no_such_key"),
             "error should name the connector and the offending key: {err}"
         );
     }
 
     /// `build_connectors_only` walks the same `build_source_node`/
-    /// `build_sink_node` path `build_all` does, so a `saci` source and sink
+    /// `build_sink_node` path `build` does, so a `saci` source and sink
     /// pair gets the node identity `ConnectorContext::identity` requires
     /// without ever reaching the "no identity" refusal.
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     #[test]
     fn build_connectors_only_binds_the_node_identity_for_a_saci_pair() {
         let raw = r#"
@@ -1684,43 +2086,65 @@ mode "standalone"
 
 node id=1 name="svc-a" data_dir="/tmp/saci-test"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "w" {
-    source "in" type="saci" component="Tick" {
+    source "in" connector="peer" component="Tick" {
         config {
             bind "127.0.0.1:0"
-            schema_fields "v" type="Int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }
     }
-    sink "out" type="saci" component="Tick" {
+    sink "out" connector="peer" component="Tick" {
         config {
             connect "127.0.0.1:9"
-            schema_fields "v" type="Int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }
     }
     link from="in" to="out"
 }
 "#;
-        let mut file = NamedTempFile::new().expect("tempfile");
-        file.write_all(raw.as_bytes()).expect("write config");
-
-        let config = ServiceConfig::load(file.path()).expect("config loads");
-        crate::service::register_builtin_factories(ServiceBuilder::new())
+        let config = ServiceConfig::from_kdl(raw).expect("config loads");
+        ServiceBuilder::new()
             .build_connectors_only(&config)
             .expect("the host binds the node identity for both saci halves");
+    }
+
+    /// The `schema` node of a workflow fills in the `field` entries of a node
+    /// that declares none, leaves a node that declares its own alone, and
+    /// leaves a node whose component no schema names alone too.
+    #[test]
+    fn config_with_schema_fills_in_only_a_node_that_declares_no_field() {
+        let declared = crate::connector::from_kdl_str("field \"id\" type=\"int64\"\n")
+            .expect("the field parses");
+        let schemas = [SchemaSpec {
+            id: "orders".to_string(),
+            field: declared["field"].clone(),
+        }];
+
+        let bare = ConfigValue::Object(ConfigMap::new());
+        assert_eq!(
+            config_with_schema(&bare, "orders", &schemas)["field"],
+            schemas[0].field
+        );
+
+        let own = crate::connector::from_kdl_str("field \"x\" type=\"utf8\"\n")
+            .expect("the field parses");
+        assert_eq!(config_with_schema(&own, "orders", &schemas), own);
+
+        assert_eq!(config_with_schema(&bare, "other", &schemas), bare);
     }
 
     #[test]
     fn test_boxed_system_runs_on_runtime() {
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system_boxed(Box::new(NoopSystem));
+        pipeline = pipeline.system_boxed(Box::new(NoopSystem));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async { pipeline.run().await }).unwrap();
     }
 
     #[test]
-    fn test_build_all_returns_one_built_service_per_workflow() {
+    fn test_build_returns_one_built_workflow_per_workflow() {
         let config = ServiceConfig {
             heal: Default::default(),
             flow_control: Default::default(),
@@ -1739,8 +2163,8 @@ workflow "w" {
             variables: HashMap::new(),
         };
 
-        let built = ServiceBuilder::new()
-            .build_all(&config)
+        let built = ServiceBuilder::empty()
+            .build(&config)
             .unwrap_or_else(|e| panic!("build failed: {e}"));
 
         assert_eq!(built.len(), 2);
@@ -1779,17 +2203,21 @@ workflow "w" {
         }
     }
 
-    struct FlakySourceFactory {
+    /// A connector for both roles: its source fails `failures` times and its
+    /// sink fails `write_failures` writes, then each succeeds.
+    struct FlakyConnector {
         failures: usize,
         calls: Arc<AtomicUsize>,
+        write_failures: usize,
+        write_calls: Arc<AtomicUsize>,
     }
 
-    impl SourceFactory for FlakySourceFactory {
-        fn type_name(&self) -> &'static str {
-            "FlakySource"
+    impl Connector for FlakyConnector {
+        fn name(&self) -> &'static str {
+            "flaky"
         }
 
-        fn build(
+        fn source(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
@@ -1797,6 +2225,17 @@ workflow "w" {
             Ok(Box::new(FlakySource {
                 failures_left: self.failures,
                 calls: Arc::clone(&self.calls),
+            }))
+        }
+
+        fn sink(
+            &self,
+            _config: &ConfigValue,
+            _ctx: &ConnectorContext,
+        ) -> Result<Box<dyn Sink>, SaciError> {
+            Ok(Box::new(FlakySink {
+                write_failures_left: self.write_failures,
+                write_calls: Arc::clone(&self.write_calls),
             }))
         }
     }
@@ -1828,30 +2267,8 @@ workflow "w" {
         }
     }
 
-    struct FlakySinkFactory {
-        write_failures: usize,
-        write_calls: Arc<AtomicUsize>,
-    }
-
-    impl SinkFactory for FlakySinkFactory {
-        fn type_name(&self) -> &'static str {
-            "FlakySink"
-        }
-
-        fn build(
-            &self,
-            _config: &ConfigValue,
-            _ctx: &ConnectorContext,
-        ) -> Result<Box<dyn Sink>, SaciError> {
-            Ok(Box::new(FlakySink {
-                write_failures_left: self.write_failures,
-                write_calls: Arc::clone(&self.write_calls),
-            }))
-        }
-    }
-
     /// A one-link workflow whose flaky source feeds a flaky sink, so
-    /// `build_all` produces a valid graph with both nodes retry-wrapped.
+    /// `build` produces a valid graph with both nodes retry-wrapped.
     fn flaky_workflow(source_retry: RetryConfig, sink_retry: RetryConfig) -> WorkflowSpec {
         let mut workflow = empty_workflow("w");
         workflow.sources.push(SourceSpec {
@@ -1859,8 +2276,8 @@ workflow "w" {
             flow_control: None,
             id: "src1".to_string(),
             name: None,
-            type_name: "FlakySource".to_string(),
-            transformer: None,
+            connector: "flaky".to_string(),
+            codec: None,
             component: "comp1".to_string(),
             retry: source_retry,
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1869,8 +2286,8 @@ workflow "w" {
             heal: None,
             id: "sink1".to_string(),
             name: None,
-            type_name: "FlakySink".to_string(),
-            transformer: None,
+            connector: "flaky".to_string(),
+            codec: None,
             component: "comp1".to_string(),
             retry: sink_retry,
             config: ConfigValue::Object(ConfigMap::new()),
@@ -1893,16 +2310,14 @@ workflow "w" {
             },
             RetryConfig::default(),
         );
-        let mut service = ServiceBuilder::new()
-            .register_source(FlakySourceFactory {
+        let mut service = ServiceBuilder::empty()
+            .connector(FlakyConnector {
                 failures: 2,
                 calls: Arc::clone(&calls),
-            })
-            .register_sink(FlakySinkFactory {
                 write_failures: 0,
                 write_calls: Arc::new(AtomicUsize::new(0)),
             })
-            .build_all(&base_config(workflow))
+            .build(&base_config(workflow))
             .unwrap_or_else(|e| panic!("build failed: {e}"))
             .remove(0);
 
@@ -1925,16 +2340,14 @@ workflow "w" {
             },
             RetryConfig::default(),
         );
-        let mut service = ServiceBuilder::new()
-            .register_source(FlakySourceFactory {
+        let mut service = ServiceBuilder::empty()
+            .connector(FlakyConnector {
                 failures: 2,
                 calls: Arc::clone(&calls),
-            })
-            .register_sink(FlakySinkFactory {
                 write_failures: 0,
                 write_calls: Arc::new(AtomicUsize::new(0)),
             })
-            .build_all(&base_config(workflow))
+            .build(&base_config(workflow))
             .unwrap_or_else(|e| panic!("build failed: {e}"))
             .remove(0);
 
@@ -1950,7 +2363,7 @@ workflow "w" {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "single attempt");
     }
 
-    /// `run_mode kind="stream"` hands the source over unwrapped: `run_stream`
+    /// `run "stream"` hands the source over unwrapped: the stream runner
     /// is itself the retry loop, so a second one inside `next_batch` would put
     /// its 100 ms first backoff on the item path in front of the runner's own
     /// 10 ms re-poll. The error must reach the runner as the connector raised
@@ -1962,19 +2375,17 @@ workflow "w" {
         let mut config = base_config(workflow);
         config.mode = ServiceMode::Standalone {
             config: StandaloneConfig {
-                run_mode: RunMode::Stream,
+                run: RunMode::Stream,
             },
         };
-        let mut service = ServiceBuilder::new()
-            .register_source(FlakySourceFactory {
+        let mut service = ServiceBuilder::empty()
+            .connector(FlakyConnector {
                 failures: 2,
                 calls: Arc::clone(&calls),
-            })
-            .register_sink(FlakySinkFactory {
                 write_failures: 0,
                 write_calls: Arc::new(AtomicUsize::new(0)),
             })
-            .build_all(&config)
+            .build(&config)
             .unwrap_or_else(|e| panic!("build failed: {e}"))
             .remove(0);
 
@@ -2003,19 +2414,17 @@ workflow "w" {
         let mut config = base_config(workflow);
         config.mode = ServiceMode::Standalone {
             config: StandaloneConfig {
-                run_mode: RunMode::Stream,
+                run: RunMode::Stream,
             },
         };
-        let mut service = ServiceBuilder::new()
-            .register_source(FlakySourceFactory {
+        let mut service = ServiceBuilder::empty()
+            .connector(FlakyConnector {
                 failures: 0,
                 calls: Arc::new(AtomicUsize::new(0)),
-            })
-            .register_sink(FlakySinkFactory {
                 write_failures: 1,
                 write_calls: Arc::clone(&write_calls),
             })
-            .build_all(&config)
+            .build(&config)
             .unwrap_or_else(|e| panic!("build failed: {e}"))
             .remove(0);
 
@@ -2048,16 +2457,14 @@ workflow "w" {
                 ..Default::default()
             },
         );
-        let mut service = ServiceBuilder::new()
-            .register_source(FlakySourceFactory {
+        let mut service = ServiceBuilder::empty()
+            .connector(FlakyConnector {
                 failures: 0,
                 calls: Arc::new(AtomicUsize::new(0)),
-            })
-            .register_sink(FlakySinkFactory {
                 write_failures: 1,
                 write_calls: Arc::clone(&write_calls),
             })
-            .build_all(&base_config(workflow))
+            .build(&base_config(workflow))
             .unwrap_or_else(|e| panic!("build failed: {e}"))
             .remove(0);
 
@@ -2082,9 +2489,9 @@ workflow "w" {
 
     // ── Self-healing ─────────────────────────────────────────────────────────
 
-    /// A source that always fails, from a factory that declares a rebuild
-    /// sound and counts how many instances it has handed out.
-    struct HealableSourceFactory(Arc<AtomicUsize>);
+    /// A source-only connector that always fails, declares a rebuild sound and
+    /// counts how many instances it has handed out.
+    struct HealableConnector(Arc<AtomicUsize>);
 
     struct AlwaysFailingSource;
 
@@ -2099,12 +2506,16 @@ workflow "w" {
         }
     }
 
-    impl SourceFactory for HealableSourceFactory {
-        fn type_name(&self) -> &'static str {
-            "HealableSource"
+    impl Connector for HealableConnector {
+        fn name(&self) -> &'static str {
+            "healable"
         }
 
-        fn build(
+        fn roles(&self) -> &'static [Role] {
+            &[Role::Source]
+        }
+
+        fn source(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
@@ -2113,12 +2524,12 @@ workflow "w" {
             Ok(Box::new(AlwaysFailingSource))
         }
 
-        fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-            Ok(())
+        fn rebuild(&self, _role: Role, _config: &ConfigValue) -> Rebuild {
+            Rebuild::Yes
         }
     }
 
-    /// `FlakySink` reused as a sink whose factory refuses a rebuild, which is
+    /// The `flaky` connector reused as a sink that refuses a rebuild, which is
     /// the trait default: it declares nothing, so the host never heals it.
     fn heal_workflow(
         source_heal: Option<HealConfig>,
@@ -2130,8 +2541,8 @@ workflow "w" {
             flow_control: None,
             id: "src1".to_string(),
             name: None,
-            type_name: "HealableSource".to_string(),
-            transformer: None,
+            connector: "healable".to_string(),
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig {
                 max_attempts: 1,
@@ -2143,8 +2554,8 @@ workflow "w" {
             heal: sink_heal,
             id: "sink1".to_string(),
             name: None,
-            type_name: "FlakySink".to_string(),
-            transformer: None,
+            connector: "flaky".to_string(),
+            codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             config: ConfigValue::Object(ConfigMap::new()),
@@ -2160,14 +2571,16 @@ workflow "w" {
     fn build_heal_service(
         config: &ServiceConfig,
         builds: &Arc<AtomicUsize>,
-    ) -> Result<BuiltService, SaciError> {
-        Ok(ServiceBuilder::new()
-            .register_source(HealableSourceFactory(Arc::clone(builds)))
-            .register_sink(FlakySinkFactory {
+    ) -> Result<BuiltWorkflow, SaciError> {
+        Ok(ServiceBuilder::empty()
+            .connector(HealableConnector(Arc::clone(builds)))
+            .connector(FlakyConnector {
+                failures: 0,
+                calls: Arc::new(AtomicUsize::new(0)),
                 write_failures: 0,
                 write_calls: Arc::new(AtomicUsize::new(0)),
             })
-            .build_all(config)?
+            .build(config)?
             .remove(0))
     }
 
@@ -2217,8 +2630,8 @@ workflow "w" {
         let err = build_heal_service(&config, &builds).expect_err("must refuse");
         let text = err.to_string();
         assert!(
-            text.contains("heal is not available for type 'FlakySink'"),
-            "the refusal names the node and its type: {text}"
+            text.contains("heal is not available for connector 'flaky'"),
+            "the refusal names the node and its connector: {text}"
         );
         assert!(
             text.contains(REBUILD_UNDECLARED),
@@ -2247,5 +2660,88 @@ workflow "w" {
             ..Default::default()
         };
         build_heal_service(&inherited, &builds).expect("an inherited policy skips the node");
+    }
+
+    // ── BuiltWorkflow::builder ────────────────────────────────────────────────
+
+    #[cfg(feature = "connector-channel")]
+    fn int_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]))
+    }
+
+    /// A hand-assembled source-to-sink workflow runs through
+    /// [`BuiltWorkflow::run`] and delivers every row.
+    #[cfg(feature = "connector-channel")]
+    #[tokio::test]
+    async fn a_hand_built_workflow_moves_every_row() -> SaciResult<()> {
+        use crate::connector::channel::{ChannelSink, ChannelSource};
+
+        let (source, tx) = ChannelSource::new(int_schema(), 8);
+        let (sink, mut rx) = ChannelSink::new(int_schema(), 8);
+        let batch = RecordBatch::try_new(
+            int_schema(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4]))],
+        )
+        .unwrap();
+        tx.send(batch).await.unwrap();
+        drop(tx);
+
+        let workflow = BuiltWorkflow::builder("w")
+            .source("a", "T", source)
+            .sink("b", "T", sink)
+            .link("a", "b")
+            .build()?;
+        assert_eq!(workflow.nodes[0].connector, "custom");
+        assert_eq!(workflow.nodes[0].downstream.len(), 1);
+
+        // The default run mode is continuous: it ends when the token fires,
+        // which the stopper does once the sink has delivered the batch.
+        let cancel = CancellationToken::new();
+        let stopper = {
+            let cancel = cancel.clone();
+            async move {
+                let delivered = rx.recv().await.expect("the sink wrote").num_rows();
+                cancel.cancel();
+                delivered
+            }
+        };
+        let (stats, delivered) = tokio::join!(workflow.run(cancel), stopper);
+        assert_eq!(stats?.rows_processed, 4);
+        assert_eq!(delivered, 4);
+        Ok(())
+    }
+
+    /// A link whose target was declared before its origin is refused, as is
+    /// every other shape the graph cannot carry.
+    #[cfg(feature = "connector-channel")]
+    #[test]
+    fn the_workflow_builder_refuses_a_graph_it_cannot_order() {
+        use crate::connector::channel::{ChannelSink, ChannelSource};
+
+        let nodes = || {
+            let (source, _tx) = ChannelSource::new(int_schema(), 1);
+            let (sink, _rx) = ChannelSink::new(int_schema(), 1);
+            BuiltWorkflow::builder("w")
+                .source("a", "T", source)
+                .sink("b", "T", sink)
+        };
+
+        let err = nodes().link("b", "a").build().unwrap_err();
+        assert_eq!(err.category(), "configuration");
+        assert!(
+            err.message()
+                .contains("declare nodes in flow order: 'a' comes before 'b'"),
+            "{err}"
+        );
+
+        let err = nodes().link("a", "missing").build().unwrap_err();
+        assert!(err.message().contains("undeclared node 'missing'"), "{err}");
+
+        let err = nodes().link("a", "a").build().unwrap_err();
+        assert!(err.message().contains("cannot link to itself"), "{err}");
+
+        let (extra, _tx) = crate::connector::channel::ChannelSource::new(int_schema(), 1);
+        let err = nodes().source("a", "T", extra).build().unwrap_err();
+        assert!(err.message().contains("duplicate node id 'a'"), "{err}");
     }
 }

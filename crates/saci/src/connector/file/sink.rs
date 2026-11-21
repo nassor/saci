@@ -1,4 +1,4 @@
-//! [`FileSink`]: a local file written through a transformer.
+//! [`FileSink`]: a local file written through a codec.
 //!
 //! # A batch lands once or not at all
 //!
@@ -22,7 +22,7 @@
 //!   writes its header or magic number at open; a writer that did would
 //!   repeat it, so the sink refuses instead;
 //! - when earlier batches are in the file and the format is
-//!   [`restartable`](crate::transformer::BatchWriter::restartable) (ndjson, csv
+//!   [`restartable`](crate::codec::BatchWriter::restartable) (ndjson, csv
 //!   without a header), a new writer carries on after them;
 //! - otherwise (csv with a header, avro, arrow-ipc, parquet) the sink cuts the
 //!   file back to the last whole batch and refuses every later call with an
@@ -51,11 +51,12 @@ use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 
+use crate::codec::{BatchWriter, Codec};
+use crate::connector::file::FileSinkConfig;
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::transformer::{BatchWriter, Transformer};
+use crate::io::Sink;
 
-/// Local-file [`Sink`]. The transformer encodes; this type owns the file
+/// Local-file [`Sink`]. The codec encodes; this type owns the file
 /// handle.
 ///
 /// The writer is held in an `Option` because
@@ -83,7 +84,7 @@ pub struct FileSink {
     /// `written` when the current writer opened: what it wrote before its
     /// first batch is its preamble.
     writer_base: u64,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
     path: PathBuf,
     /// Whether any batch has fully landed since the sink opened.
@@ -121,7 +122,7 @@ struct Plan {
     reopen: bool,
 }
 
-/// The handle given to a transformer: counts the bytes that reach the file.
+/// The handle given to a codec: counts the bytes that reach the file.
 struct Counting {
     file: std::fs::File,
     written: Arc<AtomicU64>,
@@ -140,63 +141,56 @@ impl Write for Counting {
 }
 
 impl FileSink {
-    /// Open `path` for appending and hand the handle to `transformer`.
+    /// Open `config.path` and hand the handle to `codec`.
     ///
-    /// The file is created when it is missing, and no existing byte is
-    /// removed: every batch lands after what is already there. A container
-    /// format with a footer, `parquet` and `avro`, cannot be appended to a
-    /// non-empty file and stay readable, so those want
-    /// [`FileSink::create_truncating`] or a path of their own.
+    /// With `config.truncate` unset the file is opened for appending: it is
+    /// created when it is missing, and no existing byte is removed, so every
+    /// batch lands after what is already there. A container format with a
+    /// footer, `parquet` and `avro`, cannot be appended to a non-empty file
+    /// and stay readable, so those want `truncate` or a path of their own.
     ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Generic`] when the file cannot be opened, or the
-    /// transformer's own error when it cannot write this handle.
-    pub fn create(
-        path: &Path,
-        transformer: Arc<dyn Transformer>,
-        schema: Arc<Schema>,
-    ) -> Result<Self, SaciError> {
-        Self::open_with(
-            path,
-            std::fs::OpenOptions::new().create(true).write(true),
-            |path, e| SaciError::generic(format!("FileSink: cannot open {path:?} for append: {e}")),
-            transformer,
-            schema,
-        )
-    }
-
-    /// Replace `path`: create it when missing, empty it when it exists, then
-    /// hand the handle to `transformer`.
-    ///
-    /// This is the opt-in mode behind the sink factory's `truncate` key. It is
-    /// what a run whose output must hold this run's rows alone wants, and what
-    /// a footer format writing to a path that may already exist needs.
+    /// With `config.truncate` set the file is replaced: created when missing,
+    /// emptied when it exists. That is what a run whose output must hold this
+    /// run's rows alone wants, and what a footer format writing to a path that
+    /// may already exist needs.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Generic`] when the file cannot be created, or the
-    /// transformer's own error when it cannot write this handle.
-    pub fn create_truncating(
-        path: &Path,
-        transformer: Arc<dyn Transformer>,
+    /// Returns [`SaciError::Generic`] when the file cannot be opened or
+    /// created, or the codec's own error when it cannot write this handle.
+    pub fn new(
+        config: FileSinkConfig,
         schema: Arc<Schema>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
-        Self::open_with(
-            path,
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true),
-            |path, e| SaciError::generic(format!("FileSink: cannot create {path:?}: {e}")),
-            transformer,
-            schema,
-        )
+        let FileSinkConfig { path, truncate } = config;
+        if truncate {
+            Self::open_with(
+                &path,
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true),
+                |path, e| SaciError::generic(format!("FileSink: cannot create {path:?}: {e}")),
+                codec,
+                schema,
+            )
+        } else {
+            Self::open_with(
+                &path,
+                std::fs::OpenOptions::new().create(true).write(true),
+                |path, e| {
+                    SaciError::generic(format!("FileSink: cannot open {path:?} for append: {e}"))
+                },
+                codec,
+                schema,
+            )
+        }
     }
 
     /// Open `path` twice and wire the handles up: `options` (which create, and
     /// maybe truncate, and never append) for the sink's own handle, then an
-    /// append-mode handle for the transformer's writer.
+    /// append-mode handle for the codec's writer.
     ///
     /// `on_open_error` names the open mode, so a failed open says whether it
     /// was the appending or the replacing one.
@@ -204,7 +198,7 @@ impl FileSink {
         path: &Path,
         options: &std::fs::OpenOptions,
         on_open_error: fn(&Path, &std::io::Error) -> SaciError,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
         schema: Arc<Schema>,
     ) -> Result<Self, SaciError> {
         let file = options.open(path).map_err(|e| on_open_error(path, &e))?;
@@ -218,7 +212,7 @@ impl FileSink {
             file: Some(file),
             written: Arc::new(AtomicU64::new(0)),
             writer_base: 0,
-            transformer,
+            codec,
             schema,
             path: path.to_path_buf(),
             committed: false,
@@ -247,7 +241,7 @@ impl FileSink {
                 ))
             })?;
         self.writer_base = self.written.load(Ordering::SeqCst);
-        self.transformer.open_writer(
+        self.codec.open_writer(
             Box::new(Counting {
                 file,
                 written: Arc::clone(&self.written),
@@ -346,7 +340,7 @@ impl FileSink {
                  in the middle of a file, so it cannot be retried and this sink takes no more \
                  batches",
                 self.path,
-                self.transformer.format()
+                self.codec.format()
             ));
         }
         self.pending = None;
@@ -457,26 +451,26 @@ impl Sink for FileSink {
 
 #[cfg(all(
     test,
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-ndjson",
+    feature = "codec-parquet"
 ))]
 mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use crate::transformer::BatchWriter;
-    use crate::transformer::csv::CsvTransformer;
-    use crate::transformer::ndjson::NdjsonTransformer;
-    use crate::transformer::parquet::ParquetTransformer;
+    use crate::codec::BatchWriter;
+    use crate::codec::csv::CsvCodec;
+    use crate::codec::ndjson::NdjsonCodec;
+    use crate::codec::parquet::ParquetCodec;
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use tempfile::TempDir;
 
     use super::*;
-    use crate::connector::file::FileSource;
-    use crate::io::source::Source;
+    use crate::connector::file::{FileSource, FileSourceConfig};
+    use crate::io::Source;
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
@@ -502,12 +496,12 @@ mod tests {
         }
     }
 
-    /// Wraps a real transformer. The writer's `n`th `write_batch` call (counted
-    /// across every writer this transformer opened) writes its batch for real,
+    /// Wraps a real codec. The writer's `n`th `write_batch` call (counted
+    /// across every writer this codec opened) writes its batch for real,
     /// then appends a half record and fails, the way a disk error part way
     /// through a batch looks from outside.
     struct Faulty {
-        inner: Arc<dyn Transformer>,
+        inner: Arc<dyn Codec>,
         fail_calls: Vec<usize>,
         calls: Arc<AtomicUsize>,
         /// A file another process appends `INTRUDER` to during each failing
@@ -518,7 +512,7 @@ mod tests {
     const INTRUDER: &[u8] = b"{\"id\":100}\n";
 
     impl Faulty {
-        fn new(inner: Arc<dyn Transformer>, fail_calls: &[usize]) -> Arc<Self> {
+        fn new(inner: Arc<dyn Codec>, fail_calls: &[usize]) -> Arc<Self> {
             Arc::new(Self {
                 inner,
                 fail_calls: fail_calls.to_vec(),
@@ -527,11 +521,7 @@ mod tests {
             })
         }
 
-        fn with_intruder(
-            inner: Arc<dyn Transformer>,
-            fail_calls: &[usize],
-            path: &Path,
-        ) -> Arc<Self> {
+        fn with_intruder(inner: Arc<dyn Codec>, fail_calls: &[usize], path: &Path) -> Arc<Self> {
             Arc::new(Self {
                 inner,
                 fail_calls: fail_calls.to_vec(),
@@ -541,7 +531,7 @@ mod tests {
         }
     }
 
-    impl Transformer for Faulty {
+    impl Codec for Faulty {
         fn format(&self) -> &'static str {
             self.inner.format()
         }
@@ -599,12 +589,12 @@ mod tests {
         }
     }
 
-    fn ndjson() -> Arc<dyn Transformer> {
-        Arc::new(NdjsonTransformer::new(100))
+    fn ndjson() -> Arc<dyn Codec> {
+        Arc::new(NdjsonCodec::new().infer_max(100))
     }
 
-    fn csv(has_headers: bool) -> Arc<dyn Transformer> {
-        Arc::new(CsvTransformer::new(has_headers))
+    fn csv(has_headers: bool) -> Arc<dyn Codec> {
+        Arc::new(CsvCodec::new().has_headers(has_headers))
     }
 
     /// Append to `path` the way another process would: its own handle.
@@ -625,8 +615,12 @@ mod tests {
     async fn a_failed_write_leaves_no_fragment_and_the_retry_lands_once() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
-        let mut sink =
-            FileSink::create(&path, Faulty::new(ndjson(), &[1]), schema()).expect("sink");
+        let mut sink = FileSink::new(
+            FileSinkConfig::new(&path),
+            schema(),
+            Faulty::new(ndjson(), &[1]),
+        )
+        .expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         sink.write_batch(&batch(&[2]))
@@ -647,7 +641,7 @@ mod tests {
     async fn a_failed_sync_takes_the_batch_back_out_before_the_retry() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
-        let mut sink = FileSink::create(&path, ndjson(), schema()).expect("sink");
+        let mut sink = FileSink::new(FileSinkConfig::new(&path), schema(), ndjson()).expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         sink.fail_syncs = 1;
@@ -669,8 +663,12 @@ mod tests {
     async fn a_failed_first_csv_batch_does_not_lose_or_repeat_the_header() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.csv");
-        let mut sink =
-            FileSink::create(&path, Faulty::new(csv(true), &[0]), schema()).expect("sink");
+        let mut sink = FileSink::new(
+            FileSinkConfig::new(&path),
+            schema(),
+            Faulty::new(csv(true), &[0]),
+        )
+        .expect("sink");
 
         sink.write_batch(&batch(&[1, 2]))
             .await
@@ -686,8 +684,12 @@ mod tests {
     async fn a_later_batch_of_a_headed_csv_cannot_be_retried_and_says_so() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.csv");
-        let mut sink =
-            FileSink::create(&path, Faulty::new(csv(true), &[1]), schema()).expect("sink");
+        let mut sink = FileSink::new(
+            FileSinkConfig::new(&path),
+            schema(),
+            Faulty::new(csv(true), &[1]),
+        )
+        .expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         sink.write_batch(&batch(&[2])).await.expect_err("second");
@@ -711,8 +713,16 @@ mod tests {
     async fn a_failed_first_parquet_batch_is_retried_into_a_readable_file() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.parquet");
-        let transformer = Faulty::new(Arc::new(ParquetTransformer::new()), &[0]);
-        let mut sink = FileSink::create_truncating(&path, transformer, schema()).expect("sink");
+        let codec = Faulty::new(Arc::new(ParquetCodec::new()), &[0]);
+        let mut sink = FileSink::new(
+            FileSinkConfig {
+                truncate: true,
+                ..FileSinkConfig::new(&path)
+            },
+            schema(),
+            codec,
+        )
+        .expect("sink");
 
         sink.write_batch(&batch(&[1, 2]))
             .await
@@ -721,9 +731,13 @@ mod tests {
         sink.write_batch(&batch(&[3])).await.expect("second");
         sink.finish().await.expect("finish");
 
-        let mut source = FileSource::open_async(&path, Arc::new(ParquetTransformer::new()), None)
-            .await
-            .expect("parquet reads back");
+        let mut source = FileSource::new_async(
+            FileSourceConfig::new(&path),
+            None,
+            Arc::new(ParquetCodec::new()),
+        )
+        .await
+        .expect("parquet reads back");
         let mut ids = Vec::new();
         while let Some(rows) = source.next_batch().await.expect("read") {
             let column = rows
@@ -741,8 +755,12 @@ mod tests {
     async fn a_failed_cut_back_is_retried_by_the_next_call() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
-        let mut sink =
-            FileSink::create(&path, Faulty::new(ndjson(), &[1]), schema()).expect("sink");
+        let mut sink = FileSink::new(
+            FileSinkConfig::new(&path),
+            schema(),
+            Faulty::new(ndjson(), &[1]),
+        )
+        .expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         sink.fail_cuts = 1;
@@ -767,7 +785,7 @@ mod tests {
     async fn a_dropped_call_is_undone_by_the_next_one() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
-        let mut sink = FileSink::create(&path, ndjson(), schema()).expect("sink");
+        let mut sink = FileSink::new(FileSinkConfig::new(&path), schema(), ndjson()).expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         // A write_batch future dropped after its bytes landed: the call began
@@ -787,7 +805,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
         std::fs::write(&path, "{\"id\":0}\n").expect("seed file");
-        let mut sink = FileSink::create(&path, ndjson(), schema()).expect("sink");
+        let mut sink = FileSink::new(FileSinkConfig::new(&path), schema(), ndjson()).expect("sink");
 
         sink.begin().expect("begin");
         sink.encode(&batch(&[1])).expect("encode");
@@ -801,7 +819,7 @@ mod tests {
     async fn another_process_appending_between_batches_lands_intact() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
-        let mut sink = FileSink::create(&path, ndjson(), schema()).expect("sink");
+        let mut sink = FileSink::new(FileSinkConfig::new(&path), schema(), ndjson()).expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         append_externally(&path, INTRUDER);
@@ -819,8 +837,12 @@ mod tests {
     async fn a_cut_back_keeps_bytes_another_process_appended_before_the_batch() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
-        let mut sink =
-            FileSink::create(&path, Faulty::new(ndjson(), &[1]), schema()).expect("sink");
+        let mut sink = FileSink::new(
+            FileSinkConfig::new(&path),
+            schema(),
+            Faulty::new(ndjson(), &[1]),
+        )
+        .expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         append_externally(&path, INTRUDER);
@@ -840,8 +862,8 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.ndjson");
         std::fs::write(&path, "").expect("create");
-        let transformer = Faulty::with_intruder(ndjson(), &[1], &path);
-        let mut sink = FileSink::create(&path, transformer, schema()).expect("sink");
+        let codec = Faulty::with_intruder(ndjson(), &[1], &path);
+        let mut sink = FileSink::new(FileSinkConfig::new(&path), schema(), codec).expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect("first");
         sink.write_batch(&batch(&[2]))
@@ -868,14 +890,22 @@ mod tests {
     #[tokio::test]
     async fn no_format_writes_to_the_file_before_its_first_batch() {
         let dir = TempDir::new().expect("temp dir");
-        let formats: [(&str, Arc<dyn Transformer>); 3] = [
+        let formats: [(&str, Arc<dyn Codec>); 3] = [
             ("ndjson", ndjson()),
             ("csv", csv(true)),
-            ("parquet", Arc::new(ParquetTransformer::new())),
+            ("parquet", Arc::new(ParquetCodec::new())),
         ];
-        for (name, transformer) in formats {
+        for (name, codec) in formats {
             let path = dir.path().join(format!("out.{name}"));
-            let sink = FileSink::create_truncating(&path, transformer, schema()).expect("sink");
+            let sink = FileSink::new(
+                FileSinkConfig {
+                    truncate: true,
+                    ..FileSinkConfig::new(&path)
+                },
+                schema(),
+                codec,
+            )
+            .expect("sink");
             assert_eq!(
                 sink.written.load(Ordering::SeqCst),
                 sink.writer_base,
@@ -894,8 +924,12 @@ mod tests {
     async fn bytes_appended_between_open_and_the_first_batch_survive_its_retry() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.csv");
-        let mut sink =
-            FileSink::create(&path, Faulty::new(csv(true), &[0]), schema()).expect("sink");
+        let mut sink = FileSink::new(
+            FileSinkConfig::new(&path),
+            schema(),
+            Faulty::new(csv(true), &[0]),
+        )
+        .expect("sink");
 
         append_externally(&path, b"x\n");
         sink.write_batch(&batch(&[1]))
@@ -918,7 +952,7 @@ mod tests {
         /// that does not hold it back would.
         struct EagerPreamble;
 
-        impl Transformer for EagerPreamble {
+        impl Codec for EagerPreamble {
             fn format(&self) -> &'static str {
                 "eager"
             }
@@ -950,7 +984,12 @@ mod tests {
 
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("out.txt");
-        let mut sink = FileSink::create(&path, Arc::new(EagerPreamble), schema()).expect("sink");
+        let mut sink = FileSink::new(
+            FileSinkConfig::new(&path),
+            schema(),
+            Arc::new(EagerPreamble),
+        )
+        .expect("sink");
 
         sink.write_batch(&batch(&[1])).await.expect_err("fails");
         assert_eq!(text(&path), "MAGIC\n", "only the failed batch was cut");

@@ -84,8 +84,8 @@ async fn test_distributed_runner_processes_single_batch() {
     let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ran_clone = Arc::clone(&ran);
 
-    let mut pipeline = Pipeline::new("distributed-etl");
-    pipeline.add_system(system_fn(
+    let pipeline = Pipeline::new("distributed-etl");
+    let pipeline = pipeline.system(system_fn(
         SystemMeta::new("mark_ran"),
         move |_data: &mut Dataset| {
             ran_clone.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -125,8 +125,8 @@ async fn test_distributed_runner_processes_multiple_batches() {
             .unwrap();
     }
 
-    let mut pipeline = Pipeline::new("distributed-multi");
-    pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data: &mut Dataset| {
+    let pipeline = Pipeline::new("distributed-multi");
+    let pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data: &mut Dataset| {
         Ok(())
     }));
 
@@ -147,8 +147,8 @@ async fn test_distributed_runner_processes_multiple_batches() {
 async fn test_distributed_runner_no_batches_returns_zero() {
     let store = MemoryStore::new();
 
-    let mut pipeline = Pipeline::new("distributed-empty");
-    pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data: &mut Dataset| {
+    let pipeline = Pipeline::new("distributed-empty");
+    let pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data: &mut Dataset| {
         Ok(())
     }));
 

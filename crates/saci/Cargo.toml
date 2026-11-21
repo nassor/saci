@@ -32,18 +32,18 @@ default = ["engine"]
 server = [
     "mimalloc", "service", "wasm-host", "windows", "parquet-checkpoint",
     "connector-channel", "connector-file", "connector-http", "connector-tcp",
-    "connector-udp", "connector-saci", "connector-redb",
-    "transformer-ndjson", "transformer-csv", "transformer-parquet",
-    "transformer-avro", "transformer-arrow-ipc",
+    "connector-udp", "connector-peer", "connector-redb",
+    "codec-ndjson", "codec-csv", "codec-parquet",
+    "codec-avro", "codec-arrow-ipc",
 ]
 # The connectors that need nothing installed or already running.
 connectors = [
     "connector-channel", "connector-file", "connector-redb", "connector-http",
-    "connector-tcp", "connector-udp", "connector-saci",
+    "connector-tcp", "connector-udp", "connector-peer",
 ]
-transformers = [
-    "transformer-arrow-ipc", "transformer-avro", "transformer-csv",
-    "transformer-ndjson", "transformer-parquet",
+codecs = [
+    "codec-arrow-ipc", "codec-avro", "codec-csv",
+    "codec-ndjson", "codec-parquet",
 ]
 # Every capability the crate carries. `connector-kafka` is in here, so this
 # build needs cmake and a C toolchain on PATH for its vendored librdkafka.
@@ -55,23 +55,23 @@ transformers = [
 # this list and fails if `conformance` is.
 all = [
     "engine", "windows", "processor", "plugin", "server", "service-cluster",
-    "plugin-host", "connectors", "transformers",
+    "plugin-host", "connectors", "codecs",
     "connector-clickhouse", "connector-kafka", "connector-mariadb",
-    "connector-nats", "connector-opentelemetry", "connector-postgresql",
+    "connector-nats", "connector-otlp", "connector-postgresql",
     "connector-s3", "connector-turso",
 ]
 
 # Engine
 
-# tokio and rayon stage parallelism. Cannot target wasm32-wasip3.
-runtime = ["dep:tokio", "dep:rayon", "dep:num_cpus"]
-# The Source/Sink traits and the schema cast helpers.
-io = ["runtime"]
-# The columnar engine: Dataset, Pipeline, System, Scheduler, Component, and the
-# Source/Sink traits.
-engine = ["io"]
+# The columnar engine: Dataset, Pipeline, System, Scheduler, Component, the
+# Source/Sink traits and the schema cast helpers, with tokio and rayon stage
+# parallelism. Cannot target wasm32-wasip3.
+engine = ["dep:tokio", "dep:rayon", "dep:num_cpus", "dep:arrow-cast", "derive"]
+# `#[derive(Component)]`, `#[transform]` and `#[fold]`. Needs no tokio, so a
+# wasm32-wasip3 processor carries it.
+derive = ["dep:saci-macros"]
 # Beam-style windowed aggregation.
-windows = ["dep:arrow-arith", "dep:fnv"]
+windows = ["dep:arrow-arith", "dep:arrow-cast", "dep:fnv"]
 tracing = ["dep:tracing"]
 # OpenTelemetry instruments: the service's own series and the connectors'.
 metrics = ["dep:opentelemetry"]
@@ -82,87 +82,93 @@ trace-context = ["tracing", "dep:opentelemetry", "dep:tracing-opentelemetry"]
 
 # A WebAssembly Component Model processor: Component Model Async execution on
 # wasm32-wasip3, built with `--no-default-features --features processor`.
-processor = ["dep:saci-macros"]
+processor = ["derive"]
 # A native plugin: a cdylib the host `dlopen`s.
-plugin = ["runtime", "dep:pollster", "dep:serde_json", "dep:base64"]
+plugin = ["engine", "dep:pollster", "dep:serde_json", "dep:base64"]
 
 # Contracts, pulled in by the features below; not meant to be named directly.
-config = ["dep:kdl", "dep:serde_json"]
-transformer-contract = ["runtime", "config"]
-connector-contract = ["io", "transformer-contract"]
+# `serde_json/preserve_order` keeps a table in declaration order, so a config
+# written back out as KDL does not depend on which other crate in the build
+# enables it.
+config = [
+    "dep:kdl", "dep:serde_json", "dep:serde_path_to_error",
+    "serde_json/preserve_order",
+]
+codec-api = ["engine", "config"]
+connector-api = ["engine", "codec-api"]
 
 # Byte formats
-transformer-arrow-ipc = ["transformer-contract", "io"]
-transformer-avro = ["transformer-contract", "io", "dep:arrow-avro"]
-transformer-csv = ["transformer-contract", "dep:arrow-csv"]
-transformer-ndjson = ["transformer-contract", "dep:arrow-json"]
-transformer-parquet = ["transformer-contract", "io", "dep:parquet", "dep:bytes"]
+codec-arrow-ipc = ["codec-api"]
+codec-avro = ["codec-api", "dep:arrow-avro"]
+codec-csv = ["codec-api", "dep:arrow-csv"]
+codec-ndjson = ["codec-api", "dep:arrow-json"]
+codec-parquet = ["codec-api", "dep:parquet", "dep:bytes"]
 
-# Connectors. Kafka, NATS and UDP imply `transformer-ndjson` and TCP implies
-# `transformer-arrow-ipc` so the feature alone is runnable; every other
+# Connectors. Kafka, NATS and UDP imply `codec-ndjson` and TCP implies
+# `codec-arrow-ipc` so the feature alone is runnable; every other
 # connector's node names its `transformer` and the user picks the formats.
-connector-channel = ["connector-contract"]
-connector-file = ["connector-contract"]
+connector-channel = ["connector-api"]
+connector-file = ["connector-api"]
 connector-http = [
-    "connector-contract", "dep:bytes", "dep:futures-util", "tokio/fs", "dep:tempfile",
+    "connector-api", "dep:bytes", "dep:futures-util", "tokio/fs", "dep:tempfile",
     "dep:reqwest", "reqwest/http2", "reqwest/gzip", "reqwest/brotli", "reqwest/zstd", "reqwest/deflate",
     "dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pki-types",
     "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:tokio-rustls",
     "dep:h3", "dep:h3-quinn", "dep:quinn", "dep:brotli", "dep:flate2", "dep:zstd", "dep:subtle",
 ]
-connector-kafka = ["connector-contract", "dep:futures-util", "dep:rdkafka", "transformer-ndjson"]
-connector-nats = ["connector-contract", "dep:futures-util", "tokio/fs", "dep:bytes", "dep:async-nats", "transformer-ndjson"]
-connector-opentelemetry = [
-    "connector-contract", "dep:base64", "dep:bytes", "dep:serde_json", "tokio/net",
+connector-kafka = ["connector-api", "dep:futures-util", "dep:rdkafka", "codec-ndjson"]
+connector-nats = ["connector-api", "dep:futures-util", "tokio/fs", "dep:bytes", "dep:async-nats", "codec-ndjson"]
+connector-otlp = [
+    "connector-api", "dep:base64", "dep:bytes", "dep:serde_json", "tokio/net",
     "dep:opentelemetry-proto", "dep:prost",
     "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util",
     "dep:reqwest", "reqwest/http2", "reqwest/gzip", "reqwest/brotli", "reqwest/zstd", "reqwest/deflate",
     "dep:rustls", "dep:subtle",
 ]
 connector-postgresql = [
-    "connector-contract", "tokio/net", "tokio/io-util", "dep:futures-util",
+    "connector-api", "tokio/net", "tokio/io-util", "dep:futures-util",
     "dep:tokio-postgres", "dep:postgres-protocol", "dep:bytes",
     "dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types",
 ]
 # MariaDB and MySQL servers share one connector.
 connector-mariadb = [
-    "connector-contract", "tokio/net", "tokio/io-util", "dep:futures-util", "dep:serde_json",
+    "connector-api", "tokio/net", "tokio/io-util", "dep:futures-util", "dep:serde_json",
     "dep:mysql_async", "dep:mysql_common",
     "dep:rustls", "mysql_async/rustls-tls", "mysql_async/ring", "mysql_async/tls12",
 ]
 # ClickHouse speaks native ArrowStream over HTTP.
 connector-clickhouse = [
-    "connector-contract", "dep:clickhouse", "clickhouse/rustls-tls-ring",
+    "connector-api", "dep:clickhouse", "clickhouse/rustls-tls-ring",
     "clickhouse/rustls-tls-webpki-roots", "dep:bytes", "tokio/net", "tokio/rt", "dep:url",
 ]
-connector-turso = ["connector-contract", "dep:serde_json", "dep:base64", "dep:turso"]
+connector-turso = ["connector-api", "dep:serde_json", "dep:base64", "dep:turso"]
 connector-s3 = [
-    "connector-contract", "dep:futures-util", "tokio/fs", "tokio/io-util",
+    "connector-api", "dep:futures-util", "tokio/fs", "tokio/io-util",
     "dep:tempfile", "dep:object_store", "dep:chrono",
 ]
-connector-tcp = ["connector-contract", "tokio/net", "tokio/io-util", "transformer-arrow-ipc"]
-connector-udp = ["connector-contract", "tokio/net", "transformer-ndjson", "dep:futures"]
-connector-redb = ["connector-contract", "dep:tempfile", "dep:redb"]
-connector-saci = ["connector-contract", "tokio/net", "tokio/io-util"]
+connector-tcp = ["connector-api", "tokio/net", "tokio/io-util", "codec-arrow-ipc"]
+connector-udp = ["connector-api", "tokio/net", "codec-ndjson", "dep:futures"]
+connector-redb = ["connector-api", "dep:redb"]
+connector-peer = ["connector-api", "tokio/net", "tokio/io-util"]
 
 # Host
 
 # In-process telemetry: time-bounded ring buffers fed by a `tracing` layer and
 # an in-memory OpenTelemetry metric exporter, read back through the control
 # plane's JSON API.
-inspector = ["runtime", "tracing", "metrics", "dep:tracing-subscriber", "dep:opentelemetry_sdk"]
+inspector = ["engine", "tracing", "metrics", "dep:tracing-subscriber", "dep:opentelemetry_sdk"]
 distributed = [
-    "runtime", "dep:redb", "dep:uuid", "dep:serde_json", "dep:serde_bytes", "dep:hex",
+    "engine", "dep:redb", "dep:uuid", "dep:serde_json", "dep:serde_bytes", "dep:hex",
     "tokio/net", "tokio/io-util", "dep:tokio-util", "dep:fnv",
 ]
 distributed-raft = ["distributed", "dep:openraft", "dep:futures-util", "dep:postcard"]
 # Archival Parquet checkpoint store.
 parquet-checkpoint = ["distributed", "dep:parquet"]
 # The WebAssembly processor host.
-wasm-host = ["runtime", "dep:wasmtime", "dep:wasmtime-wasi", "dep:sha3", "dep:pollster"]
+wasm-host = ["engine", "dep:wasmtime", "dep:wasmtime-wasi", "dep:sha3", "dep:pollster"]
 # The native plugin host: dlopen a shared library exporting the plugin C ABI.
 # `sha3` is the optional content digest for the library file.
-plugin-host = ["runtime", "dep:libloading", "dep:base64", "dep:serde_json", "dep:sha3"]
+plugin-host = ["engine", "dep:libloading", "dep:base64", "dep:serde_json", "dep:sha3"]
 # Generator for the cross-language conformance corpus in
 # packages/arrow-ipc-conformance/. `arrow-ipc/lz4` is enabled only here, so a
 # normal build still refuses a compressed record batch: the corpus needs to
@@ -171,7 +177,7 @@ conformance = ["arrow-ipc/lz4", "dep:serde_json"]
 # KDL configuration, the factory Registry, the runners, the axum control plane
 # and the `saci-service` binary.
 service = [
-    "connector-contract", "distributed", "parquet-checkpoint", "tracing", "inspector",
+    "connector-api", "distributed", "parquet-checkpoint", "tracing", "inspector",
     "metrics", "trace-context",
     "dep:axum", "dep:tower", "dep:tower-http", "dep:tokio-util", "dep:tracing-subscriber",
     "dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:opentelemetry-otlp",
@@ -186,7 +192,7 @@ arrow-array   = { workspace = true }
 arrow-schema  = { workspace = true }
 arrow-buffer  = { workspace = true }
 arrow-select  = { workspace = true }
-arrow-cast    = { workspace = true }
+arrow-cast    = { workspace = true, optional = true }
 arrow-arith   = { workspace = true, optional = true }
 arrow-ord     = { workspace = true }
 arrow-ipc     = { workspace = true }
@@ -206,6 +212,7 @@ pollster      = { version = "1.0.1", optional = true }
 saci-macros   = { workspace = true, optional = true }
 kdl           = { workspace = true, optional = true }
 serde_json    = { workspace = true, optional = true }
+serde_path_to_error = { version = "0.1.20", optional = true }
 base64        = { workspace = true, optional = true }
 bytes         = { workspace = true, optional = true }
 futures-util  = { workspace = true, optional = true }
@@ -344,7 +351,12 @@ harness = false
 [[bench]]
 name = "batch_vs_stream"
 harness = false
-required-features = ["io"]
+required-features = ["engine"]
+
+[[bench]]
+name = "windows"
+harness = false
+required-features = ["windows"]
 
 [[bench]]
 name = "parallelism"
@@ -477,13 +489,13 @@ path = "../../examples/integrity/integrity_check.rs"
 # reach it through `rdkafka`, `async-nats` and `tokio-postgres`, which are
 # unconditional dev-dependencies, so no connector feature is named.
 required-features = [
-    "service", "transformer-arrow-ipc", "transformer-csv", "transformer-ndjson",
-    "transformer-parquet",
+    "service", "codec-arrow-ipc", "codec-csv", "codec-ndjson",
+    "codec-parquet",
 ]
 
 [[example]]
 name = "scheduler_parquet_etl"
-required-features = ["connector-file", "transformer-csv", "transformer-ndjson", "transformer-parquet"]
+required-features = ["connector-file", "codec-csv", "codec-ndjson", "codec-parquet"]
 
 [[example]]
 name = "mariadb_roundtrip"

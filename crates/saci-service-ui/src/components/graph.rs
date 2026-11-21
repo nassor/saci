@@ -35,16 +35,16 @@
 //! Every node records its own metric series under its own declared id: a source
 //! under [`SOURCE_ATTR`], a processor under [`PROCESSOR_ATTR`], a sink under
 //! [`SINK_ATTR`]. Each box reads the copy carrying its own id, so its
-//! throughput, latency, sparkline and retry badge describe that one node. The
-//! unattributed copy of the same series is the process-wide sum over every
-//! node — what a `/metrics` consumer reads — so no box shows it.
+//! throughput, latency, sparkline and retry badge describe that one node.
+//! Every sample is recorded once, under its own id, and a process-wide figure
+//! is the sum over the attribute, which no box shows.
 //! `saci_stage_duration_seconds` is the exception: the host's span metrics layer
 //! records it with no attributes at all, so a native processor's box reads the
 //! process-wide value.
 //!
-//! A sink box reads its own `saci_sink_rows_written_total`, the rows the
+//! A sink box reads its own `saci_sink_rows_total`, the rows the
 //! runner handed to that sink, and reports records per second. It never reads
-//! `saci_sink_batches_written_total` as its headline number: a batch is
+//! `saci_sink_batches_total` as its headline number: a batch is
 //! whatever row count the upstream stage handed over, so a batch rate says
 //! nothing about records moved. That counter appears in the detail sheet as a
 //! total, beside the same edge rate the server publishes.
@@ -417,14 +417,14 @@ pub(super) fn attributed(
 
 /// The sink's own throughput: rows written per second.
 ///
-/// `saci_sink_rows_written_total` is recorded per sink, so this needs no
+/// `saci_sink_rows_total` is recorded per sink, so this needs no
 /// upstream series and no branch resolution: the number is the sink's own.
 /// The host records it on the same write as
-/// `saci_sink_batches_written_total`, so there is no state in which a sink
+/// `saci_sink_batches_total`, so there is no state in which a sink
 /// has batches but no rows, and a batch is whatever row count the upstream
 /// handed over anyway. An absent series means the sink has written nothing.
 fn sink_reading(snapshot: &Option<Snapshot>, node_id: &str) -> Option<Reading> {
-    attributed(snapshot, "saci_sink_rows_written_total", SINK_ATTR, node_id)
+    attributed(snapshot, "saci_sink_rows_total", SINK_ATTR, node_id)
 }
 
 /// One rule for every rate and count the dashboard shows: `0` for zero, `<1`
@@ -640,7 +640,7 @@ pub fn PipelinesView(
         topology.get().map(|topo| {
             if topo.workflows.is_empty() {
                 // A default `Topology` has no workflows, which is what
-                // `/api/topology` returns before `build_all` publishes one.
+                // `/api/topology` returns before `build` publishes one.
                 return view! {
                     <div class="rounded-xl border border-dashed border-border px-4 py-8">
                         <p class="text-sm text-muted-foreground">
@@ -756,14 +756,13 @@ fn workflow_view(
     // Derived signals rather than plain closures: `Signal<T>` is `Copy`, so
     // the badges' own attribute closures can each read them without moving
     // the workflow id into every one. The attributed form is this workflow's
-    // own counter; the unattributed one would be the sum across every
-    // workflow the process runs.
+    // own counter, recorded once per workflow under its own id.
     let runs = {
         let id = workflow.id.clone();
         Signal::derive(move || {
             attributed(
                 &snapshot.get(),
-                "saci_workflow_runs_total",
+                "saci_workflow_passes_total",
                 WORKFLOW_ATTR,
                 &id,
             )
@@ -775,7 +774,7 @@ fn workflow_view(
         Signal::derive(move || {
             attributed(
                 &snapshot.get(),
-                "saci_workflow_errors_total",
+                "saci_workflow_pass_errors_total",
                 WORKFLOW_ATTR,
                 &id,
             )
@@ -809,7 +808,7 @@ fn workflow_view(
             }
         })
     };
-    // Runner starts, which `saci_workflow_runs_total` does not count: that
+    // Runner starts, which `saci_workflow_passes_total` does not count: that
     // series counts passes, and a restart leaves it where it was.
     let starts = move || {
         status.get().map(|entry| {
@@ -1168,7 +1167,7 @@ fn bridges_view(bridges: Vec<BridgeEdge>, snapshot: Signal<Option<Snapshot>>) ->
             <header class="border-b border-border px-4 py-3">
                 <h2 class="text-sm font-semibold tracking-tight">"channel bridges"</h2>
                 <p class="mt-0.5 text-xs text-muted-foreground">
-                    "A ChannelSink and a ChannelSource meeting on one name. No config declares \
+                    "A channel sink and a channel source meeting on one name. No config declares \
                      the pair, so it is listed rather than drawn."
                 </p>
             </header>
@@ -1345,7 +1344,7 @@ fn node_view(
         move || {
             let snap = snapshot.get();
             match kind.as_str() {
-                "source" => attributed(&snap, "saci_rows_processed_total", SOURCE_ATTR, &node_id)
+                "source" => attributed(&snap, "saci_source_rows_total", SOURCE_ATTR, &node_id)
                     .map(|reading| ("records/s", format_count(reading.rate_per_sec))),
                 "sink" => sink_reading(&snap, &node_id)
                     .map(|reading| ("records/s", format_count(reading.rate_per_sec))),
@@ -1396,7 +1395,7 @@ fn node_view(
         move || {
             let snap = snapshot.get();
             let reading = match kind.as_str() {
-                "source" => attributed(&snap, "saci_rows_processed_total", SOURCE_ATTR, &node_id),
+                "source" => attributed(&snap, "saci_source_rows_total", SOURCE_ATTR, &node_id),
                 "sink" => sink_reading(&snap, &node_id),
                 _ if per_batch_series => attributed(
                     &snap,
@@ -1405,12 +1404,11 @@ fn node_view(
                     &node_id,
                 ),
                 // A native runtime records none of the six `saci_processor_*`
-                // series, so its box traces its own workflow's iteration count
-                // rather than nothing at all. The unattributed form would sum
-                // every workflow the process runs.
+                // series, so its box traces its own workflow's pass count
+                // rather than nothing at all.
                 _ => attributed(
                     &snap,
-                    "saci_workflow_runs_total",
+                    "saci_workflow_passes_total",
                     WORKFLOW_ATTR,
                     &workflow_id,
                 ),
@@ -1645,9 +1643,9 @@ fn detail_view(
     }
 
     // Live numbers: this node's own throughput or latency, plus whatever its
-    // role adds. Only the values carrying this processor's id: the
-    // unattributed copy of `saci_processor_metric` sums every processor's guest
-    // metric of the same name, which belongs on no single sheet.
+    // role adds. Only the values carrying this processor's id: a guest metric
+    // is one `saci_processor_custom` series per processor and name, and each
+    // belongs on its own processor's sheet.
     let live: Signal<Vec<(String, String)>> = {
         let node_id = node_id.clone();
         let kind = node.kind.clone();
@@ -1657,7 +1655,7 @@ fn detail_view(
             match kind.as_str() {
                 "source" => {
                     if let Some(reading) =
-                        attributed(&snap, "saci_rows_processed_total", SOURCE_ATTR, &node_id)
+                        attributed(&snap, "saci_source_rows_total", SOURCE_ATTR, &node_id)
                     {
                         rows.push(("rows".to_string(), format_count(reading.value)));
                         rows.push((
@@ -1665,12 +1663,9 @@ fn detail_view(
                             format_rate(reading.rate_per_sec, "records"),
                         ));
                     }
-                    if let Some(reading) = attributed(
-                        &snap,
-                        "saci_source_batches_drained_total",
-                        SOURCE_ATTR,
-                        &node_id,
-                    ) {
+                    if let Some(reading) =
+                        attributed(&snap, "saci_source_batches_total", SOURCE_ATTR, &node_id)
+                    {
                         rows.push(("batches drained".to_string(), format_count(reading.value)));
                     }
                 }
@@ -1681,12 +1676,9 @@ fn detail_view(
                             format_rate(reading.rate_per_sec, "records"),
                         ));
                     }
-                    if let Some(reading) = attributed(
-                        &snap,
-                        "saci_sink_batches_written_total",
-                        SINK_ATTR,
-                        &node_id,
-                    ) {
+                    if let Some(reading) =
+                        attributed(&snap, "saci_sink_batches_total", SINK_ATTR, &node_id)
+                    {
                         rows.push(("batches written".to_string(), format_count(reading.value)));
                     }
                 }
@@ -1721,7 +1713,7 @@ fn detail_view(
                             .unwrap_or_default()
                             .iter()
                             .filter(|series| {
-                                series.name == "saci_processor_metric"
+                                series.name == "saci_processor_custom"
                                     && attr(&series.attrs, PROCESSOR_ATTR) == Some(node_id.as_str())
                             })
                             .map(|series| {

@@ -74,7 +74,7 @@ another stream.
 
 ## What you need
 
-- A binary built with `--features server,connector-nats`; NATS is one of eight connectors that need a
+- A binary built with `--features server,connector-nats`; `nats` is one of eight connectors that need a
   specific service installed and running, so it sits outside the `server` feature.
 - A reachable NATS server with JetStream enabled. One in a container is enough:
 
@@ -98,13 +98,13 @@ docker run --rm -p 4222:4222 nats:2.11-alpine -js -sd /tmp/nats
 
 ## 1. Declare the format
 
-A message is bytes, so both halves name a declared `transformer`.
+A message is bytes, so both halves name a declared `codec`.
 
 <div class="code">
 <div class="code-cap"><span>KDL</span><em>one JSON object per message</em></div>
 
 ```kdl
-transformer "orders_json" format="ndjson"
+codec "orders_json" format="ndjson"
 ```
 
 </div>
@@ -123,7 +123,7 @@ through a pull consumer; `kind="core"` subscribes to a subject with no persisten
 <div class="code-cap"><span>KDL</span><em>a JetStream source over a durable pull consumer</em></div>
 
 ```kdl
-source "orders_in" type="NatsSource" component="Order" transformer="orders_json" {
+source "orders_in" connector="nats" component="Order" codec="orders_json" {
     config {
         stop_at_end #true
 
@@ -137,7 +137,7 @@ source "orders_in" type="NatsSource" component="Order" transformer="orders_json"
             filter_subjects "orders.new"
         }
 
-        schema_fields "id" type="int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
@@ -165,7 +165,7 @@ subject across several instances: every subscriber in one group sees a disjoint 
 <div class="code-cap"><span>KDL</span><em>a JetStream sink that publishes each batch atomically</em></div>
 
 ```kdl
-sink "orders_out" type="NatsSink" component="EnrichedOrder" transformer="orders_json" {
+sink "orders_out" connector="nats" component="EnrichedOrder" codec="orders_json" {
     config {
         connection {
             servers "nats://localhost:4222"
@@ -181,9 +181,9 @@ sink "orders_out" type="NatsSink" component="EnrichedOrder" transformer="orders_
             stream_provision allow_atomic=#true
         }
 
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "status" type="utf8" nullable=#true
-        schema_fields "total" type="float64" nullable=#true
+        field "id" type="int64" nullable=#false
+        field "status" type="utf8" nullable=#true
+        field "total" type="float64" nullable=#true
     }
 }
 ```
@@ -226,12 +226,12 @@ saci-service validate --config examples/configs/nats.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
 
-Then run it. The config sets `run_mode kind="interval" interval_ms=2000`, so the stream is redrained
+Then run it. The config sets `run "interval" every_ms=2000`, so the stream is redrained
 every two seconds:
 
 Linux/macOS:
@@ -305,8 +305,8 @@ Source, at the top of `config`:
 | `mode` | node | required | `kind="core"` or `kind="jetstream"`, plus that mode's keys |
 | `poll_timeout_ms` | integer | `1000` | how long one poll window waits for messages |
 | `stop_at_end` | bool | `#false` | report end of stream once the server confirms nothing is pending |
-| `batch_size` | integer | `1000` | rows per poll when the runner sends no admission hint |
-| `schema_fields` | list of fields | required | the declared column list the messages decode against |
+| `batch_rows` | integer | `1000` | rows per poll when the runner sends no admission hint |
+| `field` | lines | required | the declared column list the messages decode against |
 
 Sink, at the top of `config`:
 
@@ -314,7 +314,7 @@ Sink, at the top of `config`:
 |---|---|---|---|
 | `connection` | node | required | how to reach the server |
 | `mode` | node | required | `kind="core"` or `kind="jetstream"`, plus that mode's keys |
-| `schema_fields` | list of fields | required | the schema the messages are written with |
+| `field` | lines | required | the schema the messages are written with |
 
 A misspelled key anywhere in this `config` fails the parse and is named in the error.
 
@@ -451,13 +451,13 @@ A `tls://` URL requires encryption on its own. `tls_first` needs the matching se
 | Message | What to change |
 |---|---|
 | `NatsSource config: {e}` | fix the key the parse error names; unknown keys are rejected here |
-| `NatsSource moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
-| `source type 'NatsSource' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `stop_at_end #true`, or switch to `run_mode kind="stream"` |
+| `NatsSource moves bytes and needs a 'codec' key naming a declared codec` | add `codec="<id>"` to the node |
+| `source connector 'nats' never reaches EOF; it requires standalone mode with run "stream"` | set `stop_at_end #true`, or switch to `run "stream"` |
 | `NatsSource: connection.servers entry '{s}' is not a NATS URL: {e}` | fix the URL, or write a bare `host:port` |
 | `NatsSource: connection.auth kind = "token" needs exactly one of 'token' or 'token_file'` | set exactly one of the pair |
 | `NatsSource: connection.tls needs both 'client_certificate' and 'client_key', or neither` | add the missing half, or drop both |
 | `NatsSource config: 'mode.domain' and 'mode.api_prefix' are two ways to say the same thing; set one` | keep one of the two |
-| `NatsSink config: 'mode.subject_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro transformer, or drop the key |
+| `NatsSink config: 'mode.subject_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro codec, or drop the key |
 | `NatsSink: format '{format}' has no message codec` | name a format that encodes discrete messages |
 | `NatsSink config: 'mode.expected_last_sequence' needs 'mode.atomic_batch #true'` | add `atomic_batch #true`, since the guard is a batch-level claim |
 | `NatsSink config: 'mode.atomic_batch' needs 'stream_provision.allow_atomic #true' when the stream is provisioned` | add `allow_atomic #true` to `stream_provision`, or set `create #false` and allow atomic publishes on the pre-existing stream |

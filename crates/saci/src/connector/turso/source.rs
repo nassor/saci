@@ -1,6 +1,6 @@
 //! [`TursoSource`]: one public source type over three read strategies.
 //!
-//! The Arrow schema is built from the declared `schema_fields` once, in
+//! The Arrow schema is built from the declared `field` entries once, in
 //! [`TursoSource::new`], and handed out by reference from [`Source::schema`]:
 //! the trait requires a schema that does not change between calls, so it is
 //! never rebuilt.
@@ -8,7 +8,7 @@
 //! [`TursoSource::new`] opens no connection. It validates the config and builds
 //! the schema, and the first [`Source::next_batch`] opens the database and
 //! connects. That is what keeps `saci-service validate` free of a database, and
-//! it is forced anyway, because `SourceFactory::build` is synchronous while the
+//! it is forced anyway, because `Connector::source` is synchronous while the
 //! `turso` builders are asynchronous.
 //!
 //! # Read strategies
@@ -29,14 +29,15 @@
 use std::sync::Arc;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 
+use crate::connector::schema::{FieldSpec, FieldType};
 use crate::connector::turso::cdc::{decode_cdc_field, op_of};
 use crate::connector::turso::config::{
-    CdcMode, CursorMode, DumpMode, FieldSpec, Retention, TursoFieldType, TursoSourceConfig,
+    CdcMode, CursorMode, DumpMode, Retention, TursoSourceConfig,
 };
 use crate::connector::turso::connection::Db;
 use crate::connector::turso::metrics::Instruments;
@@ -119,9 +120,9 @@ impl TursoSource {
     pub fn new(config: TursoSourceConfig) -> Result<Self, SaciError> {
         config.validate()?;
         let fields = config
-            .schema_fields
+            .fields
             .iter()
-            .map(FieldSpec::to_arrow_field)
+            .map(FieldSpec::to_arrow)
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
         let mode = config.mode.as_str();
@@ -273,7 +274,7 @@ async fn poll_next(
         state.committed = Some((cursor, tiebreak));
     }
 
-    let fields = &config.schema_fields;
+    let fields = &config.fields;
     let cursor_idx = fields
         .iter()
         .position(|f| f.name == state.mode.cursor_column);
@@ -363,7 +364,7 @@ async fn dump_next(
     }
     let sql = format!(
         "SELECT {} FROM {} LIMIT {} OFFSET {}",
-        column_list(&config.schema_fields),
+        column_list(&config.fields),
         state.mode.table,
         config.batch_rows,
         state.next_offset
@@ -372,7 +373,7 @@ async fn dump_next(
         conn,
         &sql,
         Vec::new(),
-        &config.schema_fields,
+        &config.fields,
         schema,
         None,
         None,
@@ -462,7 +463,7 @@ async fn cdc_next(
             &state.mode,
             cursor,
             config.batch_rows,
-            &config.schema_fields,
+            &config.fields,
             schema,
             what,
         )
@@ -773,17 +774,17 @@ fn cursor_param(field: &FieldSpec, text: &str, what: &str) -> Result<turso::Valu
         ))
     };
     match field.ty {
-        TursoFieldType::Int64 => text
+        FieldType::Int64 => text
             .trim()
             .parse::<i64>()
             .map(turso::Value::Integer)
             .map_err(|e| bad(e.to_string())),
-        TursoFieldType::Float64 => text
+        FieldType::Float64 => text
             .trim()
             .parse::<f64>()
             .map(turso::Value::Real)
             .map_err(|e| bad(e.to_string())),
-        TursoFieldType::Utf8 => Ok(turso::Value::Text(text.to_string())),
+        FieldType::Utf8 => Ok(turso::Value::Text(text.to_string())),
         other => Err(SaciError::configuration(format!(
             "{what}: '{}' cannot be a cursor column",
             other.as_str()

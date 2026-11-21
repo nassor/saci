@@ -109,7 +109,7 @@ flow_control {
 }
 
 workflow "w" {
-    source "orders" type="NatsSource" component="Order" {
+    source "orders" connector="nats" component="Order" {
         flow_control { rows 4096 }
     }
 }
@@ -122,7 +122,7 @@ workflow "w" {
 | `max_rows` | rows | 65536 | ceiling; raising it trades memory and per-pass latency for throughput |
 | `start_rows` | rows | 4096 | where a run begins before anything has been measured |
 | `max_chunk_bytes` | bytes | 8 MiB | memory bound on one chunk; `0` unbounded; no effect on a path to a windowed node, where nothing is chunked |
-| `target_latency_ms` | ms | 250 in stream mode, 0 in `continuous` and `interval` | a candidate breaching it loses; `0` pursues throughput alone |
+| `target_latency_ms` | ms | 250 under `run "stream"`, 0 in `continuous` and `interval` | a candidate breaching it loses; `0` pursues throughput alone |
 | `adjust_interval_ms` | ms | 60000 | how long one measurement runs; longer measures more cleanly, shorter reacts sooner |
 | `growth_factor` | ratio | 2.0 | candidate step size; must exceed 1.0 |
 | `improve_threshold` | ratio | 0.05 | gain a candidate needs to win; lower chases noise, higher ignores real gains |
@@ -133,8 +133,8 @@ workflow "w" {
 | `rows` | rows | absent | pins the size and stops it adapting |
 
 Every key is optional and every default is a working policy.
-`target_latency_ms` is the one default that depends on the run mode. Stream
-mode carries a 250 ms per-item objective, the latency contract a stream
+`target_latency_ms` is the one default that depends on the run mode. `run "stream"`
+carries a 250 ms per-item objective, the latency contract a stream
 workflow has to meet. `continuous` and `interval` default to `0`, because a
 batch pass has no per-item latency contract. An explicit value, including `0`,
 is honoured in either mode.
@@ -157,11 +157,11 @@ flow_control {
 }
 
 workflow "orders" {
-    source "bulk_in" type="FileSource" component="Order" transformer="orders_csv" {
+    source "bulk_in" connector="file" component="Order" codec="orders_csv" {
         config path="/data/in/orders.csv"
     }
 
-    source "api_in" type="HttpSource" component="Order" transformer="orders_csv" {
+    source "api_in" connector="http" component="Order" codec="orders_csv" {
         // Inherits max_rows 16384, and pins its own admission.
         flow_control { rows 2048 }
         config url="https://api.example.com/orders.csv"
@@ -188,18 +188,18 @@ feeding the node, and set `allowed_lateness_ms` on the window to cover
 event-time disorder: [Windowing](@/service/processors/windowing/_index.md).
 
 How much of an arrival a source hands over also depends on the connector.
-Kafka, NATS and PostgreSQL sources size their own fetch, so they take at most
+The `kafka`, `nats` and `postgresql` sources size their own fetch, so they take at most
 the current target and may take less. Every other source hands over whatever
 it produced and the runner slices it at the target instead.
 
 ```kdl,name=Pin every source that feeds a windowed processor
 workflow "sessions" {
-    source "events" type="NatsSource" component="Event" transformer="events_json" {
+    source "events" connector="nats" component="Event" codec="events_json" {
         flow_control { rows 4096 }
         config { /* ... */ }
     }
 
-    wasm "sessionize" module="pipelines/sessions.wasm" {
+    wasm "sessionize" path="pipelines/sessions.wasm" {
         window kind="session" gap_ms=5000 time_field="event_ts" allowed_lateness_ms=2000
     }
 }
@@ -243,14 +243,14 @@ default error-only level and a `RUST_LOG` cannot silence it.
 | `flow control starting` | one per governed source, as the runner builds its controller | `workflow`, `source`, `enabled`, `fixed_rows`, `start_rows`, `min_rows`, `max_rows`, `max_chunk_bytes`, `target_latency_ms`, `adjust_interval_ms` |
 | `flow control decision` | one per episode, the same episodes the dashboard draws | `workflow`, `source`, `kind`, `from_rows`, `to_rows`, `reason` |
 | `flow control finished` | one per governed source, as the runner exits | `workflow`, `source`, `final_rows`, `adjustments`, `backoffs` |
-| `no flow control: source feeds a windowed node …` | one per ungoverned source in `stream` mode, at startup; this is what explains a missing `starting` line | `workflow`, `source` |
+| `no flow control: source feeds a windowed node …` | one per ungoverned source under `run "stream"`, at startup; this is what explains a missing `starting` line | `workflow`, `source` |
 
 `adjustments` counts the episodes that opened; `backoffs` counts every guard
 trip, deduplicated or not, so it matches `saci_flow_backoff_total`.
 
 Three cases carry no controller and so publish none of the three series: every
-source under `one_shot`, every source in `mode "cluster"`, and a source on a
-path to a windowed node under `stream`. A source with
+source under `run "once"`, every source in `mode "cluster"`, and a source on a
+path to a windowed node under `run "stream"`. A source with
 `flow_control { enabled #false }` publishes none either.
 
 Linux/macOS:

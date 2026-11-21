@@ -37,7 +37,7 @@ use crate::distributed::consensus::driver::{
 use crate::distributed::consensus::store::RedbSharedStore;
 use crate::distributed::runner::{DistributedRunner, RunnerConfig};
 use crate::distributed::strategy::CheckpointStrategy;
-use crate::service::builder::BuiltService;
+use crate::service::builder::BuiltWorkflow;
 use crate::service::config::{ClusterConfig, ServiceConfig, ServiceMode};
 
 // ── File names ────────────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ pub struct ClusterStats {
 /// Returns [`SaciError::Generic`] if the Raft cluster does not settle within
 /// the configured settle timeout.
 pub async fn run_cluster(
-    built: BuiltService,
+    built: BuiltWorkflow,
     config: &ServiceConfig,
     cancel: CancellationToken,
 ) -> SaciResult<ClusterStats> {
@@ -110,7 +110,7 @@ pub async fn run_cluster(
         ServiceMode::Cluster { config: c } => c,
         ServiceMode::Standalone { .. } => {
             return Err(SaciError::configuration(
-                "run_cluster called with standalone config — use run_standalone instead",
+                "run_cluster called with standalone config — use BuiltWorkflow::run instead",
             ));
         }
     };
@@ -328,8 +328,8 @@ pub async fn run_cluster(
 /// once a second until `cancel` fires.
 ///
 /// [`ArrowRaftDriverHandle::metrics`] is synchronous, so this needs no other
-/// plumbing. It exists because `/status` still reports `"cluster": null`: the
-/// gauges come from the driver handle, not from a populated `cluster_probe`.
+/// plumbing. `/status` carries no cluster section, so the gauges come from the
+/// driver handle.
 fn spawn_raft_gauges(
     handle: ArrowRaftDriverHandle,
     cancel: CancellationToken,
@@ -623,7 +623,8 @@ mod tests {
             workflows: vec![WorkflowSpec {
                 id: "cluster-test".to_string(),
                 name: None,
-                transformers: Vec::new(),
+                codecs: Vec::new(),
+                schemas: Vec::new(),
                 sources: Vec::new(),
                 wasm: Vec::new(),
                 plugin: Vec::new(),
@@ -638,30 +639,11 @@ mod tests {
         }
     }
 
-    fn empty_built_service() -> crate::service::builder::BuiltService {
-        use crate::service::builder::{BuiltNode, BuiltNodeKind, BuiltService};
-        BuiltService {
-            workflow_id: "cluster-test".to_string(),
-            workflow_name: None,
-            nodes: vec![BuiltNode {
-                id: "p".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(crate::pipeline::Pipeline::new("test")),
-                    kind: "native",
-                },
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            }],
-            registry: std::sync::Arc::new(crate::service::registry::Registry::new()),
-            inspector: None,
-            dlq: None,
-        }
+    fn empty_built_service() -> crate::service::builder::BuiltWorkflow {
+        crate::service::builder::BuiltWorkflow::builder("cluster-test")
+            .processor("p", crate::pipeline::Pipeline::new("test"))
+            .build()
+            .expect("a one-node workflow assembles")
     }
     #[test]
     fn test_inconsistent_data_dir_returns_error() {
@@ -924,7 +906,8 @@ mod tests {
             workflows: vec![WorkflowSpec {
                 id: "w".to_string(),
                 name: None,
-                transformers: Vec::new(),
+                codecs: Vec::new(),
+                schemas: Vec::new(),
                 sources: Vec::new(),
                 wasm: Vec::new(),
                 plugin: Vec::new(),

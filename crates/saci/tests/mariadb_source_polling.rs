@@ -10,7 +10,7 @@ mod common;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use common::Server;
 use mysql_async::prelude::Queryable;
-use saci::io::source::Source;
+use saci::io::Source;
 
 common::on_every_server!(
     polling_batches_the_table_then_resumes_from_the_persisted_offset,
@@ -43,8 +43,8 @@ common::on_every_server!(
 );
 
 const PRICES_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"label\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"label\" type=\"utf8\"
 ";
 
 fn i64_column(batches: &[RecordBatch], name: &str) -> Vec<i64> {
@@ -221,8 +221,8 @@ async fn a_tiebreak_column_keeps_a_non_unique_cursor_lossless(server: &Server) {
         &server.dsn(),
         "name \"events\"\nbatch_rows 4\n\n\
          mode kind=\"polling\" table=\"events\" cursor_column=\"grp\" tiebreak_column=\"id\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"grp\" type=\"int32\" nullable=#false\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"grp\" type=\"int32\" nullable=#false\n",
     );
     let batches = common::drain(&mut source).await;
     assert_eq!(sizes(&batches), vec![4, 4, 4]);
@@ -351,7 +351,7 @@ async fn a_bigint_unsigned_cursor_above_two_to_the_63_resumes_exactly(server: &S
 
     let body = "name \"ubig\"\nbatch_rows 2\nmax_batches_per_cycle 1\n\n\
          mode kind=\"polling\" table=\"ubig\" cursor_column=\"id\"\n\
-         schema_fields \"id\" type=\"uint64\" nullable=#false\n";
+         field \"id\" type=\"uint64\" nullable=#false\n";
     let read = |batches: &[RecordBatch]| -> Vec<u64> {
         batches
             .iter()
@@ -410,8 +410,8 @@ async fn a_datetime_cursor_resumes_exactly(server: &Server) {
 
     let body = "name \"ticks\"\nbatch_rows 2\nmax_batches_per_cycle 1\n\n\
          mode kind=\"polling\" table=\"ticks\" cursor_column=\"at\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"at\" type=\"timestamp_micros\" nullable=#false\n";
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"at\" type=\"timestamp_micros\" nullable=#false\n";
     let mut first = common::source(&server.dsn(), body);
     assert_eq!(ids(&common::drain(&mut first).await), vec![1, 2]);
     assert_eq!(ids(&common::drain(&mut first).await), vec![3, 4]);
@@ -432,8 +432,8 @@ async fn a_declared_column_the_table_lacks_names_itself(server: &Server) {
         &server.dsn(),
         "name \"prices\"\nbatch_rows 10\n\n\
          mode kind=\"polling\" table=\"prices\" cursor_column=\"id\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"colour\" type=\"utf8\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"colour\" type=\"utf8\"\n",
     );
     let err = source
         .next_batch()
@@ -511,9 +511,9 @@ async fn a_table_altered_between_cycles_is_read_with_its_new_shape(server: &Serv
         &server.dsn(),
         "name \"shifty\"\nbatch_rows 10\n\n\
          mode kind=\"polling\" table=\"shifty\" cursor_column=\"id\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"a\" type=\"int64\"\n\
-         schema_fields \"b\" type=\"utf8\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"a\" type=\"int64\"\n\
+         field \"b\" type=\"utf8\"\n",
     );
     assert_eq!(ids(&common::drain(&mut source).await), vec![1, 2]);
 
@@ -560,9 +560,9 @@ async fn a_null_tiebreak_value_is_an_error_not_a_skipped_run(server: &Server) {
         &server.dsn(),
         "name \"nullties\"\nbatch_rows 1\n\n\
          mode kind=\"polling\" table=\"nullties\" cursor_column=\"grp\" tiebreak_column=\"seq\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"grp\" type=\"int32\" nullable=#false\n\
-         schema_fields \"seq\" type=\"int32\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"grp\" type=\"int32\" nullable=#false\n\
+         field \"seq\" type=\"int32\"\n",
     );
     let err = source
         .next_batch()
@@ -637,7 +637,7 @@ async fn resumes_in_pairs(
     let body = format!(
         "name \"{table}\"\nbatch_rows 2\nmax_batches_per_cycle 1\n\n\
          mode kind=\"polling\" table=\"{table}\" {mode}\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n{fields}"
+         field \"id\" type=\"int64\" nullable=#false\n{fields}"
     );
     let mut first = common::source(&server.dsn(), &body);
     assert_eq!(ids(&common::drain(&mut first).await), vec![1, 2], "{table}");
@@ -669,7 +669,7 @@ async fn every_cursor_type_resumes_from_the_stored_offset_at_its_extremes(server
          (4, '2024-01-30 10:20:31.000000'), (5, '2024-01-30 10:20:31.000001'), \
          (6, '2038-01-19 03:14:07.999999')",
         "cursor_column=\"at\"",
-        "schema_fields \"at\" type=\"timestamp_micros_utc\" nullable=#false\n",
+        "field \"at\" type=\"timestamp_micros_utc\" nullable=#false\n",
     )
     .await;
     resumes_in_pairs(
@@ -679,7 +679,7 @@ async fn every_cursor_type_resumes_from_the_stored_offset_at_its_extremes(server
         "INSERT INTO date_cursor VALUES (1, '0001-01-01'), (2, '1970-01-01'), \
          (3, '1999-12-31'), (4, '2000-02-29'), (5, '2024-01-30'), (6, '9999-12-31')",
         "cursor_column=\"d\"",
-        "schema_fields \"d\" type=\"date32\" nullable=#false\n",
+        "field \"d\" type=\"date32\" nullable=#false\n",
     )
     .await;
     resumes_in_pairs(
@@ -688,7 +688,7 @@ async fn every_cursor_type_resumes_from_the_stored_offset_at_its_extremes(server
         "CREATE TABLE tiny_cursor (id BIGINT PRIMARY KEY, n TINYINT NOT NULL)",
         "INSERT INTO tiny_cursor VALUES (1, -128), (2, -2), (3, -1), (4, 0), (5, 1), (6, 127)",
         "cursor_column=\"n\"",
-        "schema_fields \"n\" type=\"int8\" nullable=#false\n",
+        "field \"n\" type=\"int8\" nullable=#false\n",
     )
     .await;
     resumes_in_pairs(
@@ -701,7 +701,7 @@ async fn every_cursor_type_resumes_from_the_stored_offset_at_its_extremes(server
         "INSERT INTO text_cursor VALUES (1, 'apple'), (2, 'Apple'), (3, 'apple'), \
          (4, 'banana'), (5, 'Banana'), (6, 'cherry')",
         "cursor_column=\"name\" tiebreak_column=\"id\"",
-        "schema_fields \"name\" type=\"utf8\" nullable=#false\n",
+        "field \"name\" type=\"utf8\" nullable=#false\n",
     )
     .await;
 }
@@ -915,9 +915,9 @@ async fn a_where_clause_and_a_tiebreak_over_a_non_unique_cursor_keep_every_tie(s
         "name \"ties\"\nbatch_rows 2\n\n\
          mode kind=\"polling\" table=\"ties\" cursor_column=\"id\" tiebreak_column=\"n\" \
          where_clause=\"label = 'keep'\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"n\" type=\"int32\" nullable=#false\n\
-         schema_fields \"label\" type=\"utf8\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"n\" type=\"int32\" nullable=#false\n\
+         field \"label\" type=\"utf8\"\n",
     );
     let batches = common::drain(&mut source).await;
     assert_eq!(ids(&batches), vec![1, 1, 2, 2, 3]);
@@ -1011,9 +1011,9 @@ async fn a_filtered_tie_run_cut_by_a_batch_is_finished_with_no_later_number(serv
         "name \"ties_tail\"\nbatch_rows 2\n\n\
          mode kind=\"polling\" table=\"ties_tail\" cursor_column=\"id\" tiebreak_column=\"n\" \
          where_clause=\"label = 'keep'\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"n\" type=\"int64\" nullable=#false\n\
-         schema_fields \"label\" type=\"utf8\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"n\" type=\"int64\" nullable=#false\n\
+         field \"label\" type=\"utf8\"\n",
     );
     let batches = common::drain(&mut source).await;
     assert_eq!(i64_column(&batches, "n"), vec![1, 2, 3]);

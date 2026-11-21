@@ -50,7 +50,7 @@ the workflow it declares.
     </div>
     <figcaption class="dgm-cap">
         One process, one address space. The <code>Pipeline</code> derives its own stage plan
-        from the field declarations and retries what fails, exactly as it does inside a
+        from the field declarations and retries transient failures when a system asks for it, exactly as it does inside a
         WebAssembly processor.
     </figcaption>
 </div>
@@ -175,7 +175,7 @@ the component.
 2. [Systems](@/library/systems.md): one transform, plus the `meta()` that names which
    columns it reads and writes.
 3. [Pipeline](@/library/pipeline.md): a Dataset and its Systems. Turns declarations into
-   stages, and retries what fails.
+   stages, and retries a system's transient failures when it declares a retry mode.
 4. [Scheduler](@/library/scheduler.md): several independent Pipelines in one process, with
    dependency edges between them.
 5. [Sources & Sinks](@/library/io.md): the two traits that move Arrow rows in and out of a
@@ -199,7 +199,7 @@ saci = "0.1"
 saci = { version = "0.1", features = ["service", "wasm-host"] }
 ```
 
-Add `connector-file` plus a `transformer-*` feature for each format you
+Add `connector-file` plus a `codec-*` feature for each format you
 read or write. [Crates and features](@/library/reference/crates.md) lists every
 feature flag and the module behind it.
 

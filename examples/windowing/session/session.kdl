@@ -23,7 +23,7 @@
 // then run the service and the publisher. The publisher's gap flags put a
 // silence in every symbol's stream at the same instant, so each burst's
 // sessions all close together and none outlives its burst:
-//   cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host -- serve \
+//   cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host -- serve \
 //     --config examples/windowing/session/session.kdl
 //   cargo run -p saci --features connector-nats --example windowed_publish -- --rate 20 --ts-step-ms 2000 \
 //     --gap-every 20 --gap-ms 30000
@@ -35,7 +35,7 @@ node id=1 name="saci-windowing-session" data_dir="${SACI_DATA_DIR:-/tmp/saci-win
 // A core NATS subscription never reaches EOF, so the interval runner would
 // spin on a source that is never done. The stream runner drives live sources
 // item by item instead, pulling the two sources round-robin.
-run_mode kind="stream"
+run "stream"
 
 // No `flow_control` block: both sources here feed a windowed processor, and
 // a stream-mode source on a path to a windowed node builds no controller at
@@ -43,17 +43,17 @@ run_mode kind="stream"
 // docs/content/service/operate/flow-control.md and the window block below.
 
 workflow "windowing_session" {
-    // One JSON object per message, decoded against schema_fields below.
-    transformer "ndjson_fmt" format="ndjson"
+    // One JSON object per message, decoded against the `field` lines below.
+    codec "ndjson_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- sources
     //
     // Two independent streams of the same Sale shape, both feeding the
     // processor: the fan-in merge is what one watermark spans.
 
-    source "sales_a" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+    source "sales_a" connector="nats" component="Sale" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -63,15 +63,15 @@ workflow "windowing_session" {
 
             mode kind="core" subject="windowing.sales.a"
 
-            schema_fields "timestamp_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
+            field "timestamp_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
         }
     }
 
-    source "sales_b" type="NatsSource" component="Sale" transformer="ndjson_fmt" {
+    source "sales_b" connector="nats" component="Sale" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -81,9 +81,9 @@ workflow "windowing_session" {
 
             mode kind="core" subject="windowing.sales.b"
 
-            schema_fields "timestamp_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
+            field "timestamp_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
         }
     }
 
@@ -95,19 +95,19 @@ workflow "windowing_session" {
     // processor reads back through get-config. One source of truth. A session
     // block declares a gap and nothing else: there is no size to declare.
 
-    wasm "window_session" module="target/wasm32-wasip3/release/windowing_session_wasm.wasm" {
+    wasm "window_session" path="target/wasm32-wasip3/release/windowing_session_wasm.wasm" {
         window kind="session" gap_ms=10000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-            key_field "symbol"
+            key_fields "symbol"
         }
     }
 
     // ----------------------------------------------------------------- sinks
     //
     // The table comes from schema.sql, which compose runs on first
-    // initialisation; PostgresSink never issues CREATE TABLE. upsert on
+    // initialisation; the `postgresql` sink never issues CREATE TABLE. upsert on
     // (session_start_ms, symbol) keeps a re-run or a late re-fire idempotent.
 
-    sink "session_totals" type="PostgresSink" component="SessionTotal" {
+    sink "session_totals" connector="postgresql" component="SessionTotal" {
         config {
             name "session-totals"
             table "public.session_window_totals"
@@ -120,11 +120,11 @@ workflow "windowing_session" {
                 sslmode "disable"
             }
 
-            schema_fields "session_start_ms" type="int64" nullable=#false
-            schema_fields "session_end_ms" type="int64" nullable=#false
-            schema_fields "symbol" type="utf8" nullable=#false
-            schema_fields "count" type="int64" nullable=#false
-            schema_fields "sum" type="float64" nullable=#false
+            field "session_start_ms" type="int64" nullable=#false
+            field "session_end_ms" type="int64" nullable=#false
+            field "symbol" type="utf8" nullable=#false
+            field "count" type="int64" nullable=#false
+            field "sum" type="float64" nullable=#false
         }
     }
 

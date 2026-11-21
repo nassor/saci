@@ -13,7 +13,7 @@ description = "Windowing tumbling demo native plugin: merges two NATS streams in
 crate-type = ["cdylib"]
 
 [dependencies]
-saci = { workspace = true, features = ["plugin", "windows"] }
+saci = { workspace = true, features = ["plugin"] }
 serde = { workspace = true }
 # Traces the nested state component's Arrow schema from a sample, so it matches
 # serde_arrow's encoding exactly.

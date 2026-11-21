@@ -25,12 +25,12 @@ node id=1 name="saci-nats" data_dir="${SACI_DATA_DIR:-/tmp/saci-nats}"
 // stop_at_end makes the source report EOF once the stream is drained, so the
 // interval runner can drive it without the stream runner. A live consumer
 // (stop_at_end #false) never reaches EOF and instead needs
-// run_mode kind="stream" with exactly one declared source.
-run_mode kind="interval" interval_ms=2000
+// `run "stream"` with exactly one declared source.
+run "interval" every_ms=2000
 
 // Adaptive flow control: batch mode carries no per-item latency contract, so
 // target_latency_ms stays 0 (the interval default). JetStream's own pull
-// consumer already sizes each fetch at batch_size (1000), so a lower ceiling
+// consumer already sizes each fetch at batch_rows (1000), so a lower ceiling
 // than kafka.kdl's keeps one admitted chunk close to one fetch instead of
 // several, and the 1.75x growth step is gentler than the 2x default.
 flow_control {
@@ -44,17 +44,17 @@ flow_control {
 // One workflow declares the whole DAG: the byte format each end speaks, the
 // source, the processor, the sink, and the explicit links between them.
 workflow "orders" {
-    // The transformer that decodes/encodes each message. "ndjson" is one JSON
-    // object per message, decoded against schema_fields below; "arrow-ipc" is
-    // one whole RecordBatch per message. Both need their transformer-*
+    // The codec that decodes/encodes each message. "ndjson" is one JSON
+    // object per message, decoded against the `field` lines below; "arrow-ipc"
+    // is one whole RecordBatch per message. Both need their codec-*
     // feature compiled in.
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- source
 
-    source "nats_orders" type="NatsSource" component="Order" transformer="ndjson_fmt" {
+    source "nats_orders" connector="nats" component="Order" codec="ndjson_fmt" {
         config {
-            batch_size 1000
+            batch_rows 1000
             poll_timeout_ms 1000
             stop_at_end #true
 
@@ -139,9 +139,9 @@ workflow "orders" {
                 }
             }
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
-            schema_fields "total" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "status" type="utf8" nullable=#true
+            field "total" type="float64" nullable=#true
         }
     }
 
@@ -150,15 +150,15 @@ workflow "orders" {
     // The processor's `describe()` supplies the component list, so `component`
     // on the source and sink above and below must name components it declares.
 
-    wasm "process_orders" module="pipelines/orders.wasm"
+    wasm "process_orders" path="pipelines/orders.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // A different component than the source's: the processor declares both,
-    // reads Order and writes EnrichedOrder. A sink's schema_fields must match
+    // reads Order and writes EnrichedOrder. A sink's `field` lines must match
     // the component's RecordBatch field for field, in order.
 
-    sink "nats_enriched" type="NatsSink" component="EnrichedOrder" transformer="ndjson_fmt" {
+    sink "nats_enriched" connector="nats" component="EnrichedOrder" codec="ndjson_fmt" {
         config {
             connection {
                 servers "${NATS_SERVERS:-nats://localhost:4222}"
@@ -196,9 +196,9 @@ workflow "orders" {
                 stream_provision storage="file" num_replicas=1
             }
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
-            schema_fields "total" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "status" type="utf8" nullable=#true
+            field "total" type="float64" nullable=#true
         }
     }
 
@@ -207,7 +207,7 @@ workflow "orders" {
 }
 
 // HTTP control plane. /metrics carries the service's own counters.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a 25%
 // grade: one workflow's JetStream consumer and sink redraining every 2 s

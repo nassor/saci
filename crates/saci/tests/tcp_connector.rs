@@ -18,13 +18,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Tick";
 
@@ -34,7 +32,10 @@ fn schema() -> Arc<Schema> {
 
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("tcp_connector");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
@@ -70,9 +71,9 @@ async fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
     payload
 }
 
-/// Decode a frame payload through the same transformer the config names.
+/// Decode a frame payload through the same codec the config names.
 fn decode(payload: &[u8]) -> RecordBatch {
-    let mut decoder = ArrowIpcTransformer::new()
+    let mut decoder = ArrowIpcCodec::new()
         .open_message_decoder(schema())
         .expect("decoder");
     decoder.push(payload).expect("push");
@@ -102,26 +103,26 @@ mode "standalone"
 
 node id=1 name="saci-tcp-connector" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "tcp-connector-test" {{
-    transformer "ipc" format="arrow-ipc"
+    codec "ipc" format="arrow-ipc"
 
-    source "frames_in" type="tcp" component="{COMPONENT}" transformer="ipc" {{
+    source "frames_in" connector="tcp" component="{COMPONENT}" codec="ipc" {{
         config {{
             bind "{bind}"
             buffer 8
             max_frame_bytes 65536
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
     wasm "relay" name="Relay"
 
-    sink "frames_out" type="tcp" component="{COMPONENT}" transformer="ipc" {{
+    sink "frames_out" connector="tcp" component="{COMPONENT}" codec="ipc" {{
         config {{
             connect "{connect}"
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
@@ -129,7 +130,7 @@ workflow "tcp-connector-test" {{
     link from="relay" to="frames_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -137,7 +138,7 @@ observability log_level="warn"
 }
 
 /// A free port for the source's `bind`, which the config needs before the
-/// factory binds it for real.
+/// connector binds it for real.
 fn reserved_port() -> u16 {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
     let port = probe.local_addr().expect("probe addr").port();
@@ -154,35 +155,26 @@ async fn frames_pushed_into_the_tcp_source_come_back_out_of_the_tcp_sink() {
     let bind_addr = format!("127.0.0.1:{}", reserved_port());
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(
-            &bind_addr,
-            &collector_addr.to_string(),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("relay", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &bind_addr,
+        &collector_addr.to_string(),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("relay", build_pipeline())
+        .build(&config)
         .expect("both tcp halves resolve through the registry")
         .remove(0);
 
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
-    let runner_config = config.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_standalone(built, &runner_config, runner_cancel, None, None).await
-    });
+    let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
     let stats = local
         .run_until(async move {
-            // The listener is already bound by the factory, so this connection
+            // The listener is already bound by the connector, so this connection
             // waits in the backlog until the accept loop starts.
             let mut producer = TcpStream::connect(&bind_addr)
                 .await
@@ -214,59 +206,43 @@ async fn frames_pushed_into_the_tcp_source_come_back_out_of_the_tcp_sink() {
     assert_eq!(stats.iteration_errors, 0);
 }
 
-fn validation_kdl(run_mode: &str, source_type: &str) -> String {
+fn validation_kdl(run: &str, source_connector: &str) -> String {
     format!(
         r#"
 mode "standalone"
 
 node id=1 data_dir="/tmp/saci-tcp-validate"
 
-run_mode {run_mode}
+run {run}
 
 workflow "w" {{
-    source "in" type="{source_type}" component="{COMPONENT}"
-    sink "out" type="tcp" component="{COMPONENT}"
+    source "in" connector="{source_connector}" component="{COMPONENT}"
+    sink "out" connector="tcp" component="{COMPONENT}"
     link from="in" to="out"
 }}
 "#
     )
 }
 
-fn load_from_text(dir: &tempfile::TempDir, name: &str, text: &str) -> saci::SaciResult<()> {
-    let path = dir.path().join(name);
-    std::fs::write(&path, text).expect("write config");
-    ServiceConfig::load(&path).map(|_| ())
+fn load_from_text(text: &str) -> saci::SaciResult<()> {
+    ServiceConfig::from_kdl(text).map(|_| ())
 }
 
 /// The no-EOF rule reads `source` nodes, so a `tcp` sink is legal in every run
 /// mode even though a `tcp` source is stream-only.
 #[test]
 fn a_tcp_sink_is_accepted_outside_stream_mode() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    for run_mode in [
-        r#"kind="one_shot""#,
-        r#"kind="interval" interval_ms=1000"#,
-        r#"kind="stream""#,
-    ] {
-        load_from_text(
-            &dir,
-            "sink_only.kdl",
-            &validation_kdl(run_mode, "NoopSource"),
-        )
-        .unwrap_or_else(|e| panic!("a tcp sink under {run_mode} must validate: {e}"));
+    for run in [r#""once""#, r#""interval" every_ms=1000"#, r#""stream""#] {
+        load_from_text(&validation_kdl(run, "noop"))
+            .unwrap_or_else(|e| panic!("a tcp sink under {run} must validate: {e}"));
     }
 }
 
 /// The mirror of the rule above: the source half is still stream-only.
 #[test]
 fn a_tcp_source_is_still_rejected_outside_stream_mode() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let err = load_from_text(
-        &dir,
-        "source_one_shot.kdl",
-        &validation_kdl(r#"kind="one_shot""#, "tcp"),
-    )
-    .expect_err("a tcp source outside stream mode must fail");
+    let err = load_from_text(&validation_kdl(r#""once""#, "tcp"))
+        .expect_err("a tcp source outside stream mode must fail");
     assert_eq!(err.category(), "configuration", "got: {err}");
     assert!(err.to_string().contains("never reaches EOF"), "got: {err}");
 }

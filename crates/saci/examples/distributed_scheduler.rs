@@ -15,37 +15,19 @@
 use std::sync::Arc;
 
 use arrow_array::{Float64Array, StringArray, UInt64Array};
-use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
 use saci::distributed::RedbSharedStore;
 use saci::distributed::runner::{DistributedRunner, RunnerConfig};
 use saci::distributed::strategy::CheckpointStrategy;
-use saci::pipeline::Pipeline;
-use saci::system::{SystemMeta, system_fn};
+use saci::prelude::*;
 
 /// A sales order with an amount and currency.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Component, Debug, Serialize, Deserialize)]
 struct Order {
     order_id: u64,
     amount: f64,
     currency: String,
-}
-
-impl Component for Order {
-    fn name() -> &'static str {
-        "Order"
-    }
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("order_id", DataType::UInt64, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("currency", DataType::Utf8, false),
-        ]))
-    }
 }
 
 fn make_order_ipc() -> Vec<u8> {
@@ -98,9 +80,7 @@ async fn main() -> Result<(), SaciError> {
         .await?;
     println!("Registered master batch 0 (3 rows)\n");
 
-    let mut pipeline = Pipeline::new("distributed-etl");
-
-    pipeline.add_system(system_fn(
+    let pipeline = Pipeline::new("distributed-etl").system(system_fn(
         SystemMeta::new("summarise"),
         |data: &mut Dataset| {
             let row_count = data.rows();

@@ -2,8 +2,8 @@
 //!
 //! Every struct here carries `#[serde(deny_unknown_fields)]`: a key the
 //! connector cannot honour is a configuration error, not something to drop
-//! silently. The mode enum is internally tagged on `kind`, matching the
-//! `run_mode` table the service config already uses.
+//! silently. The mode enum is internally tagged on `kind`, like the `mode`
+//! child of the other connectors.
 //!
 //! Each top-level type exposes `validate`, which the constructors in
 //! [`crate::connector::mariadb::source`](crate) and [`crate::connector::mariadb::sink`](crate) call before they build
@@ -14,18 +14,12 @@
 
 use std::time::Duration;
 
-use crate::error::SaciError;
-use arrow_schema::{DataType, Field, TimeUnit};
-use serde::Deserialize;
-
 use crate::connector::mariadb::offsets::BinlogOffset;
 use crate::connector::mariadb::source::gtid::GtidSet;
 use crate::connector::mariadb::types::data_type_is_known;
-
-/// Arrow timestamp and time resolution every temporal type in this connector
-/// uses. MariaDB and MySQL keep at most microseconds, so nothing is lost and
-/// nothing is padded.
-const UNIT: TimeUnit = TimeUnit::Microsecond;
+use crate::connector::schema::{FieldSpec, FieldType};
+use crate::error::SaciError;
+use serde::Deserialize;
 
 /// The longest schema, table or trigger name either server accepts.
 pub(crate) const MAX_IDENTIFIER_CHARS: usize = 64;
@@ -53,22 +47,22 @@ pub(crate) const MAX_SOURCE_NAME_CHARS: usize = 191;
 
 /// Fields a `cdc_binlog` source fills from the change stream instead of from
 /// the row, with the declared type each must carry.
-pub(crate) const BINLOG_RESERVED: [(&str, MariadbFieldType); 6] = [
-    ("__op", MariadbFieldType::Utf8),
-    ("__table", MariadbFieldType::Utf8),
-    ("__binlog_file", MariadbFieldType::Utf8),
-    ("__binlog_pos", MariadbFieldType::UInt64),
-    ("__gtid", MariadbFieldType::Utf8),
-    ("__commit_ts", MariadbFieldType::TimestampMicrosUtc),
+pub(crate) const BINLOG_RESERVED: [(&str, FieldType); 6] = [
+    ("__op", FieldType::Utf8),
+    ("__table", FieldType::Utf8),
+    ("__binlog_file", FieldType::Utf8),
+    ("__binlog_pos", FieldType::UInt64),
+    ("__gtid", FieldType::Utf8),
+    ("__commit_ts", FieldType::TimestampMicrosUtc),
 ];
 
 /// Fields a `cdc_trigger` source fills from the connector-installed changelog,
 /// with the declared type each must carry.
-pub(crate) const TRIGGER_RESERVED: [(&str, MariadbFieldType); 4] = [
-    ("__op", MariadbFieldType::Utf8),
-    ("__seq", MariadbFieldType::UInt64),
-    ("__commit_ts", MariadbFieldType::TimestampMicrosUtc),
-    ("__table", MariadbFieldType::Utf8),
+pub(crate) const TRIGGER_RESERVED: [(&str, FieldType); 4] = [
+    ("__op", FieldType::Utf8),
+    ("__seq", FieldType::UInt64),
+    ("__commit_ts", FieldType::TimestampMicrosUtc),
+    ("__table", FieldType::Utf8),
 ];
 
 // ---------------------------------------------------------------- connection
@@ -246,303 +240,115 @@ impl Role {
     }
 }
 
-/// One declared column: its name, its Arrow-facing type, and nullability.
+/// Every declared type this connector maps, for the code that walks the whole
+/// set. Which server types can fill each is the table in
+/// [`crate::connector::mariadb::types`](crate).
+pub(crate) const SUPPORTED_TYPES: [FieldType; 19] = [
+    FieldType::Boolean,
+    FieldType::Int8,
+    FieldType::Int16,
+    FieldType::Int32,
+    FieldType::Int64,
+    FieldType::UInt8,
+    FieldType::UInt16,
+    FieldType::UInt32,
+    FieldType::UInt64,
+    FieldType::Float32,
+    FieldType::Float64,
+    FieldType::Decimal128,
+    FieldType::Utf8,
+    FieldType::Binary,
+    FieldType::Date32,
+    FieldType::Time64Micros,
+    FieldType::TimestampMicros,
+    FieldType::TimestampMicrosUtc,
+    FieldType::Json,
+];
+
+/// Whether this connector maps the declared type.
+fn supported(ty: FieldType) -> bool {
+    SUPPORTED_TYPES.contains(&ty)
+}
+
+/// The width in bits of an integer type, `None` for any other.
+pub(crate) fn int_bits(ty: FieldType) -> Option<u8> {
+    match ty {
+        FieldType::Int8 | FieldType::UInt8 => Some(8),
+        FieldType::Int16 | FieldType::UInt16 => Some(16),
+        FieldType::Int32 | FieldType::UInt32 => Some(32),
+        FieldType::Int64 | FieldType::UInt64 => Some(64),
+        _ => None,
+    }
+}
+
+/// Whether this is one of the four unsigned integer types.
+pub(crate) fn is_unsigned_int(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::UInt8 | FieldType::UInt16 | FieldType::UInt32 | FieldType::UInt64
+    )
+}
+
+/// Whether a column of this type can carry a cursor.
 ///
-/// Flat rather than an internally tagged enum, so `deny_unknown_fields` still
-/// applies; `#[serde(flatten)]` would switch it off.
-#[derive(Deserialize, Debug, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct FieldSpec {
-    /// Column name. Matched against the server by name, never by position.
-    ///
-    /// Read from `id`, because `crate::config` puts a node's leading argument,
-    /// the `"total"` in `schema_fields "total" type="float64"`, under that
-    /// key.
-    #[serde(rename = "id")]
-    pub name: String,
-    /// Declared type. Checked against the column's server type on connect.
-    #[serde(rename = "type")]
-    pub ty: MariadbFieldType,
-    /// Whether the Arrow field admits NULL.
-    #[serde(default = "default_true")]
-    pub nullable: bool,
-    /// Total digits. `decimal128` only, and required there.
-    #[serde(default)]
-    pub precision: Option<u8>,
-    /// Fractional digits. `decimal128` only, and required there.
-    #[serde(default)]
-    pub scale: Option<i8>,
-    /// The `information_schema` `DATA_TYPE` this column must have, such as
-    /// `varchar` or `bigint`, compared without regard to case.
-    ///
-    /// An assertion made on first connect: it fails when the server column is
-    /// another type, and changes no decoding. `type` alone decides the Arrow
-    /// type.
-    #[serde(default)]
-    pub mariadb_type: Option<String>,
-}
-
-/// The declared type of a column.
-///
-/// Each maps to exactly one Arrow [`DataType`]. Which server types can fill
-/// it is the table in [`crate::connector::mariadb::types`](crate).
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MariadbFieldType {
-    /// `tinyint` as a flag, to Arrow `Boolean`. Only 0 and 1 are accepted.
-    Boolean,
-    /// To Arrow `Int8`.
-    Int8,
-    /// To Arrow `Int16`.
-    Int16,
-    /// To Arrow `Int32`.
-    Int32,
-    /// To Arrow `Int64`.
-    Int64,
-    /// To Arrow `UInt8`.
-    #[serde(rename = "uint8")]
-    UInt8,
-    /// To Arrow `UInt16`.
-    #[serde(rename = "uint16")]
-    UInt16,
-    /// To Arrow `UInt32`.
-    #[serde(rename = "uint32")]
-    UInt32,
-    /// To Arrow `UInt64`.
-    #[serde(rename = "uint64")]
-    UInt64,
-    /// `float` to Arrow `Float32`.
-    Float32,
-    /// `float` or `double` to Arrow `Float64`.
-    Float64,
-    /// `decimal` to Arrow `Decimal128`. Needs `precision` and `scale`.
-    Decimal128,
-    /// Text, to Arrow `Utf8`. Any column type can be read as its MySQL text
-    /// form.
-    Utf8,
-    /// Bytes, to Arrow `Binary`.
-    Binary,
-    /// `date` to Arrow `Date32`.
-    Date32,
-    /// `time` to Arrow `Time64(Microsecond)`. A value outside a time of day is
-    /// refused.
-    Time64Micros,
-    /// `datetime` to Arrow `Timestamp(Microsecond, None)`.
-    TimestampMicros,
-    /// `timestamp` to Arrow `Timestamp(Microsecond, "UTC")`.
-    TimestampMicrosUtc,
-    /// A JSON document to Arrow `Utf8`, carrying the document text.
-    Json,
-}
-
-impl MariadbFieldType {
-    /// Every declared type, for the code that walks the whole set.
-    pub(crate) const ALL: [MariadbFieldType; 19] = [
-        MariadbFieldType::Boolean,
-        MariadbFieldType::Int8,
-        MariadbFieldType::Int16,
-        MariadbFieldType::Int32,
-        MariadbFieldType::Int64,
-        MariadbFieldType::UInt8,
-        MariadbFieldType::UInt16,
-        MariadbFieldType::UInt32,
-        MariadbFieldType::UInt64,
-        MariadbFieldType::Float32,
-        MariadbFieldType::Float64,
-        MariadbFieldType::Decimal128,
-        MariadbFieldType::Utf8,
-        MariadbFieldType::Binary,
-        MariadbFieldType::Date32,
-        MariadbFieldType::Time64Micros,
-        MariadbFieldType::TimestampMicros,
-        MariadbFieldType::TimestampMicrosUtc,
-        MariadbFieldType::Json,
-    ];
-
-    /// The name used in error messages, matching the configured spelling.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            MariadbFieldType::Boolean => "boolean",
-            MariadbFieldType::Int8 => "int8",
-            MariadbFieldType::Int16 => "int16",
-            MariadbFieldType::Int32 => "int32",
-            MariadbFieldType::Int64 => "int64",
-            MariadbFieldType::UInt8 => "uint8",
-            MariadbFieldType::UInt16 => "uint16",
-            MariadbFieldType::UInt32 => "uint32",
-            MariadbFieldType::UInt64 => "uint64",
-            MariadbFieldType::Float32 => "float32",
-            MariadbFieldType::Float64 => "float64",
-            MariadbFieldType::Decimal128 => "decimal128",
-            MariadbFieldType::Utf8 => "utf8",
-            MariadbFieldType::Binary => "binary",
-            MariadbFieldType::Date32 => "date32",
-            MariadbFieldType::Time64Micros => "time64_micros",
-            MariadbFieldType::TimestampMicros => "timestamp_micros",
-            MariadbFieldType::TimestampMicrosUtc => "timestamp_micros_utc",
-            MariadbFieldType::Json => "json",
-        }
-    }
-
-    /// The width in bits of an integer type, `None` for any other.
-    pub(crate) fn int_bits(self) -> Option<u8> {
-        match self {
-            MariadbFieldType::Int8 | MariadbFieldType::UInt8 => Some(8),
-            MariadbFieldType::Int16 | MariadbFieldType::UInt16 => Some(16),
-            MariadbFieldType::Int32 | MariadbFieldType::UInt32 => Some(32),
-            MariadbFieldType::Int64 | MariadbFieldType::UInt64 => Some(64),
-            _ => None,
-        }
-    }
-
-    /// Whether this is one of the four unsigned integer types.
-    pub(crate) fn is_unsigned_int(self) -> bool {
-        matches!(
-            self,
-            MariadbFieldType::UInt8
-                | MariadbFieldType::UInt16
-                | MariadbFieldType::UInt32
-                | MariadbFieldType::UInt64
-        )
-    }
-
-    /// Whether a column of this type can carry a cursor.
-    ///
-    /// A cursor must be totally ordered by the same comparison the server and
-    /// the persisted text form agree on, which rules out floats, decimals,
-    /// booleans, blobs, times and documents.
-    pub(crate) fn is_cursor_capable(self) -> bool {
-        matches!(
-            self,
-            MariadbFieldType::Int8
-                | MariadbFieldType::Int16
-                | MariadbFieldType::Int32
-                | MariadbFieldType::Int64
-                | MariadbFieldType::UInt8
-                | MariadbFieldType::UInt16
-                | MariadbFieldType::UInt32
-                | MariadbFieldType::UInt64
-                | MariadbFieldType::Utf8
-                | MariadbFieldType::Date32
-                | MariadbFieldType::TimestampMicros
-                | MariadbFieldType::TimestampMicrosUtc
-        )
-    }
-}
-
-impl FieldSpec {
-    /// The Arrow field this spec declares.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Configuration`] when `decimal128` is missing
-    /// `precision` or `scale` or carries an out-of-range one, and when
-    /// `precision` or `scale` is set on another type.
-    pub fn to_arrow_field(&self) -> Result<Field, SaciError> {
-        if self.ty != MariadbFieldType::Decimal128
-            && (self.precision.is_some() || self.scale.is_some())
-        {
-            return Err(SaciError::configuration(format!(
-                "field '{}': precision and scale apply to type \"decimal128\" only, not \"{}\"",
-                self.name,
-                self.ty.as_str()
-            )));
-        }
-        let data_type = match self.ty {
-            MariadbFieldType::Boolean => DataType::Boolean,
-            MariadbFieldType::Int8 => DataType::Int8,
-            MariadbFieldType::Int16 => DataType::Int16,
-            MariadbFieldType::Int32 => DataType::Int32,
-            MariadbFieldType::Int64 => DataType::Int64,
-            MariadbFieldType::UInt8 => DataType::UInt8,
-            MariadbFieldType::UInt16 => DataType::UInt16,
-            MariadbFieldType::UInt32 => DataType::UInt32,
-            MariadbFieldType::UInt64 => DataType::UInt64,
-            MariadbFieldType::Float32 => DataType::Float32,
-            MariadbFieldType::Float64 => DataType::Float64,
-            MariadbFieldType::Utf8 | MariadbFieldType::Json => DataType::Utf8,
-            MariadbFieldType::Binary => DataType::Binary,
-            MariadbFieldType::Date32 => DataType::Date32,
-            MariadbFieldType::Time64Micros => DataType::Time64(UNIT),
-            MariadbFieldType::TimestampMicros => DataType::Timestamp(UNIT, None),
-            MariadbFieldType::TimestampMicrosUtc => DataType::Timestamp(UNIT, Some("UTC".into())),
-            MariadbFieldType::Decimal128 => {
-                let (precision, scale) = self.decimal_params()?;
-                DataType::Decimal128(precision, scale)
-            }
-        };
-        Ok(Field::new(&self.name, data_type, self.nullable))
-    }
-
-    /// The declared `(precision, scale)` of a `decimal128` field.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Configuration`] when either is missing or out of
-    /// range.
-    pub(crate) fn decimal_params(&self) -> Result<(u8, i8), SaciError> {
-        let precision = self.precision.ok_or_else(|| {
-            SaciError::configuration(format!(
-                "field '{}': type \"decimal128\" requires 'precision'",
-                self.name
-            ))
-        })?;
-        let scale = self.scale.ok_or_else(|| {
-            SaciError::configuration(format!(
-                "field '{}': type \"decimal128\" requires 'scale'",
-                self.name
-            ))
-        })?;
-        if precision == 0 || precision > 38 {
-            return Err(SaciError::configuration(format!(
-                "field '{}': decimal128 precision must be within 1..=38, got {precision}",
-                self.name
-            )));
-        }
-        if scale < 0 || i16::from(scale) > i16::from(precision) {
-            return Err(SaciError::configuration(format!(
-                "field '{}': decimal128 scale must be within 0..=precision ({precision}), \
-                 got {scale}",
-                self.name
-            )));
-        }
-        Ok((precision, scale))
-    }
-
-    /// Whether the name carries the `__` prefix this connector reserves for
-    /// the metadata columns a change stream fills.
-    pub(crate) fn is_reserved(&self) -> bool {
-        self.name.starts_with("__")
-    }
+/// A cursor must be totally ordered by the same comparison the server and the
+/// persisted text form agree on, which rules out floats, decimals, booleans,
+/// blobs, times and documents.
+pub(crate) fn is_cursor_capable(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::Int8
+            | FieldType::Int16
+            | FieldType::Int32
+            | FieldType::Int64
+            | FieldType::UInt8
+            | FieldType::UInt16
+            | FieldType::UInt32
+            | FieldType::UInt64
+            | FieldType::Utf8
+            | FieldType::Date32
+            | FieldType::TimestampMicros
+            | FieldType::TimestampMicrosUtc
+    )
 }
 
 /// Validate a declared field list: non-empty, unique names, each field legal.
+///
+/// `native_type`, when set, is the `information_schema` `DATA_TYPE` the column
+/// must have, such as `varchar` or `bigint`, compared without regard to case.
+/// It is an assertion made on first connect and changes no decoding.
 fn validate_fields(what: &str, fields: &[FieldSpec]) -> Result<(), SaciError> {
     if fields.is_empty() {
         return Err(SaciError::configuration(format!(
-            "{what}: schema_fields must declare at least one field"
+            "{what}: at least one 'field' entry is required"
         )));
     }
     for (i, field) in fields.iter().enumerate() {
         if field.name.is_empty() {
             return Err(SaciError::configuration(format!(
-                "{what}: schema_fields[{i}] has an empty 'name'"
+                "{what}: field[{i}] has an empty 'id'"
             )));
         }
         if fields[..i].iter().any(|f| f.name == field.name) {
             return Err(SaciError::configuration(format!(
-                "{what}: schema_fields declares '{}' more than once",
+                "{what}: field '{}' is declared more than once",
                 field.name
             )));
         }
+        if !supported(field.ty) {
+            return Err(SaciError::configuration(format!(
+                "mariadb: field '{}' has type '{}', which this connector does not map",
+                field.name, field.ty
+            )));
+        }
         field
-            .to_arrow_field()
+            .to_arrow()
             .map_err(|e| SaciError::configuration(format!("{what}: {}", e.message())))?;
-        if let Some(declared) = &field.mariadb_type
+        if let Some(declared) = &field.native_type
             && !data_type_is_known(declared)
         {
             return Err(SaciError::configuration(format!(
-                "{what}: field '{}': mariadb_type '{declared}' is not a column type this \
+                "{what}: field '{}': native_type '{declared}' is not a column type this \
                  connector reads or writes",
                 field.name
             )));
@@ -565,10 +371,10 @@ fn validate_cursor_field(
 ) -> Result<(), SaciError> {
     let field = find_field(fields, column).ok_or_else(|| {
         SaciError::configuration(format!(
-            "{what}: {key} '{column}' does not name a declared schema_fields entry"
+            "{what}: {key} '{column}' does not name a declared 'field' entry"
         ))
     })?;
-    if !field.ty.is_cursor_capable() {
+    if !is_cursor_capable(field.ty) {
         return Err(SaciError::configuration(format!(
             "{what}: {key} '{column}' has type \"{}\", which cannot order a cursor; use one of \
              int8, int16, int32, int64, uint8, uint16, uint32, uint64, utf8, date32, \
@@ -640,13 +446,19 @@ pub(crate) fn split_qualified<'a>(
     Ok((schema, name))
 }
 
+/// Whether the name carries the `__` prefix this connector reserves for the
+/// metadata columns a change stream fills.
+pub(crate) fn is_reserved(spec: &FieldSpec) -> bool {
+    spec.name.starts_with("__")
+}
+
 /// Refuse any `__`-prefixed field no change stream fills, for a mode that has
 /// no reserved columns at all.
 fn reject_reserved(what: &str, fields: &[FieldSpec]) -> Result<(), SaciError> {
-    if let Some(field) = fields.iter().find(|f| f.is_reserved()) {
+    if let Some(field) = fields.iter().find(|f| is_reserved(f)) {
         return Err(SaciError::configuration(format!(
-            "{what}: schema_fields '{}' uses the reserved __ prefix, which only cdc_binlog and \
-             an installed cdc_trigger fill",
+            "{what}: field '{}' uses the reserved __ prefix, which only cdc_binlog and an \
+             installed cdc_trigger fill",
             field.name
         )));
     }
@@ -658,15 +470,14 @@ fn reject_reserved(what: &str, fields: &[FieldSpec]) -> Result<(), SaciError> {
 fn check_reserved(
     what: &str,
     fields: &[FieldSpec],
-    allowed: &[(&str, MariadbFieldType)],
+    allowed: &[(&str, FieldType)],
     filler: &str,
 ) -> Result<(), SaciError> {
-    for field in fields.iter().filter(|f| f.is_reserved()) {
+    for field in fields.iter().filter(|f| is_reserved(f)) {
         let Some((_, expected)) = allowed.iter().find(|(name, _)| *name == field.name) else {
             let names: Vec<&str> = allowed.iter().map(|(name, _)| *name).collect();
             return Err(SaciError::configuration(format!(
-                "{what}: schema_fields '{}' uses the reserved __ prefix, and {filler} fills only \
-                 {}",
+                "{what}: field '{}' uses the reserved __ prefix, and {filler} fills only {}",
                 field.name,
                 names.join(", ")
             )));
@@ -691,7 +502,7 @@ fn check_reserved(
 pub struct MariadbSourceConfig {
     /// Stable identity for this source.
     ///
-    /// `SourceFactory::build` receives only the `config` sub-table, never the
+    /// `Connector::source` receives only the `config` sub-table, never the
     /// node's own name, so the name is declared here too. It keys the persisted
     /// offset row, labels every metric, prefixes the default changelog table
     /// and the default replica `server_id`.
@@ -701,8 +512,8 @@ pub struct MariadbSourceConfig {
     /// Which read strategy to use.
     pub mode: SourceMode,
     /// The Arrow schema every emitted batch conforms to.
-    #[serde(deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(rename = "field", deserialize_with = "crate::config::one_or_many")]
+    pub fields: Vec<FieldSpec>,
     /// Rows per emitted `RecordBatch`, and the `LIMIT` on each query.
     ///
     /// Only in force when the host asks for no size:
@@ -1079,7 +890,7 @@ impl MariadbSourceConfig {
         let what = Role::Source.what();
         validate_name(what, &self.name)?;
         self.connection.validate(what)?;
-        validate_fields(what, &self.schema_fields)?;
+        validate_fields(what, &self.fields)?;
 
         if self.batch_rows == 0 {
             return Err(SaciError::configuration(format!(
@@ -1095,12 +906,12 @@ impl MariadbSourceConfig {
                 validate_cursor_field(
                     what,
                     "mode.cursor_column",
-                    &self.schema_fields,
+                    &self.fields,
                     &cursor.cursor_column,
                 )?;
                 validate_cursor_extras(
                     what,
-                    &self.schema_fields,
+                    &self.fields,
                     &cursor.cursor_column,
                     cursor.tiebreak_column.as_deref(),
                     cursor.where_clause.as_deref(),
@@ -1108,11 +919,11 @@ impl MariadbSourceConfig {
                 )?;
                 validate_gap_timeout(
                     what,
-                    &self.schema_fields,
+                    &self.fields,
                     Some(&cursor.cursor_column),
                     (cursor.gap_timeout_ms, cursor.gap_max_wait_ms),
                 )?;
-                reject_reserved(what, &self.schema_fields)?;
+                reject_reserved(what, &self.fields)?;
             }
             SourceMode::CdcTrigger(trigger) => {
                 self.validate_trigger(what, trigger)?;
@@ -1158,13 +969,13 @@ impl MariadbSourceConfig {
             }
             check_reserved(
                 what,
-                &self.schema_fields,
+                &self.fields,
                 &TRIGGER_RESERVED,
                 "an installed cdc_trigger",
             )?;
             validate_gap_timeout(
                 what,
-                &self.schema_fields,
+                &self.fields,
                 None,
                 (trigger.gap_timeout_ms, trigger.gap_max_wait_ms),
             )?;
@@ -1181,10 +992,10 @@ impl MariadbSourceConfig {
                      the outbox's ordering column"
                 )));
             };
-            validate_cursor_field(what, "mode.cursor_column", &self.schema_fields, cursor)?;
+            validate_cursor_field(what, "mode.cursor_column", &self.fields, cursor)?;
             validate_cursor_extras(
                 what,
-                &self.schema_fields,
+                &self.fields,
                 cursor,
                 trigger.tiebreak_column.as_deref(),
                 trigger.where_clause.as_deref(),
@@ -1192,7 +1003,7 @@ impl MariadbSourceConfig {
             )?;
             validate_gap_timeout(
                 what,
-                &self.schema_fields,
+                &self.fields,
                 Some(cursor.as_str()),
                 (trigger.gap_timeout_ms, trigger.gap_max_wait_ms),
             )?;
@@ -1271,12 +1082,7 @@ impl MariadbSourceConfig {
             }
             _ => {}
         }
-        check_reserved(
-            what,
-            &self.schema_fields,
-            &BINLOG_RESERVED,
-            "a cdc_binlog source",
-        )
+        check_reserved(what, &self.fields, &BINLOG_RESERVED, "a cdc_binlog source")
     }
 }
 
@@ -1353,7 +1159,7 @@ fn validate_gap_timeout(
     if (timeout_ms.is_some() || max_wait_ms.is_some())
         && let Some(column) = cursor_column
         && let Some(field) = find_field(fields, column)
-        && field.ty.int_bits().is_none()
+        && int_bits(field.ty).is_none()
     {
         let key = if timeout_ms.is_some() {
             "gap_timeout_ms"
@@ -1384,8 +1190,8 @@ pub struct MariadbSinkConfig {
     /// `schema.table`, or a bare `table` in the DSN's database.
     pub table: String,
     /// The Arrow schema every accepted batch must match.
-    #[serde(deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(rename = "field", deserialize_with = "crate::config::one_or_many")]
+    pub fields: Vec<FieldSpec>,
     /// How rows reach the target table.
     #[serde(default)]
     pub write_mode: WriteMode,
@@ -1457,7 +1263,7 @@ impl MariadbSinkConfig {
         let what = Role::Sink.what();
         validate_name(what, &self.name)?;
         self.connection.validate(what)?;
-        validate_fields(what, &self.schema_fields)?;
+        validate_fields(what, &self.fields)?;
         split_qualified(what, "table", &self.table)?;
 
         if self.chunk_rows == 0 {
@@ -1529,14 +1335,14 @@ impl MariadbSinkConfig {
         }
 
         if self.write_mode == WriteMode::ApplyChanges {
-            match find_field(&self.schema_fields, "__op") {
+            match find_field(&self.fields, "__op") {
                 None => {
                     return Err(SaciError::configuration(format!(
                         "{what}: write_mode \"apply_changes\" needs a declared '__op' field of \
                          type \"utf8\" naming each row's change"
                     )));
                 }
-                Some(op) if op.ty != MariadbFieldType::Utf8 => {
+                Some(op) if op.ty != FieldType::Utf8 => {
                     return Err(SaciError::configuration(format!(
                         "{what}: reserved column '__op' must be declared type \"utf8\", not \
                          \"{}\"",
@@ -1565,9 +1371,9 @@ impl MariadbSinkConfig {
 
     /// Check that `column` of the list `key` names a declared field.
     fn check_column(&self, key: &str, column: &str) -> Result<(), SaciError> {
-        if find_field(&self.schema_fields, column).is_none() {
+        if find_field(&self.fields, column).is_none() {
             return Err(SaciError::configuration(format!(
-                "{}: {key} '{column}' does not name a declared schema_fields entry",
+                "{}: {key} '{column}' does not name a declared 'field' entry",
                 Role::Sink.what()
             )));
         }
@@ -1578,9 +1384,9 @@ impl MariadbSinkConfig {
     /// except under `apply_changes`, where the `__` fields carry the change and
     /// are never columns of the target.
     pub(crate) fn written_fields(&self) -> Vec<&FieldSpec> {
-        self.schema_fields
+        self.fields
             .iter()
-            .filter(|f| !(self.write_mode == WriteMode::ApplyChanges && f.is_reserved()))
+            .filter(|f| !(self.write_mode == WriteMode::ApplyChanges && is_reserved(f)))
             .collect()
     }
 
@@ -1650,6 +1456,7 @@ fn default_chunk_rows() -> usize {
 mod tests {
     use super::*;
     use crate::connector::from_kdl_str;
+    use arrow_schema::{DataType, Field, TimeUnit};
 
     fn source(kdl_text: &str) -> Result<MariadbSourceConfig, String> {
         let value = from_kdl_str(kdl_text).map_err(|e| e.to_string())?;
@@ -1672,9 +1479,9 @@ connection dsn="mysql://reader:pw@db:3306/shop" user="saci" password="secret" co
 
 mode kind="polling" table="shop.orders" cursor_column="updated_at" tiebreak_column="id" initial="now" offset_table="saci_source_offsets" where_clause="status <> 'draft'"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "updated_at" type="timestamp_micros" nullable=#false
-schema_fields "total" type="decimal128" precision=12 scale=2 mariadb_type="decimal"
+field "id" type="int64" nullable=#false
+field "updated_at" type="timestamp_micros" nullable=#false
+field "total" type="decimal128" precision=12 scale=2 native_type="decimal"
 "#;
 
     const TRIGGER_OUTBOX: &str = r#"
@@ -1684,9 +1491,9 @@ connection dsn="mariadb://localhost/shop" ssl_mode="disabled"
 
 mode kind="cdc_trigger" table="outbox" cursor_column="seq" retention="delete_acked" offset_table_autocreate=#false
 
-schema_fields "seq" type="uint64" nullable=#false
-schema_fields "__op" type="utf8"
-schema_fields "payload" type="json"
+field "seq" type="uint64" nullable=#false
+field "__op" type="utf8"
+field "payload" type="json"
 "#;
 
     const TRIGGER_INSTALL: &str = r#"
@@ -1696,11 +1503,11 @@ connection dsn="mysql://localhost/shop" ssl_mode="disabled"
 
 mode kind="cdc_trigger" table="orders" install_triggers=#true
 
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__seq" type="uint64" nullable=#false
-schema_fields "__commit_ts" type="timestamp_micros_utc"
-schema_fields "__table" type="utf8"
-schema_fields "id" type="int64" nullable=#false
+field "__op" type="utf8" nullable=#false
+field "__seq" type="uint64" nullable=#false
+field "__commit_ts" type="timestamp_micros_utc"
+field "__table" type="utf8"
+field "id" type="int64" nullable=#false
 "#;
 
     const BINLOG: &str = r#"
@@ -1710,14 +1517,14 @@ connection dsn="mysql://localhost/shop" ssl_mode="disabled"
 
 mode kind="cdc_binlog" table="shop.orders" server_id=4100 max_changes_per_cycle=100
 
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__table" type="utf8"
-schema_fields "__binlog_file" type="utf8"
-schema_fields "__binlog_pos" type="uint64"
-schema_fields "__gtid" type="utf8"
-schema_fields "__commit_ts" type="timestamp_micros_utc"
-schema_fields "id" type="int64" nullable=#false
-schema_fields "total" type="float64"
+field "__op" type="utf8" nullable=#false
+field "__table" type="utf8"
+field "__binlog_file" type="utf8"
+field "__binlog_pos" type="uint64"
+field "__gtid" type="utf8"
+field "__commit_ts" type="timestamp_micros_utc"
+field "id" type="int64" nullable=#false
+field "total" type="float64"
 "#;
 
     const SINK: &str = r#"
@@ -1732,9 +1539,9 @@ truncate_before_first_write #true
 
 connection dsn="mysql://localhost/shop" ssl_mode="disabled"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "seq" type="int64" nullable=#false
-schema_fields "total" type="decimal128" precision=12 scale=2
+field "id" type="int64" nullable=#false
+field "seq" type="int64" nullable=#false
+field "total" type="decimal128" precision=12 scale=2
 "#;
 
     /// The sink as an `apply_changes` consumer of a binlog source.
@@ -1746,10 +1553,10 @@ conflict_columns "id"
 
 connection dsn="mysql://localhost/shop" ssl_mode="disabled"
 
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__binlog_pos" type="uint64"
-schema_fields "id" type="int64" nullable=#false
-schema_fields "total" type="float64"
+field "__op" type="utf8" nullable=#false
+field "__binlog_pos" type="uint64"
+field "id" type="int64" nullable=#false
+field "total" type="float64"
 "#;
 
     /// Assert `validate` rejected the config as a configuration error naming
@@ -1972,7 +1779,7 @@ schema_fields "total" type="float64"
     fn a_sink_with_no_optional_keys_takes_the_documented_defaults() {
         let cfg = sink(
             "name \"s\"\ntable \"t\"\nconnection dsn=\"mysql://h/d\" ssl_mode=\"disabled\"\n\
-             schema_fields \"id\" type=\"int64\"\n",
+             field \"id\" type=\"int64\"\n",
         )
         .expect("parse");
         cfg.validate().expect("validate");
@@ -2123,21 +1930,28 @@ schema_fields "total" type="float64"
     }
 
     #[test]
-    fn empty_schema_fields_are_refused() {
+    fn empty_field_list_is_refused() {
         // The configuration language has no empty-list literal, so the only
         // way to declare nothing is to clear the parsed list.
         let mut cfg = source(POLLING).unwrap();
-        cfg.schema_fields.clear();
+        cfg.fields.clear();
         rejects(
             cfg.validate().unwrap_err(),
-            "schema_fields must declare at least one field",
+            "at least one 'field' entry is required",
         );
     }
 
     #[test]
     fn a_duplicate_field_name_is_refused() {
-        let err = invalid_source(&format!("{POLLING}\nschema_fields \"id\" type=\"int32\"\n"));
-        rejects(err, "'id' more than once");
+        let err = invalid_source(&format!("{POLLING}\nfield \"id\" type=\"int32\"\n"));
+        rejects(err, "field 'id' is declared more than once");
+    }
+
+    #[test]
+    fn a_field_of_a_type_the_connector_does_not_map_is_refused() {
+        let err = invalid_source(&format!("{POLLING}\nfield \"big\" type=\"list\"\n"));
+        rejects(err.clone(), "'big'");
+        rejects(err, "which this connector does not map");
     }
 
     #[test]
@@ -2173,23 +1987,23 @@ schema_fields "total" type="float64"
     #[test]
     fn precision_on_a_type_other_than_decimal_is_refused() {
         let err = invalid_source(&POLLING.replace(
-            "schema_fields \"id\" type=\"int64\"",
-            "schema_fields \"id\" type=\"int64\" precision=4",
+            "field \"id\" type=\"int64\"",
+            "field \"id\" type=\"int64\" precision=4",
         ));
         rejects(err, "decimal128");
     }
 
     #[test]
-    fn a_mariadb_type_the_connector_does_not_know_is_refused() {
+    fn a_native_type_the_connector_does_not_know_is_refused() {
         let err =
-            invalid_source(&POLLING.replace("mariadb_type=\"decimal\"", "mariadb_type=\"vachar\""));
+            invalid_source(&POLLING.replace("native_type=\"decimal\"", "native_type=\"vachar\""));
         rejects(err.clone(), "'vachar'");
         rejects(err, "'total'");
     }
 
     #[test]
-    fn a_mariadb_type_names_a_column_type_in_any_case() {
-        source(&POLLING.replace("mariadb_type=\"decimal\"", "mariadb_type=\"DECIMAL\""))
+    fn a_native_type_names_a_column_type_in_any_case() {
+        source(&POLLING.replace("native_type=\"decimal\"", "native_type=\"DECIMAL\""))
             .expect("parse")
             .validate()
             .expect("the assertion ignores case");
@@ -2286,10 +2100,10 @@ schema_fields "total" type="float64"
 
     #[test]
     fn a_reserved_field_in_polling_mode_is_refused_with_the_exact_text() {
-        let err = invalid_source(&format!("{POLLING}\nschema_fields \"__x\" type=\"utf8\"\n"));
+        let err = invalid_source(&format!("{POLLING}\nfield \"__x\" type=\"utf8\"\n"));
         assert_eq!(
             err.message(),
-            "MariadbSource: schema_fields '__x' uses the reserved __ prefix, which only \
+            "MariadbSource: field '__x' uses the reserved __ prefix, which only \
              cdc_binlog and an installed cdc_trigger fill"
         );
     }
@@ -2311,8 +2125,8 @@ schema_fields "total" type="float64"
             "timestamp_micros_utc",
         ] {
             let cfg = source(&POLLING.replace(
-                "schema_fields \"updated_at\" type=\"timestamp_micros\"",
-                &format!("schema_fields \"updated_at\" type=\"{ty}\""),
+                "field \"updated_at\" type=\"timestamp_micros\"",
+                &format!("field \"updated_at\" type=\"{ty}\""),
             ))
             .expect("parse");
             cfg.validate().unwrap_or_else(|e| panic!("{ty}: {e}"));
@@ -2345,7 +2159,7 @@ schema_fields "total" type="float64"
         // so does any other `__` name, because an outbox is read as plain
         // columns.
         let cfg = source(&format!(
-            "{TRIGGER_OUTBOX}\nschema_fields \"__anything\" type=\"int64\"\n"
+            "{TRIGGER_OUTBOX}\nfield \"__anything\" type=\"int64\"\n"
         ))
         .expect("parse");
         cfg.validate().expect("an outbox column is just a column");
@@ -2580,7 +2394,7 @@ schema_fields "total" type="float64"
     #[test]
     fn an_installed_trigger_may_declare_only_its_four_reserved_columns() {
         let err = invalid_source(&format!(
-            "{TRIGGER_INSTALL}\nschema_fields \"__binlog_pos\" type=\"uint64\"\n"
+            "{TRIGGER_INSTALL}\nfield \"__binlog_pos\" type=\"uint64\"\n"
         ));
         rejects(err.clone(), "'__binlog_pos'");
         rejects(err, "__op, __seq, __commit_ts, __table");
@@ -2907,7 +2721,7 @@ schema_fields "total" type="float64"
         let cfg = sink(
             "name \"s\"\ntable \"t\"\nwrite_mode \"upsert\"\nconflict_columns \"id\"\n\
              connection dsn=\"mysql://h/d\" ssl_mode=\"disabled\"\n\
-             schema_fields \"id\" type=\"int64\"\n",
+             field \"id\" type=\"int64\"\n",
         )
         .expect("parse");
         cfg.validate().expect("validate");
@@ -2916,9 +2730,8 @@ schema_fields "total" type="float64"
 
     #[test]
     fn apply_changes_without_an_op_field_is_refused() {
-        let err = invalid_sink(
-            &SINK_APPLY.replace("schema_fields \"__op\" type=\"utf8\" nullable=#false\n", ""),
-        );
+        let err =
+            invalid_sink(&SINK_APPLY.replace("field \"__op\" type=\"utf8\" nullable=#false\n", ""));
         rejects(err, "needs a declared '__op' field");
     }
 
@@ -2964,10 +2777,9 @@ schema_fields "total" type="float64"
 
     #[test]
     fn every_declared_type_deserialises_from_its_own_spelling() {
-        for ty in MariadbFieldType::ALL {
-            let parsed =
-                MariadbFieldType::deserialize(serde_json::Value::String(ty.as_str().to_string()))
-                    .unwrap_or_else(|e| panic!("{}: {e}", ty.as_str()));
+        for ty in SUPPORTED_TYPES {
+            let parsed = FieldType::deserialize(serde_json::Value::String(ty.as_str().to_string()))
+                .unwrap_or_else(|e| panic!("{}: {e}", ty.as_str()));
             assert_eq!(parsed, ty);
         }
     }
@@ -2975,11 +2787,7 @@ schema_fields "total" type="float64"
     #[test]
     fn arrow_types_match_declared_types() {
         let cfg = source(POLLING).unwrap();
-        let fields: Vec<Field> = cfg
-            .schema_fields
-            .iter()
-            .map(|f| f.to_arrow_field().unwrap())
-            .collect();
+        let fields: Vec<Field> = cfg.fields.iter().map(|f| f.to_arrow().unwrap()).collect();
         assert_eq!(fields[0].data_type(), &DataType::Int64);
         assert!(!fields[0].is_nullable());
         assert_eq!(
@@ -2994,46 +2802,47 @@ schema_fields "total" type="float64"
     fn every_declared_type_maps_to_the_documented_arrow_type() {
         let utc: std::sync::Arc<str> = "UTC".into();
         for (ty, expected) in [
-            (MariadbFieldType::Boolean, DataType::Boolean),
-            (MariadbFieldType::Int8, DataType::Int8),
-            (MariadbFieldType::Int16, DataType::Int16),
-            (MariadbFieldType::Int32, DataType::Int32),
-            (MariadbFieldType::Int64, DataType::Int64),
-            (MariadbFieldType::UInt8, DataType::UInt8),
-            (MariadbFieldType::UInt16, DataType::UInt16),
-            (MariadbFieldType::UInt32, DataType::UInt32),
-            (MariadbFieldType::UInt64, DataType::UInt64),
-            (MariadbFieldType::Float32, DataType::Float32),
-            (MariadbFieldType::Float64, DataType::Float64),
-            (MariadbFieldType::Decimal128, DataType::Decimal128(10, 2)),
-            (MariadbFieldType::Utf8, DataType::Utf8),
-            (MariadbFieldType::Binary, DataType::Binary),
-            (MariadbFieldType::Date32, DataType::Date32),
+            (FieldType::Boolean, DataType::Boolean),
+            (FieldType::Int8, DataType::Int8),
+            (FieldType::Int16, DataType::Int16),
+            (FieldType::Int32, DataType::Int32),
+            (FieldType::Int64, DataType::Int64),
+            (FieldType::UInt8, DataType::UInt8),
+            (FieldType::UInt16, DataType::UInt16),
+            (FieldType::UInt32, DataType::UInt32),
+            (FieldType::UInt64, DataType::UInt64),
+            (FieldType::Float32, DataType::Float32),
+            (FieldType::Float64, DataType::Float64),
+            (FieldType::Decimal128, DataType::Decimal128(10, 2)),
+            (FieldType::Utf8, DataType::Utf8),
+            (FieldType::Binary, DataType::Binary),
+            (FieldType::Date32, DataType::Date32),
             (
-                MariadbFieldType::Time64Micros,
+                FieldType::Time64Micros,
                 DataType::Time64(TimeUnit::Microsecond),
             ),
             (
-                MariadbFieldType::TimestampMicros,
+                FieldType::TimestampMicros,
                 DataType::Timestamp(TimeUnit::Microsecond, None),
             ),
             (
-                MariadbFieldType::TimestampMicrosUtc,
+                FieldType::TimestampMicrosUtc,
                 DataType::Timestamp(TimeUnit::Microsecond, Some(utc.clone())),
             ),
-            (MariadbFieldType::Json, DataType::Utf8),
+            (FieldType::Json, DataType::Utf8),
         ] {
-            let decimal = ty == MariadbFieldType::Decimal128;
+            let decimal = ty == FieldType::Decimal128;
             let spec = FieldSpec {
                 name: "c".to_string(),
                 ty,
                 nullable: true,
                 precision: decimal.then_some(10),
                 scale: decimal.then_some(2),
-                mariadb_type: None,
+                item: None,
+                native_type: None,
             };
             assert_eq!(
-                spec.to_arrow_field().expect("arrow field").data_type(),
+                spec.to_arrow().expect("arrow field").data_type(),
                 &expected,
                 "{}",
                 ty.as_str()
@@ -3044,32 +2853,32 @@ schema_fields "total" type="float64"
     #[test]
     fn cursor_capability_follows_the_declared_type() {
         for (ty, capable) in [
-            (MariadbFieldType::Int8, true),
-            (MariadbFieldType::Int64, true),
-            (MariadbFieldType::UInt8, true),
-            (MariadbFieldType::UInt64, true),
-            (MariadbFieldType::Date32, true),
-            (MariadbFieldType::TimestampMicros, true),
-            (MariadbFieldType::TimestampMicrosUtc, true),
-            (MariadbFieldType::Utf8, true),
-            (MariadbFieldType::Float64, false),
-            (MariadbFieldType::Decimal128, false),
-            (MariadbFieldType::Boolean, false),
-            (MariadbFieldType::Binary, false),
-            (MariadbFieldType::Json, false),
-            (MariadbFieldType::Time64Micros, false),
+            (FieldType::Int8, true),
+            (FieldType::Int64, true),
+            (FieldType::UInt8, true),
+            (FieldType::UInt64, true),
+            (FieldType::Date32, true),
+            (FieldType::TimestampMicros, true),
+            (FieldType::TimestampMicrosUtc, true),
+            (FieldType::Utf8, true),
+            (FieldType::Float64, false),
+            (FieldType::Decimal128, false),
+            (FieldType::Boolean, false),
+            (FieldType::Binary, false),
+            (FieldType::Json, false),
+            (FieldType::Time64Micros, false),
         ] {
-            assert_eq!(ty.is_cursor_capable(), capable, "{}", ty.as_str());
+            assert_eq!(is_cursor_capable(ty), capable, "{}", ty.as_str());
         }
     }
 
     #[test]
     fn integer_widths_and_signedness_are_reported() {
-        assert_eq!(MariadbFieldType::Int8.int_bits(), Some(8));
-        assert_eq!(MariadbFieldType::UInt32.int_bits(), Some(32));
-        assert_eq!(MariadbFieldType::Utf8.int_bits(), None);
-        assert!(MariadbFieldType::UInt16.is_unsigned_int());
-        assert!(!MariadbFieldType::Int16.is_unsigned_int());
-        assert!(!MariadbFieldType::Boolean.is_unsigned_int());
+        assert_eq!(int_bits(FieldType::Int8), Some(8));
+        assert_eq!(int_bits(FieldType::UInt32), Some(32));
+        assert_eq!(int_bits(FieldType::Utf8), None);
+        assert!(is_unsigned_int(FieldType::UInt16));
+        assert!(!is_unsigned_int(FieldType::Int16));
+        assert!(!is_unsigned_int(FieldType::Boolean));
     }
 }

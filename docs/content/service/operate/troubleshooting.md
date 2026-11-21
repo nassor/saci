@@ -123,13 +123,15 @@ these except the last surface in CI without moving any data.
 |---|---|
 | `error: Configuration error: reading config file saci.kdl: <os error>` | Point `--config` or `SACI_CONFIG` at a file that exists. |
 | `node.data_dir must not be empty` | Set `data_dir` on the `node` line; it is required even when nothing writes there. |
+| `http.bind 'localhost' is not a valid socket address: invalid socket address syntax` | Give `http.bind` a `host:port` with an IP address, or override it with `saci-service serve --bind 0.0.0.0:8080` (env `SACI_HTTP_BIND`). |
+| `failed to probe HTTP bind address 127.0.0.1:0: <os error>` | The address `--bind` or `http.bind` names cannot be opened with port 0. Pass `--bind` with an address this machine owns. |
 | `invalid variable name "out dir": use [A-Za-z0-9_]` | Rename the entry in the `variables` block to letters, digits and `_`. |
 | `parsing KDL: 109:18: Expected quoted string` followed by `note: ${OUT_DIR} holds a backslash` | Rewrite that variable's path with forward slashes; a backslash escapes inside the quoted string: [The config file](@/service/config/_index.md). |
 | ``mode "cluster" does not take a `store` block: cluster state lives in node.data_dir`` | Delete the `store` block: [Running a cluster](@/service/operate/cluster.md). |
 | `lease_ttl_ms (1000) must be >= 3 × election_timeout_ms (1000) = 3000` | Raise the lease, or lower the election timeout. |
 | `store redb: path must not be empty` | Give the `store "redb"` block a real `path`. |
 | `unknown store kind 'sqlite' (expected "redb")` | Change the store's leading argument to `"redb"`. |
-| `source type 'tcp' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | Set `run_mode kind="stream"`: [Run modes and persistence](@/service/config/run-modes.md). |
+| `source connector 'tcp' never reaches EOF; it requires standalone mode with run "stream"` | Set `run "stream"`: [Run modes and persistence](@/service/config/run-modes.md). |
 | `workflow 'orders': links contain a cycle` | Remove one edge; every graph rule is on [Workflows and links](@/service/config/workflows.md). |
 | `workflow 'orders': link 'enrich' -> 'orders_out': processor 'enrich' does not declare component 'Order', which sink 'orders_out' reads` | Correct the `component` name on the node, or declare that component in the processor. |
 | `workflow 'orders': link 'enrich' -> 'orders_out': component 'Order' schema differs between processor 'enrich' and sink 'orders_out'` | Make the two ends agree field by field, including nullability and order. |
@@ -138,10 +140,10 @@ these except the last surface in CI without moving any data.
 | `mode "cluster"` in a binary without cluster support | Rebuild with `--features service-cluster`: [Install saci-service](@/service/install.md). |
 | A `wasm` or `plugin` node in a binary without that host | Rebuild with the `--features` flag the message names, `wasm-host` or `plugin-host`: [Install saci-service](@/service/install.md). |
 | A `window` block on either, in a binary built without `windows` | Rebuild with `--features windows`: [Install saci-service](@/service/install.md). |
-| `type="NatsSource"`, or any connector, in a binary built without it | Rebuild with the `--features` flag the message names: [Install saci-service](@/service/install.md). |
-| `format="csv"`, or any format, on a `transformer` node in a binary built without it | Rebuild with the `--features` flag the message names: [Install saci-service](@/service/install.md). |
+| `connector="nats"`, or any connector, in a binary built without it | Rebuild with the `--features` flag the message names: [Install saci-service](@/service/install.md). |
+| `format="csv"`, or any format, on a `codec` node in a binary built without it | Rebuild with the `--features` flag the message names: [Install saci-service](@/service/install.md). |
 
-A `type` the registry cannot resolve is one of two things, and `validate`
+A `connector` name the registry cannot resolve is one of two things, and `validate`
 separates them.
 
 A connector this binary ships but was not built with is a refusal. Nothing
@@ -149,15 +151,15 @@ registered at serve time can supply it, so it fails in every mode and names
 the feature that carries it:
 
 ```text
-ERROR: no source factory registered for type 'NatsSource' (required by source 'nats_orders'): that is a built-in connector this binary was built without, so rebuild or reinstall with `--features connector-nats`, or register your own factory under that name
+ERROR: no connector named 'nats' is registered (required by source 'nats_orders'): that is a built-in connector this binary was built without, so rebuild or reinstall with `--features connector-nats`, or register your own connector under that name
 error: Configuration error: 1 declared type(s) name a built-in connector this binary was built without. Rebuild or reinstall with the feature named above.
 ```
 
-A `type` no build of the binary provides may be a factory you register
+A `connector` name no build of the binary provides may be a connector you register
 yourself, so it stays a warning and the process exits 0:
 
 ```text
-WARNING: no sink factory registered for type 'ClickHouseSink' (required by sink 'orders_out')
+WARNING: no connector named 'mongodb' is registered (required by sink 'orders_out')
 NOTE: 1 unknown type(s) above are not in the built-in registry. They may be
 user-defined types registered at serve time. Use --strict to treat these as errors.
 ```
@@ -166,14 +168,14 @@ user-defined types registered at serve time. Use --strict to treat these as erro
 first. Which check raises which message is
 [What the loader validates](@/library/service/loading.md).
 
-A `format` a `transformer` node names has no second kind. It is a refusal in
+A `format` a `codec` node names has no second kind. It is a refusal in
 every `validate` mode and at serve time, since the format is either compiled
 into this binary or registered by the embedder driving it. The message lists
 what the binary does carry, and names the feature when the format is one this
 crate ships:
 
 ```text
-error: Configuration error: transformer 'csv_fmt' names format 'csv', which no transformer is registered for (registered: none): that is a built-in format this binary was built without, so rebuild or reinstall with `--features transformer-csv`, or register your own transformer under that name
+error: Configuration error: codec 'csv_fmt' names format 'csv', which no codec is registered for (registered: none): that is a built-in format this binary was built without, so rebuild or reinstall with `--features codec-csv`, or register your own codec under that name
 ```
 
 A build capability has no second kind either, and nothing registered at serve
@@ -208,8 +210,8 @@ whichever binary reads it.
 
 A misspelled key inside a `workflow` block is an error that names it, with one
 exception below. Every node kind rejects a key it cannot honour: a `wasm` node
-with a `watch` property, or a `sink` with a `truncat` key, fails the parse
-instead of ignoring it. The same holds for `transformer`, `source`, `sink`,
+with a `watch` property, or a `sink` with a `compnent` property, fails the parse
+instead of ignoring it. The same holds for `codec`, `source`, `sink`,
 `plugin`, `retry`, `heal`, `window` and `flow_control`.
 
 A node kind is never one of those keys, and neither is `window`. Both node
@@ -217,11 +219,11 @@ kinds and the block they carry are part of the schema whichever hosts and
 engine this binary was built with, so declaring one is never reported as an
 unknown key: it is the capability refusal above.
 
-Two kinds of place are looser. A key at the top level, or inside `node`,
-`peer`, `http`, `observability` or a `link`, is accepted and ignored, so a
-typo in one of those changes nothing silently. And a key inside a `config`
-block belongs to the connector, which decides for itself whether it is an
-error. The keys each one accepts are on its own page under
+The top level and `node`, `peer`, `http`, `observability`, `inspector` and
+`link` are strict too: a key they do not know fails the load instead of being
+ignored. A key inside a `config` block
+belongs to the connector, which rejects an unknown key by name. The keys each
+one accepts are on its own page under
 [Sources and sinks](@/service/connectors/_index.md).
 
 ## Failures while running
@@ -234,7 +236,7 @@ downstream of it is fed. Every one of them logs and increments
 | Condition | What happens |
 |---|---|
 | A source fails to read | That source stops draining for this pass; the pass continues with the others |
-| A processor call fails | That processor's downstream nodes are fed nothing this pass, and `saci_workflow_errors_total` increments |
+| A processor call fails | That processor's downstream nodes are fed nothing this pass, and `saci_workflow_pass_errors_total` increments |
 | More than 128 processor calls run at once | The 129th fails to instantiate with `processor trap (instantiate): maximum concurrent limit of 128 for component instances reached`, and that batch is treated as failed |
 | A sink fails to write | The write is retried with backoff first; the error reaches the runner only after the last attempt |
 | The next chunk would exceed `max_chunk_bytes` | The source's admission target is divided: [Flow control](@/service/operate/flow-control.md) |
@@ -248,7 +250,7 @@ Three places answer "what went wrong", in increasing detail:
 
 - `iteration_errors` on `/status`, per workflow, is the fastest yes or no. It
   counts every failure below, source, processor and sink alike.
-- `saci_workflow_errors_total` on `/metrics`, under `workflow="<id>"`, is the
+- `saci_workflow_pass_errors_total` on `/metrics`, under `workflow="<id>"`, is the
   narrower signal for an alert: a processor call that failed, and in cluster
   mode a claim the node could not renew. A source or sink failure never
   reaches it, so pair it with `iteration_errors`:
@@ -275,6 +277,12 @@ Windows (PowerShell):
 curl.exe -s http://localhost:8080/status | ConvertFrom-Json |
   Select-Object -ExpandProperty standalone |
   Select-Object workflow_id, iterations, iteration_errors
+```
+
+The same document from the command line. Without `--url` (env `SACI_URL`) it loads `--config` and uses `http://{http.bind}`:
+
+```bash,name=Runs the same on Linux, macOS and Windows (PowerShell)
+saci-service status --url http://localhost:8080 --full
 ```
 
 ## Next

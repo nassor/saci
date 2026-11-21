@@ -59,7 +59,7 @@
 use std::sync::Arc;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
@@ -109,9 +109,9 @@ impl TursoSink {
     pub fn new(config: TursoSinkConfig) -> Result<Self, SaciError> {
         config.validate()?;
         let fields = config
-            .schema_fields
+            .fields
             .iter()
-            .map(|f| f.to_arrow_field())
+            .map(|f| f.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
         let metrics = Instruments::sink(&config.name);
@@ -258,7 +258,7 @@ impl TursoSink {
     /// `truncate_before_first_write` asks for, so the old rows and the new ones
     /// change together or not at all.
     async fn flush_once(&mut self, what: &str) -> FlushOutcome {
-        let fields = &self.config.schema_fields;
+        let fields = &self.config.fields;
         let table = self.config.table.clone();
         let begin = self.config.transaction.begin_sql();
         let truncate = self.config.truncate_before_first_write && !self.first_write_done;
@@ -402,7 +402,7 @@ async fn verify_target(
             config.table
         )));
     }
-    for field in &config.schema_fields {
+    for field in &config.fields {
         if !columns.iter().any(|c| c == &field.name) {
             return Err(SaciError::configuration(format!(
                 "{what}: table '{}' has no column '{}'",
@@ -416,12 +416,12 @@ async fn verify_target(
 /// The insert statement for the configured write mode.
 fn build_insert_sql(config: &TursoSinkConfig) -> String {
     let columns = config
-        .schema_fields
+        .fields
         .iter()
         .map(|f| f.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let placeholders = (1..=config.schema_fields.len())
+    let placeholders = (1..=config.fields.len())
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -439,7 +439,7 @@ fn build_insert_sql(config: &TursoSinkConfig) -> String {
         }
         WriteMode::Upsert => {
             let assignments = config
-                .schema_fields
+                .fields
                 .iter()
                 .filter(|f| !config.conflict_columns.contains(&f.name))
                 .map(|f| format!("{} = excluded.{}", f.name, f.name))
@@ -489,8 +489,8 @@ mod tests {
              table \"enriched\"\n\
              {extra}\
              connection path=\"{path}\"\n\
-             schema_fields \"id\" type=\"int64\" nullable=#false\n\
-             schema_fields \"total\" type=\"float64\" nullable=#true\n"
+             field \"id\" type=\"int64\" nullable=#false\n\
+             field \"total\" type=\"float64\" nullable=#true\n"
         );
         let config: TursoSinkConfig =
             serde_json::from_value(from_kdl_str(&kdl).expect("kdl parses")).expect("config");

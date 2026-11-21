@@ -19,11 +19,9 @@ use crate::error::SaciError;
 /// # Example
 ///
 /// ```
-/// # #[cfg(feature = "windows")]
-/// # {
-/// use saci::windows::function::{ProcessWindowFn, WindowContext};
-/// use arrow_array::RecordBatch;
-/// use saci::error::SaciError;
+/// use saci::windows::{ProcessWindowFn, WindowContext};
+/// use saci::arrow_array::RecordBatch;
+/// use saci::SaciError;
 ///
 /// struct MyFn;
 /// impl ProcessWindowFn for MyFn {
@@ -32,7 +30,6 @@ use crate::error::SaciError;
 ///         Ok(batch.clone())
 ///     }
 /// }
-/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct WindowContext {
@@ -89,21 +86,15 @@ pub trait ProcessWindowFn: Send + Sync {
 /// The window function to apply when computing window results.
 ///
 /// Either a built-in columnar aggregate over one field, or a fully custom
-/// function that receives the entire window [`RecordBatch`].
+/// function that receives the entire window [`RecordBatch`]. Build one with
+/// [`sum`](Self::sum), [`min`](Self::min), [`max`](Self::max),
+/// [`count`](Self::count), [`mean`](Self::mean) or
+/// [`process`](Self::process).
 pub enum WindowFunction {
     /// Apply a built-in aggregate to a single field.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// WindowFunction::Reduce {
-    ///     input_field: "price",
-    ///     aggregate: ReduceAggregate::Sum,
-    /// }
-    /// ```
     Reduce {
         /// Name of the numeric field to aggregate.
-        input_field: &'static str,
+        input_field: String,
         /// The aggregate operation to apply.
         aggregate: ReduceAggregate,
     },
@@ -113,6 +104,45 @@ pub enum WindowFunction {
     /// The boxed [`ProcessWindowFn`] receives the full window [`RecordBatch`]
     /// and can return an output with an arbitrary schema.
     Process(Box<dyn ProcessWindowFn>),
+}
+
+impl WindowFunction {
+    fn reduce(field: impl AsRef<str>, aggregate: ReduceAggregate) -> Self {
+        Self::Reduce {
+            input_field: field.as_ref().to_string(),
+            aggregate,
+        }
+    }
+
+    /// Sum of `field` per window.
+    pub fn sum(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::Sum)
+    }
+
+    /// Minimum of `field` per window.
+    pub fn min(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::Min)
+    }
+
+    /// Maximum of `field` per window.
+    pub fn max(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::Max)
+    }
+
+    /// Row count per window.
+    pub fn count(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::Count)
+    }
+
+    /// Mean of the non-null values of `field` per window.
+    pub fn mean(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::Mean)
+    }
+
+    /// Run `f` once per window group.
+    pub fn process(f: impl ProcessWindowFn + 'static) -> Self {
+        Self::Process(Box::new(f))
+    }
 }
 
 #[cfg(test)]
@@ -139,20 +169,24 @@ mod tests {
     }
 
     #[test]
-    fn test_window_function_reduce_constructible() {
-        let wf = WindowFunction::Reduce {
-            input_field: "amount",
-            aggregate: ReduceAggregate::Sum,
-        };
-        match wf {
-            WindowFunction::Reduce {
-                input_field,
-                aggregate,
-            } => {
-                assert_eq!(input_field, "amount");
-                assert_eq!(aggregate, ReduceAggregate::Sum);
+    fn test_window_function_constructors() {
+        for (wf, expected) in [
+            (WindowFunction::sum("amount"), ReduceAggregate::Sum),
+            (WindowFunction::min("amount"), ReduceAggregate::Min),
+            (WindowFunction::max("amount"), ReduceAggregate::Max),
+            (WindowFunction::count("amount"), ReduceAggregate::Count),
+            (WindowFunction::mean("amount"), ReduceAggregate::Mean),
+        ] {
+            match wf {
+                WindowFunction::Reduce {
+                    input_field,
+                    aggregate,
+                } => {
+                    assert_eq!(input_field, "amount");
+                    assert_eq!(aggregate, expected);
+                }
+                WindowFunction::Process(_) => panic!("unexpected variant"),
             }
-            WindowFunction::Process(_) => panic!("unexpected variant"),
         }
     }
 

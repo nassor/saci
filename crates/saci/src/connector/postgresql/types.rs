@@ -3,7 +3,7 @@
 //!
 //! [`ROWS`] is the one mapping in this crate: one entry per PostgreSQL base
 //! type, carrying the OID, the OID of its one-dimensional array type, the
-//! [`PgFieldType`] a column of it maps to by default, and every declared type
+//! [`FieldType`] a column of it maps to by default, and every declared type
 //! it can fill over the binary wire. A PostgreSQL type with no Arrow
 //! counterpart maps to `utf8` in PostgreSQL's canonical text form, which is
 //! what makes the table total: every type is readable and writable, and the
@@ -11,7 +11,7 @@
 //!
 //! The connector never coerces. A declared `int32` fed by an `int8` column is a
 //! configuration error, not a narrowing cast, and reading a type whose default
-//! is not `utf8` as text takes an explicit `pg_type` on the field.
+//! is not `utf8` as text takes an explicit `native_type` on the field.
 //! [`validate_columns`] runs once per connection against the real catalog --
 //! the statement's result columns for the source, `pg_attribute` for the sink
 //! -- and reports every mismatch at once so one restart fixes the whole config.
@@ -19,7 +19,8 @@
 use crate::error::SaciError;
 use tokio_postgres::types::Type;
 
-use crate::connector::postgresql::config::{FieldSpec, PgFieldType, Role};
+use crate::connector::postgresql::config::{Role, forced_pg_type};
+use crate::connector::schema::{FieldSpec, FieldType};
 
 /// `jsonb`'s OID, which the encoder checks to add the version byte.
 pub(crate) const OID_JSONB: u32 = 3802;
@@ -50,20 +51,20 @@ struct TypeRow {
     /// The OID of the one-dimensional array of this type, or 0 when it has none.
     array_oid: u32,
     /// The declared type a column of this type maps to when nothing forces it.
-    default_arrow: PgFieldType,
+    default_arrow: FieldType,
     /// Every declared type this PostgreSQL type fills over [`Wire::Binary`].
     ///
     /// `utf8` over [`Wire::Text`] is admitted by rule rather than listed here,
     /// so it is not repeated in all 84 rows: see [`resolve_wire`].
-    binary: &'static [PgFieldType],
+    binary: &'static [FieldType],
 }
 
 const fn row(
     pg: &'static str,
     oid: u32,
     array_oid: u32,
-    default_arrow: PgFieldType,
-    binary: &'static [PgFieldType],
+    default_arrow: FieldType,
+    binary: &'static [FieldType],
 ) -> TypeRow {
     TypeRow {
         pg,
@@ -83,90 +84,90 @@ const fn row(
 /// catalog.
 #[rustfmt::skip]
 static ROWS: &[TypeRow] = &[
-    row("aclitem", 1033, 1034, PgFieldType::Utf8, &[]),
-    row("bit", 1560, 1561, PgFieldType::Utf8, &[]),
-    row("bool", 16, 1000, PgFieldType::Boolean, &[PgFieldType::Boolean]),
-    row("box", 603, 1020, PgFieldType::Utf8, &[]),
-    row("bpchar", 1042, 1014, PgFieldType::Utf8, &[PgFieldType::Utf8]),
-    row("bytea", 17, 1001, PgFieldType::Binary, &[PgFieldType::Binary]),
-    row("char", 18, 1002, PgFieldType::Utf8, &[]),
-    row("cid", 29, 1012, PgFieldType::Int64, &[PgFieldType::Int64]),
-    row("cidr", 650, 651, PgFieldType::Utf8, &[]),
-    row("circle", 718, 719, PgFieldType::Utf8, &[]),
-    row("citext", 0, 0, PgFieldType::Utf8, &[PgFieldType::Utf8]),
-    row("date", 1082, 1182, PgFieldType::Date32, &[PgFieldType::Date32]),
-    row("datemultirange", 4535, 6155, PgFieldType::Utf8, &[]),
-    row("daterange", 3912, 3913, PgFieldType::Utf8, &[]),
-    row("float4", 700, 1021, PgFieldType::Float32, &[PgFieldType::Float32]),
-    row("float8", 701, 1022, PgFieldType::Float64, &[PgFieldType::Float64]),
-    row("gtsvector", 3642, 3644, PgFieldType::Utf8, &[]),
-    row("hstore", 0, 0, PgFieldType::Utf8, &[]),
-    row("inet", 869, 1041, PgFieldType::Utf8, &[]),
-    row("int2", 21, 1005, PgFieldType::Int16, &[PgFieldType::Int16]),
-    row("int4", 23, 1007, PgFieldType::Int32, &[PgFieldType::Int32]),
-    row("int4multirange", 4451, 6150, PgFieldType::Utf8, &[]),
-    row("int4range", 3904, 3905, PgFieldType::Utf8, &[]),
-    row("int8", 20, 1016, PgFieldType::Int64, &[PgFieldType::Int64]),
-    row("int8multirange", 4536, 6157, PgFieldType::Utf8, &[]),
-    row("int8range", 3926, 3927, PgFieldType::Utf8, &[]),
-    row("interval", 1186, 1187, PgFieldType::IntervalMonthDayNano, &[PgFieldType::IntervalMonthDayNano]),
-    row("json", 114, 199, PgFieldType::Json, &[PgFieldType::Json]),
-    row("jsonb", 3802, 3807, PgFieldType::Json, &[PgFieldType::Json]),
-    row("jsonpath", 4072, 4073, PgFieldType::Utf8, &[]),
-    row("line", 628, 629, PgFieldType::Utf8, &[]),
-    row("lseg", 601, 1018, PgFieldType::Utf8, &[]),
-    row("ltree", 0, 0, PgFieldType::Utf8, &[]),
-    row("macaddr", 829, 1040, PgFieldType::Utf8, &[]),
-    row("macaddr8", 774, 775, PgFieldType::Utf8, &[]),
-    row("money", 790, 791, PgFieldType::Decimal128, &[PgFieldType::Decimal128]),
-    row("name", 19, 1003, PgFieldType::Utf8, &[PgFieldType::Utf8]),
-    row("numeric", 1700, 1231, PgFieldType::Utf8, &[PgFieldType::Decimal128]),
-    row("nummultirange", 4532, 6151, PgFieldType::Utf8, &[]),
-    row("numrange", 3906, 3907, PgFieldType::Utf8, &[]),
-    row("oid", 26, 1028, PgFieldType::Int64, &[PgFieldType::Int64]),
-    row("path", 602, 1019, PgFieldType::Utf8, &[]),
-    row("pg_brin_bloom_summary", 4600, 0, PgFieldType::Utf8, &[]),
-    row("pg_brin_minmax_multi_summary", 4601, 0, PgFieldType::Utf8, &[]),
-    row("pg_dependencies", 3402, 0, PgFieldType::Utf8, &[]),
-    row("pg_lsn", 3220, 3221, PgFieldType::Utf8, &[]),
-    row("pg_mcv_list", 5017, 0, PgFieldType::Utf8, &[]),
-    row("pg_ndistinct", 3361, 0, PgFieldType::Utf8, &[]),
-    row("pg_node_tree", 194, 0, PgFieldType::Utf8, &[]),
-    row("pg_snapshot", 5038, 5039, PgFieldType::Utf8, &[]),
-    row("point", 600, 1017, PgFieldType::Utf8, &[]),
-    row("polygon", 604, 1027, PgFieldType::Utf8, &[]),
-    row("refcursor", 1790, 2201, PgFieldType::Utf8, &[]),
-    row("regclass", 2205, 2210, PgFieldType::Utf8, &[]),
-    row("regcollation", 4191, 4192, PgFieldType::Utf8, &[]),
-    row("regconfig", 3734, 3735, PgFieldType::Utf8, &[]),
-    row("regdictionary", 3769, 3770, PgFieldType::Utf8, &[]),
-    row("regnamespace", 4089, 4090, PgFieldType::Utf8, &[]),
-    row("regoper", 2203, 2208, PgFieldType::Utf8, &[]),
-    row("regoperator", 2204, 2209, PgFieldType::Utf8, &[]),
-    row("regproc", 24, 1008, PgFieldType::Utf8, &[]),
-    row("regprocedure", 2202, 2207, PgFieldType::Utf8, &[]),
-    row("regrole", 4096, 4097, PgFieldType::Utf8, &[]),
-    row("regtype", 2206, 2211, PgFieldType::Utf8, &[]),
-    row("text", 25, 1009, PgFieldType::Utf8, &[PgFieldType::Utf8]),
-    row("tid", 27, 1010, PgFieldType::Utf8, &[]),
-    row("time", 1083, 1183, PgFieldType::Time64Micros, &[PgFieldType::Time64Micros]),
-    row("timestamp", 1114, 1115, PgFieldType::TimestampMicros, &[PgFieldType::TimestampMicros]),
-    row("timestamptz", 1184, 1185, PgFieldType::TimestampMicrosUtc, &[PgFieldType::TimestampMicrosUtc]),
-    row("timetz", 1266, 1270, PgFieldType::Utf8, &[]),
-    row("tsmultirange", 4533, 6152, PgFieldType::Utf8, &[]),
-    row("tsquery", 3615, 3645, PgFieldType::Utf8, &[]),
-    row("tsrange", 3908, 3909, PgFieldType::Utf8, &[]),
-    row("tstzmultirange", 4534, 6153, PgFieldType::Utf8, &[]),
-    row("tstzrange", 3910, 3911, PgFieldType::Utf8, &[]),
-    row("tsvector", 3614, 3643, PgFieldType::Utf8, &[]),
-    row("txid_snapshot", 2970, 2949, PgFieldType::Utf8, &[]),
-    row("unknown", 705, 0, PgFieldType::Utf8, &[PgFieldType::Utf8]),
-    row("uuid", 2950, 2951, PgFieldType::Uuid, &[PgFieldType::Uuid]),
-    row("varbit", 1562, 1563, PgFieldType::Utf8, &[]),
-    row("varchar", 1043, 1015, PgFieldType::Utf8, &[PgFieldType::Utf8]),
-    row("xid", 28, 1011, PgFieldType::Int64, &[PgFieldType::Int64]),
-    row("xid8", 5069, 271, PgFieldType::Utf8, &[]),
-    row("xml", 142, 143, PgFieldType::Utf8, &[]),
+    row("aclitem", 1033, 1034, FieldType::Utf8, &[]),
+    row("bit", 1560, 1561, FieldType::Utf8, &[]),
+    row("bool", 16, 1000, FieldType::Boolean, &[FieldType::Boolean]),
+    row("box", 603, 1020, FieldType::Utf8, &[]),
+    row("bpchar", 1042, 1014, FieldType::Utf8, &[FieldType::Utf8]),
+    row("bytea", 17, 1001, FieldType::Binary, &[FieldType::Binary]),
+    row("char", 18, 1002, FieldType::Utf8, &[]),
+    row("cid", 29, 1012, FieldType::Int64, &[FieldType::Int64]),
+    row("cidr", 650, 651, FieldType::Utf8, &[]),
+    row("circle", 718, 719, FieldType::Utf8, &[]),
+    row("citext", 0, 0, FieldType::Utf8, &[FieldType::Utf8]),
+    row("date", 1082, 1182, FieldType::Date32, &[FieldType::Date32]),
+    row("datemultirange", 4535, 6155, FieldType::Utf8, &[]),
+    row("daterange", 3912, 3913, FieldType::Utf8, &[]),
+    row("float4", 700, 1021, FieldType::Float32, &[FieldType::Float32]),
+    row("float8", 701, 1022, FieldType::Float64, &[FieldType::Float64]),
+    row("gtsvector", 3642, 3644, FieldType::Utf8, &[]),
+    row("hstore", 0, 0, FieldType::Utf8, &[]),
+    row("inet", 869, 1041, FieldType::Utf8, &[]),
+    row("int2", 21, 1005, FieldType::Int16, &[FieldType::Int16]),
+    row("int4", 23, 1007, FieldType::Int32, &[FieldType::Int32]),
+    row("int4multirange", 4451, 6150, FieldType::Utf8, &[]),
+    row("int4range", 3904, 3905, FieldType::Utf8, &[]),
+    row("int8", 20, 1016, FieldType::Int64, &[FieldType::Int64]),
+    row("int8multirange", 4536, 6157, FieldType::Utf8, &[]),
+    row("int8range", 3926, 3927, FieldType::Utf8, &[]),
+    row("interval", 1186, 1187, FieldType::IntervalMonthDayNano, &[FieldType::IntervalMonthDayNano]),
+    row("json", 114, 199, FieldType::Json, &[FieldType::Json]),
+    row("jsonb", 3802, 3807, FieldType::Json, &[FieldType::Json]),
+    row("jsonpath", 4072, 4073, FieldType::Utf8, &[]),
+    row("line", 628, 629, FieldType::Utf8, &[]),
+    row("lseg", 601, 1018, FieldType::Utf8, &[]),
+    row("ltree", 0, 0, FieldType::Utf8, &[]),
+    row("macaddr", 829, 1040, FieldType::Utf8, &[]),
+    row("macaddr8", 774, 775, FieldType::Utf8, &[]),
+    row("money", 790, 791, FieldType::Decimal128, &[FieldType::Decimal128]),
+    row("name", 19, 1003, FieldType::Utf8, &[FieldType::Utf8]),
+    row("numeric", 1700, 1231, FieldType::Utf8, &[FieldType::Decimal128]),
+    row("nummultirange", 4532, 6151, FieldType::Utf8, &[]),
+    row("numrange", 3906, 3907, FieldType::Utf8, &[]),
+    row("oid", 26, 1028, FieldType::Int64, &[FieldType::Int64]),
+    row("path", 602, 1019, FieldType::Utf8, &[]),
+    row("pg_brin_bloom_summary", 4600, 0, FieldType::Utf8, &[]),
+    row("pg_brin_minmax_multi_summary", 4601, 0, FieldType::Utf8, &[]),
+    row("pg_dependencies", 3402, 0, FieldType::Utf8, &[]),
+    row("pg_lsn", 3220, 3221, FieldType::Utf8, &[]),
+    row("pg_mcv_list", 5017, 0, FieldType::Utf8, &[]),
+    row("pg_ndistinct", 3361, 0, FieldType::Utf8, &[]),
+    row("pg_node_tree", 194, 0, FieldType::Utf8, &[]),
+    row("pg_snapshot", 5038, 5039, FieldType::Utf8, &[]),
+    row("point", 600, 1017, FieldType::Utf8, &[]),
+    row("polygon", 604, 1027, FieldType::Utf8, &[]),
+    row("refcursor", 1790, 2201, FieldType::Utf8, &[]),
+    row("regclass", 2205, 2210, FieldType::Utf8, &[]),
+    row("regcollation", 4191, 4192, FieldType::Utf8, &[]),
+    row("regconfig", 3734, 3735, FieldType::Utf8, &[]),
+    row("regdictionary", 3769, 3770, FieldType::Utf8, &[]),
+    row("regnamespace", 4089, 4090, FieldType::Utf8, &[]),
+    row("regoper", 2203, 2208, FieldType::Utf8, &[]),
+    row("regoperator", 2204, 2209, FieldType::Utf8, &[]),
+    row("regproc", 24, 1008, FieldType::Utf8, &[]),
+    row("regprocedure", 2202, 2207, FieldType::Utf8, &[]),
+    row("regrole", 4096, 4097, FieldType::Utf8, &[]),
+    row("regtype", 2206, 2211, FieldType::Utf8, &[]),
+    row("text", 25, 1009, FieldType::Utf8, &[FieldType::Utf8]),
+    row("tid", 27, 1010, FieldType::Utf8, &[]),
+    row("time", 1083, 1183, FieldType::Time64Micros, &[FieldType::Time64Micros]),
+    row("timestamp", 1114, 1115, FieldType::TimestampMicros, &[FieldType::TimestampMicros]),
+    row("timestamptz", 1184, 1185, FieldType::TimestampMicrosUtc, &[FieldType::TimestampMicrosUtc]),
+    row("timetz", 1266, 1270, FieldType::Utf8, &[]),
+    row("tsmultirange", 4533, 6152, FieldType::Utf8, &[]),
+    row("tsquery", 3615, 3645, FieldType::Utf8, &[]),
+    row("tsrange", 3908, 3909, FieldType::Utf8, &[]),
+    row("tstzmultirange", 4534, 6153, FieldType::Utf8, &[]),
+    row("tstzrange", 3910, 3911, FieldType::Utf8, &[]),
+    row("tsvector", 3614, 3643, FieldType::Utf8, &[]),
+    row("txid_snapshot", 2970, 2949, FieldType::Utf8, &[]),
+    row("unknown", 705, 0, FieldType::Utf8, &[FieldType::Utf8]),
+    row("uuid", 2950, 2951, FieldType::Uuid, &[FieldType::Uuid]),
+    row("varbit", 1562, 1563, FieldType::Utf8, &[]),
+    row("varchar", 1043, 1015, FieldType::Utf8, &[FieldType::Utf8]),
+    row("xid", 28, 1011, FieldType::Int64, &[FieldType::Int64]),
+    row("xid8", 5069, 271, FieldType::Utf8, &[]),
+    row("xml", 142, 143, FieldType::Utf8, &[]),
 ];
 
 /// `oid` to [`ROWS`] index, sorted by OID.
@@ -359,7 +360,7 @@ pub(crate) struct ColumnType {
     /// declared `decimal128` scale.
     pub(crate) typmod: i32,
     /// `(schema, typname)` of the column's own type, when it has no static
-    /// row. This is what a forced `pg_type` asserts identity against.
+    /// row. This is what a forced `native_type` asserts identity against.
     pub(crate) catalog: Option<(String, String)>,
 }
 
@@ -382,7 +383,7 @@ impl ColumnType {
 /// Which wire form fills `spec` from a column of PostgreSQL type `oid`.
 ///
 /// `role` decides one rule: a sink may encode a declared integer into a
-/// narrower PostgreSQL integer, with a per-value range check, when `pg_type`
+/// narrower PostgreSQL integer, with a per-value range check, when `native_type`
 /// names that target explicitly. A source never widens on read.
 ///
 /// # Errors
@@ -394,7 +395,7 @@ pub(crate) fn resolve_wire(
     column: &ColumnType,
     role: Role,
 ) -> Result<Wire, String> {
-    let forced = spec.forced_pg_type()?;
+    let forced = forced_pg_type(spec)?;
     let oid = column.oid;
 
     if let Some(forced) = &forced {
@@ -402,7 +403,7 @@ pub(crate) fn resolve_wire(
             // A built-in name asserts against the resolved OID.
             (Some(want), _) if want != oid => {
                 return Err(format!(
-                    "pg_type = \"{}\" is {} (oid {want}) but the server type is {} (oid {oid})",
+                    "native_type = \"{}\" is {} (oid {want}) but the server type is {} (oid {oid})",
                     forced.raw,
                     type_name(want),
                     column.display
@@ -410,7 +411,7 @@ pub(crate) fn resolve_wire(
             }
             (Some(_), _) => {}
             // A name the table does not know asserts against the catalog's own
-            // `schema.typname`, so `pg_type = "public.mood"` proves *this*
+            // `schema.typname`, so `native_type = "public.mood"` proves *this*
             // enum rather than merely "some type the table has no row for".
             (None, Some((schema, typname))) => {
                 let name_matches = forced.base == *typname;
@@ -420,14 +421,14 @@ pub(crate) fn resolve_wire(
                     .is_none_or(|declared| declared == schema);
                 if !name_matches || !schema_matches {
                     return Err(format!(
-                        "pg_type = \"{}\" but the server type is {schema}.{typname}",
+                        "native_type = \"{}\" but the server type is {schema}.{typname}",
                         forced.raw
                     ));
                 }
             }
             (None, None) => {
                 return Err(format!(
-                    "pg_type = \"{}\" is not a built-in type, and the server type {} is",
+                    "native_type = \"{}\" is not a built-in type, and the server type {} is",
                     forced.raw, column.display
                 ));
             }
@@ -447,16 +448,16 @@ pub(crate) fn resolve_wire(
         }
         // Same intent rule as a scalar: reading elements as text is fine when
         // text is what the element type maps to anyway, and takes an explicit
-        // `pg_type` naming the array otherwise.
-        if item == PgFieldType::Utf8 {
-            if element.default_arrow == PgFieldType::Utf8
+        // `native_type` naming the array otherwise.
+        if item == FieldType::Utf8 {
+            if element.default_arrow == FieldType::Utf8
                 || forced.as_ref().is_some_and(|f| f.builtin_oid == Some(oid))
             {
                 return Ok(Wire::Text);
             }
             return Err(format!(
                 "item = \"utf8\" reads an element of {} (oid {oid}) as PostgreSQL text; add \
-                 pg_type = \"{}[]\" to say so deliberately, or declare item = \"{}\"",
+                 native_type = \"{}[]\" to say so deliberately, or declare item = \"{}\"",
                 element.pg,
                 element.pg,
                 element.default_arrow.as_str()
@@ -470,7 +471,7 @@ pub(crate) fn resolve_wire(
         ));
     }
 
-    if spec.ty == PgFieldType::List {
+    if spec.ty == FieldType::List {
         return Err(format!(
             "declared type \"list\" but the server type is {} (oid {oid}), which is not an array \
              type",
@@ -482,12 +483,12 @@ pub(crate) fn resolve_wire(
         // No static row even after the catalog step: an enum, a composite, or
         // an extension type. Its canonical text is the only form this
         // connector can read without knowing the type, and naming it with
-        // `pg_type` is what proves the user meant this type. (A domain never
+        // `native_type` is what proves the user meant this type. (A domain never
         // reaches here: the catalog step replaced it with its base OID.)
         return match (&forced, spec.ty) {
-            (Some(_), PgFieldType::Utf8) => Ok(Wire::Text),
+            (Some(_), FieldType::Utf8) => Ok(Wire::Text),
             (Some(forced), ty) => Err(format!(
-                "pg_type = \"{}\" is {}, which can only be read as text; declare type = \"utf8\" \
+                "native_type = \"{}\" is {}, which can only be read as text; declare type = \"utf8\" \
                  rather than \"{}\"",
                 forced.raw,
                 column.display,
@@ -495,7 +496,7 @@ pub(crate) fn resolve_wire(
             )),
             (None, ty) => Err(format!(
                 "declared type \"{}\" but the server type {} (oid {oid}) has no built-in type; \
-                 name it with pg_type = \"{}\" and declare type = \"utf8\" to read its text form",
+                 name it with native_type = \"{}\" and declare type = \"utf8\" to read its text form",
                 ty.as_str(),
                 column.display,
                 column.display
@@ -508,12 +509,12 @@ pub(crate) fn resolve_wire(
     }
     let named_exactly = forced.as_ref().is_some_and(|f| f.builtin_oid == Some(oid));
     // The text form of a type whose default is not `utf8` is available, but
-    // only on purpose: `pg_type` naming that exact type is the intent.
-    if spec.ty == PgFieldType::Utf8 && (row.default_arrow == PgFieldType::Utf8 || named_exactly) {
+    // only on purpose: `native_type` naming that exact type is the intent.
+    if spec.ty == FieldType::Utf8 && (row.default_arrow == FieldType::Utf8 || named_exactly) {
         return Ok(Wire::Text);
     }
     // A sink narrows an integer width with a per-value range check. Gated on
-    // the explicit `pg_type`, so a declared `int64` over a plain `int4` column
+    // the explicit `native_type`, so a declared `int64` over a plain `int4` column
     // stays the configuration error it has always been.
     if role == Role::Sink
         && named_exactly
@@ -536,17 +537,17 @@ fn options(row: &TypeRow) -> String {
         .binary
         .iter()
         .map(|ty| match ty {
-            PgFieldType::Decimal128 => {
+            FieldType::Decimal128 => {
                 "declare type = \"decimal128\" with explicit 'precision' and 'scale'".to_string()
             }
             other => format!("declare type = \"{}\"", other.as_str()),
         })
         .collect();
-    parts.push(if row.default_arrow == PgFieldType::Utf8 {
+    parts.push(if row.default_arrow == FieldType::Utf8 {
         "declare type = \"utf8\" to read it as PostgreSQL text (its output function)".to_string()
     } else {
         format!(
-            "declare type = \"utf8\" with pg_type = \"{}\" to read it as PostgreSQL text (its \
+            "declare type = \"utf8\" with native_type = \"{}\" to read it as PostgreSQL text (its \
              output function)",
             row.pg
         )
@@ -568,7 +569,7 @@ pub(crate) fn numeric_scale(typmod: i32) -> Option<i32> {
 
 /// The precision a `numeric` column's `atttypmod` packs, when it declares one.
 ///
-/// The sink compares it against a forced `pg_type = "numeric(p,s)"`, so a
+/// The sink compares it against a forced `native_type = "numeric(p,s)"`, so a
 /// modifier the configuration states and the server does not carry is a
 /// refusal rather than a silent re-interpretation.
 pub(crate) fn numeric_precision(typmod: i32) -> Option<u8> {
@@ -633,7 +634,7 @@ pub(crate) fn validate_columns(
 
 // ------------------------------------------------------------------ resolver
 
-/// A PostgreSQL type name from a `pg_type` key, parsed.
+/// A PostgreSQL type name from a `native_type` key, parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PgTypeRef {
     /// The spelling from the configuration, for error messages.
@@ -651,11 +652,11 @@ pub(crate) struct PgTypeRef {
     ///
     /// `None` for an enum, a domain, a composite, an extension type or a
     /// schema-qualified name: those need the catalog, which
-    /// `SourceFactory::build` cannot reach.
+    /// `Connector::source` cannot reach.
     pub(crate) builtin_oid: Option<u32>,
 }
 
-/// Parse a `pg_type` spelling.
+/// Parse a `native_type` spelling.
 ///
 /// Accepts every `Type::name()`, the SQL aliases in [`ALIASES`], both array
 /// spellings (`text[]` and `_text`), a parenthesised modifier anywhere after
@@ -670,7 +671,7 @@ pub(crate) struct PgTypeRef {
 pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
     let raw = spelling.trim();
     if raw.is_empty() {
-        return Err("pg_type must not be empty".to_string());
+        return Err("native_type must not be empty".to_string());
     }
     let mut text: String = collapse_whitespace(raw);
 
@@ -678,7 +679,7 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
     while let Some(rest) = text.strip_suffix("[]") {
         if array {
             return Err(format!(
-                "pg_type = \"{raw}\" is multi-dimensional; Arrow's List is one-dimensional, so \
+                "native_type = \"{raw}\" is multi-dimensional; Arrow's List is one-dimensional, so \
                  only a single '[]' is supported"
             ));
         }
@@ -691,7 +692,7 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
         Some(open) => {
             if text[..open].trim().is_empty() {
                 return Err(format!(
-                    "pg_type = \"{raw}\" has a modifier with no type name before it"
+                    "native_type = \"{raw}\" has a modifier with no type name before it"
                 ));
             }
             // The '(' sits outside every quoted identifier, so the rest of the
@@ -700,7 +701,7 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
                 .0
                 .map(|i| open + 1 + i)
             else {
-                return Err(format!("pg_type = \"{raw}\" has a '(' with no ')'"));
+                return Err(format!("native_type = \"{raw}\" has a '(' with no ')'"));
             };
             let inside = text[open + 1..close].replace(' ', "");
             let parts: Vec<&str> = inside.split(',').collect();
@@ -716,7 +717,7 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
             };
             if !legal {
                 return Err(format!(
-                    "pg_type = \"{raw}\" has a modifier that is not '(digits)' or \
+                    "native_type = \"{raw}\" has a modifier that is not '(digits)' or \
                      '(digits,[-]digits)'"
                 ));
             }
@@ -730,13 +731,13 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
             text = collapse_whitespace(&rest);
             if outside_quotes(&text, '(').1 > 0 || outside_quotes(&text, ')').1 > 0 {
                 return Err(format!(
-                    "pg_type = \"{raw}\" has more than one modifier; a type carries one"
+                    "native_type = \"{raw}\" has more than one modifier; a type carries one"
                 ));
             }
         }
         None => {
             if outside_quotes(&text, ')').1 > 0 {
-                return Err(format!("pg_type = \"{raw}\" has a ')' with no '('"));
+                return Err(format!("native_type = \"{raw}\" has a ')' with no '('"));
             }
         }
     }
@@ -751,11 +752,11 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
             let (schema_part, name) = (&text[..dot], &text[dot + 1..]);
             if schema_part.is_empty() || name.is_empty() {
                 return Err(format!(
-                    "pg_type = \"{raw}\" has an empty schema or type part"
+                    "native_type = \"{raw}\" has an empty schema or type part"
                 ));
             }
             let Some(schema_name) = unquote_or_fold(schema_part) else {
-                return Err(format!("pg_type = \"{raw}\" has an unterminated quote"));
+                return Err(format!("native_type = \"{raw}\" has an unterminated quote"));
             };
             qualified = schema_part_is_foreign(&schema_name);
             schema = Some(schema_name);
@@ -763,14 +764,14 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
         }
         _ => {
             return Err(format!(
-                "pg_type = \"{raw}\" must be 'type' or 'schema.type', not a longer path"
+                "native_type = \"{raw}\" must be 'type' or 'schema.type', not a longer path"
             ));
         }
     }
 
     let quoted = text.starts_with('"');
     let Some(mut base) = unquote_or_fold(&text) else {
-        return Err(format!("pg_type = \"{raw}\" has an unterminated quote"));
+        return Err(format!("native_type = \"{raw}\" has an unterminated quote"));
     };
 
     if !quoted
@@ -779,7 +780,7 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
     {
         if array {
             return Err(format!(
-                "pg_type = \"{raw}\" names an array twice ('_' and '[]'); Arrow's List is \
+                "native_type = \"{raw}\" names an array twice ('_' and '[]'); Arrow's List is \
                  one-dimensional"
             ));
         }
@@ -795,7 +796,10 @@ pub(crate) fn resolve_pg_type(spelling: &str) -> Result<PgTypeRef, String> {
         Some(row) if !qualified && row.oid != 0 => {
             if array {
                 if row.array_oid == 0 {
-                    return Err(format!("pg_type = \"{raw}\": {} has no array type", row.pg));
+                    return Err(format!(
+                        "native_type = \"{raw}\": {} has no array type",
+                        row.pg
+                    ));
                 }
                 Some(row.array_oid)
             } else {
@@ -877,7 +881,7 @@ fn collapse_whitespace(text: &str) -> String {
     out
 }
 
-/// Reject a `pg_type` the declared type cannot be encoded to or decoded from.
+/// Reject a `native_type` the declared type cannot be encoded to or decoded from.
 ///
 /// Runs at load time, so it sees only what the table knows: a name needing the
 /// catalog is checked when the connection opens, by [`resolve_wire`].
@@ -901,20 +905,20 @@ pub(crate) fn validate_forced(
         // A name the table does not know needs the catalog, and what it turns
         // out to be decides which declared types can carry it: a domain
         // decodes as whatever it is built over, so `type = "int32"` with
-        // `pg_type = "public.posint"` is right, while an enum or a composite
+        // `native_type = "public.posint"` is right, while an enum or a composite
         // can only be text. Neither is knowable here, so only the shape the
         // *name* fixes is checked now and `resolve_wire` enforces the rest
         // once the connection is open.
         return match (forced.array, spec.ty) {
-            (true, PgFieldType::List) => Ok(()),
+            (true, FieldType::List) => Ok(()),
             (true, ty) => Err(format!(
-                "pg_type = \"{}\" names an array type, so declare type = \"list\" with an \
+                "native_type = \"{}\" names an array type, so declare type = \"list\" with an \
                  'item', not \"{}\"",
                 forced.raw,
                 ty.as_str()
             )),
-            (false, PgFieldType::List) => Err(format!(
-                "type = \"list\" needs an array pg_type such as \"{}[]\", not \"{}\"",
+            (false, FieldType::List) => Err(format!(
+                "type = \"list\" needs an array native_type such as \"{}[]\", not \"{}\"",
                 forced.base, forced.raw
             )),
             (false, _) => Ok(()),
@@ -922,9 +926,9 @@ pub(crate) fn validate_forced(
     };
 
     if forced.array {
-        if spec.ty != PgFieldType::List {
+        if spec.ty != FieldType::List {
             return Err(format!(
-                "pg_type = \"{}\" names an array type, so declare type = \"list\" with an 'item', \
+                "native_type = \"{}\" names an array type, so declare type = \"list\" with an 'item', \
                  not \"{}\"",
                 forced.raw,
                 spec.ty.as_str()
@@ -932,15 +936,15 @@ pub(crate) fn validate_forced(
         }
         let item = spec.item.ok_or_else(|| {
             format!(
-                "pg_type = \"{}\" names an array type and type = \"list\" requires 'item'",
+                "native_type = \"{}\" names an array type and type = \"list\" requires 'item'",
                 forced.raw
             )
         })?;
-        if row.binary.contains(&item) || item == PgFieldType::Utf8 {
+        if row.binary.contains(&item) || item == FieldType::Utf8 {
             return Ok(());
         }
         return Err(format!(
-            "pg_type = \"{}\" has elements of {}, which item = \"{}\" cannot hold; {}",
+            "native_type = \"{}\" has elements of {}, which item = \"{}\" cannot hold; {}",
             forced.raw,
             row.pg,
             item.as_str(),
@@ -948,15 +952,15 @@ pub(crate) fn validate_forced(
         ));
     }
 
-    if spec.ty == PgFieldType::List {
+    if spec.ty == FieldType::List {
         return Err(format!(
-            "type = \"list\" needs an array pg_type such as \"{}[]\", not \"{}\"",
+            "type = \"list\" needs an array native_type such as \"{}[]\", not \"{}\"",
             row.pg, forced.raw
         ));
     }
 
     if row.pg == "numeric"
-        && spec.ty == PgFieldType::Decimal128
+        && spec.ty == FieldType::Decimal128
         && let Some(modifier) = &forced.typmod
     {
         let (precision, scale) = numeric_typmod(modifier);
@@ -966,7 +970,7 @@ pub(crate) fn validate_forced(
             && i16::from(declared_scale) > i16::from(scale)
         {
             return Err(format!(
-                "pg_type = \"{}\" keeps {scale} fractional digit(s) but the field declares scale \
+                "native_type = \"{}\" keeps {scale} fractional digit(s) but the field declares scale \
                  {declared_scale}; a narrower target would round rather than error",
                 forced.raw
             ));
@@ -975,14 +979,14 @@ pub(crate) fn validate_forced(
             && declared_precision > precision
         {
             return Err(format!(
-                "pg_type = \"{}\" holds {precision} digit(s) but the field declares precision \
+                "native_type = \"{}\" holds {precision} digit(s) but the field declares precision \
                  {declared_precision}",
                 forced.raw
             ));
         }
     }
 
-    if row.binary.contains(&spec.ty) || spec.ty == PgFieldType::Utf8 {
+    if row.binary.contains(&spec.ty) || spec.ty == FieldType::Utf8 {
         return Ok(());
     }
     // A sink narrows integer widths with a per-value range check, so a declared
@@ -991,25 +995,22 @@ pub(crate) fn validate_forced(
         return Ok(());
     }
     Err(format!(
-        "pg_type = \"{}\" cannot carry a declared \"{}\"; {}",
+        "native_type = \"{}\" cannot carry a declared \"{}\"; {}",
         forced.raw,
         spec.ty.as_str(),
         options(row)
     ))
 }
 
-fn is_integer(ty: PgFieldType) -> bool {
-    matches!(
-        ty,
-        PgFieldType::Int16 | PgFieldType::Int32 | PgFieldType::Int64
-    )
+fn is_integer(ty: FieldType) -> bool {
+    matches!(ty, FieldType::Int16 | FieldType::Int32 | FieldType::Int64)
 }
 
 /// `(precision, scale)` from a forced `numeric` modifier's text.
 ///
 /// A modifier with no comma is PostgreSQL's own `NUMERIC(p)`, which *is*
 /// `NUMERIC(p, 0)` -- not an unconstrained scale. Reading it as "no scale
-/// constraint" would let `pg_type = "numeric(12)"` pass beside a declared
+/// constraint" would let `native_type = "numeric(12)"` pass beside a declared
 /// scale the target rounds away.
 pub(crate) fn numeric_typmod(modifier: &str) -> (Option<u8>, Option<i8>) {
     let mut parts = modifier.split(',');
@@ -1025,29 +1026,29 @@ pub(crate) fn numeric_typmod(modifier: &str) -> (Option<u8>, Option<i8>) {
 mod tests {
     use super::*;
 
-    fn spec(name: &str, ty: PgFieldType) -> FieldSpec {
+    fn spec(name: &str, ty: FieldType) -> FieldSpec {
         FieldSpec {
             name: name.to_string(),
             ty,
             nullable: true,
-            precision: matches!(ty, PgFieldType::Decimal128).then_some(18),
-            scale: matches!(ty, PgFieldType::Decimal128).then_some(4),
+            precision: matches!(ty, FieldType::Decimal128).then_some(18),
+            scale: matches!(ty, FieldType::Decimal128).then_some(4),
             item: None,
-            pg_type: None,
+            native_type: None,
         }
     }
 
-    fn forced(name: &str, ty: PgFieldType, pg_type: &str) -> FieldSpec {
+    fn forced(name: &str, ty: FieldType, native_type: &str) -> FieldSpec {
         FieldSpec {
-            pg_type: Some(pg_type.to_string()),
+            native_type: Some(native_type.to_string()),
             ..spec(name, ty)
         }
     }
 
-    fn list(name: &str, item: PgFieldType) -> FieldSpec {
+    fn list(name: &str, item: FieldType) -> FieldSpec {
         FieldSpec {
             item: Some(item),
-            ..spec(name, PgFieldType::List)
+            ..spec(name, FieldType::List)
         }
     }
 
@@ -1176,9 +1177,9 @@ mod tests {
         ] {
             let oid = oid_of(name);
             assert_eq!(
-                resolve_wire(&spec("c", PgFieldType::Utf8), &col(oid), Role::Source),
+                resolve_wire(&spec("c", FieldType::Utf8), &col(oid), Role::Source),
                 Ok(Wire::Text),
-                "{name} should be readable as text with no pg_type"
+                "{name} should be readable as text with no native_type"
             );
         }
     }
@@ -1186,11 +1187,11 @@ mod tests {
     #[test]
     fn integer_widths_are_not_interchangeable() {
         for (ty, name) in [
-            (PgFieldType::Int32, "int8"),
-            (PgFieldType::Int64, "int4"),
-            (PgFieldType::TimestampMicros, "timestamptz"),
-            (PgFieldType::TimestampMicrosUtc, "timestamp"),
-            (PgFieldType::Float32, "float8"),
+            (FieldType::Int32, "int8"),
+            (FieldType::Int64, "int4"),
+            (FieldType::TimestampMicros, "timestamptz"),
+            (FieldType::TimestampMicrosUtc, "timestamp"),
+            (FieldType::Float32, "float8"),
         ] {
             let reason = resolve_wire(&spec("c", ty), &col(oid_of(name)), Role::Source)
                 .expect_err("widths and time zones are not interchangeable");
@@ -1201,7 +1202,7 @@ mod tests {
     #[test]
     fn text_over_a_non_text_default_needs_an_explicit_pg_type() {
         let reason = resolve_wire(
-            &spec("c", PgFieldType::Utf8),
+            &spec("c", FieldType::Utf8),
             &col(oid_of("int8")),
             Role::Source,
         )
@@ -1209,7 +1210,7 @@ mod tests {
         assert!(reason.contains("int8"), "{reason}");
         assert_eq!(
             resolve_wire(
-                &forced("c", PgFieldType::Utf8, "int8"),
+                &forced("c", FieldType::Utf8, "int8"),
                 &col(oid_of("int8")),
                 Role::Source
             ),
@@ -1220,7 +1221,7 @@ mod tests {
     #[test]
     fn a_forced_type_must_equal_the_server_type() {
         let reason = resolve_wire(
-            &forced("c", PgFieldType::Int32, "int4"),
+            &forced("c", FieldType::Int32, "int4"),
             &col(oid_of("int8")),
             Role::Source,
         )
@@ -1232,7 +1233,7 @@ mod tests {
     #[test]
     fn an_array_column_needs_a_list_declaration() {
         let reason = resolve_wire(
-            &spec("c", PgFieldType::Utf8),
+            &spec("c", FieldType::Utf8),
             &col(array_oid_of("text")),
             Role::Source,
         )
@@ -1242,7 +1243,7 @@ mod tests {
 
         assert_eq!(
             resolve_wire(
-                &list("c", PgFieldType::Utf8),
+                &list("c", FieldType::Utf8),
                 &col(array_oid_of("text")),
                 Role::Source
             ),
@@ -1250,7 +1251,7 @@ mod tests {
         );
         assert_eq!(
             resolve_wire(
-                &list("c", PgFieldType::Int32),
+                &list("c", FieldType::Int32),
                 &col(array_oid_of("int4")),
                 Role::Source
             ),
@@ -1266,31 +1267,31 @@ mod tests {
         // not a reinterpretation.
         assert_eq!(
             resolve_wire(
-                &list("c", PgFieldType::Utf8),
+                &list("c", FieldType::Utf8),
                 &col(array_oid_of("inet")),
                 Role::Source
             ),
             Ok(Wire::Text)
         );
 
-        // `int4` does not, so it takes `pg_type` naming the array.
+        // `int4` does not, so it takes `native_type` naming the array.
         let reason = resolve_wire(
-            &list("c", PgFieldType::Utf8),
+            &list("c", FieldType::Utf8),
             &col(array_oid_of("int4")),
             Role::Source,
         )
         .expect_err("reading int4 elements as text must be deliberate");
         assert!(reason.contains("int4"), "{reason}");
-        assert!(reason.contains("pg_type"), "{reason}");
+        assert!(reason.contains("native_type"), "{reason}");
 
-        let mut forced_list = list("c", PgFieldType::Utf8);
-        forced_list.pg_type = Some("int4[]".to_string());
+        let mut forced_list = list("c", FieldType::Utf8);
+        forced_list.native_type = Some("int4[]".to_string());
         assert_eq!(
             resolve_wire(&forced_list, &col(array_oid_of("int4")), Role::Source),
             Ok(Wire::Text)
         );
         // Both array spellings name the same type.
-        forced_list.pg_type = Some("_int4".to_string());
+        forced_list.native_type = Some("_int4".to_string());
         assert_eq!(
             resolve_wire(&forced_list, &col(array_oid_of("int4")), Role::Source),
             Ok(Wire::Text)
@@ -1300,7 +1301,7 @@ mod tests {
     #[test]
     fn an_element_type_the_array_cannot_hold_is_rejected() {
         let reason = resolve_wire(
-            &list("c", PgFieldType::Boolean),
+            &list("c", FieldType::Boolean),
             &col(array_oid_of("int4")),
             Role::Source,
         )
@@ -1311,7 +1312,7 @@ mod tests {
     #[test]
     fn a_list_declared_over_a_scalar_column_is_rejected() {
         let reason = resolve_wire(
-            &list("c", PgFieldType::Int32),
+            &list("c", FieldType::Int32),
             &col(oid_of("int4")),
             Role::Source,
         )
@@ -1322,16 +1323,16 @@ mod tests {
     #[test]
     fn a_type_with_no_static_oid_needs_a_pg_type() {
         // What the catalog step reports for an enum: its own OID, plus the
-        // `schema.typname` a forced `pg_type` is asserted against.
+        // `schema.typname` a forced `native_type` is asserted against.
         let mood = catalog_col(99_999, "public", "mood");
 
-        let reason = resolve_wire(&spec("c", PgFieldType::Utf8), &mood, Role::Source)
+        let reason = resolve_wire(&spec("c", FieldType::Utf8), &mood, Role::Source)
             .expect_err("an enum cannot be decoded blind");
-        assert!(reason.contains("pg_type"), "{reason}");
+        assert!(reason.contains("native_type"), "{reason}");
 
         assert_eq!(
             resolve_wire(
-                &forced("c", PgFieldType::Utf8, "public.mood"),
+                &forced("c", FieldType::Utf8, "public.mood"),
                 &mood,
                 Role::Source
             ),
@@ -1339,11 +1340,11 @@ mod tests {
         );
         // The unqualified spelling resolves through the search path.
         assert_eq!(
-            resolve_wire(&forced("c", PgFieldType::Utf8, "mood"), &mood, Role::Source),
+            resolve_wire(&forced("c", FieldType::Utf8, "mood"), &mood, Role::Source),
             Ok(Wire::Text)
         );
         let reason = resolve_wire(
-            &forced("c", PgFieldType::Int64, "public.mood"),
+            &forced("c", FieldType::Int64, "public.mood"),
             &mood,
             Role::Source,
         )
@@ -1352,29 +1353,25 @@ mod tests {
     }
 
     /// The identity assertion is against the catalog's own `schema.typname`,
-    /// so a `pg_type` naming a different type is refused even though both are
+    /// so a `native_type` naming a different type is refused even though both are
     /// types the table has no row for.
     #[test]
     fn a_forced_non_builtin_name_must_match_the_catalog() {
         let mood = catalog_col(99_999, "public", "mood");
         for (spelling, fragment) in [("public.moood", "moood"), ("other.mood", "other.mood")] {
-            let reason = resolve_wire(
-                &forced("c", PgFieldType::Utf8, spelling),
-                &mood,
-                Role::Source,
-            )
-            .expect_err(spelling);
+            let reason = resolve_wire(&forced("c", FieldType::Utf8, spelling), &mood, Role::Source)
+                .expect_err(spelling);
             assert!(reason.contains(fragment), "{spelling}: {reason}");
             assert!(reason.contains("public.mood"), "{spelling}: {reason}");
         }
     }
 
-    /// A built-in column with a non-built-in `pg_type` is a mismatch, not a
+    /// A built-in column with a non-built-in `native_type` is a mismatch, not a
     /// free pass: the catalog step proved the column's type is built in.
     #[test]
     fn a_non_builtin_pg_type_over_a_builtin_column_is_refused() {
         let reason = resolve_wire(
-            &forced("c", PgFieldType::Utf8, "public.mood"),
+            &forced("c", FieldType::Utf8, "public.mood"),
             &col(oid_of("text")),
             Role::Source,
         )
@@ -1415,9 +1412,9 @@ mod tests {
     #[test]
     fn missing_and_mismatched_columns_are_reported_together() {
         let declared = [
-            spec("id", PgFieldType::Int64),
-            spec("label", PgFieldType::Int32),
-            spec("gone", PgFieldType::Utf8),
+            spec("id", FieldType::Int64),
+            spec("label", FieldType::Int32),
+            spec("gone", FieldType::Utf8),
         ];
         let actual = vec![
             ColumnType::builtin("id".to_string(), oid_of("int8")),
@@ -1434,7 +1431,7 @@ mod tests {
 
     #[test]
     fn numeric_into_a_non_decimal_field_suggests_the_alternatives() {
-        let declared = [spec("amount", PgFieldType::Float64)];
+        let declared = [spec("amount", FieldType::Float64)];
         let actual = vec![ColumnType::builtin("amount".to_string(), oid_of("numeric"))];
         let err = validate_columns("PostgresSink", Role::Sink, &declared, &actual).unwrap_err();
         let message = err.message();
@@ -1446,7 +1443,7 @@ mod tests {
 
     #[test]
     fn undeclared_server_columns_are_ignored() {
-        let declared = [spec("id", PgFieldType::Int64)];
+        let declared = [spec("id", FieldType::Int64)];
         let actual = vec![
             ColumnType::builtin("id".to_string(), oid_of("int8")),
             ColumnType::builtin("extra".to_string(), oid_of("text")),
@@ -1654,7 +1651,7 @@ mod tests {
 
     #[test]
     fn a_forced_type_the_declared_type_cannot_carry_is_rejected() {
-        let field = forced("c", PgFieldType::Float64, "float4");
+        let field = forced("c", FieldType::Float64, "float4");
         let forced_ref = resolve_pg_type("float4").expect("float4");
         let reason = validate_forced(&field, &forced_ref, Role::Sink)
             .expect_err("float64 into float4 loses precision");
@@ -1663,7 +1660,7 @@ mod tests {
 
     #[test]
     fn a_sink_may_narrow_an_integer_but_a_source_may_not() {
-        let field = forced("c", PgFieldType::Int64, "int2");
+        let field = forced("c", FieldType::Int64, "int2");
         let forced_ref = resolve_pg_type("int2").expect("int2");
         validate_forced(&field, &forced_ref, Role::Sink).expect("a sink range-checks per value");
         let reason = validate_forced(&field, &forced_ref, Role::Source)
@@ -1679,24 +1676,21 @@ mod tests {
     fn the_load_time_and_connect_time_checks_agree_on_a_static_forced_pair() {
         let list_of = |item, name| FieldSpec {
             item: Some(item),
-            ..forced("c", PgFieldType::List, name)
+            ..forced("c", FieldType::List, name)
         };
         let cases = [
             // A deliberate sink narrowing, admitted by both.
-            (forced("c", PgFieldType::Int64, "int2"), col(oid_of("int2"))),
+            (forced("c", FieldType::Int64, "int2"), col(oid_of("int2"))),
             // A widening the table does not offer, refused by both.
             (
-                forced("c", PgFieldType::Float64, "float4"),
+                forced("c", FieldType::Float64, "float4"),
                 col(oid_of("float4")),
             ),
             // An array name against a scalar declaration, refused by both.
-            (
-                forced("c", PgFieldType::Utf8, "text[]"),
-                col(oid_of("text")),
-            ),
+            (forced("c", FieldType::Utf8, "text[]"), col(oid_of("text"))),
             // A list over an element the table admits, taken by both.
             (
-                list_of(PgFieldType::Int32, "int4[]"),
+                list_of(FieldType::Int32, "int4[]"),
                 col(array_oid_of("int4")),
             ),
             // A forced modifier, which neither half evaluates.
@@ -1704,23 +1698,22 @@ mod tests {
                 FieldSpec {
                     precision: Some(12),
                     scale: Some(2),
-                    ..forced("c", PgFieldType::Decimal128, "numeric(12,2)")
+                    ..forced("c", FieldType::Decimal128, "numeric(12,2)")
                 },
                 col(oid_of("numeric")),
             ),
         ];
 
         for (field, column) in cases {
-            let reference = field
-                .forced_pg_type()
+            let reference = forced_pg_type(&field)
                 .expect("the spelling parses")
-                .expect("the field carries a pg_type");
+                .expect("the field carries a native_type");
             let load = validate_forced(&field, &reference, Role::Sink);
             let connect = resolve_wire(&field, &column, Role::Sink);
             assert_eq!(
                 load.is_ok(),
                 connect.is_ok(),
-                "pg_type = {:?} with type = {:?}: load said {load:?}, connect said {connect:?}",
+                "native_type = {:?} with type = {:?}: load said {load:?}, connect said {connect:?}",
                 reference.raw,
                 field.ty.as_str()
             );
@@ -1734,25 +1727,25 @@ mod tests {
     fn a_foreign_schema_name_is_not_matched_against_the_built_in_of_that_name() {
         // `myext.int4` may be a domain over anything, so pairing it with
         // float64 is only knowable once the catalog is read.
-        let field = forced("c", PgFieldType::Float64, "myext.int4");
+        let field = forced("c", FieldType::Float64, "myext.int4");
         let reference = resolve_pg_type("myext.int4").expect("qualified");
         validate_forced(&field, &reference, Role::Sink)
             .expect("a foreign-schema name defers to the catalog");
 
         // The unqualified built-in is still settled at load time.
-        let field = forced("c", PgFieldType::Float64, "int4");
+        let field = forced("c", FieldType::Float64, "int4");
         let reference = resolve_pg_type("int4").expect("built-in");
         validate_forced(&field, &reference, Role::Sink)
             .expect_err("int4 cannot carry a declared float64");
     }
 
-    /// Without an explicit `pg_type` a width mismatch stays the configuration
+    /// Without an explicit `native_type` a width mismatch stays the configuration
     /// error it has always been, on both halves. This is what keeps
     /// `tests/sink.rs`'s `int64`-over-`integer` refusal true.
     #[test]
     fn an_unforced_width_mismatch_is_refused_on_a_sink_too() {
         for role in [Role::Source, Role::Sink] {
-            let reason = resolve_wire(&spec("seq", PgFieldType::Int64), &col(oid_of("int4")), role)
+            let reason = resolve_wire(&spec("seq", FieldType::Int64), &col(oid_of("int4")), role)
                 .expect_err("narrowing must be deliberate");
             assert!(reason.contains("int4"), "{reason}");
         }
@@ -1763,7 +1756,7 @@ mod tests {
         let field = FieldSpec {
             precision: Some(18),
             scale: Some(4),
-            ..forced("amount", PgFieldType::Decimal128, "numeric(12,2)")
+            ..forced("amount", FieldType::Decimal128, "numeric(12,2)")
         };
         let forced_ref = resolve_pg_type("numeric(12,2)").expect("numeric");
         let reason = validate_forced(&field, &forced_ref, Role::Sink)
@@ -1789,7 +1782,7 @@ mod tests {
         let field = FieldSpec {
             precision: Some(12),
             scale: Some(4),
-            ..forced("amount", PgFieldType::Decimal128, "numeric(12)")
+            ..forced("amount", FieldType::Decimal128, "numeric(12)")
         };
         let forced_ref = resolve_pg_type("numeric(12)").expect("numeric(12)");
         let reason = validate_forced(&field, &forced_ref, Role::Sink)
@@ -1805,19 +1798,19 @@ mod tests {
 
     #[test]
     fn an_array_pg_type_needs_a_list_declaration_and_the_reverse() {
-        let scalar_over_array = forced("c", PgFieldType::Utf8, "text[]");
+        let scalar_over_array = forced("c", FieldType::Utf8, "text[]");
         let array_ref = resolve_pg_type("text[]").expect("array");
         let reason = validate_forced(&scalar_over_array, &array_ref, Role::Source)
-            .expect_err("an array pg_type needs type=list");
+            .expect_err("an array native_type needs type=list");
         assert!(reason.contains("list"), "{reason}");
 
         let list_over_scalar = FieldSpec {
-            pg_type: Some("text".to_string()),
-            ..list("c", PgFieldType::Utf8)
+            native_type: Some("text".to_string()),
+            ..list("c", FieldType::Utf8)
         };
         let scalar_ref = resolve_pg_type("text").expect("scalar");
         let reason = validate_forced(&list_over_scalar, &scalar_ref, Role::Source)
-            .expect_err("a list needs an array pg_type");
+            .expect_err("a list needs an array native_type");
         assert!(reason.contains("text[]"), "{reason}");
     }
 
@@ -1827,15 +1820,15 @@ mod tests {
     #[test]
     fn a_non_builtin_forced_type_defers_its_pairing_to_connect_time() {
         let enum_ref = resolve_pg_type("public.mood").expect("enum");
-        for ty in [PgFieldType::Utf8, PgFieldType::Int64] {
+        for ty in [FieldType::Utf8, FieldType::Int64] {
             validate_forced(&forced("c", ty, "public.mood"), &enum_ref, Role::Source)
                 .expect("the catalog decides, not the name");
         }
-        // `type = "int32" pg_type = "public.posint"` is the domain case that
+        // `type = "int32" native_type = "public.posint"` is the domain case that
         // has to survive load time: a domain over `int4` decodes as `int32`.
         let domain_ref = resolve_pg_type("public.posint").expect("domain");
         validate_forced(
-            &forced("c", PgFieldType::Int32, "public.posint"),
+            &forced("c", FieldType::Int32, "public.posint"),
             &domain_ref,
             Role::Source,
         )
@@ -1844,15 +1837,15 @@ mod tests {
         // The shape the name itself fixes is still checked here.
         let array_ref = resolve_pg_type("public.mood[]").expect("enum array");
         let reason = validate_forced(
-            &forced("c", PgFieldType::Utf8, "public.mood[]"),
+            &forced("c", FieldType::Utf8, "public.mood[]"),
             &array_ref,
             Role::Source,
         )
         .expect_err("an array name needs a list declaration");
         assert!(reason.contains("list"), "{reason}");
 
-        let mut field = list("c", PgFieldType::Utf8);
-        field.pg_type = Some("public.mood[]".to_string());
+        let mut field = list("c", FieldType::Utf8);
+        field.native_type = Some("public.mood[]".to_string());
         validate_forced(&field, &array_ref, Role::Source).expect("a list of text carries it");
     }
 }

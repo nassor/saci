@@ -20,8 +20,8 @@ pub const ACCUMULATOR_STAGE_SENTINEL: u32 = u32::MAX;
 ///
 /// Distinct from [`ACCUMULATOR_STAGE_SENTINEL`] (`u32::MAX`) and far above any real
 /// stage index, which number from 0 and stay in the dozens. The payload is whatever
-/// [`PipelineRuntime::run_on_with_state`](crate::runtime::PipelineRuntime::run_on_with_state)
-/// returned; the host never interprets it.
+/// [`PipelineRuntime::run_batch`](crate::runtime::PipelineRuntime::run_batch)
+/// returned as its state; the host never interprets it.
 pub const PROCESSOR_STATE_STAGE_SENTINEL: u32 = u32::MAX - 1;
 
 /// A persisted intermediate snapshot of pipeline state for one claim stage.

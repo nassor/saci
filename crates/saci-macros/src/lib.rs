@@ -1,31 +1,25 @@
-//! Derive and attribute macros for the SACI processor SDK.
+//! Derive and attribute macros for SACI.
 //!
-//! Re-exported from `saci::processor`; a processor crate depends on `saci` with
-//! `features = ["processor"]` and never on this crate directly. Four macros cover a whole processor:
+//! Re-exported from `saci` (and `saci::prelude`); a crate depends on `saci` and
+//! never on this crate directly. Five macros:
 //!
-//! | Macro                    | Applies to                                        | Generates                                              |
-//! |--------------------------|---------------------------------------------------|--------------------------------------------------------|
-//! | `#[derive(Component)]`   | a row struct                                      | `Component::name` and `Component::schema`              |
-//! | `#[transform(...)]`      | `fn(&mut Row)` / `fn(&mut Row, &Config)`          | a `System` that decodes, mutates in place, re-encodes  |
-//! | `#[fold(...)]`           | `fn(&[Row], &mut State)`                          | a `System` that hands the whole batch over once        |
-//! | `#[processor(...)]`      | `fn() -> Pipeline`                                | the WIT world, the guest exports, the host-io shims    |
+//! | Macro                  | Applies to                                    | Generates                                              |
+//! |------------------------|-----------------------------------------------|--------------------------------------------------------|
+//! | `#[derive(Component)]` | a row struct                                  | `Component::name`, `Component::schema`, field consts   |
+//! | `#[transform]`         | `fn(&mut Row)` / `fn(&mut Row, &sdk::Config)` | a `System` that decodes, mutates in place, re-encodes  |
+//! | `#[fold]`              | `fn(&[Row], &mut State)`                      | a `System` that hands the whole batch over once        |
+//! | `#[processor]`         | `fn() -> Pipeline`                            | the WIT world and the WebAssembly guest exports        |
+//! | `#[plugin]`            | `fn() -> Pipeline`                            | the native plugin C ABI exports                        |
 //!
 //! Every macro leaves the item it is applied to exactly as written, so the
 //! author's function stays callable and unit-testable outside any pipeline.
 //!
 //! # Paths in the expansions
 //!
-//! Generated code names `::saci::processor::...`, so `saci` must be a
-//! direct dependency of the crate using these macros. Two references are
-//! deliberately unqualified instead:
-//!
-//! - `crate::bindings`, the `wit_bindgen::generate!` module `#[processor]`
-//!   emits. WIT bindings are caller-side, so this must resolve to the processor
-//!   crate, not to `saci`.
-//! - `crate::saci_config_get`, which `#[processor]` emits for the same reason
-//!   and a two-parameter `#[transform]` reads.
-//!
-//! Both consequences are the same: `#[processor]` belongs on a `fn` at the
+//! Generated code names `::saci::__private::...`, so `saci` must be a direct
+//! dependency of the crate using these macros. `#[processor]` also names
+//! `crate::bindings`, the `wit_bindgen::generate!` module it emits: WIT
+//! bindings are caller-side, so `#[processor]` belongs on a `fn` at the
 //! processor crate's root.
 
 #![deny(missing_docs)]
@@ -34,6 +28,7 @@ use proc_macro::TokenStream;
 use syn::{DeriveInput, ItemFn, parse_macro_input};
 
 mod component;
+mod plugin;
 mod processor;
 mod system;
 mod util;
@@ -57,10 +52,16 @@ const PIPELINE_WIT: &str = include_str!("../wit/pipeline.wit");
 ///
 /// - `name()` returns the struct identifier, or the `#[saci(name = "...")]`
 ///   override.
-/// - `schema()` traces the Arrow schema from the type with `serde_arrow`,
-///   pinned to the 32-bit offset forms (`Utf8`, `List`, `Binary`) that every
-///   non-Rust SACI codec assumes. Field order is declaration order, which is
-///   what the schema fingerprint hashes.
+/// - `schema()` traces the Arrow schema from the type with `serde_arrow`, once
+///   per process, pinned to the 32-bit offset forms (`Utf8`, `List`, `Binary`)
+///   that every non-Rust SACI codec assumes. Field order is declaration order,
+///   which is what the schema fingerprint hashes.
+///
+/// It also declares one `FieldRef` constant per field, named after the field
+/// in upper case (`usd_amount` → `Order::USD_AMOUNT`) and pointing at the
+/// column serde writes for it, `#[serde(rename)]` and
+/// `#[serde(rename_all)]` included. A skipped or flattened field has none.
+/// `#[saci(fields = false)]` declares none at all.
 ///
 /// # Requires `Serialize` and `Deserialize`
 ///
@@ -77,8 +78,8 @@ const PIPELINE_WIT: &str = include_str!("../wit/pipeline.wit");
 /// `schema()` traces the type's `Deserialize` impl, and `Component`'s default
 /// `to_record_batch` / `from_record_batch` are `serde_arrow` calls. A derive
 /// macro emits impls, not derives, so it cannot add them for you; `serde` also
-/// has to be a direct dependency of the processor crate, because serde's own
-/// expansion names the literal `serde` crate at the call site.
+/// has to be a direct dependency of the crate, because serde's own expansion
+/// names the literal `serde` crate at the call site.
 ///
 /// # Renaming a column
 ///
@@ -97,53 +98,46 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 /// Turn a row function into a `System` that rewrites one component in place.
 ///
 /// ```ignore
-/// #[transform(component = Order)]
-/// pub fn settle(row: &mut Order) -> saci::processor::Result<()> {
+/// #[transform]
+/// pub fn settle(row: &mut Order) -> sdk::Result<()> {
 ///     row.settlement = if row.valid { "SETTLED" } else { "REJECTED" }.to_string();
 ///     Ok(())
 /// }
 /// ```
 ///
 /// Adds `settle_system() -> impl System` next to the untouched `settle`. The
-/// generated system decodes the component's rows, calls the function once per
-/// row, and writes the batch back with `Dataset::replace_batch`.
+/// component is the type behind the first parameter, which must be written
+/// `&mut T`. The generated system decodes the component's rows, calls the
+/// function once per row, and writes the batch back with
+/// `Dataset::replace_batch`.
 ///
-/// A second parameter opts into host config; the parameter count alone selects
-/// the form, so the type may be spelled any way that resolves:
+/// A second parameter opts into host config, built once per batch:
 ///
 /// ```ignore
-/// #[transform(component = Order)]
-/// pub fn settle(row: &mut Order, config: &saci::processor::Config) -> saci::processor::Result<()> {
+/// #[transform]
+/// pub fn settle(row: &mut Order, config: &sdk::Config) -> sdk::Result<()> {
 ///     let floor = config.get("min_amount", 0.0)?;
 ///     # let _ = floor;
 ///     Ok(())
 /// }
 /// ```
 ///
-/// The `Config` is built once per batch, not per row.
-///
 /// # Declared access
 ///
-/// The system declares a whole-component read *and* write of `component`.
+/// The system declares a whole-component read *and* write of the component.
 /// Over-declaration is safe by construction: the DAG expands a whole-component
 /// declaration into every field of that component, which can only add edges,
 /// and edges only cost parallelism.
 ///
-/// # Scope
-///
-/// Reads and writes name the same component, because the function mutates a row
-/// in place. A batch-level operation, or one that writes state rather than
-/// columns, is a `#[fold]`.
-///
 /// # Errors
 ///
 /// An error out of the function fails the batch as
-/// `SaciError::SystemExecution`, which the host classifies as retryable.
+/// `SaciError::SystemExecution`, which is retryable.
 #[proc_macro_attribute]
 pub fn transform(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as system::TransformArgs);
     let func = parse_macro_input!(item as ItemFn);
-    system::expand_transform(args, func)
+    util::reject_args(attr.into(), "transform")
+        .and_then(|()| system::expand_transform(func))
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -152,38 +146,29 @@ pub fn transform(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// cross-batch state.
 ///
 /// ```ignore
-/// #[fold(reads = Order, state = Ledger)]
-/// pub fn ledger(rows: &[Order], state: &mut Ledger) -> saci::processor::Result<()> {
+/// #[fold]
+/// pub fn ledger(rows: &[Order], state: &mut Ledger) -> sdk::Result<()> {
 ///     state.settled_count += rows.len() as i64;
 ///     Ok(())
 /// }
 /// ```
 ///
 /// Adds `ledger_system() -> impl System` next to the untouched `ledger`. The
-/// generated system decodes every row of `reads`, fetches the
-/// `ProcessorState<State>` resource the `#[processor]` `state = ...` form put
-/// on the dataset (inserting `State::default()` on a cold start), and calls the
-/// function once with the whole slice.
-///
-/// The declared access is a whole-component read of `reads` plus a resource
-/// write of `ProcessorState<State>`, so a fold is scheduled after any
-/// `#[transform]` writing that component.
-///
-/// `State` must be a `Component` implementing `Default`, `Serialize` and
-/// `Deserialize`. It is *state*, not a batch component: never register it on
-/// the dataset. `Dataset`'s IPC format requires every registered component to
-/// hold exactly the dataset's row count, while state rows are independent of
-/// batch rows.
+/// component is the element type of the first parameter (`&[T]`), the state
+/// the type behind the second (`&mut S`). The generated system decodes every
+/// row, fetches the `sdk::State<S>` resource the pipeline's `.state::<S>()`
+/// put on the dataset (inserting `S::default()` on a cold start), and calls
+/// the function once with the whole slice.
 ///
 /// # Errors
 ///
 /// An error out of the function fails the batch as
-/// `SaciError::SystemExecution`, which the host classifies as retryable.
+/// `SaciError::SystemExecution`, which is retryable.
 #[proc_macro_attribute]
 pub fn fold(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as system::FoldArgs);
     let func = parse_macro_input!(item as ItemFn);
-    system::expand_fold(args, func)
+    util::reject_args(attr.into(), "fold")
+        .and_then(|()| system::expand_fold(func))
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -191,42 +176,25 @@ pub fn fold(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Export a pipeline as a `saci:pipeline@0.4.0` WebAssembly component.
 ///
 /// ```ignore
-/// #[processor(name = "settle", state = Ledger)]
+/// #[processor]
 /// pub fn build() -> Pipeline {
-///     Pipeline::builder("settle")
-///         .with::<Order>()
-///         .with_system(settle_system())
-///         .with_system(ledger_system())
-///         .build()
+///     Pipeline::new("settle")
+///         .component::<Order>()
+///         .state::<Ledger>()
+///         .system(settle_system())
+///         .system(ledger_system())
 /// }
 /// ```
 ///
 /// Emits, all under `#[cfg(target_arch = "wasm32")]` so the author's source
-/// carries no target gates:
+/// carries no target gates: `mod bindings`, a `wit_bindgen::generate!` over
+/// the `saci-pipeline` world, the `Guest` impl covering `describe` and
+/// `run-batch`, the `sdk::host` backend over the `host-io` imports, and the
+/// `crate::bindings::export!` handshake. `fn build()` itself is re-emitted
+/// unchanged and compiles for every target.
 ///
-/// - `mod bindings`, a `wit_bindgen::generate!` over the `saci-pipeline` world
-///   text embedded in this crate,
-/// - the `Guest` impl covering `describe` and `run-batch`, including state
-///   restore/capture, `RouteDecision` read-back, error classification and
-///   `RunMetrics`,
-/// - the `crate::bindings::export!` handshake.
-///
-/// Plus four host-io functions with host-target stand-ins, which must be
-/// emitted into the processor crate because WIT bindings are caller-side:
-/// `saci_config_get`, `saci_config_parse`, `log(target, message)` and
-/// `metric(name, value)`.
-///
-/// `fn build()` itself is re-emitted unchanged and compiles for every target.
-///
-/// # Arguments
-///
-/// - `name = "..."` (required) is the `pipeline-descriptor.name` the host gates
-///   config and checkpoint compatibility on. It is the processor's external
-///   identity; the string passed to `Pipeline::builder` names the DAG in
-///   diagnostics and is normally the same.
-/// - `state = T` (optional) names the one `Component` whose rows survive across
-///   `run-batch` calls; omit it for a stateless processor. `T` must not be
-///   registered on the dataset.
+/// The pipeline's name is the `pipeline-descriptor.name` the host gates config
+/// and checkpoint compatibility on.
 ///
 /// # Requirements
 ///
@@ -241,9 +209,32 @@ pub fn fold(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   collide with the one this macro splices in.
 #[proc_macro_attribute]
 pub fn processor(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as processor::ProcessorArgs);
     let func = parse_macro_input!(item as ItemFn);
-    processor::expand(args, func)
+    util::reject_args(attr.into(), "processor")
+        .and_then(|()| processor::expand(func))
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Export a pipeline as a native plugin: a `cdylib` the host `dlopen`s.
+///
+/// ```ignore
+/// #[plugin]
+/// pub fn build() -> Pipeline {
+///     Pipeline::new("settle").component::<Order>().system(settle_system())
+/// }
+/// ```
+///
+/// Emits the two exported symbols the C ABI requires, `saci_abi_version` and
+/// `saci_plugin_v1`, and the four vtable thunks they install. Every call into
+/// the pipeline runs inside `catch_unwind`, so a panic becomes a `PERMANENT`
+/// status instead of unwinding across the boundary. The crate must set
+/// `crate-type = ["cdylib"]`.
+#[proc_macro_attribute]
+pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+    util::reject_args(attr.into(), "plugin")
+        .and_then(|()| plugin::expand(func))
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

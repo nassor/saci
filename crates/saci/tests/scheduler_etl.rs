@@ -1,4 +1,4 @@
-#![cfg(feature = "runtime")]
+#![cfg(feature = "engine")]
 // Runs the full 4-system ETL pipeline and asserts on data correctness.
 
 use std::sync::Arc;
@@ -20,7 +20,7 @@ struct IngestSystem;
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("Transaction")
+        SystemMeta::new("ingest").writes_all::<Transaction>()
     }
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
         let transactions = support::seed_transactions();
@@ -39,10 +39,7 @@ impl System for ValidateSystem {
             .writes(Transaction::VALID)
     }
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let batch = pipeline
-            .columns::<Transaction>()
-            .ok_or_else(|| SaciError::generic("Transaction batch not found"))?
-            .clone();
+        let batch = pipeline.batch::<Transaction>()?.clone();
         let n;
         let valid_flags: Vec<bool>;
         {
@@ -79,16 +76,11 @@ impl System for EnrichSystem {
             .reads(Transaction::AMOUNT)
             .reads(Transaction::CURRENCY)
             .writes(Transaction::USD_AMOUNT)
-            .read_resource::<FxRates>()
+            .reads_resource::<FxRates>()
     }
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let rates = pipeline
-            .get_resource::<FxRates>()
-            .ok_or_else(|| SaciError::generic("FxRates resource not found"))?;
-        let batch = pipeline
-            .columns::<Transaction>()
-            .ok_or_else(|| SaciError::generic("Transaction batch not found"))?
-            .clone();
+        let rates = pipeline.resource::<FxRates>()?;
+        let batch = pipeline.batch::<Transaction>()?.clone();
         let n;
         let usd_amounts: Vec<f64>;
         {
@@ -125,8 +117,8 @@ impl System for EnrichSystem {
 fn make_report_system() -> impl System {
     system_fn(
         SystemMeta::new("report")
-            .read_component("Transaction")
-            .write_resource::<Report>(),
+            .reads_all::<Transaction>()
+            .writes_resource::<Report>(),
         |data| {
             let (n, valid_count, total_usd) = {
                 let txns = data.view::<Transaction>()?;
@@ -157,25 +149,24 @@ fn make_report_system() -> impl System {
 
 #[tokio::test]
 async fn test_scheduler_etl_pipeline_runs_and_produces_correct_report() {
-    let mut pipeline = Pipeline::builder("etl")
-        .with::<Transaction>()
-        .with_resource(FxRates {
+    let mut pipeline = Pipeline::new("etl")
+        .component::<Transaction>()
+        .resource(FxRates {
             eur: 1.08,
             gbp: 1.27,
             jpy: 0.0067,
             cad: 0.74,
         })
-        .with_system(IngestSystem)
-        .with_system(ValidateSystem)
-        .with_system(EnrichSystem)
-        .with_system(make_report_system())
-        .build();
+        .system(IngestSystem)
+        .system(ValidateSystem)
+        .system(EnrichSystem)
+        .system(make_report_system());
 
     pipeline.run().await.unwrap();
 
     let report = pipeline
         .data()
-        .get_resource::<Report>()
+        .resource::<Report>()
         .expect("Report resource missing after pipeline run");
 
     // 9 rows total; id 1004 (amount=-50) and id 1008 (amount=0) are rejected.
@@ -185,7 +176,7 @@ async fn test_scheduler_etl_pipeline_runs_and_produces_correct_report() {
     assert!(report.total_usd > 0.0, "total USD should be positive");
 
     // Validate and enrich touch disjoint fields, so they share a stage.
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan().unwrap();
     assert_eq!(
         stages.len(),
         3,

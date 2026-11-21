@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::connector::ChannelBridge;
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
 use crate::connector::channel::{ChannelSink, ChannelSource};
 
@@ -36,12 +36,12 @@ struct Entry {
 /// Name-keyed registry resolving each channel name's `ChannelSink` and
 /// `ChannelSource` to the two ends of one shared `mpsc` pair.
 ///
-/// Register one instance with [`ServiceBuilder::with_channel_bridge`]
+/// Register one instance with [`ServiceBuilder::channels`]
 /// (under the service, `connector-channel` registers a default instance
 /// automatically); the channel factories reach it through
-/// [`ConnectorContext::channel_bridge`](crate::connector::ConnectorContext::channel_bridge).
+/// [`ConnectorContext::channels`](crate::connector::ConnectorContext::channels).
 ///
-/// [`ServiceBuilder::with_channel_bridge`]: crate::service::builder::ServiceBuilder::with_channel_bridge
+/// [`ServiceBuilder::channels`]: crate::service::ServiceBuilder::channels
 #[derive(Default)]
 pub struct ChannelRegistry {
     entries: Mutex<HashMap<String, Entry>>,
@@ -97,7 +97,7 @@ impl ChannelBridge for ChannelRegistry {
             .take()
             .expect("sender present for the sink half");
         entry.sink_built = true;
-        Ok(Box::new(ChannelSink::from_sender(schema, buffer, tx)))
+        Ok(Box::new(ChannelSink::with_sender(schema, buffer, tx)))
     }
 
     fn source(
@@ -137,7 +137,7 @@ impl ChannelBridge for ChannelRegistry {
             .take()
             .expect("receiver present for the source half");
         entry.source_built = true;
-        Ok(Box::new(ChannelSource::from_receiver(schema, rx)))
+        Ok(Box::new(ChannelSource::with_receiver(schema, rx)))
     }
 }
 

@@ -17,65 +17,28 @@
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use tokio_util::sync::CancellationToken;
 
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
-use saci::service::config::{
-    HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
-    StandaloneConfig, WorkflowSpec,
-};
-use saci::service::standalone::run_standalone;
-use saci::system::{System, SystemMeta};
-use saci::windows::{
-    ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowWatermark,
-    WindowedSystemBuilder,
-};
+use saci::prelude::*;
+use saci::service::BuiltWorkflow;
+use saci::service::RunMode;
+use saci::service::WindowConfig;
+use saci::windows::{WindowFunction, WindowResults, WindowWatermark, WindowedSystem};
 
 /// A trade event: one price at one instant, in milliseconds since the epoch.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Component, serde::Serialize, serde::Deserialize)]
 struct Trade {
     timestamp_ms: i64,
     price: f64,
 }
 
-impl Component for Trade {
-    fn name() -> &'static str {
-        "Trade"
-    }
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("timestamp_ms", DataType::Int64, false),
-            Field::new("price", DataType::Float64, false),
-        ]))
-    }
-}
-
 /// One aggregate row per (window, key) group, the processor node's output.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Component, serde::Serialize, serde::Deserialize)]
 struct WindowTotal {
     window_id: i64,
     key_hash: i64,
     total: f64,
-}
-
-impl Component for WindowTotal {
-    fn name() -> &'static str {
-        "WindowTotal"
-    }
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("window_id", DataType::Int64, false),
-            Field::new("key_hash", DataType::Int64, false),
-            Field::new("total", DataType::Float64, false),
-        ]))
-    }
 }
 
 /// Reads the [`WindowResults`] the [`WindowedSystem`] left on the batch
@@ -87,18 +50,16 @@ struct ReportSystem;
 impl System for ReportSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("report")
-            .read_resource::<WindowResults>()
-            .read_resource::<WindowWatermark>()
-            .write_component("WindowTotal")
+            .reads_resource::<WindowResults>()
+            .reads_resource::<WindowWatermark>()
+            .writes_all::<WindowTotal>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-        let results = data
-            .get_resource::<WindowResults>()
-            .ok_or_else(|| SaciError::generic("WindowResults resource not found"))?;
+        let results = data.resource::<WindowResults>()?;
 
         let mut rows = Vec::new();
-        for batch in &results.batches {
+        for batch in &results.on_time {
             if batch.num_rows() == 0 {
                 continue;
             }
@@ -151,32 +112,19 @@ impl System for ReportSystem {
 /// The windowed processor node's pipeline: aggregate merged trades into
 /// 30-second tumbling windows and publish the totals.
 fn build_windowed_pipeline() -> Pipeline {
-    let windowed = WindowedSystemBuilder::new()
-        .source("Trade", "timestamp_ms")
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "price",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(5_000)
-        .build()
-        .expect("windowed system builds");
+    let windowed = WindowedSystem::new(
+        Trade::TIMESTAMP_MS,
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("price"),
+    )
+    .expect("windowed system builds")
+    .allowed_lateness_ms(5_000);
 
-    let mut pipeline = Pipeline::new("windowed-fan-in");
-    pipeline
-        .data_mut()
-        .register_component::<Trade>()
-        .expect("register Trade");
-    pipeline
-        .data_mut()
-        .register_component::<WindowTotal>()
-        .expect("register WindowTotal");
-    pipeline.add_system(windowed);
-    pipeline.add_system(ReportSystem);
-    pipeline
+    Pipeline::new("windowed-fan-in")
+        .component::<Trade>()
+        .component::<WindowTotal>()
+        .system(windowed)
+        .system(ReportSystem)
 }
 
 fn trade_batch(trades: &[(i64, f64)]) -> RecordBatch {
@@ -195,8 +143,8 @@ async fn main() -> Result<(), SaciError> {
 
     // Two independent streams feeding the same component of one processor:
     // the fan-in merge is the whole point of the example.
-    let (tx_a, source_a) = ChannelSource::new(trade_schema.clone(), 16);
-    let (tx_b, source_b) = ChannelSource::new(trade_schema.clone(), 16);
+    let (source_a, tx_a) = ChannelSource::new(trade_schema.clone(), 16);
+    let (source_b, tx_b) = ChannelSource::new(trade_schema.clone(), 16);
     let (sink, mut rx) = ChannelSink::new(WindowTotal::schema(), 16);
 
     // Stream A: window 0 only. Stream B: window 0 and window 1.
@@ -213,117 +161,35 @@ async fn main() -> Result<(), SaciError> {
     // senders and the sink receiver. The shape is exactly what a config file
     // with two `source` nodes, one `wasm` node carrying a `window` block, and
     // one `sink` node would produce.
-    let nodes = vec![
-        BuiltNode {
-            id: "trades_a".to_string(),
-            name: Some("Trades A".to_string()),
-            type_name: "ChannelSource".to_string(),
-            component: Some("Trade"),
-            kind: BuiltNodeKind::Source(Box::new(source_a)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "trades_b".to_string(),
-            name: Some("Trades B".to_string()),
-            type_name: "ChannelSource".to_string(),
-            component: Some("Trade"),
-            kind: BuiltNodeKind::Source(Box::new(source_b)),
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "windowed".to_string(),
-            name: Some("Windowed aggregate".to_string()),
-            type_name: "native".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(build_windowed_pipeline()),
-                kind: "native",
-            },
-            downstream: vec![BuiltEdge {
-                node: 3,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: Some(saci::service::config::WindowConfig {
-                spec: WindowSpec::Tumbling {
-                    size_ms: 30_000,
-                    offset_ms: 0,
-                },
+    let mut built = BuiltWorkflow::builder("windowed-fan-in")
+        .name("Two streams, one windowed processor")
+        .source("trades_a", "Trade", source_a)
+        .source("trades_b", "Trade", source_b)
+        .processor("windowed", build_windowed_pipeline())
+        .sink("totals", "WindowTotal", sink)
+        .window(
+            "windowed",
+            WindowConfig {
+                spec: WindowSpec::tumbling(30_000),
                 time_field: "timestamp_ms".to_string(),
                 key_fields: Vec::new(),
                 allowed_lateness_ms: 5_000,
-            }),
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "totals".to_string(),
-            name: Some("Window totals".to_string()),
-            type_name: "ChannelSink".to_string(),
-            component: Some("WindowTotal"),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-    ];
-
-    let config = ServiceConfig {
-        heal: Default::default(),
-        flow_control: Default::default(),
-        node: NodeConfig {
-            id: 1,
-            name: Some("demo".to_string()),
-            data_dir: std::path::PathBuf::from("/tmp/saci-windowed-fan-in"),
-        },
-        mode: ServiceMode::Standalone {
-            config: StandaloneConfig {
-                run_mode: RunMode::OneShot,
             },
-        },
-        workflows: vec![WorkflowSpec {
-            id: "windowed-fan-in".to_string(),
-            name: Some("Two streams, one windowed processor".to_string()),
-            transformers: Vec::new(),
-            sources: Vec::new(),
-            plugin: Vec::new(),
-            wasm: Vec::new(),
-            sinks: Vec::new(),
-            links: Vec::new(),
-            dlq: None,
-        }],
-        store: None,
-        http: HttpConfig::default(),
-        observability: ObservabilityConfig::default(),
-        variables: std::collections::HashMap::new(),
-    };
+        )
+        .link("trades_a", "windowed")
+        .link("trades_b", "windowed")
+        .link("windowed", "totals")
+        .run_mode(RunMode::Once)
+        .build()?;
+    built.nodes[0].name = Some("Trades A".to_string());
+    built.nodes[0].connector = "channel".to_string();
+    built.nodes[1].name = Some("Trades B".to_string());
+    built.nodes[1].connector = "channel".to_string();
+    built.nodes[2].name = Some("Windowed aggregate".to_string());
+    built.nodes[3].name = Some("Window totals".to_string());
+    built.nodes[3].connector = "channel".to_string();
 
-    let built = BuiltService {
-        workflow_id: "windowed-fan-in".to_string(),
-        workflow_name: Some("Two streams, one windowed processor".to_string()),
-        nodes,
-        registry: std::sync::Arc::new(saci::service::registry::Registry::new()),
-        inspector: None,
-        dlq: None,
-    };
-
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None).await?;
+    let stats = built.run(CancellationToken::new()).await?;
     println!();
     println!(
         "iterations: {} · rows in: {} · sink batches: {}",

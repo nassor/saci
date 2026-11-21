@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::bindings::{HostIo, LogLevel, TypesHost};
+use crate::metrics::ProcessorMetrics;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// Per-store processor state passed as the wasmtime `Store<T>` data.
@@ -17,12 +18,12 @@ pub struct HostState {
     /// with the owning runtime, so a processor call costs one `Arc` bump and no map
     /// copy.
     pub config: Arc<HashMap<String, String>>,
-    /// This node's declared id.
+    /// This node's metric writers, bound to its declared id.
     ///
     /// Carried here so a `host-io::metric` call can be attributed to the node
     /// that made it: the import gives the host a name and a value and nothing
     /// that identifies the caller.
-    pub processor_id: String,
+    pub metrics: ProcessorMetrics,
     pub wasi_ctx: WasiCtx,
     pub resource_table: ResourceTable,
 }
@@ -31,12 +32,12 @@ impl HostState {
     pub fn new(
         name: impl Into<String>,
         config: Arc<HashMap<String, String>>,
-        processor_id: String,
+        metrics: ProcessorMetrics,
     ) -> Self {
         Self {
             name: name.into(),
             config,
-            processor_id,
+            metrics,
             wasi_ctx: WasiCtxBuilder::new().build(),
             resource_table: ResourceTable::new(),
         }
@@ -84,7 +85,7 @@ impl HostIo for HostState {
     }
 
     fn metric(&mut self, name: String, value: f64) {
-        crate::metrics::instruments().processor_metric(&self.processor_id, &name, value);
+        self.metrics.custom(&name, value);
         #[cfg(feature = "tracing")]
         tracing::trace!(pipeline = %self.name, metric = %name, value = value, "processor metric");
         #[cfg(not(feature = "tracing"))]
@@ -109,7 +110,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
             ),
-            "test-pipeline".to_string(),
+            crate::metrics::instruments().processor("test-pipeline"),
         )
     }
 
@@ -149,12 +150,13 @@ mod tests {
             .encode_to_string(&registry.gather())
             .expect("encode prometheus text");
         assert!(
-            text.contains("saci_processor_metric"),
+            text.contains("saci_processor_custom"),
             "the histogram should exist:\n{text}"
         );
         assert!(
-            text.contains(r#"metric="rows_flagged""#),
-            "the metric name should become an attribute:\n{text}"
+            text.contains(r#"metric="rows_flagged""#)
+                && text.contains(r#"processor="test-pipeline""#),
+            "the metric name and the node id should become attributes:\n{text}"
         );
 
         // Enough distinct names to take the total past the cap, so the number of
@@ -167,12 +169,20 @@ mod tests {
         let text = TextEncoder::new()
             .encode_to_string(&registry.gather())
             .expect("encode prometheus text");
-        // Attribution is additive: each admitted name writes both the
-        // unattributed series and one under `processor="<id>"`, so only the
-        // unattributed form maps one to one with a distinct name.
-        let distinct = text
+        // One sample per event, under the node's own id: every line carries
+        // `processor=`, and this host's lines map one to one with an admitted
+        // name.
+        let lines: Vec<&str> = text
             .lines()
-            .filter(|l| l.starts_with("saci_processor_metric_count{") && !l.contains("processor="))
+            .filter(|l| l.starts_with("saci_processor_custom_count{"))
+            .collect();
+        assert!(
+            lines.iter().all(|l| l.contains("processor=")),
+            "a custom metric has no unattributed sample:\n{text}"
+        );
+        let distinct = lines
+            .iter()
+            .filter(|l| l.contains(r#"processor="test-pipeline""#))
             .count();
         assert_eq!(
             distinct,

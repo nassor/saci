@@ -51,7 +51,7 @@ through different sinks if they land in different passes: see
             <rect class="hd hd-bnd" x="210" y="78" width="190" height="8"/>
             <text class="t-lbl t-bnd" x="222" y="81">classify</text>
             <text class="t-sm" x="222" y="104">wasm or plugin</text>
-            <text class="t-sm t-bnd" x="222" y="124">RouteDecision(["eu"])</text>
+            <text class="t-sm t-bnd" x="222" y="124">routes: ["eu"]</text>
         </g>
         <g class="anim anim-3">
             <path class="arw arw-data" d="M400 104 C450 104 450 54 500 54" marker-end="url(#brc-d)"/>
@@ -113,7 +113,7 @@ through different sinks if they land in different passes: see
             <rect class="hd hd-data" x="0" y="100" width="124" height="20" rx="8"/>
             <rect class="hd hd-data" x="0" y="112" width="124" height="8"/>
             <text class="t-lbl" x="12" y="115">in</text>
-            <text class="t-sm" x="12" y="138">NatsSource</text>
+            <text class="t-sm" x="12" y="138">nats source</text>
         </g>
         <g class="anim anim-2">
             <path class="arw arw-data" d="M124 128 C167 128 167 54 210 54" marker-end="url(#br-d)"/>
@@ -217,7 +217,7 @@ A processor labels every outbound link or none; the load-time rules behind that 
 - Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`.
 - Docker for the NATS broker.
 - NATS is an opt-in connector too: the serve and validate commands
-  below pass `--features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host`.
+  below pass `--features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host`.
 
 ## 1. Build the processors
 
@@ -244,7 +244,7 @@ A mislabelled graph is caught before anything runs. On macOS and Windows set
 Linux:
 
 ```bash,name=Validate the branching config
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate \
+cargo run -p saci --features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host -- validate \
   --config examples/branching/branching.kdl --strict
 ```
 
@@ -252,7 +252,7 @@ macOS:
 
 ```bash,name=Validate with the dylib name
 SACI_PLUGIN_LIB=target/release/libbranching_plugin.dylib \
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate \
+cargo run -p saci --features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host -- validate \
   --config examples/branching/branching.kdl --strict
 ```
 
@@ -260,7 +260,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/release/branching_plugin.dll"
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- validate --config examples/branching/branching.kdl --strict
+cargo run -p saci --features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host -- validate --config examples/branching/branching.kdl --strict
 ```
 
 Expected output ends with `OK: all declared types resolved in built-in
@@ -287,7 +287,7 @@ Linux:
 mkdir -p /tmp/saci-branching
 
 SACI_OUT_DIR=/tmp/saci-branching \
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
+cargo run -p saci --features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host -- serve \
   --config examples/branching/branching.kdl
 ```
 
@@ -298,7 +298,7 @@ mkdir -p /tmp/saci-branching
 
 SACI_OUT_DIR=/tmp/saci-branching \
 SACI_PLUGIN_LIB=target/release/libbranching_plugin.dylib \
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve \
+cargo run -p saci --features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host -- serve \
   --config examples/branching/branching.kdl
 ```
 
@@ -309,7 +309,7 @@ mkdir C:\saci-branching
 
 $env:SACI_OUT_DIR = "C:/saci-branching"
 $env:SACI_PLUGIN_LIB = "target/release/branching_plugin.dll"
-cargo run -p saci --features server,connector-file,connector-nats,transformer-csv,wasm-host,plugin-host -- serve --config examples/branching/branching.kdl
+cargo run -p saci --features server,connector-file,connector-nats,codec-csv,wasm-host,plugin-host -- serve --config examples/branching/branching.kdl
 ```
 
 The stream runner waits for messages, so no output files exist yet. Leave this

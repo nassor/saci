@@ -2,15 +2,15 @@
 // both ends.
 //
 // Run:
-//   cargo run --features server,connector-saci,wasm-host --bin saci-service -- validate \
+//   cargo run --features server,connector-peer,wasm-host --bin saci-service -- validate \
 //     --config examples/configs/saci.kdl
-//   cargo run --features server,connector-saci,wasm-host --bin saci-service -- serve \
+//   cargo run --features server,connector-peer,wasm-host --bin saci-service -- serve \
 //     --config examples/configs/saci.kdl
 //
 // The source listens and the sink dials: `bind` is an address this process
 // accepts peer services on, `connect` is a peer service this process pushes
 // batches to. Both halves carry `RecordBatch`es over Arrow IPC, so neither
-// names a `transformer`; a sink here feeds a source in another saci-service
+// names a `codec`; a sink here feeds a source in another saci-service
 // and nothing in between chooses a byte format.
 //
 // `connect` takes several addresses, tried in order until one accepts a
@@ -38,20 +38,21 @@ mode "standalone"
 node id=1 name="saci-a" data_dir="${SACI_DATA_DIR:-/tmp/saci-saci}"
 
 // The source never reaches EOF: it blocks until the next batch arrives. Only
-// the stream runner can drive that, so config validation rejects `type="saci"`
-// on a source node in any other run mode. One workflow pass runs per arriving
-// batch. The sink half carries no such rule and runs in every mode.
-run_mode kind="stream"
+// the stream runner can drive that, so config validation rejects
+// `connector="peer"` on a source node in any other run mode. One workflow
+// pass runs per arriving batch. The sink half carries no such rule and runs
+// in every mode.
+run "stream"
 
 // One workflow declares the whole DAG: the source, the processor, the sink,
-// and the explicit links between them. No `transformer` node: a `saci` node
+// and the explicit links between them. No `codec` node: a `peer` node
 // resolves no format.
 workflow "ticks" {
     // ---------------------------------------------------------------- source
 
     // The processor's `describe()` supplies the component list, so `component`
     // on this source and the sink below must name components it declares.
-    source "ticks_in" type="saci" component="Tick" {
+    source "ticks_in" connector="peer" component="Tick" {
         config {
             // Listen address. Peer services connect here and push batches;
             // several at once is fine, and ordering holds within one session.
@@ -69,22 +70,22 @@ workflow "ticks" {
             // fields is refused with a message naming both schemas, so the
             // mismatch is found at the handshake rather than at the first
             // batch.
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "price" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "price" type="float64" nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "process_ticks" module="pipelines/ticks.wasm"
+    wasm "process_ticks" path="pipelines/ticks.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // A different component than the source's: the processor declares both,
-    // reads Tick and writes EnrichedTick. A sink's schema_fields must match
+    // reads Tick and writes EnrichedTick. A sink's `field` lines must match
     // the component's RecordBatch field for field, in order.
 
-    sink "ticks_out" type="saci" component="EnrichedTick" {
+    sink "ticks_out" connector="peer" component="EnrichedTick" {
         config {
             // Peers to dial, in order. Resolved when the factory is built and
             // dialled on the first batch.
@@ -94,8 +95,8 @@ workflow "ticks" {
             // it as down and trying the next one.
             handshake_timeout_ms 5000
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "price" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "price" type="float64" nullable=#true
         }
     }
 
@@ -105,7 +106,7 @@ workflow "ticks" {
 
 // HTTP control plane. /metrics carries the service's own counters plus the
 // saci_peer_source_* series labelled with the peer that fed this source.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a 15% grade:
 // one workflow.batch span opens per arriving batch, so a live peer at any real

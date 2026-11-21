@@ -44,7 +44,8 @@ const BENCHES: &[(&str, &str, &str)] = &[
     ("parallelism_compute", "saci", ""),
     ("pipeline", "saci", ""),
     ("ipc_checkpoint", "saci", ""),
-    ("batch_vs_stream", "saci", "io"),
+    ("batch_vs_stream", "saci", "engine"),
+    ("windows", "saci", "windows"),
     ("vs_datafusion_q6", "saci", ""),
     // Needs the smoketest component on disk first:
     // `cargo build --release -p saci-processor-smoketest --target wasm32-wasip3`.

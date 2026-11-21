@@ -97,10 +97,10 @@ const INTEGRITY: [&str; 2] = ["integrity", "integrity_audit"];
 /// which the integrity sequence prints alongside its two `serve` lines.
 const INTEGRITY_CHECK_FEATURES: &[&str] = &[
     "service",
-    "transformer-arrow-ipc",
-    "transformer-csv",
-    "transformer-ndjson",
-    "transformer-parquet",
+    "codec-arrow-ipc",
+    "codec-csv",
+    "codec-ndjson",
+    "codec-parquet",
 ];
 
 /// One streaming demo's publisher: the `[[example]]` target that feeds its

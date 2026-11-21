@@ -66,7 +66,7 @@ fn bench_ipc_round_trip(c: &mut Criterion) {
     let rows = make_wide_rows(1_000_000);
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<WideRow>().unwrap();
+    pipeline.register::<WideRow>().unwrap();
     pipeline.append::<WideRow>(&rows).unwrap();
 
     let mut group = c.benchmark_group("ipc_roundtrip_1m_rows");
@@ -111,7 +111,7 @@ fn bench_append_1m_rows(c: &mut Criterion) {
     c.bench_function("world_append_1m", |b| {
         b.iter(|| {
             let mut pipeline = Dataset::new();
-            pipeline.register_component::<WideRow>().unwrap();
+            pipeline.register::<WideRow>().unwrap();
             pipeline.append::<WideRow>(&rows).unwrap();
         });
     });
@@ -121,12 +121,12 @@ fn bench_column_scan_1m(c: &mut Criterion) {
     let rows = make_wide_rows(1_000_000);
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<WideRow>().unwrap();
+    pipeline.register::<WideRow>().unwrap();
     pipeline.append::<WideRow>(&rows).unwrap();
 
     c.bench_function("world_column_scan_sum_f64_1m", |b| {
         b.iter(|| {
-            let col = pipeline.column::<WideRow>("f0").unwrap();
+            let col = pipeline.column_named("WideRow", "f0").unwrap();
             let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
             let sum: f64 = arr.values().iter().sum();
             sum

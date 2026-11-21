@@ -8,7 +8,7 @@
 
 #![deny(missing_docs)]
 
-use saci::processor::prelude::*;
+use saci::prelude::*;
 
 /// One card authorisation row matching the Quick Start `Order` schema.
 #[derive(Component, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -40,23 +40,22 @@ pub struct Order {
 }
 
 /// Mark `row.valid` according to the host-configured `min_amount` threshold.
-#[transform(component = Order)]
-pub fn validate(row: &mut Order, config: &Config) -> Result<()> {
+#[transform]
+pub fn validate(row: &mut Order, config: &sdk::Config) -> sdk::Result<()> {
     let min_amount: f64 = config.get("min_amount", 0.0)?;
     row.valid = row.amount > min_amount;
     if !row.valid {
-        metric("validate.invalid_rows", 1.0);
+        sdk::host::metric("validate.invalid_rows", 1.0);
     }
     Ok(())
 }
 
 /// Export the Quick Start validation pipeline as a `saci:pipeline@0.4.0` component.
-#[processor(name = "quickstart-validate")]
+#[processor]
 pub fn build() -> Pipeline {
-    Pipeline::builder("quickstart-validate")
-        .with::<Order>()
-        .with_system(validate_system())
-        .build()
+    Pipeline::new("quickstart-validate")
+        .component::<Order>()
+        .system(validate_system())
 }
 
 #[cfg(test)]
@@ -83,14 +82,14 @@ mod tests {
     #[test]
     fn validates_orders_against_threshold() {
         let mut data = Dataset::new();
-        data.register_component::<Order>().expect("register Order");
+        data.register::<Order>().expect("register Order");
         data.append(&[sample(1, 0.0), sample(2, 25.0)])
             .expect("append");
 
         pollster::block_on(build().run_on(&mut data)).expect("run");
 
         let rows = <Order as Component>::from_record_batch(
-            data.columns::<Order>().expect("Order registered"),
+            data.batch::<Order>().expect("Order registered"),
         )
         .expect("decode");
         assert!(!rows[0].valid);

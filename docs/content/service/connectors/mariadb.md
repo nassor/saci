@@ -9,7 +9,7 @@ label = "Direction"
 value = "Source and sink"
 [[extra.facts]]
 label = "Format"
-value = "None: rows arrive already typed, so no transformer is named"
+value = "None: rows arrive already typed, so no codec is named"
 [[extra.facts]]
 label = "Run modes"
 value = "Any: every mode reaches EOF once it is caught up"
@@ -26,7 +26,7 @@ MySQL 8.4 and 9.
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 124" role="img" aria-labelledby="mdb-t mdb-d">
         <title id="mdb-t">One table read into a workflow and the result written to another table</title>
-        <desc id="mdb-d">A table box on the left feeds a source node named maria_orders. The source hands rows to a WebAssembly processor, drawn as a boundary box, which hands them to a sink node named maria_enriched. The sink writes the table box on the right. The two tables may live on a MariaDB server, a MySQL server, or one of each. No transformer sits anywhere in the chain, because rows arrive already typed.</desc>
+        <desc id="mdb-d">A table box on the left feeds a source node named maria_orders. The source hands rows to a WebAssembly processor, drawn as a boundary box, which hands them to a sink node named maria_enriched. The sink writes the table box on the right. The two tables may live on a MariaDB server, a MySQL server, or one of each. No codec sits anywhere in the chain, because rows arrive already typed.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="36" width="104" height="52" rx="8"/>
             <rect class="hd hd-data" x="0" y="36" width="104" height="18" rx="8"/>
@@ -77,9 +77,9 @@ MySQL 8.4 and 9.
 
 ## What you need
 
-- A binary built with `--features server,connector-mariadb`; MariaDB and MySQL are one of eight
-  connectors that need a specific service installed and running, so they sit outside the `server`
-  feature.
+- A binary built with `--features server,connector-mariadb`; the `mariadb` connector, for MariaDB and
+  MySQL, is one of eight connectors that need a specific service installed and running, so it sits
+  outside the `server` feature.
 - A reachable server. One in a container is enough. These commands start one of each, with the
   settings the `cdc_binlog` mode needs. Run one of them; they run the same on Linux, macOS and
   Windows (PowerShell):
@@ -110,7 +110,7 @@ log line `ready for connections`; both images restart once while they initialise
 - The processor component the config names, at `pipelines/orders.wasm`, for the `serve` step.
   [Build your own processor](@/service/processors/build/_index.md) is where that comes from;
   `validate --connectors-only` below runs without it.
-- No transformer. Rows arrive typed, so this connector names no format at all.
+- No codec. Rows arrive typed, so this connector names no format at all.
 
 ## Choose how to read changes
 
@@ -153,7 +153,7 @@ rows is a million rows in memory.
 <div class="code-cap"><span>KDL</span><em>the whole config table is read by the connector, so name is repeated inside it</em></div>
 
 ```kdl
-source "maria_orders" type="MariadbSource" component="OrderChange" {
+source "maria_orders" connector="mariadb" component="OrderChange" {
     config {
         name "maria_orders"
 
@@ -165,9 +165,9 @@ source "maria_orders" type="MariadbSource" component="OrderChange" {
             tiebreak_column "id"
         }
 
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "updated_at" type="timestamp_micros" nullable=#false
-        schema_fields "total" type="decimal128" precision=12 scale=2
+        field "id" type="int64" nullable=#false
+        field "updated_at" type="timestamp_micros" nullable=#false
+        field "total" type="decimal128" precision=12 scale=2
     }
 }
 ```
@@ -215,10 +215,10 @@ mode kind="cdc_trigger" {
     install_triggers #true
 }
 
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__seq" type="uint64" nullable=#false
-schema_fields "id" type="int64" nullable=#false
-schema_fields "status" type="utf8"
+field "__op" type="utf8" nullable=#false
+field "__seq" type="uint64" nullable=#false
+field "id" type="int64" nullable=#false
+field "status" type="utf8"
 ```
 
 </div>
@@ -236,11 +236,11 @@ mode kind="cdc_binlog" {
     server_id 4100
 }
 
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__binlog_file" type="utf8" nullable=#false
-schema_fields "__binlog_pos" type="uint64" nullable=#false
-schema_fields "id" type="int64" nullable=#false
-schema_fields "status" type="utf8"
+field "__op" type="utf8" nullable=#false
+field "__binlog_file" type="utf8" nullable=#false
+field "__binlog_pos" type="uint64" nullable=#false
+field "id" type="int64" nullable=#false
+field "status" type="utf8"
 ```
 
 </div>
@@ -270,7 +270,7 @@ An update that changes a primary key arrives as a `D` of the old row, then an `I
 `polling` refuses every `__` field. An outbox reads every column as an ordinary column, so an outbox
 may carry its own `__op` for an `apply_changes` sink.
 
-`schema_fields` is required and uses this connector's own type vocabulary, listed under
+`field` lines are required and use this connector's own type vocabulary, listed under
 [Every key](#every-key) below.
 
 ## 2. Write to a table: the sink node
@@ -279,7 +279,7 @@ may carry its own `__op` for an `apply_changes` sink.
 <div class="code-cap"><span>KDL</span><em>upsert makes a replayed drain cycle idempotent</em></div>
 
 ```kdl
-sink "maria_enriched" type="MariadbSink" component="EnrichedOrder" {
+sink "maria_enriched" connector="mariadb" component="EnrichedOrder" {
     config {
         name "maria_enriched"
         table "shop.enriched_orders"
@@ -290,9 +290,9 @@ sink "maria_enriched" type="MariadbSink" component="EnrichedOrder" {
 
         connection dsn="${SACI_MARIADB_SINK_DSN}" ssl_mode="verify_identity"
 
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "source_seq" type="uint64" nullable=#false
-        schema_fields "total" type="decimal128" precision=18 scale=4 mariadb_type="decimal"
+        field "id" type="int64" nullable=#false
+        field "source_seq" type="uint64" nullable=#false
+        field "total" type="decimal128" precision=18 scale=4 native_type="decimal"
     }
 }
 ```
@@ -326,7 +326,7 @@ table, deletes included.
 <div class="code-cap"><span>KDL</span><em>the __op field is read for the operation and is never written to the table</em></div>
 
 ```kdl
-sink "maria_mirror" type="MariadbSink" component="OrderChange" {
+sink "maria_mirror" connector="mariadb" component="OrderChange" {
     config {
         name "maria_mirror"
         table "shop.orders_copy"
@@ -335,9 +335,9 @@ sink "maria_mirror" type="MariadbSink" component="OrderChange" {
 
         connection dsn="${SACI_MARIADB_SINK_DSN}" ssl_mode="verify_identity"
 
-        schema_fields "__op" type="utf8" nullable=#false
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "status" type="utf8"
+        field "__op" type="utf8" nullable=#false
+        field "id" type="int64" nullable=#false
+        field "status" type="utf8"
     }
 }
 ```
@@ -350,7 +350,7 @@ order. Any `__op` other than `I`, `U`, `R` or `D`, a NULL one included, fails th
 anything is written. A `D` row whose key has a NULL part is refused for the same reason: `k = NULL`
 matches no row.
 
-`mariadb_type` asserts the server column's `DATA_TYPE` on the first connection, for example
+`native_type` asserts the server column's `DATA_TYPE` on the first connection, for example
 `"decimal"`. It changes no decoding.
 
 ## 3. Validate and run
@@ -373,12 +373,12 @@ saci-service validate --config examples/configs/mariadb.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
 
-Then run it. The config sets `run_mode kind="interval" interval_ms=2000`, so the source is redrained
+Then run it. The config sets `run "interval" every_ms=2000`, so the source is redrained
 every two seconds:
 
 Linux/macOS:
@@ -738,7 +738,7 @@ Source, at the top of `config`:
 | `mode` | node | required | `kind="polling"`, `"cdc_trigger"` or `"cdc_binlog"`, plus that mode's keys |
 | `batch_rows` | integer | `8192` | rows per query when the runner sends no admission hint; at least 1 |
 | `max_batches_per_cycle` | integer | `0` | batches per drain cycle; `0` is no cap |
-| `schema_fields` | list of fields | required | the declared columns, in the order the component holds them |
+| `field` | lines | required | the declared columns, in the order the component holds them |
 
 Sink, at the top of `config`:
 
@@ -754,7 +754,7 @@ Sink, at the top of `config`:
 | `chunk_rows` | integer | `1000` | rows per `INSERT`, held under 65535 placeholders; at least 1 |
 | `flush_rows` | integer | `0` | rows buffered before a flush; `0` flushes on every batch |
 | `truncate_before_first_write` | bool | `#false` | empty the target inside the first flush |
-| `schema_fields` | list of fields | required | the columns written, in the component's order |
+| `field` | lines | required | the columns written, in the component's order |
 
 A misspelled key anywhere in this `config` fails the parse and is named in the error.
 
@@ -808,7 +808,7 @@ connector logs a DSN, user or password: messages name the target as `host:port/d
 `initial` for `polling` and an outbox is `"beginning"`, `"now"` (start after the table's current
 highest cursor value) or a literal cursor value of the cursor column's type.
 
-### schema_fields
+### field
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
@@ -816,13 +816,16 @@ highest cursor value) or a literal cursor value of the cursor column's type.
 | `type` | string | required | one of the names below |
 | `nullable` | bool | `#true` | whether the column may hold nulls |
 | `precision`<br>`scale` | integer | required for `decimal128` | the decimal width, 1 to 38, and its fractional digits, 0 up to the precision |
-| `mariadb_type` | string | absent | the server's `DATA_TYPE` for this column, asserted on the first connection |
+| `native_type` | string | absent | the server's `DATA_TYPE` for this column, asserted on the first connection |
 
 The accepted `type` names are `boolean`, `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`,
 `uint32`, `uint64`, `float32`, `float64`, `decimal128`, `utf8`, `binary`, `date32`, `time64_micros`,
-`timestamp_micros`, `timestamp_micros_utc` and `json`. `timestamp_micros` is a `datetime` with no
-zone, `timestamp_micros_utc` an instant read as UTC, and `json` carries a document as `utf8` text.
-The vocabulary has no list type. Columns the server has and the config does not declare are ignored.
+`timestamp_micros`, `timestamp_micros_utc` and `json`, all in lower case. `timestamp_micros` is a
+`datetime` with no zone, `timestamp_micros_utc` an instant read as UTC, and `json` carries a
+document as `utf8` text. The vocabulary has no list type. A name outside the list is refused with
+`mariadb: field '{name}' has type '{ty}', which this connector does not map`, and an unknown key on
+a `field` line is a configuration error naming the key. Columns the server has and the config does
+not declare are ignored.
 Every declared column must exist on the server, and a mismatch is one error that lists every
 problem.
 
@@ -963,7 +966,7 @@ chosen value. A `cdc_binlog` source's definitions sit in the schema history tabl
 
 ## When it refuses to start
 
-Each message is prefixed with the half it came from, `MariadbSource:` or `MariadbSink:`. Config
+Each message is prefixed with the half it came from, `MariadbSource:` or `MariadbSink:`, except the type refusal, which starts `mariadb:`. Config
 refusals come when the node is built; the server refusals come on the first drain cycle.
 
 | Message | What to change |
@@ -971,14 +974,14 @@ refusals come when the node is built; the server refusals come on the first drai
 | `connection.dsn must be a 'mysql://' or 'mariadb://' URL` | use one of those schemes |
 | `connection.dsn names no database, so mode.table '{t}' must be written schema.table` | write `schema.table`, or put a database in the DSN; the sink says `table '{t}'` |
 | `connection.reconnect.max_attempts must be at least 1` | raise it; `multiplier` must be at least `1.0` and `jitter` within `0.0` to `1.0` |
-| `schema_fields declares '{name}' more than once` | declare each column once |
+| `field '{name}' is declared more than once` | declare each column once |
 | `field '{name}': type "decimal128" requires 'precision'` | add `precision` and `scale` |
 | `field '{name}': precision and scale apply to type "decimal128" only, not "{type}"` | drop the two keys |
-| `field '{name}': mariadb_type '{t}' is not a column type this connector reads or writes` | name a `DATA_TYPE` from the type reference |
+| `field '{name}': native_type '{t}' is not a column type this connector reads or writes` | name a `DATA_TYPE` from the type reference |
 | `mode.cursor_column '{c}' has type "{type}", which cannot order a cursor` | declare the cursor column as an integer, `utf8`, `date32` or timestamp type |
 | `mode.tiebreak_column '{c}' repeats mode.cursor_column` | pick a different tiebreak column |
-| `schema_fields '{name}' uses the reserved __ prefix, which only cdc_binlog and an installed cdc_trigger fill` | drop the field, or switch mode |
-| `schema_fields '{name}' uses the reserved __ prefix, and a cdc_binlog source fills only {names}` | use one of the names in the reserved column table |
+| `field '{name}' uses the reserved __ prefix, which only cdc_binlog and an installed cdc_trigger fill` | drop the field, or switch mode |
+| `field '{name}' uses the reserved __ prefix, and a cdc_binlog source fills only {names}` | use one of the names in the reserved column table |
 | `reserved column '{name}' must be declared type "{expected}", not "{actual}"` | declare the type the table shows |
 | `mode.cursor_column cannot be set with install_triggers #true; the cursor is the changelog's own __seq` | drop it; the same applies to `tiebreak_column` and `where_clause` |
 | `mode.cursor_column is required with install_triggers #false` | name the outbox's ordering column |
@@ -1001,14 +1004,14 @@ refusals come when the node is built; the server refusals come on the first drai
 | `cdc_binlog needs binlog_row_value_options = '' on {target}` | clear it on MySQL |
 | `position "gtid" needs gtid_mode = ON on {target}` | enable GTIDs, or use `position "file"`; MariaDB takes `file` only |
 | `snapshot "initial" needs '{t}' to have a primary key` | add a primary key, or drop the snapshot |
-| `snapshot "initial" pages '{t}' by its primary key, so every key column must be declared in schema_fields (missing: {cols})` | declare the key columns |
+| `snapshot "initial" pages '{t}' by its primary key, so every key column must be declared in 'field' entries (missing: {cols})` | declare the key columns |
 | `snapshot "initial" needs the RELOAD privilege for a brief global read lock` | grant `RELOAD` |
 | `trigger '{n}' exists with a different body; drop it or set install_triggers #false` | drop the trigger, or stop installing |
 | `changelog table '{t}' no longer matches '{w}'; drop it and its triggers to rebuild, or set install_triggers #false` | drop the changelog and triggers; the next start rebuilds them |
 | `changelog table '{t}' no longer holds what '{w}' does ({detail}), so rows the triggers captured since may be truncated` | a column's type changed under a running source; drop the changelog and triggers to rebuild |
 | `with binary logging on, creating triggers needs SUPER or log_bin_trust_function_creators = 1` | grant `SUPER`, or set the variable |
 | `the connecting user needs the TRIGGER privilege on '{t}' and INSERT on '{c}'` | grant both |
-| `a '{type}' column cannot be read from the binlog, which carries it as raw bytes` | leave it out of `schema_fields`, or read with `polling` |
+| `a '{type}' column cannot be read from the binlog, which carries it as raw bytes` | leave it out of the `field` lines, or read with `polling` |
 | `a partial JSON update reached the binlog; set binlog_row_value_options = '' on the server` | clear it on MySQL |
 | `cdc_binlog needs log_bin_compress = OFF on {target}` | switch off MariaDB's binlog compression; the reader cannot decode compressed row events |
 | `a row event compressed by MariaDB's log_bin_compress, which this reader cannot decode` | a compressed event of the table is in the binlog; set `log_bin_compress = OFF` and start the source after it with `mode.initial` |
@@ -1017,14 +1020,15 @@ refusals come when the node is built; the server refusals come on the first drai
 | `DELETE from '{t}' failed: {server message}`, `cannot commit the write to '{t}': {error}` | read the server message; the flush rolled back whole |
 | `row {n} has __op 'D' with a NULL conflict key, which matches no row` | give the delete a key |
 | `column '{c}' row {n}: the value carries fraction digits beyond the {k} the server column keeps` | round the value, or widen the server column |
-| `{key} '{c}' does not name a declared schema_fields entry` | declare the column, or fix the name in `cursor_column`, `tiebreak_column`, `conflict_columns`, `update_columns` or `dedupe_order_column` |
+| `{key} '{c}' does not name a declared 'field' entry` | declare the column, or fix the name in `cursor_column`, `tiebreak_column`, `conflict_columns`, `update_columns` or `dedupe_order_column` |
 | `connection.dsn must not be empty` | give a URL |
 | `cannot parse connection.dsn: {error}` | fix the URL; the message never repeats it |
 | `cannot read connection.password_file '{path}': {error}` | fix the path or its permissions |
 | `cannot read connection.ssl_ca '{path}': {error}`, `connection.ssl_ca '{path}' is empty` or `contains no PEM certificate` | point it at a PEM bundle |
 | `'name' '{name}' contains '{c}'; only ASCII letters, digits, '_' and '-' are allowed` | rename it; it is also limited to 191 characters and may not be empty |
 | `{key} '{t}' must be 'table' or 'schema.table', not a longer path` | write one or two parts; an empty part is refused too |
-| `schema_fields must declare at least one field`, `schema_fields[{i}] has an empty 'name'` | declare at least one named field |
+| `at least one 'field' entry is required`, `field[{i}] has an empty 'id'` | declare at least one named field |
+| `mariadb: field '{name}' has type '{ty}', which this connector does not map` | declare one of the `type` names listed under `field` |
 | `field '{name}': type "decimal128" requires 'scale'`, `decimal128 precision must be within 1..=38`, `decimal128 scale must be within 0..=precision` | fix the two keys |
 | `batch_rows must be at least 1`, `chunk_rows must be at least 1`, `mode.max_changes_per_cycle must be at least 1` | raise it |
 | `mode.where_clause must not be empty; leave it out to read every row` | drop the key, or give a predicate |
@@ -1048,14 +1052,14 @@ refusals come when the node is built; the server refusals come on the first drai
 | `cannot run '{statement}' on {host:port/db}: {error}` | a session setup statement failed; the server refused the time zone, character set, statement timeout or sink `sql_mode` setting |
 | `cannot read the columns of '{t}': {error}`, `cannot read the keys of '{t}': {error}` | grant the user access to the table |
 | `declared schema does not match the server: column '{c}' is declared but the server has no such column (server columns: {list})` | fix the name or add the column; every problem is listed in one message, separated by `;` |
-| `column '{c}': mariadb_type '{asserted}' is declared but the server column is '{actual}'` | fix `mariadb_type` |
-| `column '{c}': the server type '{t}' is not supported by this connector` | leave the column out of `schema_fields` |
+| `column '{c}': native_type '{asserted}' is declared but the server column is '{actual}'` | fix `native_type` |
+| `column '{c}': the server type '{t}' is not supported by this connector` | leave the column out of the `field` lines |
 | `column '{c}': declared decimal128({p}, {s}) does not fit the server column '{t}', which holds {n} digit(s) before the point and {m} after it` | on a sink, declare a precision and scale no wider than the column |
 | `column '{c}': declared decimal128({p}, {s}) but the server column is '{t}'; declare precision {P} and scale {S}` | on a source, match the column exactly |
 | `column '{c}': the server column '{t}' is wider than the 38 digits of decimal128; declare it "utf8"` | declare `utf8` |
 | `column '{c}': the binlog carries '{t}' text in the column's character set '{cs}', which is not UTF-8; convert the column to utf8mb4 or read with mode kind "polling"` | convert it, or poll |
 | `column '{c}': cannot read the labels of '{t}': {reason}` | the `enum` or `set` definition could not be parsed |
-| `schema_fields '{name}' uses the reserved __ prefix, and an installed cdc_trigger fills only __op, __seq, __commit_ts, __table` | use those names |
+| `field '{name}' uses the reserved __ prefix, and an installed cdc_trigger fills only __op, __seq, __commit_ts, __table` | use those names |
 | `snapshot "initial" pages '{t}' by its primary key, so key column '{c}' must not be decimal, float or double` | snapshot a table with another key, or skip the snapshot |
 | `cannot lock {host:port/db} for the snapshot: {error}`, `snapshot statement '{s}' failed on {host:port/db}: {error}`, `cannot read a snapshot page of '{t}': {error}` | read the server message; the first adds the `RELOAD` hint |
 | `table '{t}' has a column named '{c}', which the changelog reserves; rename it or read the table with mode kind "polling"` | rename the column (`__seq`, `__op` or `__commit_ts`), or poll |

@@ -2,16 +2,15 @@
 
 use crate::error::SaciError;
 
-use crate::connector::clickhouse::config::{
-    ClickhouseConnectionConfig, ClickhouseFieldType, CompressionConfig,
-};
+use crate::connector::clickhouse::config::{CompressionConfig, ConnectionConfig};
+use crate::connector::schema::FieldType;
 
-/// Builds a [`clickhouse::Client`] from [`ClickhouseConnectionConfig`].
+/// Builds a [`clickhouse::Client`] from [`ConnectionConfig`].
 ///
 /// # Errors
 ///
 /// Returns [`SaciError::Configuration`] if the URL or database is malformed.
-pub fn build_client(config: &ClickhouseConnectionConfig) -> Result<clickhouse::Client, SaciError> {
+pub fn build_client(config: &ConnectionConfig) -> Result<clickhouse::Client, SaciError> {
     config.validate("clickhouse connection")?;
 
     let mut client = clickhouse::Client::default().with_url(&config.url);
@@ -72,20 +71,20 @@ pub fn escape_string_literal(val: &str) -> String {
 }
 
 /// Formats a cursor scalar value for a SQL comparison clause.
-pub fn format_cursor_value(val: &str, ty: ClickhouseFieldType) -> String {
+pub fn format_cursor_value(val: &str, ty: FieldType) -> String {
     match ty {
-        ClickhouseFieldType::Int8
-        | ClickhouseFieldType::Int16
-        | ClickhouseFieldType::Int32
-        | ClickhouseFieldType::Int64
-        | ClickhouseFieldType::UInt8
-        | ClickhouseFieldType::UInt16
-        | ClickhouseFieldType::UInt32
-        | ClickhouseFieldType::UInt64
-        | ClickhouseFieldType::Float32
-        | ClickhouseFieldType::Float64
-        | ClickhouseFieldType::Decimal128 => val.to_string(),
-        ClickhouseFieldType::Boolean => {
+        FieldType::Int8
+        | FieldType::Int16
+        | FieldType::Int32
+        | FieldType::Int64
+        | FieldType::UInt8
+        | FieldType::UInt16
+        | FieldType::UInt32
+        | FieldType::UInt64
+        | FieldType::Float32
+        | FieldType::Float64
+        | FieldType::Decimal128 => val.to_string(),
+        FieldType::Boolean => {
             if val.eq_ignore_ascii_case("true") || val == "1" {
                 "1".to_string()
             } else {
@@ -122,24 +121,12 @@ mod tests {
 
     #[test]
     fn format_cursor_value_differentiates_types() {
+        assert_eq!(format_cursor_value("123", FieldType::Int64), "123");
+        assert_eq!(format_cursor_value("45.67", FieldType::Float64), "45.67");
+        assert_eq!(format_cursor_value("true", FieldType::Boolean), "1");
+        assert_eq!(format_cursor_value("false", FieldType::Boolean), "0");
         assert_eq!(
-            format_cursor_value("123", ClickhouseFieldType::Int64),
-            "123"
-        );
-        assert_eq!(
-            format_cursor_value("45.67", ClickhouseFieldType::Float64),
-            "45.67"
-        );
-        assert_eq!(
-            format_cursor_value("true", ClickhouseFieldType::Boolean),
-            "1"
-        );
-        assert_eq!(
-            format_cursor_value("false", ClickhouseFieldType::Boolean),
-            "0"
-        );
-        assert_eq!(
-            format_cursor_value("abc'def", ClickhouseFieldType::Utf8),
+            format_cursor_value("abc'def", FieldType::Utf8),
             "'abc\\'def'"
         );
     }
@@ -150,7 +137,7 @@ mod tests {
         let mut settings = HashMap::new();
         settings.insert("max_execution_time".to_string(), "60".to_string());
 
-        let cfg = ClickhouseConnectionConfig {
+        let cfg = ConnectionConfig {
             url: "https://clickhouse.internal:8443".to_string(),
             user: Some("admin".to_string()),
             password: Some("s3cret".to_string()),
@@ -166,7 +153,7 @@ mod tests {
     #[test]
     fn build_client_fails_on_invalid_config() {
         use std::collections::HashMap;
-        let cfg = ClickhouseConnectionConfig {
+        let cfg = ConnectionConfig {
             url: "not_a_valid_url".to_string(),
             user: None,
             password: None,
@@ -182,88 +169,58 @@ mod tests {
     #[test]
     fn format_cursor_value_covers_all_types() {
         // Signed integers
-        assert_eq!(format_cursor_value("-10", ClickhouseFieldType::Int8), "-10");
+        assert_eq!(format_cursor_value("-10", FieldType::Int8), "-10");
+        assert_eq!(format_cursor_value("-300", FieldType::Int16), "-300");
+        assert_eq!(format_cursor_value("-50000", FieldType::Int32), "-50000");
         assert_eq!(
-            format_cursor_value("-300", ClickhouseFieldType::Int16),
-            "-300"
-        );
-        assert_eq!(
-            format_cursor_value("-50000", ClickhouseFieldType::Int32),
-            "-50000"
-        );
-        assert_eq!(
-            format_cursor_value("-123456789", ClickhouseFieldType::Int64),
+            format_cursor_value("-123456789", FieldType::Int64),
             "-123456789"
         );
 
         // Unsigned integers
-        assert_eq!(format_cursor_value("10", ClickhouseFieldType::UInt8), "10");
+        assert_eq!(format_cursor_value("10", FieldType::UInt8), "10");
+        assert_eq!(format_cursor_value("300", FieldType::UInt16), "300");
+        assert_eq!(format_cursor_value("50000", FieldType::UInt32), "50000");
         assert_eq!(
-            format_cursor_value("300", ClickhouseFieldType::UInt16),
-            "300"
-        );
-        assert_eq!(
-            format_cursor_value("50000", ClickhouseFieldType::UInt32),
-            "50000"
-        );
-        assert_eq!(
-            format_cursor_value("123456789", ClickhouseFieldType::UInt64),
+            format_cursor_value("123456789", FieldType::UInt64),
             "123456789"
         );
 
         // Floats and Decimals
+        assert_eq!(format_cursor_value("1.23", FieldType::Float32), "1.23");
+        assert_eq!(format_cursor_value("45.67", FieldType::Float64), "45.67");
         assert_eq!(
-            format_cursor_value("1.23", ClickhouseFieldType::Float32),
-            "1.23"
-        );
-        assert_eq!(
-            format_cursor_value("45.67", ClickhouseFieldType::Float64),
-            "45.67"
-        );
-        assert_eq!(
-            format_cursor_value("99.999", ClickhouseFieldType::Decimal128),
+            format_cursor_value("99.999", FieldType::Decimal128),
             "99.999"
         );
 
         // Boolean variants
-        assert_eq!(
-            format_cursor_value("true", ClickhouseFieldType::Boolean),
-            "1"
-        );
-        assert_eq!(
-            format_cursor_value("TRUE", ClickhouseFieldType::Boolean),
-            "1"
-        );
-        assert_eq!(format_cursor_value("1", ClickhouseFieldType::Boolean), "1");
-        assert_eq!(
-            format_cursor_value("false", ClickhouseFieldType::Boolean),
-            "0"
-        );
-        assert_eq!(format_cursor_value("0", ClickhouseFieldType::Boolean), "0");
-        assert_eq!(
-            format_cursor_value("unknown", ClickhouseFieldType::Boolean),
-            "0"
-        );
+        assert_eq!(format_cursor_value("true", FieldType::Boolean), "1");
+        assert_eq!(format_cursor_value("TRUE", FieldType::Boolean), "1");
+        assert_eq!(format_cursor_value("1", FieldType::Boolean), "1");
+        assert_eq!(format_cursor_value("false", FieldType::Boolean), "0");
+        assert_eq!(format_cursor_value("0", FieldType::Boolean), "0");
+        assert_eq!(format_cursor_value("unknown", FieldType::Boolean), "0");
 
         // Strings and Dates/Timestamps are escaped
         assert_eq!(
-            format_cursor_value("2026-10-10", ClickhouseFieldType::Date32),
+            format_cursor_value("2026-10-10", FieldType::Date32),
             "'2026-10-10'"
         );
         assert_eq!(
-            format_cursor_value("2026-10-10", ClickhouseFieldType::Date64),
+            format_cursor_value("2026-10-10", FieldType::Date64),
             "'2026-10-10'"
         );
         assert_eq!(
-            format_cursor_value("2026-10-10 12:00:00", ClickhouseFieldType::TimestampMicros),
+            format_cursor_value("2026-10-10 12:00:00", FieldType::TimestampMicros),
             "'2026-10-10 12:00:00'"
         );
         assert_eq!(
-            format_cursor_value("2026-10-10 12:00:00", ClickhouseFieldType::TimestampMillis),
+            format_cursor_value("2026-10-10 12:00:00", FieldType::TimestampMillis),
             "'2026-10-10 12:00:00'"
         );
         assert_eq!(
-            format_cursor_value("O'Connor", ClickhouseFieldType::Utf8),
+            format_cursor_value("O'Connor", FieldType::Utf8),
             "'O\\'Connor'"
         );
     }

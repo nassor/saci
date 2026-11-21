@@ -12,7 +12,7 @@
 //   cargo run -p saci --features server,connector-nats,connector-postgresql -- validate -c examples/quickstart/quickstart.kdl
 //   cargo run -p saci --features server,connector-nats,connector-postgresql -- serve    -c examples/quickstart/quickstart.kdl
 //
-// NATS and PostgreSQL are opt-in connectors; `wasm` and `transformer-ndjson`
+// NATS and PostgreSQL are opt-in connectors; `wasm` and `codec-ndjson`
 // are on by default.
 
 mode "standalone"
@@ -25,7 +25,7 @@ node id=1 name="quickstart" data_dir="${SACI_DATA_DIR:-/tmp/saci-quickstart}"
 //
 // Delivery is at-most-once: the stream runner acknowledges nothing and keeps no
 // checkpoints. `DistributedRunner` is the at-least-once path.
-run_mode kind="stream"
+run "stream"
 
 // Adaptive flow control: one stream source feeds two chained wasm stages
 // before the sink, so a wider chunk holds both stages' Arrow IPC round trip
@@ -43,14 +43,14 @@ flow_control {
 // One workflow declares the whole DAG: the byte format, the source, both
 // processors, the sink, and the explicit links between them.
 workflow "quickstart" {
-    // One JSON object per message, decoded against schema_fields below.
-    transformer "ndjson_fmt" format="ndjson"
+    // One JSON object per message, decoded against the `field` lines below.
+    codec "ndjson_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- source
 
-    source "authorizations-raw" type="NatsSource" component="Order" transformer="ndjson_fmt" {
+    source "authorizations-raw" connector="nats" component="Order" codec="ndjson_fmt" {
         config {
-            batch_size 2500
+            batch_rows 2500
             poll_timeout_ms 5
 
             connection {
@@ -64,18 +64,18 @@ workflow "quickstart" {
             // mutates the Arrow IPC buffer in place and cannot add columns, so
             // every field either stage touches has to be present from the first
             // decode.
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "currency" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
-            schema_fields "valid" type="boolean" nullable=#false
-            schema_fields "usd_amount" type="float64" nullable=#false
-            schema_fields "usd_amount_display" type="utf8" nullable=#false
-            schema_fields "risk_score" type="float64" nullable=#false
-            schema_fields "flagged" type="boolean" nullable=#false
-            schema_fields "fee" type="float64" nullable=#false
-            schema_fields "review_tier" type="int64" nullable=#false
-            schema_fields "settlement" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "currency" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
+            field "valid" type="boolean" nullable=#false
+            field "usd_amount" type="float64" nullable=#false
+            field "usd_amount_display" type="utf8" nullable=#false
+            field "risk_score" type="float64" nullable=#false
+            field "flagged" type="boolean" nullable=#false
+            field "fee" type="float64" nullable=#false
+            field "review_tier" type="int64" nullable=#false
+            field "settlement" type="utf8" nullable=#false
         }
     }
 
@@ -95,14 +95,14 @@ workflow "quickstart" {
     // `component` on the source above and the sink below must name what they
     // declare: `Order`, and only `Order`.
 
-    wasm "validate" module="examples/quickstart/build/validate.wasm" {
+    wasm "validate" path="examples/quickstart/build/validate.wasm" {
         // An authorisation below this amount is a card-testing probe, not a
         // purchase. The WIT contract hands config over as strings; the
         // processor parses.
         config min_amount="0.50"
     }
 
-    wasm "settle" module="examples/quickstart/build/settle.wasm" {
+    wasm "settle" path="examples/quickstart/build/settle.wasm" {
         // Fee in basis points of the authorised amount, plus a flat component.
         // A valid authorisation above hold_above is held for manual review
         // (review_tier 1) rather than settled (review_tier 0).
@@ -112,15 +112,15 @@ workflow "quickstart" {
     // ------------------------------------------------------------------ sink
     //
     // All twelve fields, matching examples/quickstart/schema.sql column for column.
-    // A sink's schema_fields must match the component's RecordBatch field for field,
-    // in order: `PostgresSink` projects nothing, and a batch with a different column
+    // A sink's `field` lines must match the component's RecordBatch field for field,
+    // in order: the `postgresql` sink projects nothing, and a batch with a different column
     // count is rejected rather than partially written. The five fields neither stage
     // writes (usd_amount, usd_amount_display, risk_score, flagged, settlement)
-    // therefore land as the zero values the publisher sent. `PostgresSink`
+    // therefore land as the zero values the publisher sent. The `postgresql` sink
     // never issues CREATE TABLE: the table comes from schema.sql, which compose runs
     // on first initialisation.
 
-    sink "settlements" type="PostgresSink" component="Order" {
+    sink "settlements" connector="postgresql" component="Order" {
         config {
             name "settlements"
             table "public.settlements"
@@ -139,18 +139,18 @@ workflow "quickstart" {
                 sslmode "disable"
             }
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "region" type="utf8" nullable=#false
-            schema_fields "currency" type="utf8" nullable=#false
-            schema_fields "amount" type="float64" nullable=#false
-            schema_fields "valid" type="boolean" nullable=#false
-            schema_fields "usd_amount" type="float64" nullable=#false
-            schema_fields "usd_amount_display" type="utf8" nullable=#false
-            schema_fields "risk_score" type="float64" nullable=#false
-            schema_fields "flagged" type="boolean" nullable=#false
-            schema_fields "fee" type="float64" nullable=#false
-            schema_fields "review_tier" type="int64" nullable=#false
-            schema_fields "settlement" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "region" type="utf8" nullable=#false
+            field "currency" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
+            field "valid" type="boolean" nullable=#false
+            field "usd_amount" type="float64" nullable=#false
+            field "usd_amount_display" type="utf8" nullable=#false
+            field "risk_score" type="float64" nullable=#false
+            field "flagged" type="boolean" nullable=#false
+            field "fee" type="float64" nullable=#false
+            field "review_tier" type="int64" nullable=#false
+            field "settlement" type="utf8" nullable=#false
         }
     }
 

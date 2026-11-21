@@ -1,8 +1,8 @@
 //! End-to-end Parquet ETL through the Source/Sink layer.
 //!
 //! Generates a synthetic 10 000-row `input.parquet` in a temp directory, reads
-//! it with a [`FileSource`] carrying a [`ParquetTransformer`] through
-//! [`Pipeline::run_with_io`], scales `price` by 1.1 and derives a `rounded`
+//! it with a [`FileSource`] carrying a [`ParquetCodec`] through
+//! [`Pipeline::run`], scales `price` by 1.1 and derives a `rounded`
 //! column with two [`ParallelSystem`]s, writes the result with a [`FileSink`],
 //! then reads it back and prints five rows.
 
@@ -10,16 +10,10 @@ use std::sync::Arc;
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
 
-use saci::SaciError;
-use saci::connector::file::{FileSink, FileSource};
-use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::Source;
-use saci::pipeline::Pipeline;
-use saci::system::{ParallelSystem, SystemMeta, WriteSet};
-use saci::transformer::parquet::ParquetTransformer;
+use saci::codec::parquet::ParquetCodec;
+use saci::connector::file::{FileSink, FileSinkConfig, FileSource, FileSourceConfig};
+use saci::prelude::*;
 
 /// Schema with `id` (Int64), `price` (Float64), `rounded` (Int64).
 fn trade_schema() -> Arc<Schema> {
@@ -45,14 +39,12 @@ struct ScaleSystem;
 impl ParallelSystem for ScaleSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("scale_price")
-            .read("Trade", "price")
-            .write("Trade", "price")
+            .reads_named("Trade", "price")
+            .writes_named("Trade", "price")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Trade")
-            .ok_or_else(|| SaciError::generic("ScaleSystem: Trade component not found"))?;
+        let batch = pipeline.batch_named("Trade")?;
         let prices = batch
             .column_by_name("price")
             .ok_or_else(|| SaciError::generic("ScaleSystem: price column missing"))?
@@ -63,7 +55,7 @@ impl ParallelSystem for ScaleSystem {
         let scaled: Float64Array =
             Float64Array::from_iter_values(prices.values().iter().map(|&p| p * 1.1));
 
-        Ok(WriteSet::new().put("Trade", "price", Arc::new(scaled)))
+        Ok(WriteSet::new().put_named("Trade", "price", Arc::new(scaled)))
     }
 }
 
@@ -74,14 +66,12 @@ struct RoundSystem;
 impl ParallelSystem for RoundSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("round_price")
-            .read("Trade", "price")
-            .write("Trade", "rounded")
+            .reads_named("Trade", "price")
+            .writes_named("Trade", "rounded")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Trade")
-            .ok_or_else(|| SaciError::generic("RoundSystem: Trade component not found"))?;
+        let batch = pipeline.batch_named("Trade")?;
         let prices = batch
             .column_by_name("price")
             .ok_or_else(|| SaciError::generic("RoundSystem: price column missing"))?
@@ -92,7 +82,7 @@ impl ParallelSystem for RoundSystem {
         let rounded: Int64Array =
             Int64Array::from_iter_values(prices.values().iter().map(|&p| p.round() as i64));
 
-        Ok(WriteSet::new().put("Trade", "rounded", Arc::new(rounded)))
+        Ok(WriteSet::new().put_named("Trade", "rounded", Arc::new(rounded)))
     }
 }
 
@@ -105,7 +95,11 @@ async fn generate_input(path: &std::path::Path, n: usize) -> Result<(), SaciErro
     let batch = RecordBatch::try_new(schema.clone(), vec![ids, prices])
         .map_err(|e| SaciError::generic(format!("generate_input: {e}")))?;
 
-    let mut sink = FileSink::create(path, Arc::new(ParquetTransformer::new()), schema)?;
+    let mut sink = FileSink::new(
+        FileSinkConfig::new(path),
+        schema,
+        Arc::new(ParquetCodec::new()),
+    )?;
     sink.write_batch(&batch).await?;
     sink.finish().await
 }
@@ -120,10 +114,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     generate_input(&input_path, 10_000).await?;
 
     let full_schema = trade_schema();
-    let mut pipeline = Pipeline::new("parquet-etl");
-    pipeline
-        .data_mut()
-        .register_raw_component("Trade", full_schema.clone());
 
     // The Parquet file holds only `id` and `price`, so the source pads a
     // zero-filled `rounded` column to match the registered Trade schema.
@@ -162,26 +152,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let inner_src =
-        FileSource::open_async(&input_path, Arc::new(ParquetTransformer::new()), None).await?;
+    let inner_src = FileSource::new_async(
+        FileSourceConfig::new(&input_path),
+        None,
+        Arc::new(ParquetCodec::new()),
+    )
+    .await?;
     let src = PaddedParquetSource {
         inner: inner_src,
         full_schema: full_schema.clone(),
     };
-    let sink = FileSink::create(
-        &output_path,
-        Arc::new(ParquetTransformer::new()),
+    let sink = FileSink::new(
+        FileSinkConfig::new(&output_path),
         full_schema.clone(),
+        Arc::new(ParquetCodec::new()),
     )?;
 
-    pipeline
-        .add_parallel_system(ScaleSystem)
-        .add_parallel_system(RoundSystem)
-        .add_source("Trade", src)
-        .add_sink("Trade", sink);
+    let mut pipeline = Pipeline::new("parquet-etl")
+        .schema("Trade", full_schema.clone())
+        .parallel_system(ScaleSystem)
+        .parallel_system(RoundSystem)
+        .source("Trade", src)
+        .sink("Trade", sink);
 
     println!("Running pipeline (scale + round) …");
-    pipeline.run_with_io().await?;
+    pipeline.run().await?;
     println!(
         "Pipeline complete. {} rows processed.",
         pipeline.data().rows()
@@ -191,8 +186,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:<8} {:<14} {:<10}", "id", "price", "rounded");
     println!("{}", "-".repeat(34));
 
-    let mut out_src =
-        FileSource::open_async(&output_path, Arc::new(ParquetTransformer::new()), None).await?;
+    let mut out_src = FileSource::new_async(
+        FileSourceConfig::new(&output_path),
+        None,
+        Arc::new(ParquetCodec::new()),
+    )
+    .await?;
     let mut printed = 0usize;
     'outer: while let Some(batch) = out_src.next_batch().await? {
         let ids = batch

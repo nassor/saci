@@ -1,6 +1,6 @@
 //! Conditional fan-out routing through a real native plugin: the
 //! `saci-plugin-smoketest` shared library returning a `RouteDecision` from its
-//! `smoketest.route` config key, driven through the real `run_standalone`
+//! `smoketest.route` config key, driven through the real `BuiltWorkflow::run`
 //! runner, asserting branch-selected delivery.
 //!
 //! ```bash
@@ -23,13 +23,8 @@ use arrow_schema::{DataType, Field, Schema};
 use saci::component::Component;
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::plugin_host::NativePluginRuntime;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
-use saci::service::config::{
-    HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig, ServiceMode,
-    StandaloneConfig, WorkflowSpec,
-};
-use saci::service::registry::Registry;
-use saci::service::standalone::run_standalone;
+use saci::service::BuiltWorkflow;
+use saci::service::RunMode;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -86,130 +81,36 @@ fn load_runtime(config: HashMap<String, String>) -> NativePluginRuntime {
     NativePluginRuntime::open(&path, config).expect("NativePluginRuntime::open")
 }
 
-fn config() -> ServiceConfig {
-    ServiceConfig {
-        heal: Default::default(),
-        flow_control: Default::default(),
-        node: NodeConfig {
-            id: 1,
-            name: None,
-            data_dir: PathBuf::from("/tmp/saci-branching-test"),
-        },
-        mode: ServiceMode::Standalone {
-            config: StandaloneConfig {
-                run_mode: RunMode::OneShot,
-            },
-        },
-        workflows: vec![WorkflowSpec {
-            id: "w".to_string(),
-            name: None,
-            transformers: Vec::new(),
-            sources: Vec::new(),
-            wasm: Vec::new(),
-            plugin: Vec::new(),
-            sinks: Vec::new(),
-            links: Vec::new(),
-            dlq: None,
-        }],
-        http: HttpConfig::default(),
-        store: None,
-        observability: ObservabilityConfig::default(),
-        variables: std::collections::HashMap::new(),
-    }
-}
-
 /// The branching workflow: source `in` → plugin `router` (with `config`
 /// injected) → sinks `out_a` (branch `a`) and `out_b` (branch `b`), in
 /// topological order.
 fn branching_built(
     config_map: HashMap<String, String>,
 ) -> (
-    BuiltService,
+    BuiltWorkflow,
     mpsc::Sender<RecordBatch>,
     mpsc::Receiver<RecordBatch>,
     mpsc::Receiver<RecordBatch>,
 ) {
-    let (tx, source) = ChannelSource::new(Counter::schema(), 8);
+    let (source, tx) = ChannelSource::new(Counter::schema(), 8);
     let (sink_a, rx_a) = ChannelSink::new(Counter::schema(), 8);
     let (sink_b, rx_b) = ChannelSink::new(Counter::schema(), 8);
-    let nodes = vec![
-        BuiltNode {
-            id: "in".to_string(),
-            name: None,
-            type_name: "ChannelSource".to_string(),
-            component: Some("Counter"),
-            kind: BuiltNodeKind::Source(Box::new(source)),
-            downstream: vec![BuiltEdge {
-                node: 1,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "router".to_string(),
-            name: None,
-            type_name: "plugin".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(load_runtime(config_map)),
-                kind: "plugin",
-            },
-            downstream: vec![
-                BuiltEdge {
-                    node: 2,
-                    branch: Some("a".to_string()),
-                },
-                BuiltEdge {
-                    node: 3,
-                    branch: Some("b".to_string()),
-                },
-            ],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "out_a".to_string(),
-            name: None,
-            type_name: "ChannelSink".to_string(),
-            component: Some("Counter"),
-            kind: BuiltNodeKind::Sink(Box::new(sink_a)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "out_b".to_string(),
-            name: None,
-            type_name: "ChannelSink".to_string(),
-            component: Some("Counter"),
-            kind: BuiltNodeKind::Sink(Box::new(sink_b)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-    ];
-    (
-        BuiltService {
-            workflow_id: "w".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(Registry::new()),
-            inspector: None,
-            dlq: None,
-        },
-        tx,
-        rx_a,
-        rx_b,
-    )
+    let mut built = BuiltWorkflow::builder("w")
+        .source("in", "Counter", source)
+        .processor("router", load_runtime(config_map))
+        .sink("out_a", "Counter", sink_a)
+        .sink("out_b", "Counter", sink_b)
+        .link("in", "router")
+        .link_branch("router", "out_a", "a")
+        .link_branch("router", "out_b", "b")
+        .run_mode(RunMode::Once)
+        .build()
+        .expect("build workflow");
+    built.nodes[0].connector = "channel".to_string();
+    built.nodes[1].connector = "plugin".to_string();
+    built.nodes[2].connector = "channel".to_string();
+    built.nodes[3].connector = "channel".to_string();
+    (built, tx, rx_a, rx_b)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -229,7 +130,8 @@ async fn plugin_routing_processor_delivers_to_the_selected_branch() {
     tx.send(batch).await.expect("send batch");
     drop(tx);
 
-    run_standalone(built, &config(), CancellationToken::new(), None, None)
+    built
+        .run(CancellationToken::new())
         .await
         .expect("run succeeds");
 

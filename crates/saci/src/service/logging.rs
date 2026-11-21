@@ -124,8 +124,8 @@ impl TelemetryGuard {
 /// ```rust,no_run
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::config::ObservabilityConfig;
-/// use saci::service::logging::init_logging;
+/// use saci::service::ObservabilityConfig;
+/// use saci::service::init_logging;
 ///
 /// let cfg = ObservabilityConfig::default(); // Pretty format, error level, no OTLP
 /// let (telemetry, inspector) = init_logging(&cfg, 1).expect("logging init");

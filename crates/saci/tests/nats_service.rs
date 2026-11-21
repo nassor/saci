@@ -1,13 +1,13 @@
-//! The whole standalone service path over NATS: config file, factories, source
+//! The whole standalone service path over NATS: config file, connector, source
 //! drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this is
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this is
 //! the end to end proof that a `connector-nats` build moves rows from one
 //! JetStream stream through a pipeline into another via the registered
-//! `NatsSourceFactory`/`NatsSinkFactory`, not just via the connector's own
+//! `NatsConnector`, not just via the connector's own
 //! direct API (already covered by the NATS connector's own tests, `crates/saci/tests/nats_roundtrip.rs`).
 //!
-//! Soft-skips without Docker. The `is_live_source` test needs no daemon.
+//! Soft-skips without Docker. The `Connector::live` test needs no daemon.
 
 #![cfg(all(
     feature = "connector-http",
@@ -31,12 +31,10 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_util::sync::CancellationToken;
 
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::dlq::DlqRegistry;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
-use saci::transformer::ndjson::NdjsonTransformer;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::service::DlqRegistry;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 
@@ -104,7 +102,10 @@ fn schema() -> Arc<Schema> {
 /// covered by `crates/saci/src/connector/nats.rs`'s own tests).
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("nats_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
@@ -122,12 +123,12 @@ mode "standalone"
 
 node id=1 name="saci-nats-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "nats-service-test" {{
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="NatsSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="nats" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             stop_at_end #{stop_at_end}
             poll_timeout_ms 2000
@@ -142,15 +143,15 @@ workflow "nats-service-test" {{
                 fetch_expires_ms 2000
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="NatsSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="nats" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             connection {{
                 servers "{url}"
@@ -161,9 +162,9 @@ workflow "nats-service-test" {{
                 subject "{out_subject}"
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
@@ -171,7 +172,7 @@ workflow "nats-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -207,10 +208,9 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
                 subject: in_subject.clone(),
                 ..JetstreamSinkMode::default()
             })),
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(
@@ -223,7 +223,7 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await
@@ -233,21 +233,23 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(
-        &path,
-        config_kdl(&url, &in_stream, &out_stream, &out_subject, &data_dir, true),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &url,
+        &in_stream,
+        &out_stream,
+        &out_subject,
+        &data_dir,
+        true,
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -266,23 +268,22 @@ async fn a_nats_source_and_sink_move_rows_through_the_standalone_runner() {
                 fetch_expires_ms: 2_000,
                 ..JetstreamSourceMode::default()
             })),
-            batch_size: 1000,
+            batch_rows: 1000,
             poll_timeout_ms: 2_000,
             stop_at_end: true,
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("readback source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema);
-    let rows = saci::io::source::drain_into_dataset(&mut read_source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema).unwrap();
+    let rows = saci::io::read_all(&mut read_source, &mut dataset, COMPONENT)
         .await
         .expect("drain output stream");
     assert_eq!(rows, 3);
 
-    let out = dataset.batch_for(COMPONENT).expect("component present");
+    let out = dataset.batch_named(COMPONENT).expect("component present");
     let ids = out
         .column(0)
         .as_any()
@@ -300,13 +301,17 @@ fn the_pipeline_declares_the_component_the_config_names() {
     assert!(declared.contains(&COMPONENT), "declared: {declared:?}");
 }
 
-/// `is_live_source` must know `NatsSource`, or a `one_shot` config with a live
-/// consumer would be accepted and then block forever. No daemon needed.
+/// [`Connector::live`](saci::connector::Connector::live) must know the `nats`
+/// connector, or a `one_shot` config with a live consumer would be accepted
+/// and then block forever. The config check asks the builtin registry, so no
+/// daemon is needed.
 #[test]
 fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
+    use saci::connector::Connector;
+    use saci::connector::nats::NatsConnector;
+
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
 
     let live = config_kdl(
         "nats://127.0.0.1:4222",
@@ -316,45 +321,48 @@ fn a_nats_source_without_stop_at_end_is_refused_outside_stream_mode() {
         &data_dir,
         false,
     );
-    std::fs::write(&path, &live).expect("write config");
-    let err = ServiceConfig::load(&path).expect_err("a live source cannot run one_shot");
+    let err = ServiceConfig::from_kdl(&live).expect_err("a live source cannot run one_shot");
     assert_eq!(err.category(), "configuration");
     assert!(err.message().contains("never reaches EOF"), "got: {err}");
-    assert!(err.message().contains("NatsSource"), "got: {err}");
+    assert!(err.message().contains("connector 'nats'"), "got: {err}");
 
     let bounded = live.replace("stop_at_end #false", "stop_at_end #true");
-    std::fs::write(&path, bounded).expect("write config");
-    ServiceConfig::load(&path).expect("stop_at_end makes the source drivable by one_shot");
+    let config = ServiceConfig::from_kdl(&bounded)
+        .expect("stop_at_end makes the source drivable by one_shot");
+    assert!(
+        !NatsConnector.live(&config.workflows[0].sources[0].config),
+        "stop_at_end makes the source drivable by one_shot"
+    );
 }
 
 /// The shipped `examples/configs/nats.kdl` must parse and its two IO tables
-/// must be accepted by the factories.
+/// must be accepted by the connector.
 ///
 /// Gated on `wasm` because the example declares a `wasm` node, which the
-/// config parser only knows about with that feature on. The factories are
-/// driven directly rather than through `ServiceBuilder::build_all`, which would also
-/// try to load the module the example points at. No daemon needed: both
-/// factories open no connection.
+/// config parser only knows about with that feature on. The connector is
+/// driven directly rather than through `ServiceBuilder::build`, which would also
+/// try to load the module the example points at. No daemon needed: the
+/// connector opens no connection.
 #[cfg(feature = "wasm-host")]
 #[test]
 fn the_shipped_example_config_loads_and_its_io_tables_are_accepted() {
+    use saci::connector::Connector;
+    use saci::connector::nats::NatsConnector;
     use saci::service::ConnectorContext;
-    use saci::service::factories::{NatsSinkFactory, NatsSourceFactory};
-    use saci::service::registry::{SinkFactory, SourceFactory};
 
     let config = ServiceConfig::load("../../examples/configs/nats.kdl")
         .expect("the shipped example must load");
     assert_eq!(config.workflows[0].sources.len(), 1);
     assert_eq!(config.workflows[0].sinks.len(), 1);
-    assert_eq!(config.workflows[0].sources[0].type_name, "NatsSource");
-    assert_eq!(config.workflows[0].sinks[0].type_name, "NatsSink");
+    assert_eq!(config.workflows[0].sources[0].connector, "nats");
+    assert_eq!(config.workflows[0].sinks[0].connector, "nats");
 
-    let ctx = ConnectorContext::new(Some(Arc::new(NdjsonTransformer::default())));
-    let source = NatsSourceFactory
-        .build(&config.workflows[0].sources[0].config, &ctx)
+    let ctx = ConnectorContext::new(Some(Arc::new(NdjsonCodec::default())));
+    let source = NatsConnector
+        .source(&config.workflows[0].sources[0].config, &ctx)
         .expect("the example source table must be accepted");
-    let sink = NatsSinkFactory
-        .build(&config.workflows[0].sinks[0].config, &ctx)
+    let sink = NatsConnector
+        .sink(&config.workflows[0].sinks[0].config, &ctx)
         .expect("the example sink table must be accepted");
     assert_eq!(source.schema().fields().len(), 3);
     assert_eq!(sink.schema().fields().len(), 3);
@@ -414,7 +422,7 @@ mode "standalone"
 
 node id=1 name="saci-nats-dlq" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "nats-dlq-test" {{
     dlq "nats" {{
@@ -440,9 +448,9 @@ workflow "nats-dlq-test" {{
         }}
     }}
 
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="NatsSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="nats" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             stop_at_end #true
             poll_timeout_ms 2000
@@ -457,29 +465,29 @@ workflow "nats-dlq-test" {{
                 fetch_expires_ms 2000
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="ndjson_fmt" {{
         retry {{ max_attempts 1 }}
         heal {{ enabled #false }}
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     link from="orders_in" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -511,10 +519,9 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
                 subject: in_subject.clone(),
                 ..JetstreamSinkMode::default()
             })),
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(
@@ -527,7 +534,7 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await
@@ -539,23 +546,20 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
     let data_dir = dir.path().display().to_string().replace('\\', "/");
     let refused = dead_url();
 
-    /// Load `kdl` and run it once, sharing `registry` when there is one.
+    /// Parse `kdl` and run it once, sharing `registry` when there is one.
     async fn run_once(
-        dir: &std::path::Path,
-        name: &str,
         kdl: String,
         registry: Option<Arc<DlqRegistry>>,
-    ) -> (saci::service::standalone::StandaloneStats, Arc<DlqRegistry>) {
-        let path = dir.join(name);
-        std::fs::write(&path, kdl).expect("write config");
-        let config = ServiceConfig::load(&path).expect("config loads");
+    ) -> (saci::service::WorkflowStats, Arc<DlqRegistry>) {
+        let config = ServiceConfig::from_kdl(&kdl).expect("config loads");
         let registry = registry.unwrap_or_else(|| Arc::new(DlqRegistry::from_config(&config)));
-        let built = register_builtin_factories(ServiceBuilder::new())
-            .with_dlq_registry(Arc::clone(&registry))
-            .build_all(&config)
+        let built = ServiceBuilder::new()
+            .dlq_registry(Arc::clone(&registry))
+            .build(&config)
             .expect("service builds")
             .remove(0);
-        let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+        let stats = built
+            .run(CancellationToken::new())
             .await
             .expect("one-shot run");
         (stats, registry)
@@ -563,8 +567,6 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
 
     // Run 1: the endpoint refuses the connection, so the batch is stored.
     let (stats, registry) = run_once(
-        dir.path(),
-        "run1.kdl",
         dlq_config_kdl(
             &url,
             &in_stream,
@@ -591,8 +593,6 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
     // Run 2: a live endpoint, and the startup replay delivers the letter.
     let (accepted, collector) = collect(1);
     let (stats, registry) = run_once(
-        dir.path(),
-        "run2.kdl",
         dlq_config_kdl(
             &url,
             &in_stream,
@@ -625,8 +625,6 @@ async fn a_jetstream_store_records_a_refused_batch_and_replays_it() {
 
     // Run 3: the stream is drained, so the replay dials nothing.
     let (stats, _) = run_once(
-        dir.path(),
-        "run3.kdl",
         dlq_config_kdl(
             &url,
             &in_stream,

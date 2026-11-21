@@ -23,11 +23,10 @@
 
 use std::sync::Arc;
 
-use saci::plugin::ProcessorState;
-use saci::plugin::arrow_array::{Float64Array, Int64Array, StringArray};
-use saci::plugin::arrow_schema::{DataType, Field, FieldRef, Schema};
-use saci::plugin::prelude::*;
-use saci::plugin::windows::WindowSpec;
+use saci::arrow_array::{Float64Array, Int64Array, StringArray};
+use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
+use saci::prelude::*;
+use saci::window::tumbling_id;
 
 /// One row of the demo workload: a sale at an instant in time.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -150,13 +149,13 @@ pub struct WindowGeometry {
 /// to the same defaults the KDL block's serde defaults use.
 fn geometry() -> WindowGeometry {
     WindowGeometry {
-        size_ms: saci_config_parse::<i64>("window.size_ms")
+        size_ms: sdk::host::config_parse::<i64>("window.size_ms")
             .and_then(Result::ok)
             .unwrap_or(30_000),
-        offset_ms: saci_config_parse::<i64>("window.offset_ms")
+        offset_ms: sdk::host::config_parse::<i64>("window.offset_ms")
             .and_then(Result::ok)
             .unwrap_or(0),
-        allowed_lateness_ms: saci_config_parse::<i64>("window.allowed_lateness_ms")
+        allowed_lateness_ms: sdk::host::config_parse::<i64>("window.allowed_lateness_ms")
             .and_then(Result::ok)
             .unwrap_or(0),
     }
@@ -165,10 +164,7 @@ fn geometry() -> WindowGeometry {
 /// Merge the batch into the open windows and emit every group whose window
 /// has closed, the core of the demo's windowing logic.
 pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Sale>()
-        .ok_or_else(|| SaciError::generic("windowing: Sale component missing"))?
-        .clone();
+    let batch = data.batch::<Sale>()?.clone();
     let n = batch.num_rows();
 
     // An empty batch still runs the systems: emit nothing, change nothing.
@@ -202,11 +198,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| SaciError::generic("windowing: amount is not Float64"))?;
 
-    let state = data
-        .get_resource_mut::<ProcessorState<WindowState>>()
-        .ok_or_else(|| {
-            SaciError::generic("windowing: ProcessorState<WindowState> resource missing")
-        })?;
+    let state = data.resource_mut::<sdk::State<WindowState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole WindowState.
     if state.rows.is_empty() {
@@ -240,7 +232,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
             late_rows += 1;
             continue;
         }
-        let wid = WindowSpec::assign_tumbling(ts, geo.size_ms, geo.offset_ms);
+        let wid = tumbling_id(ts, geo.size_ms, geo.offset_ms);
         let symbol = sym_col.value(i).to_string();
         let amount = amt_col.value(i);
         if let Some(open) = window_state
@@ -283,44 +275,36 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
     // The borrow through `state` ends here (NLL), before `data.append` below.
 
     data.append::<WindowTotal>(&emitted)?;
-    saci::plugin::host::metric("window.open", open_count as f64);
-    saci::plugin::host::metric("window.closed", closed as f64);
-    saci::plugin::host::metric("window.late_rows", late_rows as f64);
+    sdk::host::metric("window.open", open_count as f64);
+    sdk::host::metric("window.closed", closed as f64);
+    sdk::host::metric("window.late_rows", late_rows as f64);
     Ok(())
 }
 
 /// Build the windowing demo pipeline.
 ///
-/// Called lazily by the `export_plugin!` macro on the first `describe` or
+/// Called lazily by the `#[plugin]` thunks on the first `describe` or
 /// `run-batch` call, and constructed exactly once per loaded library.
+#[plugin]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("windowing-tumbling-plugin");
-    pipeline
-        .data
-        .register_component::<Sale>()
-        .expect("register Sale");
-    pipeline
-        .data
-        .register_component::<WindowTotal>()
-        .expect("register WindowTotal");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("accumulate")
-            .read_component("Sale")
-            .write_component("WindowTotal"),
-        |data| {
-            let geo = geometry();
-            accumulate_impl(data, &geo)
-        },
-    ));
-    pipeline
+    Pipeline::new("windowing-tumbling-plugin")
+        .state::<WindowState>()
+        .component::<Sale>()
+        .component::<WindowTotal>()
+        .system(system_fn(
+            SystemMeta::new("accumulate")
+                .reads_all::<Sale>()
+                .writes_all::<WindowTotal>(),
+            |data| {
+                let geo = geometry();
+                accumulate_impl(data, &geo)
+            },
+        ))
 }
-
-saci::export_plugin!(build, state = WindowState);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci::plugin::__rt::{ProcessorStateSpec, Stateful};
 
     fn geo() -> WindowGeometry {
         WindowGeometry {
@@ -332,9 +316,9 @@ mod tests {
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Sale>().unwrap();
-        data.register_component::<WindowTotal>().unwrap();
-        <Stateful<WindowState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
+        data.register::<Sale>().unwrap();
+        data.register::<WindowTotal>().unwrap();
+        build().restore_state(&mut data, None).unwrap();
         data
     }
 
@@ -350,7 +334,7 @@ mod tests {
     type Total = (i64, String, i64, f64);
 
     fn totals(data: &Dataset) -> Vec<Total> {
-        let batch = data.batch_for("WindowTotal").expect("WindowTotal batch");
+        let batch = data.batch_named("WindowTotal").expect("WindowTotal batch");
         let wid = batch
             .column(0)
             .as_any()
@@ -389,11 +373,11 @@ mod tests {
     /// the emitted totals, and the blob the next item resumes from.
     fn run_batch(prior: Option<&[u8]>, sales: &[Sale]) -> (Dataset, Vec<Total>, Option<Vec<u8>>) {
         let mut data = dataset_with_state();
-        <Stateful<WindowState> as ProcessorStateSpec>::restore(&mut data, prior).unwrap();
+        build().restore_state(&mut data, prior).unwrap();
         data.append::<Sale>(sales).unwrap();
         accumulate_impl(&mut data, &geo()).unwrap();
         let emitted = totals(&data);
-        let next = <Stateful<WindowState> as ProcessorStateSpec>::capture(&data).unwrap();
+        let next = build().capture_state(&data).unwrap();
         (data, emitted, next)
     }
 
@@ -444,7 +428,7 @@ mod tests {
         let (data, emitted, _) = run_batch(blob.as_deref(), &[sale(90_000, "AAPL", 99.0)]);
         assert!(emitted.is_empty());
         let state = data
-            .get_resource::<ProcessorState<WindowState>>()
+            .get_resource::<sdk::State<WindowState>>()
             .expect("state resource");
         assert_eq!(state.rows[0].open.len(), 1, "window 3 stays open");
         assert_eq!(state.rows[0].open[0].count, 1, "the late row was dropped");

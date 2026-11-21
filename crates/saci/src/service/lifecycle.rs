@@ -3,13 +3,13 @@
 //!
 //! Three pieces:
 //!
-//! - [`RunControl`] and [`PauseGate`], the runner half. `run_standalone` and
-//!   `run_stream` take a `RunControl` instead of a bare
+//! - [`RunControl`] and [`PauseGate`], the runner half. [`BuiltWorkflow::run`]
+//!   takes a `RunControl` (through its `RunOptions`) instead of a bare
 //!   [`CancellationToken`]; `From<CancellationToken>` yields an always-open
 //!   gate, so an uncontrolled call site is unchanged and allocates nothing.
 //! - [`run_supervised`], which owns one workflow's runner: it builds, runs,
 //!   parks, drains and rebuilds it in response to commands. With `control`
-//!   `None` it is exactly one `run_standalone` call.
+//!   `None` it is exactly one `BuiltWorkflow::run` call.
 //! - [`LifecycleRegistry`], what the HTTP handlers hold: one entry per
 //!   controllable workflow, each a `watch` of the published
 //!   [`WorkflowStatus`] plus the channel its supervisor listens on.
@@ -35,10 +35,10 @@ use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SaciError;
-use crate::service::builder::{BuiltService, ServiceFactory};
-use crate::service::config::{ServiceConfig, WorkflowSpec};
+use crate::service::builder::{BuiltWorkflow, RunOptions, WorkflowFactory};
+use crate::service::config::WorkflowSpec;
 use crate::service::redb_state::RedbStateClient;
-use crate::service::standalone::{StandaloneStats, run_standalone};
+use crate::service::standalone::WorkflowStats;
 
 /// How long a control request waits for the transition to settle before it is
 /// reported as still in progress.
@@ -86,6 +86,13 @@ impl From<CancellationToken> for RunControl {
     }
 }
 
+impl Default for RunControl {
+    /// A token nothing cancels and an always-open gate.
+    fn default() -> Self {
+        CancellationToken::new().into()
+    }
+}
+
 /// The runner's end of one pause pair.
 ///
 /// The two halves own opposite ends of the two channels, so dropping either
@@ -118,7 +125,7 @@ impl PauseGate {
     /// parked yet.
     ///
     /// Synchronous, so a pacing sleep can cut itself short instead of waiting
-    /// out a whole `interval_ms` before the runner reaches its pause point.
+    /// out a whole `every_ms` before the runner reaches its pause point.
     pub fn is_paused(&self) -> bool {
         self.0
             .as_ref()
@@ -624,10 +631,10 @@ impl Publisher {
 
 /// Fold one run's counters into the workflow's running total.
 ///
-/// `run_standalone` counts from zero on every start, so the supervised total
+/// `BuiltWorkflow::run` counts from zero on every start, so the supervised total
 /// is what survives a restart; `nodes` is the latest run's breakdown, because
 /// summing per-node counters across two different builds says nothing.
-fn accumulate(total: &mut StandaloneStats, run: StandaloneStats) {
+fn accumulate(total: &mut WorkflowStats, run: WorkflowStats) {
     total.iterations += run.iterations;
     total.source_batches_drained += run.source_batches_drained;
     total.rows_processed += run.rows_processed;
@@ -659,7 +666,7 @@ async fn next_command(
 ///
 /// `factory` is shared by every supervisor in the process: they are polled by
 /// one `join_all` on one task, so a `RefCell` is enough and the borrow is held
-/// only across the synchronous [`ServiceFactory::build`] call.
+/// only across the synchronous [`WorkflowFactory::build`] call.
 ///
 /// # Errors
 ///
@@ -667,17 +674,15 @@ async fn next_command(
 /// cannot be restarted. A controlled, restartable workflow reports its failure
 /// as [`WorkflowRunState::Failed`] and parks instead, so an operator can
 /// restart it.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_supervised(
-    initial: BuiltService,
+    initial: BuiltWorkflow,
     workflow: &WorkflowSpec,
-    config: &ServiceConfig,
     cancel: CancellationToken,
-    live_stats: Option<Arc<RwLock<StandaloneStats>>>,
+    live_stats: Option<Arc<RwLock<WorkflowStats>>>,
     state: Option<Arc<RedbStateClient>>,
-    factory: &RefCell<ServiceFactory>,
+    factory: &RefCell<WorkflowFactory>,
     control: Option<SupervisorChannels>,
-) -> Result<StandaloneStats, SaciError> {
+) -> Result<WorkflowStats, SaciError> {
     let (mut commands, status) = match control {
         Some(channels) => (Some(channels.commands), Some(channels.status)),
         None => (None, None),
@@ -702,7 +707,7 @@ pub async fn run_supervised(
         pending: None,
     };
 
-    let mut total = StandaloneStats::default();
+    let mut total = WorkflowStats::default();
     let mut initial = Some(initial);
     let mut run_now = true;
     let mut cancelled = false;
@@ -768,17 +773,18 @@ pub async fn run_supervised(
         let mut after: Option<AfterRun> = None;
         let mut commands_open = controlled;
 
-        // The runner owns the `BuiltService` and every exclusive resource its
+        // The runner owns the `BuiltWorkflow` and every exclusive resource its
         // connectors hold, so it is dropped at the end of this block, before
         // the next iteration can build the same workflow again.
         let outcome = {
-            let runner = run_standalone(
-                built,
-                config,
-                RunControl::new(run_token.clone(), gate),
-                live_stats.clone(),
-                state.clone(),
-            );
+            let mut options = RunOptions::new(RunControl::new(run_token.clone(), gate));
+            if let Some(stats) = &live_stats {
+                options = options.live_stats(Arc::clone(stats));
+            }
+            if let Some(state) = &state {
+                options = options.state(Arc::clone(state));
+            }
+            let runner = built.run(options);
             let mut runner = std::pin::pin!(runner);
             loop {
                 tokio::select! {

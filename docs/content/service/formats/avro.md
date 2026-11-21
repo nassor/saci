@@ -14,7 +14,7 @@ value = "yes"
 label = "Per-message"
 value = "One message per row"
 [[extra.facts]]
-label = "Needs schema_fields"
+label = "Needs field lines"
 value = "Optional reading a file, required writing and on messages"
 [[extra.facts]]
 label = "In the server build"
@@ -26,8 +26,8 @@ does not.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="av-t av-d">
-        <title id="av-t">An avro transformer decoding bytes into rows and encoding rows back into bytes</title>
-        <desc id="av-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is avro. The upper arrow runs left to right and is the decode path, which reads a container file's own header or a framed message. The lower arrow runs right to left and is the encode path, which needs a declared schema. The schema_id option selects the framing.</desc>
+        <title id="av-t">An avro codec decoding bytes into rows and encoding rows back into bytes</title>
+        <desc id="av-d">Bytes on the left and rows on the right, with a codec in the middle whose format is avro. The upper arrow runs left to right and is the decode path, which reads a container file's own header or a framed message. The lower arrow runs right to left and is the encode path, which needs a declared schema. The schema_id option selects the framing.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>
@@ -42,10 +42,10 @@ does not.
             <rect class="blk blk-ctl" x="258" y="26" width="144" height="80" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="26" width="144" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="38" width="144" height="8"/>
-            <text class="t-lbl" x="270" y="41">transformer</text>
+            <text class="t-lbl" x="270" y="41">codec</text>
             <text class="t-sm t-ctl" x="270" y="62">format="avro"</text>
-            <text class="t-sm" x="270" y="80">options compression</text>
-            <text class="t-sm" x="270" y="96">options schema_id</text>
+            <text class="t-sm" x="270" y="80">config compression</text>
+            <text class="t-sm" x="270" y="96">config schema_id</text>
             <path class="arw arw-data" d="M254 86 H150" marker-end="url(#av-a)"/>
             <text class="t-sm t-mid" x="202" y="104">encode</text>
         </g>
@@ -56,8 +56,8 @@ does not.
             <rect class="hd hd-data" x="514" y="34" width="146" height="20" rx="8"/>
             <rect class="hd hd-data" x="514" y="46" width="146" height="8"/>
             <text class="t-lbl" x="526" y="49">rows</text>
-            <text class="t-sm" x="526" y="70">id    Int64</text>
-            <text class="t-sm" x="526" y="86">price Float64</text>
+            <text class="t-sm" x="526" y="70">id    int64</text>
+            <text class="t-sm" x="526" y="86">price float64</text>
         </g>
         <defs>
             <marker id="av-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -78,12 +78,12 @@ does not.
 <div class="code-cap"><span>KDL</span><em>one format, two declared instances: a compressed container file and a Confluent framed topic</em></div>
 
 ```kdl
-transformer "avro_file" format="avro" {
-    options compression="zstd"
+codec "avro_file" format="avro" {
+    config compression="zstd"
 }
 
-transformer "avro_topic" format="avro" {
-    options schema_id=42
+codec "avro_topic" format="avro" {
+    config schema_id=42
 }
 ```
 
@@ -95,17 +95,17 @@ transformer "avro_topic" format="avro" {
 <div class="code-cap"><span>KDL</span><em>the file source declares no columns; the topic source declares them</em></div>
 
 ```kdl
-source "orders_in" type="FileSource" component="Order" transformer="avro_file" {
+source "orders_in" connector="file" component="Order" codec="avro_file" {
     config path="/data/orders.avro"
 }
 
-source "orders_stream" type="KafkaSource" component="Order" transformer="avro_topic" {
+source "orders_stream" connector="kafka" component="Order" codec="avro_topic" {
     config {
         brokers "localhost:9092"
         topic "orders-raw"
         stop_at_end #true
 
-        schema_fields "id" type="int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
@@ -137,7 +137,7 @@ wider `int`. A value that does not fit the declared column is an error rather th
 
 ## How it behaves
 
-Two framings exist on the message surface, and `schema_id` picks which one this transformer writes.
+Two framings exist on the message surface, and `schema_id` picks which one this codec writes.
 Without it the encoder emits single-object framing; with it, the Confluent framing carrying that
 registry id.
 
@@ -156,6 +156,7 @@ and reads either one.
 | `avro: option 'schema_id' must be an integer` | write a bare number |
 | `avro: option 'schema_id' must fit in a u32` | use the registry id, which is a 32-bit number |
 | `avro: the declared schema has no Avro form: {e}` | replace the column type the message names with one Avro can express |
+| `avro: unknown option '{key}'` | remove the key; `compression` and `schema_id` are the only two |
 
 Some errors wait for a payload rather than the config check:
 `avro: payload carries the Confluent prefix; set option 'schema_id' to its registry id`,

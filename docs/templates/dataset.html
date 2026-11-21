@@ -155,62 +155,44 @@
 <h2 id="component">Defining a Component</h2>
 
 <p>
-    A component names itself and provides an Arrow schema. Conversion to and from
-    <code>RecordBatch</code> goes through <code>serde_arrow</code>, so deriving
-    <code>Serialize</code> and <code>Deserialize</code> is enough for most types.
+    A component names itself and provides an Arrow schema. <code>#[derive(Component)]</code>
+    writes both: the name is the struct name, and the schema is traced from the fields through
+    <code>serde_arrow</code>, so deriving <code>Serialize</code> and <code>Deserialize</code>
+    is all a type needs.
 </p>
 
 <div class="code">
-    <div class="code-cap"><span>Rust</span><em>a component is a struct plus a schema</em></div>
-    <pre><code class="language-rust">use std::sync::Arc;
-use arrow_schema::{DataType, Field, Schema};
-use saci::prelude::*;
+    <div class="code-cap"><span>Rust</span><em>a component is a struct</em></div>
+    <pre><code class="language-rust">use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Component, Serialize, Deserialize, Clone)]
 struct Price {
     symbol: String,
     value: f64,
-}
-
-impl Component for Price {
-    fn name() -&gt; &amp;'static str { "Price" }
-
-    fn schema() -&gt; Arc&lt;Schema&gt; {
-        Arc::new(Schema::new(vec![
-            Field::new("symbol", DataType::Utf8,    false),
-            Field::new("value",  DataType::Float64, false),
-        ]))
-    }
 }</code></pre>
 </div>
 
 <p>
-    Typed <code>FieldRef</code> constants are optional. Systems use them to declare access
-    and <code>ComponentView</code> uses them to fetch typed columns, and neither costs
-    more than a string compare.
+    The derive also generates one typed <code>FieldRef</code> constant per field, named after
+    the field in upper case: <code>Price::SYMBOL</code> and <code>Price::VALUE</code>. Systems use
+    them to declare access, and <code>ComponentView</code> and <code>Dataset::column</code> use
+    them to fetch typed columns. None costs more than a string compare.
+    <code>#[saci(fields = false)]</code> on the struct turns the constants off.
 </p>
-
-<div class="code">
-    <div class="code-cap"><span>Rust</span><em>optional, and worth it</em></div>
-    <pre><code class="language-rust">impl Price {
-    pub const SYMBOL: FieldRef&lt;Price&gt; = FieldRef::new("symbol");
-    pub const VALUE:  FieldRef&lt;Price&gt; = FieldRef::new("value");
-}</code></pre>
-</div>
 
 <h2 id="register-and-append">Registering and appending</h2>
 
 <p>
     Register every component <b>before</b> the first append. Registration reserves the
     component's batch slot, and appending afterwards would break the shared row count, so
-    <code>register_component</code> returns an error once rows exist.
+    <code>register</code> returns an error once rows exist.
 </p>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>register, then append</em></div>
     <pre><code class="language-rust">let mut data = Dataset::new();
-data.register_component::&lt;Price&gt;()?;
+data.register::&lt;Price&gt;()?;
 
 let rows = vec![
     Price { symbol: "AAPL".into(), value: 150.0 },
@@ -231,16 +213,20 @@ assert_eq!(data.rows(), 3);</code></pre>
     </p>
 </div>
 
-<p>Or set everything up in one chain with the builder:</p>
+<p>A pipeline registers its components for you, so the chain form needs no separate call:</p>
 
 <div class="code">
-    <div class="code-cap"><span>Rust</span><em>builder form</em></div>
-    <pre><code class="language-rust">let data = Dataset::builder()
-    .with::&lt;Price&gt;()
-    .with::&lt;Volume&gt;()
-    .with_resource(MarketCalendar::default())
-    .build();</code></pre>
+    <div class="code-cap"><span>Rust</span><em>registering through a pipeline</em></div>
+    <pre><code class="language-rust">let pipeline = Pipeline::new("market")
+    .component::&lt;Price&gt;()
+    .component::&lt;Volume&gt;()
+    .resource(MarketCalendar::default());</code></pre>
 </div>
+
+<p>
+    A schema known only at run time registers with
+    <code>register_schema(name, schema)</code>.
+</p>
 
 <h2 id="reading">Reading columns</h2>
 
@@ -249,8 +235,8 @@ assert_eq!(data.rows(), 3);</code></pre>
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>pick the level you need</em></div>
     <pre><code class="language-rust">// 1. Raw Arrow, for whole-batch operations
-let batch: &amp;RecordBatch = data.columns::&lt;Price&gt;().expect("registered");
-let value: &amp;ArrayRef    = data.column::&lt;Price&gt;("value").expect("field");
+let batch: &amp;RecordBatch = data.batch::&lt;Price&gt;()?;
+let value: &amp;ArrayRef    = data.column(Price::VALUE)?;
 
 // 2. Typed view: borrows the batch, hands back concrete Arrow arrays
 let prices = data.view::&lt;Price&gt;()?;
@@ -370,11 +356,11 @@ if data.should_compact() {
 
 data.insert_resource(FxRates { eur: 1.08, gbp: 1.27 });
 
-let rates = data.get_resource::&lt;FxRates&gt;().expect("inserted");
+let rates = data.resource::&lt;FxRates&gt;()?;
 assert_eq!(rates.eur, 1.08);
 
 // Mutation needs &amp;mut Dataset
-data.get_resource_mut::&lt;FxRates&gt;().unwrap().gbp = 1.30;</code></pre>
+data.resource_mut::&lt;FxRates&gt;()?.gbp = 1.30;</code></pre>
 </div>
 
 <p>Systems declare resource access the same way they declare fields:</p>
@@ -382,8 +368,8 @@ data.get_resource_mut::&lt;FxRates&gt;().unwrap().gbp = 1.30;</code></pre>
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>declared access</em></div>
     <pre><code class="language-rust">SystemMeta::new("convert")
-    .read_resource::&lt;FxRates&gt;()    // shared read
-    .write_resource::&lt;Report&gt;();   // exclusive write</code></pre>
+    .reads_resource::&lt;FxRates&gt;()    // shared read
+    .writes_resource::&lt;Report&gt;();   // exclusive write</code></pre>
 </div>
 
 <p>

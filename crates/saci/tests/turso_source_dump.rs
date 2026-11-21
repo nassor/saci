@@ -14,8 +14,8 @@ fn source(path: &str, batch_rows: usize) -> TursoSource {
          batch_rows {batch_rows}\n\
          connection path=\"{}\"\n\
          mode kind=\"dump\" table=\"orders\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSourceConfig = common::config_from_kdl(&body);
@@ -29,8 +29,8 @@ fn source_capped(path: &str, batch_rows: usize, max_batches_per_cycle: usize) ->
          max_batches_per_cycle {max_batches_per_cycle}\n\
          connection path=\"{}\"\n\
          mode kind=\"dump\" table=\"orders\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"total\" type=\"float64\" nullable=#true\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"total\" type=\"float64\" nullable=#true\n",
         common::kdl_path(path)
     );
     let config: TursoSourceConfig = common::config_from_kdl(&body);
@@ -66,7 +66,7 @@ async fn dump_reads_the_whole_table_every_cycle() {
 
 #[tokio::test]
 async fn dump_respects_max_batches_per_cycle() {
-    use saci::io::source::Source;
+    use saci::io::Source;
 
     let db = common::temp_db();
     seed_five(&db).await;

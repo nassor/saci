@@ -35,15 +35,15 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
+use crate::codec::{BatchWriter, Codec};
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::transformer::{BatchWriter, Transformer};
+use crate::io::Sink;
 
 use crate::connector::s3::config::{Flush, S3SinkConfig};
 
 /// A `std::io::Write` handle onto a shared byte buffer.
 ///
-/// `Transformer::open_writer` takes ownership of the handle and
+/// `Codec::open_writer` takes ownership of the handle and
 /// `BatchWriter::finish` consumes the writer, so the sink keeps a second handle
 /// on the same bytes to read the finished object back out — the same trick
 /// `FileSink` plays with `File::try_clone`.
@@ -82,7 +82,7 @@ struct SinkShared {
     prefix: String,
     suffix: String,
     flush: Flush,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
 }
 
@@ -91,7 +91,7 @@ impl SinkShared {
     fn open_encoder(&self) -> Result<Encoder, SaciError> {
         let buffer = SharedBuffer::default();
         let writer = self
-            .transformer
+            .codec
             .open_writer(Box::new(buffer.clone()), Arc::clone(&self.schema))?;
         Ok(Encoder { writer, buffer })
     }
@@ -232,7 +232,7 @@ impl Pending {
     }
 }
 
-/// S3 [`Sink`]. The transformer encodes; this type owns the object client, the
+/// S3 [`Sink`]. The codec encodes; this type owns the object client, the
 /// open object and the `flush.max_age_ms` ticker task.
 ///
 /// Batches accumulate in the open object, in memory, until a flush threshold
@@ -251,11 +251,11 @@ impl Pending {
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::Schema;
-/// use saci::connector::s3::{Flush, S3ConnectionConfig, S3Sink, S3SinkConfig};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::connector::s3::{ConnectionConfig, Flush, S3Sink, S3SinkConfig};
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let config = S3SinkConfig {
-///     connection: S3ConnectionConfig {
+///     connection: ConnectionConfig {
 ///         bucket: "orders".to_string(),
 ///         endpoint: Some("http://127.0.0.1:9000".to_string()),
 ///         access_key_id: Some("key".to_string()),
@@ -266,9 +266,8 @@ impl Pending {
 ///     prefix: "out".to_string(),
 ///     suffix: ".csv".to_string(),
 ///     flush: Flush::default(),
-///     schema_fields: Vec::new(),
 /// };
-/// let sink = S3Sink::new(config, Arc::new(Schema::empty()), Arc::new(CsvTransformer::new(true)))
+/// let sink = S3Sink::new(config, Arc::new(Schema::empty()), Arc::new(CsvCodec::new()))
 ///     .unwrap();
 /// ```
 pub struct S3Sink {
@@ -292,10 +291,10 @@ impl S3Sink {
     pub fn new(
         config: S3SinkConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         let store = config.connection.build_store("S3Sink")?;
-        Ok(Self::from_store(store, config, schema, transformer))
+        Ok(Self::from_store(store, config, schema, codec))
     }
 
     /// Build over an existing object client; `config.connection` is not
@@ -304,7 +303,7 @@ impl S3Sink {
         store: Arc<dyn ObjectStore>,
         config: S3SinkConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Self {
         Self {
             shared: Arc::new(SinkShared {
@@ -312,7 +311,7 @@ impl S3Sink {
                 prefix: config.prefix,
                 suffix: config.suffix,
                 flush: config.flush,
-                transformer,
+                codec,
                 schema,
             }),
             state: Arc::new(tokio::sync::Mutex::new(SinkState {
@@ -495,24 +494,24 @@ async fn flush_locked(shared: &SinkShared, state: &mut SinkState) -> Result<(), 
     Ok(())
 }
 
-#[cfg(all(test, feature = "transformer-csv"))]
+#[cfg(all(test, feature = "codec-csv"))]
 mod tests {
     use std::io::Write;
 
     use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
 
-    use crate::transformer::csv::CsvTransformer;
+    use crate::codec::csv::CsvCodec;
 
     use super::*;
 
-    use crate::connector::s3::S3ConnectionConfig;
+    use crate::connector::s3::ConnectionConfig;
     use std::collections::VecDeque;
     use std::fmt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use crate::transformer::{BatchWriter, Transformer};
+    use crate::codec::{BatchWriter, Codec};
     use futures_util::TryStreamExt as _;
     use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
@@ -539,7 +538,7 @@ mod tests {
 
     fn config() -> S3SinkConfig {
         S3SinkConfig {
-            connection: S3ConnectionConfig {
+            connection: ConnectionConfig {
                 bucket: "test".to_string(),
                 endpoint: Some("http://127.0.0.1:1".to_string()),
                 allow_http: true,
@@ -548,7 +547,6 @@ mod tests {
             prefix: String::new(),
             suffix: String::new(),
             flush: Flush::default(),
-            schema_fields: Vec::new(),
         }
     }
 
@@ -564,8 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_batch_after_finish_is_the_exact_error() {
-        let mut sink =
-            S3Sink::new(config(), schema(), Arc::new(CsvTransformer::new(true))).expect("builds");
+        let mut sink = S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
         sink.finish()
             .await
             .expect("finish on a fresh sink is a no-op");
@@ -579,8 +576,7 @@ mod tests {
     #[tokio::test]
     async fn finish_on_a_never_written_sink_issues_no_request() {
         // The endpoint is unreachable; any request would fail the test.
-        let mut sink =
-            S3Sink::new(config(), schema(), Arc::new(CsvTransformer::new(true))).expect("builds");
+        let mut sink = S3Sink::new(config(), schema(), Arc::new(CsvCodec::new())).expect("builds");
         sink.finish().await.expect("finish issues no request");
         sink.finish().await.expect("finish is idempotent");
     }
@@ -723,7 +719,7 @@ mod tests {
     /// Writes each row's `id` on its own line. A batch holding id 99 writes
     /// half a line and then fails, which is what a mid-batch encode error
     /// leaves behind.
-    struct LineTransformer;
+    struct LineCodec;
 
     struct LineWriter(Box<dyn Write + Send>);
 
@@ -749,7 +745,7 @@ mod tests {
         }
     }
 
-    impl Transformer for LineTransformer {
+    impl Codec for LineCodec {
         fn format(&self) -> &'static str {
             "lines"
         }
@@ -777,18 +773,14 @@ mod tests {
         }
     }
 
-    fn sink_over(
-        store: &Arc<FlakyStore>,
-        flush: Flush,
-        transformer: Arc<dyn Transformer>,
-    ) -> S3Sink {
+    fn sink_over(store: &Arc<FlakyStore>, flush: Flush, codec: Arc<dyn Codec>) -> S3Sink {
         let mut config = config();
         config.flush = flush;
-        S3Sink::from_store(store.clone(), config, schema(), transformer)
+        S3Sink::from_store(store.clone(), config, schema(), codec)
     }
 
-    fn lines() -> Arc<dyn Transformer> {
-        Arc::new(LineTransformer)
+    fn lines() -> Arc<dyn Codec> {
+        Arc::new(LineCodec)
     }
 
     #[tokio::test]

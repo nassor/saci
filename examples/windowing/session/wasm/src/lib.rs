@@ -26,26 +26,11 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::ProcessorState;
-use saci::processor::arrow_array::{Float64Array, Int64Array, StringArray};
-use saci::processor::arrow_schema::{DataType, Field, FieldRef, Schema};
-use saci::processor::prelude::*;
+use saci::arrow_array::{Float64Array, Int64Array, StringArray};
+use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
+use saci::prelude::*;
 
 /// One row of the demo workload: a sale at an instant in time.
 ///
@@ -177,35 +162,16 @@ pub struct WindowGeometry {
 
 /// Read the geometry from the injected `window.*` config keys, falling back
 /// to the same defaults the KDL block's serde defaults use.
-#[cfg(target_arch = "wasm32")]
 fn geometry() -> WindowGeometry {
     WindowGeometry {
-        gap_ms: saci_config_parse::<i64>("window.gap_ms")
+        gap_ms: sdk::host::config_parse::<i64>("window.gap_ms")
             .and_then(Result::ok)
             .unwrap_or(10_000),
-        allowed_lateness_ms: saci_config_parse::<i64>("window.allowed_lateness_ms")
+        allowed_lateness_ms: sdk::host::config_parse::<i64>("window.allowed_lateness_ms")
             .and_then(Result::ok)
             .unwrap_or(0),
     }
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-fn geometry() -> WindowGeometry {
-    WindowGeometry {
-        gap_ms: 10_000,
-        allowed_lateness_ms: 0,
-    }
-}
-
-/// Report a metric through `host-io::metric`; a no-op outside wasm, where the
-/// host bindings do not exist.
-#[cfg(target_arch = "wasm32")]
-fn report_metric(name: &str, value: f64) {
-    crate::bindings::saci::pipeline::host_io::metric(name, value);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn report_metric(_name: &str, _value: f64) {}
 
 /// Merge into the session at `idx` every other session of the same key it now
 /// reaches, so an out-of-order row that lands between two sessions bridges
@@ -247,10 +213,7 @@ fn coalesce_from(open: &mut Vec<OpenSession>, idx: usize, gap_ms: i64) {
 /// Merge the batch into the open sessions and emit every session the
 /// watermark has left behind, the core of the demo's session logic.
 pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Sale>()
-        .ok_or_else(|| SaciError::generic("windowing: Sale component missing"))?
-        .clone();
+    let batch = data.batch::<Sale>()?.clone();
     let n = batch.num_rows();
 
     // An empty batch still runs the systems: emit nothing, change nothing.
@@ -284,11 +247,7 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| SaciError::generic("windowing: amount is not Float64"))?;
 
-    let state = data
-        .get_resource_mut::<ProcessorState<SessionState>>()
-        .ok_or_else(|| {
-            SaciError::generic("windowing: ProcessorState<SessionState> resource missing")
-        })?;
+    let state = data.resource_mut::<sdk::State<SessionState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole SessionState.
     if state.rows.is_empty() {
@@ -374,45 +333,36 @@ pub fn accumulate_impl(data: &mut Dataset, geo: &WindowGeometry) -> Result<(), S
     // The borrow through `state` ends here (NLL), before `data.append` below.
 
     data.append::<SessionTotal>(&emitted)?;
-    report_metric("window.open", open_count as f64);
-    report_metric("window.closed", closed as f64);
-    report_metric("window.late_rows", late_rows as f64);
+    sdk::host::metric("window.open", open_count as f64);
+    sdk::host::metric("window.closed", closed as f64);
+    sdk::host::metric("window.late_rows", late_rows as f64);
     Ok(())
 }
 
 /// Build the session windowing demo pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
+#[processor]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("windowing_session");
-    pipeline
-        .data
-        .register_component::<Sale>()
-        .expect("register Sale");
-    pipeline
-        .data
-        .register_component::<SessionTotal>()
-        .expect("register SessionTotal");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("accumulate")
-            .read_component("Sale")
-            .write_component("SessionTotal"),
-        |data| {
-            let geo = geometry();
-            accumulate_impl(data, &geo)
-        },
-    ));
-    pipeline
+    Pipeline::new("windowing_session")
+        .state::<SessionState>()
+        .component::<Sale>()
+        .component::<SessionTotal>()
+        .system(system_fn(
+            SystemMeta::new("accumulate")
+                .reads_all::<Sale>()
+                .writes_all::<SessionTotal>(),
+            |data| {
+                let geo = geometry();
+                accumulate_impl(data, &geo)
+            },
+        ))
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build, state = SessionState);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci::processor::__rt::{ProcessorStateSpec, Stateful};
 
     fn geo() -> WindowGeometry {
         WindowGeometry {
@@ -423,9 +373,9 @@ mod tests {
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Sale>().unwrap();
-        data.register_component::<SessionTotal>().unwrap();
-        <Stateful<SessionState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
+        data.register::<Sale>().unwrap();
+        data.register::<SessionTotal>().unwrap();
+        build().restore_state(&mut data, None).unwrap();
         data
     }
 
@@ -441,7 +391,9 @@ mod tests {
     type Total = (i64, i64, String, i64, f64);
 
     fn totals(data: &Dataset) -> Vec<Total> {
-        let batch = data.batch_for("SessionTotal").expect("SessionTotal batch");
+        let batch = data
+            .batch_named("SessionTotal")
+            .expect("SessionTotal batch");
         let start = batch
             .column(0)
             .as_any()
@@ -483,7 +435,7 @@ mod tests {
     /// The open sessions the state carries, as `(symbol, start, last, count)`.
     fn open_sessions(data: &Dataset) -> Vec<(String, i64, i64, i64)> {
         let state = data
-            .get_resource::<ProcessorState<SessionState>>()
+            .get_resource::<sdk::State<SessionState>>()
             .expect("state resource");
         let mut sessions: Vec<(String, i64, i64, i64)> = state.rows[0]
             .open
@@ -504,11 +456,11 @@ mod tests {
         sales: &[Sale],
     ) -> (Dataset, Vec<Total>, Option<Vec<u8>>) {
         let mut data = dataset_with_state();
-        <Stateful<SessionState> as ProcessorStateSpec>::restore(&mut data, prior).unwrap();
+        build().restore_state(&mut data, prior).unwrap();
         data.append::<Sale>(sales).unwrap();
         accumulate_impl(&mut data, geo).unwrap();
         let emitted = totals(&data);
-        let next = <Stateful<SessionState> as ProcessorStateSpec>::capture(&data).unwrap();
+        let next = build().capture_state(&data).unwrap();
         (data, emitted, next)
     }
 

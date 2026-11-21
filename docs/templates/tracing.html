@@ -61,7 +61,7 @@
         <!-- the data plane: the thing being observed, and it is untouched -->
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="44" width="654" height="30" rx="8"/>
-            <text class="t-lbl t-data" x="12" y="63">batch &rarr; run_on &rarr; checkpoint</text>
+            <text class="t-lbl t-data" x="12" y="63">batch &rarr; run_batch &rarr; checkpoint</text>
             <text class="t-sm t-end" x="642" y="63">spans per run and per stage, no per-row events</text>
         </g>
 
@@ -220,7 +220,7 @@
     <div class="code-cap"><span>TOML</span><em>as declared; the service list is abridged</em></div>
     <pre><code class="language-toml"># crates/saci/Cargo.toml
 tracing = ["dep:tracing"]
-service = ["connector-contract", "distributed", "parquet-checkpoint", "tracing", "inspector", ...]</code></pre>
+service = ["connector-api", "distributed", "parquet-checkpoint", "tracing", "inspector", ...]</code></pre>
 </div>
 
 <div class="note">
@@ -303,14 +303,14 @@ service = ["connector-contract", "distributed", "parquet-checkpoint", "tracing",
     <dt><code>saci::distributed::parquet_checkpoint</code> <small>debug</small></dt>
     <dd>A parent-directory <code>fsync</code> that failed after a checkpoint write: <code>error</code>. Needs the <code>parquet-checkpoint</code> feature.</dd>
     <dt><code>saci::wasm_host::host_impl</code> <small>trace to error</small></dt>
-    <dd>The processor's own <code>host-io::log</code> lines, re-emitted at the level the processor asked for and tagged <code>pipeline</code> and <code>target</code>. They land inside that batch's <code>processor.batch</code> span, because the runtime re-enters it on the blocking thread the guest call runs on. A <code>host-io::metric</code> call records the <code>saci_processor_metric</code> histogram, labelled with the metric name, and also emits a <code>trace</code> event with <code>metric</code> and <code>value</code>.</dd>
+    <dd>The processor's own <code>host-io::log</code> lines, re-emitted at the level the processor asked for and tagged <code>pipeline</code> and <code>target</code>. They land inside that batch's <code>processor.batch</code> span, because the runtime re-enters it on the blocking thread the guest call runs on. A <code>host-io::metric</code> call records the <code>saci_processor_custom</code> histogram, labelled with the metric name and the node id, and also emits a <code>trace</code> event with <code>metric</code> and <code>value</code>.</dd>
     <dt><code>saci::wasm_host::runner</code> <small>debug span, warn</small></dt>
     <dd>One <code>processor.batch</code> span per <code>run-batch</code> call, covering the IPC encode, the guest call and the IPC decode: <code>workflow</code>, <code>processor</code>, <code>rows_in</code>, <code>rows_out</code>, <code>systems_run</code>, <code>retries</code>, <code>guest_wall_us</code>, the last four read back off the WIT <code>run-metrics</code> record. The <code>warn</code> covers building the template dataset: <code>describe()</code> failed, or one component's schema would not parse (<code>component</code>, <code>error</code>).</dd>
     <dt><code>saci::plugin_host::runtime</code> <small>debug span, debug</small></dt>
     <dd>The same <code>processor.batch</code> span for a native plugin, with <code>plugin_wall_us</code> in place of <code>guest_wall_us</code>. The <code>debug</code> reports a loaded plugin's <code>plugin</code>, <code>version</code>, <code>stateful</code> and <code>components</code>.</dd>
     <dt><code>saci::service::http</code>, <code>::shutdown</code> <small>info, debug, warn, error</small></dt>
     <dd>Control-plane bind and clean shutdown, signal receipt, and the 30-second shutdown budget being exceeded.</dd>
-    <dt><code>saci::service::cli::commands::serve</code> <small>info, error</small></dt>
+    <dt><code>saci::service::serve</code> <small>info, error</small></dt>
     <dd>Binary startup (<code>node_id</code>), which of signal-or-runner-exit fired first, and the exit path.</dd>
     <dt><code>saci::flow_control</code> <small>info</small></dt>
     <dd>The adaptive-flow-control lines: <code>flow control starting</code> per governed source, <code>flow control decision</code> per episode, <code>flow control finished</code> per governed source at runner exit, and one naming each <code>stream</code> source a windowed path leaves ungoverned. The <code>EnvFilter</code> enables this target at <code>info</code> whatever <code>log_level</code> says, and the sampler never drops it, so admission control is readable at the error-only default.</dd>
@@ -473,8 +473,7 @@ async fn main() {
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>what the binary calls</em></div>
-    <pre><code class="language-rust">use saci::service::config::ObservabilityConfig;
-use saci::service::logging::init_logging;
+    <pre><code class="language-rust">use saci::service::{ObservabilityConfig, init_logging};
 
 let cfg = ObservabilityConfig::default();  // Pretty, "error", no span export
 // init_logging returns the guard and the inspector handle, None when capture is off.

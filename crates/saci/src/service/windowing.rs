@@ -45,7 +45,7 @@
 //! - The runner never sends it
 //!   [`request_batch_rows`](crate::io::Source::request_batch_rows). That
 //!   hint steers the connector's own fetch size, and `KafkaSource` and
-//!   `NatsSource` overwrite `batch_size` with it while `PostgresSource`
+//!   `NatsSource` overwrite `batch_rows` with it while `PostgresSource`
 //!   overwrites `batch_rows`, so honouring it would move the arrival
 //!   boundaries themselves. That is the same measurement one layer earlier.
 //!   Such a connector keeps its declared fetch size, a number the operator
@@ -73,8 +73,8 @@
 //! [`FlowController`](super::flow::FlowController) in that mode: no samples,
 //! no epoch experiment, and no `saci_flow_*` series, including
 //! `saci_flow_backoff_total`. Its arrival size is whatever the connector's
-//! declared `batch_size`/`batch_rows` produces, and
-//! [`run_stream`](super::stream::run_stream) names each such source in one
+//! declared `batch_rows` produces, and
+//! the stream runner names each such source in one
 //! startup line. A controller kept anyway would publish a target nothing
 //! applies, which is the one question those series exist to answer.
 //!
@@ -128,11 +128,12 @@
 //! windowed node's state blob from one pass to the next whatever `store`
 //! says, because a `window` block is the declaration that the node
 //! accumulates over more than one pass; see
-//! [`run_standalone`](super::standalone::run_standalone).
+//! [`BuiltWorkflow::run`](super::builder::BuiltWorkflow::run).
 
 use crate::SaciResult;
 use crate::dataset::Dataset;
 use crate::error::SaciError;
+use crate::metrics::ProcessorMetrics;
 
 use super::builder::BuiltEdge;
 use super::config::WindowConfig;
@@ -145,7 +146,7 @@ use super::sampling::WINDOWING_TARGET;
 /// `trackers[i]` is `Some` exactly for a node whose config declares a
 /// `window` block, and `downstream[i]` holds that node's outbound edges.
 /// `BuiltEdge::node` always exceeds the owning node's index, because
-/// `BuiltService::nodes` is in topological order, so one reverse pass
+/// `BuiltWorkflow::nodes` is in topological order, so one reverse pass
 /// resolves the whole reachability relation.
 ///
 /// The runners read the source entries: a `true` source keeps its arrivals
@@ -153,7 +154,7 @@ use super::sampling::WINDOWING_TARGET;
 /// [`request_batch_rows`](crate::io::Source::request_batch_rows) hint,
 /// because splitting an arrival or sizing one from the credit would both move
 /// a pass boundary the windowed node observes event time at.
-/// [`run_stream`](super::stream::run_stream) goes one step further and builds
+/// the stream runner goes one step further and builds
 /// no controller for it: with both suppressions in force and one arrival per
 /// item, nothing in that loop would read the target. A source feeding both a
 /// windowed and a non-windowed node is `true` as well. Both see the same
@@ -174,7 +175,7 @@ pub(super) fn reaches_windowed_node(
                 // runners would then slice.
                 debug_assert!(
                     edge.node > i,
-                    "BuiltService::nodes must be topologically ordered, but node {i} \
+                    "BuiltWorkflow::nodes must be topologically ordered, but node {i} \
                      links back to {}",
                     edge.node
                 );
@@ -306,7 +307,7 @@ impl WindowTracker {
     /// `WindowedSystem`'s null-timestamp handling.
     ///
     /// The returned [`WatermarkAdvance`] applies
-    /// [`WatermarkState`](crate::windows::watermark::WatermarkState)'s own
+    /// [`WatermarkState`](crate::windows::WatermarkState)'s own
     /// rule to the arrival's newest timestamp: below
     /// `watermark - allowed_lateness_ms`, the node's windowing logic has no
     /// row it can place in a window, so the whole arrival is dropped and
@@ -332,7 +333,7 @@ impl WindowTracker {
                 continue;
             }
             let batch = dataset
-                .batch_for(name)
+                .batch_named(name)
                 .expect("registered component has a batch");
             let idx = schema.index_of(time_field).map_err(|e| {
                 SaciError::generic(format!("WindowTracker: time field lookup: {e}"))
@@ -407,6 +408,7 @@ impl WindowTracker {
 pub(super) fn report_watermark_advance(
     workflow_id: &str,
     processor_id: &str,
+    metrics: &ProcessorMetrics,
     tracker: &WindowTracker,
     advance: WatermarkAdvance,
 ) {
@@ -433,7 +435,7 @@ pub(super) fn report_watermark_advance(
             behind_ms,
             first,
         } => {
-            crate::metrics::instruments().window_late_arrival(processor_id);
+            metrics.window_late_arrival();
             if first {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
@@ -464,7 +466,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use crate::component::Component;
-    use crate::windows::WindowSpec;
+    use crate::window::WindowSpec;
 
     use super::*;
 
@@ -487,10 +489,7 @@ mod tests {
 
     fn config() -> WindowConfig {
         WindowConfig {
-            spec: WindowSpec::Tumbling {
-                size_ms: 30_000,
-                offset_ms: 0,
-            },
+            spec: WindowSpec::tumbling(30_000),
             time_field: "timestamp_ms".to_string(),
             key_fields: Vec::new(),
             allowed_lateness_ms: 0,
@@ -507,7 +506,7 @@ mod tests {
     #[test]
     fn advances_from_the_time_column_and_is_monotonic() {
         let mut dataset = Dataset::new();
-        dataset.register_component::<Trade>().unwrap();
+        dataset.register::<Trade>().unwrap();
         dataset
             .append::<Trade>(&[
                 Trade {
@@ -552,12 +551,14 @@ mod tests {
     #[test]
     fn skips_components_without_the_time_field_and_null_timestamps() {
         let mut dataset = Dataset::new();
-        dataset.register_component::<Trade>().unwrap();
+        dataset.register::<Trade>().unwrap();
         // A component with no time field: must be skipped, not an error.
-        dataset.register_raw_component(
-            "Audit",
-            Arc::new(Schema::new(vec![Field::new("note", DataType::Utf8, false)])),
-        );
+        dataset
+            .register_schema(
+                "Audit",
+                Arc::new(Schema::new(vec![Field::new("note", DataType::Utf8, false)])),
+            )
+            .unwrap();
         // A component whose time column carries nulls: the null's backing bits
         // must not advance the watermark.
         let null_schema = Arc::new(Schema::new(vec![Field::new(
@@ -565,7 +566,7 @@ mod tests {
             DataType::Int64,
             true,
         )]));
-        dataset.register_raw_component("NullTrade", null_schema);
+        dataset.register_schema("NullTrade", null_schema).unwrap();
 
         dataset
             .append::<Trade>(&[Trade {
@@ -599,7 +600,7 @@ mod tests {
         )]));
         let ts = TimestampMillisecondArray::from(vec![1_000, 2_000]);
         let mut dataset = Dataset::new();
-        dataset.register_raw_component("Event", schema.clone());
+        dataset.register_schema("Event", schema.clone()).unwrap();
         dataset
             .append_record_batch(
                 "Event",
@@ -624,7 +625,7 @@ mod tests {
         )]));
         let prices = Float64Array::from(vec![1.5, 2.5]);
         let mut dataset = Dataset::new();
-        dataset.register_raw_component("BadTime", schema.clone());
+        dataset.register_schema("BadTime", schema.clone()).unwrap();
         dataset
             .append_record_batch(
                 "BadTime",
@@ -641,7 +642,7 @@ mod tests {
     /// One arrival of `Trade` rows at the given timestamps.
     fn arrival(timestamps: &[i64]) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_component::<Trade>().unwrap();
+        dataset.register::<Trade>().unwrap();
         let rows: Vec<Trade> = timestamps
             .iter()
             .map(|&timestamp_ms| Trade {
@@ -774,7 +775,7 @@ mod tests {
         tracker.advance_from(&arrival(&[100_000])).unwrap();
 
         let mut empty = Dataset::new();
-        empty.register_component::<Trade>().unwrap();
+        empty.register::<Trade>().unwrap();
 
         // One short of the run, then an empty pass, then the arrival that
         // completes it: the report must still open, so the empty pass neither
@@ -834,7 +835,7 @@ mod tests {
     }
 
     /// One edge per `(from, to)` pair, in the topological shape
-    /// `BuiltService::nodes` guarantees.
+    /// `BuiltWorkflow::nodes` guarantees.
     fn edges(pairs: &[(usize, usize)], n: usize) -> Vec<Vec<BuiltEdge>> {
         let mut out = vec![Vec::new(); n];
         for &(from, to) in pairs {

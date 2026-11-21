@@ -1,10 +1,10 @@
 //! Windowed aggregation over sales events: tumbling 30-second windows keyed by category.
 //!
-//! [`WindowedSystemBuilder`] sums the `amount` field of a `SalesEvent`
+//! [`WindowedSystem`] sums the `amount` field of a `SalesEvent`
 //! component into 30-second tumbling windows keyed by `category`, and a
 //! downstream system prints the totals from [`WindowResults`]. Rows arriving
-//! within `allowed_lateness` re-fire their window; later ones go to the side
-//! output.
+//! within the allowed lateness re-fire their window; later ones land in
+//! [`WindowResults::dropped`].
 //!
 //! ```bash
 //! cargo run --example window_aggregation --features windows
@@ -13,22 +13,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_array::{Array, cast::AsArray};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
+use arrow_array::{Array, ArrayRef, StringArray, cast::AsArray};
 use serde::{Deserialize, Serialize};
 
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::system::{FieldRef, System, SystemMeta};
+use saci::prelude::*;
 
-use saci::windows::{
-    ReduceAggregate, WindowFunction, WindowResults, WindowSpec, WindowedSystemBuilder,
-};
+use saci::windows::{WindowFunction, WindowResults, WindowedSystem, key_hash};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
 struct SalesEvent {
     /// Unix timestamp in milliseconds.
     timestamp_ms: i64,
@@ -38,31 +30,13 @@ struct SalesEvent {
     amount: f64,
 }
 
-impl Component for SalesEvent {
-    fn name() -> &'static str {
-        "SalesEvent"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("timestamp_ms", DataType::Int64, false),
-            Field::new("category", DataType::Utf8, false),
-            Field::new("amount", DataType::Float64, false),
-        ]))
-    }
-}
-
-impl SalesEvent {
-    const CATEGORY: FieldRef<SalesEvent> = FieldRef::new("category");
-}
-
 /// Loads seed sales events spanning three 30-second windows across two categories.
 struct IngestSystem;
 
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("SalesEvent")
+        SystemMeta::new("ingest").writes_all::<SalesEvent>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
@@ -133,60 +107,21 @@ impl System for BuildLookupSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("build_lookup")
             .reads(SalesEvent::CATEGORY)
-            .write_resource::<CategoryLookup>()
+            .writes_resource::<CategoryLookup>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-        use saci::windows::WindowedSystemBuilder as W;
-
-        // The key-hash helper is crate-private, so each category's hash comes
-        // from running an identically configured windowed system over a
-        // one-row dataset and reading back its `key_hash` output.
-        use saci::windows::WindowSpec as WS;
+        // `key_hash` is the function the windowed system keys its groups by,
+        // so hashing the known category names yields the same `key_hash`
+        // values the window results carry.
         let known_categories = ["Electronics", "Books"];
-        let mut map = HashMap::new();
-
-        for cat in known_categories {
-            let row = SalesEvent {
-                timestamp_ms: 0,
-                category: cat.to_string(),
-                amount: 1.0,
-            };
-            let mut mini = Dataset::new();
-            mini.register_component::<SalesEvent>()?;
-            mini.append::<SalesEvent>(&[row])?;
-
-            let ws = W::new()
-                .source("SalesEvent", "timestamp_ms")
-                .keyed_by(&["category"])
-                .window(WS::Tumbling {
-                    size_ms: 30_000,
-                    offset_ms: 0,
-                })
-                .function(WindowFunction::Reduce {
-                    input_field: "amount",
-                    aggregate: ReduceAggregate::Sum,
-                })
-                .build()
-                .map_err(|e| SaciError::generic(format!("BuildLookupSystem build: {e}")))?;
-
-            ws.run(&mut mini).await?;
-
-            if let Some(wr) = mini.get_resource::<WindowResults>() {
-                for batch in &wr.batches {
-                    let kh_idx = batch
-                        .schema()
-                        .index_of("key_hash")
-                        .map_err(|e| SaciError::generic(format!("key_hash column missing: {e}")))?;
-                    let kh_col = batch
-                        .column(kh_idx)
-                        .as_primitive::<arrow_array::types::Int64Type>();
-                    if !kh_col.is_empty() {
-                        map.insert(kh_col.value(0), cat.to_string());
-                    }
-                }
-            }
-        }
+        let names: ArrayRef = Arc::new(StringArray::from(known_categories.to_vec()));
+        let hashes = key_hash(&[&names])?;
+        let map: HashMap<i64, String> = known_categories
+            .iter()
+            .enumerate()
+            .map(|(i, cat)| (hashes.value(i), (*cat).to_string()))
+            .collect();
 
         println!("[lookup]  built hash map for {} categories", map.len());
         data.insert_resource(CategoryLookup(map));
@@ -201,17 +136,13 @@ struct ReportSystem;
 impl System for ReportSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("report")
-            .read_resource::<WindowResults>()
-            .read_resource::<CategoryLookup>()
+            .reads_resource::<WindowResults>()
+            .reads_resource::<CategoryLookup>()
     }
 
     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-        let results = data
-            .get_resource::<WindowResults>()
-            .ok_or_else(|| SaciError::generic("WindowResults resource not found"))?;
-        let lookup = data
-            .get_resource::<CategoryLookup>()
-            .ok_or_else(|| SaciError::generic("CategoryLookup resource not found"))?;
+        let results = data.resource::<WindowResults>()?;
+        let lookup = data.resource::<CategoryLookup>()?;
 
         println!();
         println!("╔══════════════════════════════════════════════════════╗");
@@ -220,7 +151,7 @@ impl System for ReportSystem {
         println!("║  Window               ║  Category    ║  Sum (USD)   ║");
         println!("╠═══════════════════════╬══════════════╬══════════════╣");
 
-        for batch in &results.batches {
+        for batch in &results.on_time {
             if batch.num_rows() == 0 {
                 continue;
             }
@@ -270,14 +201,12 @@ impl System for ReportSystem {
 
         println!("╚═══════════════════════╩══════════════╩══════════════╝");
 
-        if !results.late_batches.is_empty() {
-            println!("  Late re-firings: {}", results.late_batches.len());
+        if !results.late.is_empty() {
+            println!("  Late re-firings: {}", results.late.len());
         }
-        if !results.side_output.is_empty() {
-            println!(
-                "  Dropped (beyond lateness): {} rows",
-                results.side_output.total_rows()
-            );
+        let dropped_rows: usize = results.dropped.iter().map(|b| b.num_rows()).sum();
+        if dropped_rows > 0 {
+            println!("  Dropped (beyond lateness): {dropped_rows} rows");
         }
 
         println!();
@@ -289,32 +218,25 @@ impl System for ReportSystem {
 
 #[tokio::main]
 async fn main() -> Result<(), SaciError> {
-    let windowed = WindowedSystemBuilder::new()
-        .source("SalesEvent", "timestamp_ms")
-        .keyed_by(&["category"])
-        .window(WindowSpec::Tumbling {
-            size_ms: 30_000,
-            offset_ms: 0,
-        })
-        .function(WindowFunction::Reduce {
-            input_field: "amount",
-            aggregate: ReduceAggregate::Sum,
-        })
-        .allowed_lateness(5_000)
-        .build()?;
+    let windowed = WindowedSystem::new(
+        SalesEvent::TIMESTAMP_MS,
+        WindowSpec::tumbling(30_000),
+        WindowFunction::sum("amount"),
+    )?
+    .key_by(["category"])
+    .allowed_lateness_ms(5_000);
 
-    let mut pipeline = Pipeline::builder("window_aggregation")
-        .with::<SalesEvent>()
-        .with_system(IngestSystem)
-        .with_system(BuildLookupSystem)
-        .with_system(windowed)
-        .with_system(ReportSystem)
-        .build();
+    let mut pipeline = Pipeline::new("window_aggregation")
+        .component::<SalesEvent>()
+        .system(IngestSystem)
+        .system(BuildLookupSystem)
+        .system(windowed)
+        .system(ReportSystem);
 
     println!("Running windowed aggregation pipeline...");
     pipeline.run().await?;
 
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan()?.to_vec();
     println!();
     println!("Stage layout:");
     for (i, stage) in stages.iter().enumerate() {

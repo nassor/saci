@@ -12,7 +12,7 @@ use saci::SaciResult;
 use saci::distributed::checkpoint::CheckpointStore;
 use saci::distributed::consensus::store::RedbSharedStore;
 use saci::distributed::partition::{MAX_LOG_ENTRY_BYTES, PartitionSource};
-use saci::service::redb_state::{RedbStateClient, SourceCursorMeta};
+use saci::service::{RedbStateClient, SourceCursorMeta};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -368,7 +368,7 @@ async fn runner_window_accumulator_carries_across_claims() {
     use saci::distributed::strategy::CheckpointStrategy;
     use saci::pipeline::Pipeline;
     use saci::system::system_fn;
-    use saci::windows::accumulator::WindowAccumulator;
+    use saci::windows::WindowAccumulator;
 
     let dir = TempDir::new().expect("tempdir");
     let store = RedbSharedStore::single_node(&dir.path().join("app.redb")).expect("open store");
@@ -387,8 +387,8 @@ async fn runner_window_accumulator_carries_across_claims() {
     let run_count_clone = StdArc::clone(&run_count);
     let entry_rows_clone = StdArc::clone(&entry_rows);
 
-    let mut pipeline = Pipeline::new("test");
-    pipeline.add_system(system_fn(
+    let pipeline = Pipeline::new("test");
+    let pipeline = pipeline.system(system_fn(
         SystemMeta::new("append_accumulator"),
         move |data: &mut Dataset| {
             entry_rows_clone
@@ -396,7 +396,7 @@ async fn runner_window_accumulator_carries_across_claims() {
                 .expect("entry rows mutex poisoned")
                 .push(data.rows() as u64);
             let run = run_count_clone.fetch_add(1, Ordering::Relaxed);
-            if data.batch_for(WindowAccumulator::name()).is_some() {
+            if data.batch_named(WindowAccumulator::name()).is_ok() {
                 let row = WindowAccumulator {
                     version: Some(1),
                     source_component: "test".to_string(),
@@ -419,7 +419,7 @@ async fn runner_window_accumulator_carries_across_claims() {
 
     let world_factory = || {
         let mut d = Dataset::new();
-        d.register_component::<WindowAccumulator>()
+        d.register::<WindowAccumulator>()
             .expect("register accumulator component");
         d
     };

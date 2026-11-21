@@ -44,7 +44,7 @@ use saci::SaciError;
 use saci::component::Component;
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
-use saci::system::{ParallelSystem, ResourceUpdate, System, SystemMeta, WriteSet};
+use saci::system::{ParallelSystem, System, SystemMeta, WriteSet};
 use serde::{Deserialize, Serialize};
 
 // Installs mimalloc so the benchmark uses the same allocator as the shipped
@@ -215,19 +215,16 @@ struct SaciFilterStage;
 impl ParallelSystem for SaciFilterStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("saci_q6_filter")
-            .read("Lineitem", "l_shipdate")
-            .read("Lineitem", "l_discount")
-            .read("Lineitem", "l_quantity")
-            .write_resource::<FilterMask>()
+            .reads_named("Lineitem", "l_shipdate")
+            .reads_named("Lineitem", "l_discount")
+            .reads_named("Lineitem", "l_quantity")
+            .writes_resource::<FilterMask>()
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Lineitem")
-            .ok_or_else(|| SaciError::generic("Lineitem not found"))?;
+        let batch = pipeline.batch_named("Lineitem")?;
         let mask = compute_filter_mask(batch)?;
-        let update = ResourceUpdate::new(FilterMask(Arc::new(mask)));
-        Ok(WriteSet::new().with_resource(update))
+        Ok(WriteSet::new().with_resource(FilterMask(Arc::new(mask))))
     }
 }
 
@@ -325,16 +322,14 @@ struct SaciComputeStage;
 impl ParallelSystem for SaciComputeStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("saci_q6_compute")
-            .read("Lineitem", "l_extendedprice")
-            .read("Lineitem", "l_discount")
-            .read_resource::<FilterMask>()
-            .write("Revenue", "piece")
+            .reads_named("Lineitem", "l_extendedprice")
+            .reads_named("Lineitem", "l_discount")
+            .reads_resource::<FilterMask>()
+            .writes_named("Revenue", "piece")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for("Lineitem")
-            .ok_or_else(|| SaciError::generic("Lineitem not found"))?;
+        let batch = pipeline.batch_named("Lineitem")?;
         let price_arr = batch
             .column_by_name("l_extendedprice")
             .ok_or_else(|| SaciError::generic("l_extendedprice not found"))?
@@ -358,7 +353,7 @@ impl ParallelSystem for SaciComputeStage {
             .map(|(p, d)| p * d)
             .collect();
 
-        Ok(WriteSet::new().put("Revenue", "piece", Arc::new(Float64Array::from(pieces))))
+        Ok(WriteSet::new().put_named("Revenue", "piece", Arc::new(Float64Array::from(pieces))))
     }
 }
 
@@ -405,21 +400,15 @@ struct SaciAggregateStage;
 impl System for SaciAggregateStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("saci_q6_aggregate")
-            .read("Revenue", "piece")
-            .read_resource::<FilterMask>()
-            .write_resource::<Q6Revenue>()
+            .reads_named("Revenue", "piece")
+            .reads_resource::<FilterMask>()
+            .writes_resource::<Q6Revenue>()
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let mask_arr = pipeline
-            .get_resource::<FilterMask>()
-            .ok_or_else(|| SaciError::generic("FilterMask not found"))?
-            .0
-            .clone();
+        let mask_arr = pipeline.resource::<FilterMask>()?.0.clone();
 
-        let rev_batch = pipeline
-            .batch_for("Revenue")
-            .ok_or_else(|| SaciError::generic("Revenue not found"))?;
+        let rev_batch = pipeline.batch_named("Revenue")?;
         let piece_arr = rev_batch
             .column_by_name("piece")
             .ok_or_else(|| SaciError::generic("piece not found"))?
@@ -446,8 +435,8 @@ impl System for SaciAggregateStage {
 
 fn build_saci_pipeline(batch: &RecordBatch) -> Dataset {
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<Lineitem>().unwrap();
-    pipeline.register_component::<Revenue>().unwrap();
+    pipeline.register::<Lineitem>().unwrap();
+    pipeline.register::<Revenue>().unwrap();
     pipeline
         .append_record_batch("Lineitem", batch.clone())
         .unwrap();
@@ -560,13 +549,13 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
     // Correctness: SACI and DataFusion must agree on the revenue total.
     {
         let saci_revenue = {
-            let mut wl = Pipeline::new("q6_check");
-            wl.data = build_saci_pipeline(&batch);
-            wl.add_parallel_system(SaciFilterStage);
-            wl.add_parallel_system(SaciComputeStage);
-            wl.add_system(SaciAggregateStage);
+            let mut wl = Pipeline::new("q6_check")
+                .parallel_system(SaciFilterStage)
+                .parallel_system(SaciComputeStage)
+                .system(SaciAggregateStage);
+            *wl.data_mut() = build_saci_pipeline(&batch);
             rt.block_on(wl.run()).unwrap();
-            wl.data
+            wl.data()
                 .get_resource::<Q6Revenue>()
                 .map(|r| r.0)
                 .unwrap_or(0.0)
@@ -623,14 +612,14 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
 
     group.bench_function("saci_pipeline", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("q6");
-            wl.data = build_saci_pipeline(std::hint::black_box(&batch));
-            wl.add_parallel_system(SaciFilterStage);
-            wl.add_parallel_system(SaciComputeStage);
-            wl.add_system(SaciAggregateStage);
+            let mut wl = Pipeline::new("q6")
+                .parallel_system(SaciFilterStage)
+                .parallel_system(SaciComputeStage)
+                .system(SaciAggregateStage);
+            *wl.data_mut() = build_saci_pipeline(std::hint::black_box(&batch));
             rt.block_on(wl.run()).unwrap();
             let r = wl
-                .data
+                .data()
                 .get_resource::<Q6Revenue>()
                 .map(|r| r.0)
                 .unwrap_or(0.0);
@@ -650,12 +639,12 @@ fn bench_vs_datafusion_q6(c: &mut Criterion) {
     // on the part of `saci_pipeline` a deployment would pay once.
     group.bench_function("saci_pipeline_setup_only", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("q6");
-            wl.data = build_saci_pipeline(std::hint::black_box(&batch));
-            wl.add_parallel_system(SaciFilterStage);
-            wl.add_parallel_system(SaciComputeStage);
-            wl.add_system(SaciAggregateStage);
-            std::hint::black_box(wl.data.rows())
+            let mut wl = Pipeline::new("q6")
+                .parallel_system(SaciFilterStage)
+                .parallel_system(SaciComputeStage)
+                .system(SaciAggregateStage);
+            *wl.data_mut() = build_saci_pipeline(std::hint::black_box(&batch));
+            std::hint::black_box(wl.data().rows())
         })
     });
 

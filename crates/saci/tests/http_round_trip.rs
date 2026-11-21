@@ -1,6 +1,6 @@
 //! One transport, every direction: an [`HttpSource`] read decoded by a
-//! transformer, an [`HttpSink`] request whose body decodes back to the rows
-//! that went in, and an [`HttpPushSource`] that accepts what the sink sends.
+//! codec, an [`HttpSink`] request whose body decodes back to the rows
+//! that went in, and an [`HttpListenSource`] that accepts what the sink sends.
 //!
 //! Three servers, each the smallest thing that proves its point.
 //! [`serve`] is hand rolled on a `std::net::TcpListener`: a spawned thread
@@ -14,9 +14,9 @@
 
 #![cfg(all(
     feature = "connector-http",
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
-    feature = "transformer-parquet"
+    feature = "codec-csv",
+    feature = "codec-ndjson",
+    feature = "codec-parquet"
 ))]
 
 use std::io::{Read, Write};
@@ -30,16 +30,17 @@ use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
 
+use saci::codec::Codec;
+use saci::codec::csv::CsvCodec;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::codec::parquet::ParquetCodec;
+use saci::connector::SchemaFrom;
 use saci::connector::http::{
-    ContentEncoding, HttpPushOptions, HttpPushSource, HttpSink, HttpSinkOptions, HttpSource,
-    HttpSourceOptions, HttpVersion, Pagination, ReadMode, SchemaFrom, ServerTls, TlsFiles, Window,
+    BatchWindow, ContentEncoding, HttpListenConfig, HttpListenSource, HttpSink, HttpSinkConfig,
+    HttpSource, HttpSourceConfig, HttpVersion, Pagination, ReadMode, ServerTls, TlsFiles,
 };
-use saci::io::sink::Sink;
-use saci::io::source::Source;
-use saci::transformer::Transformer;
-use saci::transformer::csv::CsvTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
-use saci::transformer::parquet::ParquetTransformer;
+use saci::io::Sink;
+use saci::io::Source;
 
 // ── the hand-rolled HTTP/1.1 test server ────────────────────────────────────
 
@@ -222,16 +223,16 @@ fn schema() -> Arc<Schema> {
     ]))
 }
 
-fn csv() -> Arc<dyn Transformer> {
-    Arc::new(CsvTransformer::new(true))
+fn csv() -> Arc<dyn Codec> {
+    Arc::new(CsvCodec::new())
 }
 
-fn ndjson() -> Arc<dyn Transformer> {
-    Arc::new(NdjsonTransformer::default())
+fn ndjson() -> Arc<dyn Codec> {
+    Arc::new(NdjsonCodec::default())
 }
 
-fn parquet() -> Arc<dyn Transformer> {
-    Arc::new(ParquetTransformer::new())
+fn parquet() -> Arc<dyn Codec> {
+    Arc::new(ParquetCodec::new())
 }
 
 fn batch(ids: &[i64]) -> RecordBatch {
@@ -259,12 +260,8 @@ fn column(batch: &RecordBatch, name: &str) -> Vec<i64> {
 /// Decode a captured request body back through the same format the sink wrote
 /// it with, which is what makes the round trip a round trip.
 fn decode_body(body: &[u8]) -> Vec<RecordBatch> {
-    let mut spool = tempfile::tempfile().expect("temp file");
-    spool.write_all(body).expect("write body");
-    std::io::Seek::rewind(&mut spool).expect("rewind");
-
     let mut reader = csv()
-        .open_reader(spool, Some(schema()))
+        .open_reader(body.to_vec().into(), Some(schema()))
         .expect("the body is a whole csv document");
     let mut batches = Vec::new();
     while let Some(batch) = reader.next_batch().expect("decode") {
@@ -287,23 +284,20 @@ fn parquet_body(schema: Arc<Schema>, batch: &RecordBatch) -> Vec<u8> {
 
 /// A csv document source with the declared schema, the shape most tests want.
 fn source(url: &str, headers: Vec<(String, String)>) -> HttpSource {
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        ..HttpSourceOptions::default()
-    };
-    options.client.headers = headers;
-    options.client.timeout = Duration::from_secs(5);
-    HttpSource::new(url, csv(), options).expect("source builds")
+    let mut config = HttpSourceConfig::new(url);
+    config.client.headers = headers;
+    config.client.timeout = Duration::from_secs(5);
+    HttpSource::new(config, Some(schema()), csv()).expect("source builds")
 }
 
 /// A csv sink, the shape most tests want.
 fn sink(url: &str, method: &str) -> HttpSink {
-    let mut options = HttpSinkOptions {
+    let mut config = HttpSinkConfig {
         method: method.to_string(),
-        ..HttpSinkOptions::default()
+        ..HttpSinkConfig::new(url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    HttpSink::new(url, schema(), csv(), options).expect("sink builds")
+    config.client.timeout = Duration::from_secs(5);
+    HttpSink::new(config, schema(), csv()).expect("sink builds")
 }
 
 /// A self-signed certificate for `localhost` and `127.0.0.1`, PEM, in a temp
@@ -452,13 +446,12 @@ async fn a_body_much_larger_than_one_read_decodes_whole() {
 #[tokio::test]
 async fn an_announced_length_over_the_cap_is_refused() {
     let (url, server) = serve(1, "200 OK", CSV_BODY.to_vec());
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         max_body_bytes: Some(8),
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let Err(err) = source.next_batch().await else {
         panic!("a 24-byte body does not fit in 8 bytes");
@@ -488,13 +481,12 @@ async fn a_body_that_overruns_the_cap_is_refused() {
         let _ = stream.flush();
     });
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         max_body_bytes: Some(20),
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let Err(err) = source.next_batch().await else {
         panic!("29 bytes do not fit in 20");
@@ -511,13 +503,12 @@ async fn a_body_that_overruns_the_cap_is_refused() {
 #[tokio::test]
 async fn a_body_exactly_the_size_of_the_cap_is_accepted() {
     let (url, server) = serve(1, "200 OK", CSV_BODY.to_vec());
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         max_body_bytes: Some(CSV_BODY.len()),
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let batch = source
         .next_batch()
@@ -595,16 +586,15 @@ async fn a_conditional_read_sends_the_validators_and_honours_a_304() {
             .with("last-modified", "Tue, 01 Jan 2030 00:00:00 GMT"),
         Reply::status("304 Not Modified"),
     ]);
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Document {
             pagination: Pagination::None,
             conditional: true,
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     assert_eq!(drain(&mut source).await.len(), 1, "the first read");
     assert!(
@@ -645,16 +635,15 @@ async fn a_paginated_read_follows_the_next_link_across_pages() {
         captured
     });
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Document {
             pagination: Pagination::Link,
             conditional: false,
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let ids: Vec<i64> = drain(&mut source)
         .await
@@ -683,16 +672,15 @@ async fn a_next_link_pointing_at_the_same_page_is_an_error() {
         );
     });
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Document {
             pagination: Pagination::Link,
             conditional: false,
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let Err(err) = source.next_batch().await else {
         panic!("a self-link is an infinite read");
@@ -712,16 +700,15 @@ async fn a_conditional_read_sends_last_modified_alone_when_there_is_no_etag() {
         Reply::ok(CSV_BODY.to_vec()).with("last-modified", "Tue, 01 Jan 2030 00:00:00 GMT"),
         Reply::status("304 Not Modified"),
     ]);
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Document {
             pagination: Pagination::None,
             conditional: true,
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     assert_eq!(drain(&mut source).await.len(), 1, "the first read");
     assert!(
@@ -754,16 +741,15 @@ async fn a_paginated_conditional_read_validates_the_first_page_only() {
         Reply::status("304 Not Modified"),
     ]);
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Document {
             pagination: Pagination::Link,
             conditional: true,
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let ids: Vec<i64> = drain(&mut source)
         .await
@@ -818,16 +804,15 @@ async fn a_relative_next_link_resolves_against_the_page_that_carried_it() {
         captured
     });
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Document {
             pagination: Pagination::Link,
             conditional: false,
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let ids: Vec<i64> = drain(&mut source)
         .await
@@ -852,16 +837,15 @@ async fn a_next_link_resolves_against_the_url_a_redirect_ended_on() {
         Reply::ok(b"id,total\n1,10\n2,20\n".to_vec()).with("link", "<page2>; rel=\"next\""),
         Reply::ok(b"id,total\n3,30\n".to_vec()),
     ]);
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Document {
             pagination: Pagination::Link,
             conditional: false,
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     // `drain` returns on EOF, which is the page with no next link ending the
     // read rather than a fourth request.
@@ -924,20 +908,19 @@ async fn a_decode_error_mid_document_ends_the_read_and_re_arms() {
     assert_eq!(captured.len(), 2, "one GET per read");
 }
 
-/// `schema_from "body"` takes the body's own schema rather than projecting
+/// `schema_from "payload"` takes the body's own schema rather than projecting
 /// onto the declared one. The declared schema is still what the graph is
 /// validated against, so it is checked rather than dropped.
 #[tokio::test]
 async fn a_self_describing_body_is_read_with_its_own_schema() {
     let (url, server) = serve(1, "200 OK", parquet_body(schema(), &batch(&[1, 2, 3])));
     let mut source = HttpSource::new(
-        &url,
-        parquet(),
-        HttpSourceOptions {
-            declared: Some(schema()),
-            schema_from: SchemaFrom::Body,
-            ..HttpSourceOptions::default()
+        HttpSourceConfig {
+            schema_from: SchemaFrom::Payload,
+            ..HttpSourceConfig::new(&url)
         },
+        Some(schema()),
+        parquet(),
     )
     .expect("source builds");
 
@@ -980,15 +963,8 @@ async fn a_self_describing_body_is_projected_onto_the_declared_schema() {
         .expect("batch"),
     );
     let (url, server) = serve(1, "200 OK", body);
-    let mut source = HttpSource::new(
-        &url,
-        parquet(),
-        HttpSourceOptions {
-            declared: Some(schema()),
-            ..HttpSourceOptions::default()
-        },
-    )
-    .expect("source builds");
+    let mut source = HttpSource::new(HttpSourceConfig::new(&url), Some(schema()), parquet())
+        .expect("source builds");
 
     let batch = source
         .next_batch()
@@ -1029,13 +1005,12 @@ async fn a_body_schema_that_differs_from_the_declared_one_is_a_configuration_err
     );
     let (url, server) = serve(1, "200 OK", body);
     let mut source = HttpSource::new(
-        &url,
-        parquet(),
-        HttpSourceOptions {
-            declared: Some(schema()),
-            schema_from: SchemaFrom::Body,
-            ..HttpSourceOptions::default()
+        HttpSourceConfig {
+            schema_from: SchemaFrom::Payload,
+            ..HttpSourceConfig::new(&url)
         },
+        Some(schema()),
+        parquet(),
     )
     .expect("source builds");
 
@@ -1059,19 +1034,19 @@ async fn a_body_schema_that_differs_from_the_declared_one_is_a_configuration_err
 /// With no declared schema there is nothing for the graph check to compare, so
 /// the source refuses while it builds rather than failing the link later.
 #[test]
-fn schema_from_body_without_a_declared_schema_is_a_configuration_error() {
+fn schema_from_payload_without_a_declared_schema_is_a_configuration_error() {
     let Err(err) = HttpSource::new(
-        "https://example.invalid/orders.parquet",
-        parquet(),
-        HttpSourceOptions {
-            schema_from: SchemaFrom::Body,
-            ..HttpSourceOptions::default()
+        HttpSourceConfig {
+            schema_from: SchemaFrom::Payload,
+            ..HttpSourceConfig::new("https://example.invalid/orders.parquet")
         },
+        None,
+        parquet(),
     ) else {
-        panic!("schema_from body needs a schema to check against");
+        panic!("schema_from payload needs a schema to check against");
     };
     assert_eq!(err.category(), "configuration", "got: {err}");
-    assert!(err.message().contains("schema_fields"), "got: {err}");
+    assert!(err.message().contains("'field'"), "got: {err}");
 }
 
 // ── the source half, streaming modes ────────────────────────────────────────
@@ -1168,16 +1143,15 @@ fn serve_live_each(
 }
 
 fn live_source(url: &str, mode: ReadMode) -> HttpSource {
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode,
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    HttpSource::new(url, ndjson(), options).expect("source builds")
+    config.client.timeout = Duration::from_secs(5);
+    HttpSource::new(config, Some(schema()), ndjson()).expect("source builds")
 }
 
-/// A window closes on `poll_timeout` as well as on `batch_size`, so a live
+/// A window closes on `poll_timeout` as well as on `batch_rows`, so a live
 /// body that pauses hands over what it has instead of holding it.
 #[tokio::test]
 async fn a_line_stream_closes_a_window_on_the_poll_timeout() {
@@ -1192,8 +1166,8 @@ async fn a_line_stream_closes_a_window_on_the_poll_timeout() {
     );
     let mut source = live_source(
         &url,
-        ReadMode::Lines(Window {
-            batch_size: 1_000,
+        ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_secs(30),
         }),
@@ -1221,9 +1195,9 @@ async fn a_line_stream_closes_a_window_on_the_poll_timeout() {
     server.join().expect("server thread");
 }
 
-/// `batch_size` closes a window before `poll_timeout` does.
+/// `batch_rows` closes a window before `poll_timeout` does.
 #[tokio::test]
-async fn a_line_stream_closes_a_window_on_batch_size() {
+async fn a_line_stream_closes_a_window_on_batch_rows() {
     let (url, server) = serve_live(
         1,
         "application/x-ndjson",
@@ -1234,8 +1208,8 @@ async fn a_line_stream_closes_a_window_on_batch_size() {
     );
     let mut source = live_source(
         &url,
-        ReadMode::Lines(Window {
-            batch_size: 2,
+        ReadMode::Lines(BatchWindow {
+            batch_rows: 2,
             poll_timeout: Duration::from_secs(30),
             reconnect: Duration::from_secs(30),
         }),
@@ -1259,8 +1233,8 @@ async fn a_line_stream_reconnects_after_the_body_ends() {
     );
     let mut source = live_source(
         &url,
-        ReadMode::Lines(Window {
-            batch_size: 1_000,
+        ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1307,8 +1281,8 @@ async fn an_event_stream_filters_by_name_and_remembers_the_last_id() {
         &url,
         ReadMode::Events {
             event: Some("order".to_string()),
-            window: Window {
-                batch_size: 1_000,
+            window: BatchWindow {
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 // Replaced by the stream's own `retry: 50`.
                 reconnect: Duration::from_secs(30),
@@ -1363,8 +1337,8 @@ async fn a_live_non_2xx_status_is_reported_and_the_reader_reconnects() {
     );
     let mut source = live_source(
         &url,
-        ReadMode::Lines(Window {
-            batch_size: 1_000,
+        ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1402,8 +1376,8 @@ async fn a_live_transport_failure_is_reported_on_every_attempt() {
     let url = dead_url();
     let mut source = live_source(
         &url,
-        ReadMode::Lines(Window {
-            batch_size: 1_000,
+        ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
@@ -1437,17 +1411,16 @@ async fn a_live_body_that_stalls_past_the_timeout_fails_and_reconnects() {
         vec![b"{\"id\":1,\"total\":10}\n".to_vec()],
         Duration::from_secs(1),
     );
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        mode: ReadMode::Lines(Window {
-            batch_size: 1_000,
+    let mut config = HttpSourceConfig {
+        mode: ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_millis(300);
-    let mut source = HttpSource::new(&url, ndjson(), options).expect("source builds");
+    config.client.timeout = Duration::from_millis(300);
+    let mut source = HttpSource::new(config, Some(schema()), ndjson()).expect("source builds");
 
     let first = source.next_batch().await.expect("read").expect("one line");
     assert_eq!(column(&first, "id"), vec![1]);
@@ -1482,21 +1455,20 @@ async fn a_configured_accept_wins_over_the_event_stream_media_type() {
         vec![b"data: {\"id\":2,\"total\":20}\n\n".to_vec()],
         Duration::from_millis(10),
     );
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
+    let mut config = HttpSourceConfig {
         mode: ReadMode::Events {
             event: None,
-            window: Window {
-                batch_size: 1_000,
+            window: BatchWindow {
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_secs(30),
             },
         },
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.headers = vec![("accept".to_string(), "application/custom".to_string())];
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, ndjson(), options).expect("source builds");
+    config.client.headers = vec![("accept".to_string(), "application/custom".to_string())];
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), ndjson()).expect("source builds");
 
     let batch = source
         .next_batch()
@@ -1539,8 +1511,8 @@ async fn an_event_stream_with_no_filter_decodes_every_event() {
         &url,
         ReadMode::Events {
             event: None,
-            window: Window {
-                batch_size: 1_000,
+            window: BatchWindow {
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_secs(30),
             },
@@ -1573,8 +1545,8 @@ async fn dropping_a_streaming_source_ends_the_reader_task() {
     let (url, server) = serve_live(1, "application/x-ndjson", chunks, Duration::from_millis(50));
     let mut source = live_source(
         &url,
-        ReadMode::Lines(Window {
-            batch_size: 1,
+        ReadMode::Lines(BatchWindow {
+            batch_rows: 1,
             poll_timeout: Duration::from_secs(30),
             reconnect: Duration::from_secs(30),
         }),
@@ -1600,18 +1572,18 @@ async fn dropping_a_streaming_source_ends_the_reader_task() {
 #[test]
 fn a_streaming_mode_without_a_declared_schema_is_a_configuration_error() {
     let Err(err) = HttpSource::new(
-        "http://127.0.0.1:1/live",
-        ndjson(),
-        HttpSourceOptions {
-            mode: ReadMode::Lines(Window::default()),
-            ..HttpSourceOptions::default()
+        HttpSourceConfig {
+            mode: ReadMode::Lines(BatchWindow::default()),
+            ..HttpSourceConfig::new("http://127.0.0.1:1/live")
         },
+        None,
+        ndjson(),
     ) else {
         panic!("a decoder needs a schema");
     };
     assert_eq!(err.category(), "configuration");
     assert!(
-        err.message().contains("needs a 'schema_fields' list"),
+        err.message().contains("needs a 'field' entry"),
         "got: {err}"
     );
 }
@@ -1619,22 +1591,21 @@ fn a_streaming_mode_without_a_declared_schema_is_a_configuration_error() {
 /// A live body's schema is the declared one: there is no document whose own
 /// schema could be read instead.
 #[test]
-fn schema_from_body_with_a_streaming_mode_is_a_configuration_error() {
+fn schema_from_payload_with_a_streaming_mode_is_a_configuration_error() {
     let Err(err) = HttpSource::new(
-        "http://127.0.0.1:1/live",
-        ndjson(),
-        HttpSourceOptions {
-            declared: Some(schema()),
-            schema_from: SchemaFrom::Body,
-            mode: ReadMode::Lines(Window::default()),
-            ..HttpSourceOptions::default()
+        HttpSourceConfig {
+            schema_from: SchemaFrom::Payload,
+            mode: ReadMode::Lines(BatchWindow::default()),
+            ..HttpSourceConfig::new("http://127.0.0.1:1/live")
         },
+        Some(schema()),
+        ndjson(),
     ) else {
         panic!("a live body carries no document schema");
     };
     assert_eq!(
         err.message(),
-        "HttpSource: schema_from \"body\" applies to mode kind=\"document\" only"
+        "HttpSource: schema_from \"payload\" applies to mode kind=\"document\" only"
     );
 }
 
@@ -1667,8 +1638,8 @@ async fn a_refused_frame_does_not_poison_the_rest_of_a_line_stream() {
     );
     let mut source = live_source(
         &url,
-        ReadMode::Lines(Window {
-            batch_size: 1_000,
+        ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_secs(30),
         }),
@@ -1716,18 +1687,17 @@ async fn a_frame_cap_measures_one_frame_not_the_chunk_that_carried_it() {
         Duration::from_millis(400),
     );
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        mode: ReadMode::Lines(Window {
-            batch_size: 1_000,
+    let mut config = HttpSourceConfig {
+        mode: ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_secs(30),
         }),
         max_body_bytes: Some(64),
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, ndjson(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), ndjson()).expect("source builds");
 
     let batch = source
         .next_batch()
@@ -1758,18 +1728,17 @@ async fn a_frame_over_the_cap_ends_the_body_and_the_reader_reconnects() {
         Duration::from_millis(400),
     );
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        mode: ReadMode::Lines(Window {
-            batch_size: 1_000,
+    let mut config = HttpSourceConfig {
+        mode: ReadMode::Lines(BatchWindow {
+            batch_rows: 1_000,
             poll_timeout: Duration::from_millis(100),
             reconnect: Duration::from_millis(50),
         }),
         max_body_bytes: Some(64),
-        ..HttpSourceOptions::default()
+        ..HttpSourceConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, ndjson(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), ndjson()).expect("source builds");
 
     let batch = source
         .next_batch()
@@ -1815,8 +1784,8 @@ async fn a_retry_block_with_no_data_still_governs_the_reconnect() {
         &url,
         ReadMode::Events {
             event: None,
-            window: Window {
-                batch_size: 1_000,
+            window: BatchWindow {
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_millis(50),
             },
@@ -1852,8 +1821,8 @@ async fn an_empty_event_id_clears_the_one_the_reconnect_sends() {
         &url,
         ReadMode::Events {
             event: None,
-            window: Window {
-                batch_size: 1_000,
+            window: BatchWindow {
+                batch_rows: 1_000,
                 poll_timeout: Duration::from_millis(100),
                 reconnect: Duration::from_millis(50),
             },
@@ -1933,9 +1902,9 @@ async fn the_content_type_follows_the_format_unless_a_header_names_one() {
     assert_eq!(captured[0].header("content-type"), Some("text/csv"));
 
     let (url, server) = serve(1, "200 OK", Vec::new());
-    let mut options = HttpSinkOptions::default();
-    options.client.headers = vec![("content-type".to_string(), "text/plain".to_string())];
-    let mut sink = HttpSink::new(&url, schema(), csv(), options).expect("sink builds");
+    let mut config = HttpSinkConfig::new(&url);
+    config.client.headers = vec![("content-type".to_string(), "text/plain".to_string())];
+    let mut sink = HttpSink::new(config, schema(), csv()).expect("sink builds");
     sink.write_batch(&batch(&[1])).await.expect("write");
     let captured = server.join().expect("server thread");
     assert_eq!(captured[0].header("content-type"), Some("text/plain"));
@@ -1951,12 +1920,12 @@ async fn content_encoding_compresses_the_whole_document() {
         (ContentEncoding::Zstd, "zstd"),
     ] {
         let (url, server) = serve(1, "200 OK", Vec::new());
-        let mut options = HttpSinkOptions {
+        let mut config = HttpSinkConfig {
             content_encoding: Some(encoding),
-            ..HttpSinkOptions::default()
+            ..HttpSinkConfig::new(&url)
         };
-        options.client.timeout = Duration::from_secs(5);
-        let mut sink = HttpSink::new(&url, schema(), csv(), options).expect("sink builds");
+        config.client.timeout = Duration::from_secs(5);
+        let mut sink = HttpSink::new(config, schema(), csv()).expect("sink builds");
         sink.write_batch(&batch(&[1, 2])).await.expect("write");
 
         let captured = server.join().expect("server thread");
@@ -2139,12 +2108,12 @@ async fn the_announced_length_covers_the_whole_compressed_document() {
     let document = server.join().expect("server thread").remove(0).body;
 
     let (url, server) = serve(1, "204 No Content", Vec::new());
-    let mut options = HttpSinkOptions {
+    let mut config = HttpSinkConfig {
         content_encoding: Some(ContentEncoding::Gzip),
-        ..HttpSinkOptions::default()
+        ..HttpSinkConfig::new(&url)
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut sink = HttpSink::new(&url, schema(), csv(), options).expect("sink builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut sink = HttpSink::new(config, schema(), csv()).expect("sink builds");
     sink.write_batch(&batch(&rows)).await.expect("write");
 
     let compressed = server.join().expect("server thread").remove(0).body;
@@ -2188,22 +2157,21 @@ async fn what_the_sink_wrote_is_what_the_source_reads_back() {
     assert_eq!(column(&read_back, "total"), vec![40, 50]);
 }
 
-// ── the push source ─────────────────────────────────────────────────────────
+// ── the listen source ───────────────────────────────────────────────────────
 
-/// A push source on a free port, with `options` applied on top of the csv
+/// A listen source on a free port, with `config` applied on top of the csv
 /// defaults every test here wants.
-fn push(options: HttpPushOptions) -> (HttpPushSource, String) {
-    let path = options.path.clone();
-    let source = HttpPushSource::new("127.0.0.1:0", csv(), options).expect("listener binds");
+fn listen(config: HttpListenConfig) -> (HttpListenSource, String) {
+    let path = config.path.clone();
+    let source = HttpListenSource::new(config, schema(), csv()).expect("listener binds");
     let url = format!("http://{}{path}", source.local_addr());
     (source, url)
 }
 
-fn push_options() -> HttpPushOptions {
-    HttpPushOptions {
-        declared: schema(),
+fn listen_config() -> HttpListenConfig {
+    HttpListenConfig {
         path: "/ingest".to_string(),
-        ..HttpPushOptions::default()
+        ..HttpListenConfig::new("127.0.0.1:0")
     }
 }
 
@@ -2236,7 +2204,7 @@ async fn status_line(stream: &mut tokio::net::TcpStream) -> String {
 
 #[tokio::test]
 async fn a_posted_document_becomes_batches_and_answers_202() {
-    let (mut source, url) = push(push_options());
+    let (mut source, url) = listen(listen_config());
     let post = tokio::spawn({
         let url = url.clone();
         async move {
@@ -2267,10 +2235,10 @@ async fn a_posted_document_becomes_batches_and_answers_202() {
 /// Every refusal, one request each, all against one listener.
 #[tokio::test]
 async fn every_refusal_has_its_own_status() {
-    let (mut source, url) = push(HttpPushOptions {
+    let (mut source, url) = listen(HttpListenConfig {
         methods: vec!["POST".to_string(), "PUT".to_string()],
         bearer: Some("s3cret".to_string()),
-        ..push_options()
+        ..listen_config()
     });
     // Nothing is read off the channel until the last request, so the listener
     // has to be spawned; `ensure_listening` runs on the first `next_batch`.
@@ -2354,9 +2322,9 @@ async fn every_refusal_has_its_own_status() {
 /// `Limited` stopping the read rather than buffering the rest.
 #[tokio::test]
 async fn a_body_over_the_cap_is_refused_announced_or_not() {
-    let (mut source, url) = push(HttpPushOptions {
+    let (mut source, url) = listen(HttpListenConfig {
         max_body_bytes: 16,
-        ..push_options()
+        ..listen_config()
     });
     let address = source.local_addr();
     let listening = tokio::spawn(async move { source.next_batch().await });
@@ -2407,7 +2375,7 @@ async fn a_body_over_the_cap_is_refused_announced_or_not() {
 /// work is not an error.
 #[tokio::test]
 async fn an_empty_document_is_accepted_and_queues_nothing() {
-    let (mut source, url) = push(push_options());
+    let (mut source, url) = listen(listen_config());
     let listening = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_millis(400), source.next_batch()).await
     });
@@ -2431,9 +2399,9 @@ async fn an_empty_document_is_accepted_and_queues_nothing() {
 /// reading, a third request cannot complete until the source drains.
 #[tokio::test]
 async fn a_full_channel_holds_the_client_until_the_source_reads() {
-    let (mut source, url) = push(HttpPushOptions {
+    let (mut source, url) = listen(HttpListenConfig {
         buffer: 1,
-        ..push_options()
+        ..listen_config()
     });
     // Bind the accept loop without draining: one `next_batch` starts it and
     // takes the first batch, after which nothing reads.
@@ -2483,11 +2451,11 @@ async fn a_full_channel_holds_the_client_until_the_source_reads() {
     assert_eq!(posted.load(Ordering::SeqCst), 3);
 }
 
-/// What the sink sends is what the push source accepts, with no configuration
+/// What the sink sends is what the listen source accepts, with no configuration
 /// between them beyond naming the same format.
 #[tokio::test]
-async fn what_the_sink_posts_the_push_source_reads() {
-    let (mut source, url) = push(push_options());
+async fn what_the_sink_posts_the_listen_source_reads() {
+    let (mut source, url) = listen(listen_config());
     let mut sink = sink(&url, "POST");
 
     let writer = tokio::spawn(async move {
@@ -2505,9 +2473,9 @@ async fn what_the_sink_posts_the_push_source_reads() {
 /// it stops short of the real one or carries extra on the end.
 #[tokio::test]
 async fn a_bearer_token_of_the_wrong_length_is_refused() {
-    let (mut source, url) = push(HttpPushOptions {
+    let (mut source, url) = listen(HttpListenConfig {
         bearer: Some("s3cret".to_string()),
-        ..push_options()
+        ..listen_config()
     });
     let listening = tokio::spawn(async move { source.next_batch().await });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2531,7 +2499,7 @@ async fn a_bearer_token_of_the_wrong_length_is_refused() {
 /// accepted document has no body and says nothing about one.
 #[tokio::test]
 async fn a_refusal_declares_its_media_type_and_the_202_carries_none() {
-    let (mut source, url) = push(push_options());
+    let (mut source, url) = listen(listen_config());
     let listening = tokio::spawn(async move {
         let outcome = source.next_batch().await;
         (source, outcome)
@@ -2568,18 +2536,18 @@ async fn a_refusal_declares_its_media_type_and_the_202_carries_none() {
     assert_eq!(column(&batch, "id"), vec![1, 2, 3]);
 }
 
-/// `schema_from "body"` on a listener judges each document by the schema it
+/// `schema_from "payload"` on a listener judges each document by the schema it
 /// turned out to carry: one that differs is a `400` naming it, and the same
 /// error reaches the source.
 #[tokio::test]
-async fn a_pushed_body_is_judged_by_the_schema_it_carries() {
-    let mut source = HttpPushSource::new(
-        "127.0.0.1:0",
-        parquet(),
-        HttpPushOptions {
-            schema_from: SchemaFrom::Body,
-            ..push_options()
+async fn a_posted_body_is_judged_by_the_schema_it_carries() {
+    let mut source = HttpListenSource::new(
+        HttpListenConfig {
+            schema_from: SchemaFrom::Payload,
+            ..listen_config()
         },
+        schema(),
+        parquet(),
     )
     .expect("listener binds");
     let url = format!("http://{}/ingest", source.local_addr());
@@ -2629,11 +2597,11 @@ async fn a_pushed_body_is_judged_by_the_schema_it_carries() {
     assert_eq!(posting.await.expect("join").status(), 202);
 }
 
-/// Rebuilding a connector in place needs its address back, so a dropped push
+/// Rebuilding a connector in place needs its address back, so a dropped listen
 /// source leaves nothing holding the port it bound.
 #[tokio::test]
-async fn a_dropped_push_source_frees_its_address_for_the_next_one() {
-    let (mut source, url) = push(push_options());
+async fn a_dropped_listen_source_frees_its_address_for_the_next_one() {
+    let (mut source, url) = listen(listen_config());
     let address = source.local_addr();
     let posting = tokio::spawn(async move {
         let client = client();
@@ -2659,7 +2627,14 @@ async fn a_dropped_push_source_frees_its_address_for_the_next_one() {
     // listener on one of the next turns of the runtime.
     let rebuilt = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match HttpPushSource::new(&address.to_string(), csv(), push_options()) {
+            match HttpListenSource::new(
+                HttpListenConfig {
+                    bind: address.to_string(),
+                    ..listen_config()
+                },
+                schema(),
+                csv(),
+            ) {
                 Ok(source) => return source,
                 Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
             }
@@ -2683,13 +2658,13 @@ async fn a_dropped_push_source_frees_its_address_for_the_next_one() {
 /// nothing partial is queued and the retry adds one more whole copy.
 #[tokio::test]
 async fn a_document_whose_client_gave_up_is_queued_whole_or_not_at_all() {
-    let mut source = HttpPushSource::new(
-        "127.0.0.1:0",
-        ndjson(),
-        HttpPushOptions {
+    let mut source = HttpListenSource::new(
+        HttpListenConfig {
             buffer: 1,
-            ..push_options()
+            ..listen_config()
         },
+        schema(),
+        ndjson(),
     )
     .expect("listener binds");
     let url = format!("http://{}/ingest", source.local_addr());
@@ -2710,7 +2685,7 @@ async fn a_document_whose_client_gave_up_is_queued_whole_or_not_at_all() {
             .filter(|id| (first..first + 3_000).contains(id))
             .count()
     };
-    let drain_queued = async |source: &mut HttpPushSource| {
+    let drain_queued = async |source: &mut HttpListenSource| {
         let mut batches = Vec::new();
         while let Ok(batch) =
             tokio::time::timeout(Duration::from_millis(500), source.next_batch()).await
@@ -2804,10 +2779,10 @@ async fn a_document_whose_client_gave_up_is_queued_whole_or_not_at_all() {
 /// request promises a hundred bytes and sends none, and the answer arrives
 /// anyway.
 #[tokio::test]
-async fn a_push_body_over_the_cap_is_refused_before_it_is_sent() {
-    let (mut source, _url) = push(HttpPushOptions {
+async fn a_listen_body_over_the_cap_is_refused_before_it_is_sent() {
+    let (mut source, _url) = listen(HttpListenConfig {
         max_body_bytes: 16,
-        ..push_options()
+        ..listen_config()
     });
     let address = source.local_addr();
     let listening = tokio::spawn(async move { source.next_batch().await });
@@ -2835,7 +2810,7 @@ async fn a_push_body_over_the_cap_is_refused_before_it_is_sent() {
 /// listener answers the next good request as though nothing had happened.
 #[tokio::test]
 async fn a_body_whose_connection_dies_mid_chunk_queues_nothing() {
-    let (mut source, url) = push(push_options());
+    let (mut source, url) = listen(listen_config());
     let address = source.local_addr();
     let listening = tokio::spawn(async move {
         let outcome = tokio::time::timeout(Duration::from_millis(500), source.next_batch()).await;
@@ -2953,13 +2928,10 @@ fn serve_versioned(body: Vec<u8>) -> (String, Arc<Seen>) {
 #[tokio::test]
 async fn a_source_speaking_http2_arrives_as_http2() {
     let (url, seen) = serve_versioned(CSV_BODY.to_vec());
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        ..HttpSourceOptions::default()
-    };
-    options.client.http_version = HttpVersion::Http2;
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    let mut config = HttpSourceConfig::new(&url);
+    config.client.http_version = HttpVersion::Http2;
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let batches = drain(&mut source).await;
     assert_eq!(column(&batches[0], "id"), vec![1, 2, 3]);
@@ -2976,15 +2948,15 @@ async fn an_auto_source_arrives_as_http11_on_cleartext() {
     assert_eq!(seen.versions(), [http::Version::HTTP_11]);
 }
 
-/// An HTTP/2 sink posting to a push source: h2c end to end, both halves of
+/// An HTTP/2 sink posting to a listen source: h2c end to end, both halves of
 /// this crate, no TLS.
 #[tokio::test]
-async fn an_http2_sink_posts_to_the_push_source() {
-    let (mut source, url) = push(push_options());
-    let mut options = HttpSinkOptions::default();
-    options.client.http_version = HttpVersion::Http2;
-    options.client.timeout = Duration::from_secs(5);
-    let mut sink = HttpSink::new(&url, schema(), csv(), options).expect("sink builds");
+async fn an_http2_sink_posts_to_the_listen_source() {
+    let (mut source, url) = listen(listen_config());
+    let mut config = HttpSinkConfig::new(&url);
+    config.client.http_version = HttpVersion::Http2;
+    config.client.timeout = Duration::from_secs(5);
+    let mut sink = HttpSink::new(config, schema(), csv()).expect("sink builds");
 
     let writer = tokio::spawn(async move {
         sink.write_batch(&batch(&[8, 9])).await.expect("write");
@@ -2999,10 +2971,10 @@ async fn an_http2_sink_posts_to_the_push_source() {
 #[tokio::test]
 async fn an_http2_sink_sends_every_batch_on_one_connection() {
     let (url, seen) = serve_versioned(Vec::new());
-    let mut options = HttpSinkOptions::default();
-    options.client.http_version = HttpVersion::Http2;
-    options.client.timeout = Duration::from_secs(5);
-    let mut sink = HttpSink::new(&url, schema(), csv(), options).expect("sink builds");
+    let mut config = HttpSinkConfig::new(&url);
+    config.client.http_version = HttpVersion::Http2;
+    config.client.timeout = Duration::from_secs(5);
+    let mut sink = HttpSink::new(config, schema(), csv()).expect("sink builds");
 
     for id in 1..=3 {
         sink.write_batch(&batch(&[id])).await.expect("write");
@@ -3014,35 +2986,35 @@ async fn an_http2_sink_sends_every_batch_on_one_connection() {
 
 // ── TLS on TCP ──────────────────────────────────────────────────────────────
 
-/// A TLS push source and a sink that trusts its certificate through
+/// A TLS listen source and a sink that trusts its certificate through
 /// `tls.ca_file`, and the same sink without it, which the platform verifier
 /// refuses.
 #[tokio::test]
 async fn tls_needs_the_ca_file_to_trust_a_private_certificate() {
     let certificate = certificate();
-    let mut source = HttpPushSource::new(
-        "127.0.0.1:0",
-        csv(),
-        HttpPushOptions {
+    let mut source = HttpListenSource::new(
+        HttpListenConfig {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
             }),
-            ..push_options()
+            ..listen_config()
         },
+        schema(),
+        csv(),
     )
     .expect("listener binds");
     // The certificate names `127.0.0.1` as well as `localhost`, so the
     // resolved address is a name the handshake accepts.
     let url = format!("https://{}/ingest", source.local_addr());
 
-    let mut trusting = HttpSinkOptions::default();
+    let mut trusting = HttpSinkConfig::new(&url);
     trusting.client.tls = TlsFiles {
         ca_file: Some(certificate.cert.clone()),
         ..TlsFiles::default()
     };
     trusting.client.timeout = Duration::from_secs(10);
-    let mut sink = HttpSink::new(&url, schema(), csv(), trusting).expect("sink builds");
+    let mut sink = HttpSink::new(trusting, schema(), csv()).expect("sink builds");
     let writer = tokio::spawn(async move {
         sink.write_batch(&batch(&[1, 2])).await.expect("write");
     });
@@ -3050,9 +3022,9 @@ async fn tls_needs_the_ca_file_to_trust_a_private_certificate() {
     assert_eq!(column(&read_back, "id"), vec![1, 2]);
     writer.await.expect("join");
 
-    let mut untrusting = HttpSinkOptions::default();
+    let mut untrusting = HttpSinkConfig::new(&url);
     untrusting.client.timeout = Duration::from_secs(10);
-    let mut sink = HttpSink::new(&url, schema(), csv(), untrusting).expect("sink builds");
+    let mut sink = HttpSink::new(untrusting, schema(), csv()).expect("sink builds");
     let Err(err) = sink.write_batch(&batch(&[3])).await else {
         panic!("the platform store does not know this certificate");
     };
@@ -3067,29 +3039,28 @@ async fn tls_needs_the_ca_file_to_trust_a_private_certificate() {
 #[tokio::test]
 async fn a_client_identity_is_accepted_at_build_and_used() {
     let certificate = certificate();
-    let mut source = HttpPushSource::new(
-        "127.0.0.1:0",
-        csv(),
-        HttpPushOptions {
+    let mut source = HttpListenSource::new(
+        HttpListenConfig {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
             }),
-            ..push_options()
+            ..listen_config()
         },
+        schema(),
+        csv(),
     )
     .expect("listener binds");
     let url = format!("https://{}/ingest", source.local_addr());
 
-    let mut options = HttpSinkOptions::default();
-    options.client.tls = TlsFiles {
+    let mut config = HttpSinkConfig::new(&url);
+    config.client.tls = TlsFiles {
         ca_file: Some(certificate.cert.clone()),
         cert_file: Some(certificate.cert.clone()),
         key_file: Some(certificate.key.clone()),
     };
-    options.client.timeout = Duration::from_secs(10);
-    let mut sink =
-        HttpSink::new(&url, schema(), csv(), options).expect("the identity is a usable pair");
+    config.client.timeout = Duration::from_secs(10);
+    let mut sink = HttpSink::new(config, schema(), csv()).expect("the identity is a usable pair");
 
     let writer = tokio::spawn(async move {
         sink.write_batch(&batch(&[5])).await.expect("write");
@@ -3104,14 +3075,14 @@ async fn a_client_identity_is_accepted_at_build_and_used() {
 #[test]
 fn a_key_file_that_is_a_certificate_is_refused_at_build() {
     let certificate = certificate();
-    let mut options = HttpSinkOptions::default();
-    options.client.tls = TlsFiles {
+    let mut config = HttpSinkConfig::new("https://example.invalid/");
+    config.client.tls = TlsFiles {
         cert_file: Some(certificate.cert.clone()),
         key_file: Some(certificate.cert.clone()),
         ..TlsFiles::default()
     };
 
-    let Err(err) = HttpSink::new("https://example.invalid/", schema(), csv(), options) else {
+    let Err(err) = HttpSink::new(config, schema(), csv()) else {
         panic!("a certificate is not a private key");
     };
     assert_eq!(err.category(), "configuration");
@@ -3205,17 +3176,14 @@ async fn a_source_reads_a_document_over_http3() {
     let certificate = certificate();
     let (url, server) = serve_h3(&certificate, 200, CSV_BODY.to_vec());
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        ..HttpSourceOptions::default()
-    };
-    options.client.http_version = HttpVersion::Http3;
-    options.client.tls = TlsFiles {
+    let mut config = HttpSourceConfig::new(&url);
+    config.client.http_version = HttpVersion::Http3;
+    config.client.tls = TlsFiles {
         ca_file: Some(certificate.cert.clone()),
         ..TlsFiles::default()
     };
-    options.client.timeout = Duration::from_secs(10);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(10);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let batches = drain(&mut source).await;
     assert_eq!(column(&batches[0], "id"), vec![1, 2, 3]);
@@ -3230,17 +3198,14 @@ async fn a_non_2xx_over_http3_names_the_status_and_the_url() {
     let certificate = certificate();
     let (url, server) = serve_h3(&certificate, 500, Vec::new());
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        ..HttpSourceOptions::default()
-    };
-    options.client.http_version = HttpVersion::Http3;
-    options.client.tls = TlsFiles {
+    let mut config = HttpSourceConfig::new(&url);
+    config.client.http_version = HttpVersion::Http3;
+    config.client.tls = TlsFiles {
         ca_file: Some(certificate.cert.clone()),
         ..TlsFiles::default()
     };
-    options.client.timeout = Duration::from_secs(10);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(10);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
 
     let Err(err) = source.next_batch().await else {
         panic!("a 500 is not a body to decode");
@@ -3260,17 +3225,14 @@ async fn a_read_after_the_http3_peer_is_gone_fails_rather_than_hanging() {
     let certificate = certificate();
     let (url, server) = serve_h3(&certificate, 200, CSV_BODY.to_vec());
 
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        ..HttpSourceOptions::default()
-    };
-    options.client.http_version = HttpVersion::Http3;
-    options.client.tls = TlsFiles {
+    let mut config = HttpSourceConfig::new(&url);
+    config.client.http_version = HttpVersion::Http3;
+    config.client.tls = TlsFiles {
         ca_file: Some(certificate.cert.clone()),
         ..TlsFiles::default()
     };
-    options.client.timeout = Duration::from_secs(5);
-    let mut source = HttpSource::new(&url, csv(), options).expect("source builds");
+    config.client.timeout = Duration::from_secs(5);
+    let mut source = HttpSource::new(config, Some(schema()), csv()).expect("source builds");
     assert_eq!(drain(&mut source).await.len(), 1, "the first read");
 
     server.close(0u32.into(), b"gone");
@@ -3288,42 +3250,36 @@ async fn a_read_after_the_http3_peer_is_gone_fails_rather_than_hanging() {
     );
 }
 
-/// The sink's half of the same: a batch posted over QUIC to the push source's
+/// The sink's half of the same: a batch posted over QUIC to the listen source's
 /// own HTTP/3 endpoint, which also advertises itself on the TCP listener.
 #[tokio::test]
-async fn an_http3_sink_posts_to_the_push_sources_quic_endpoint() {
+async fn an_http3_sink_posts_to_the_listen_sources_quic_endpoint() {
     let certificate = certificate();
-    let mut source = HttpPushSource::new(
-        "127.0.0.1:0",
-        csv(),
-        HttpPushOptions {
+    let mut source = HttpListenSource::new(
+        HttpListenConfig {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
             }),
             quic_bind: Some("127.0.0.1:0".to_string()),
-            ..push_options()
+            ..listen_config()
         },
+        schema(),
+        csv(),
     )
     .expect("both sockets bind");
     let tcp_address = source.local_addr();
     let quic_port = source.quic_local_addr().expect("quic addr").port();
     assert_ne!(quic_port, 0, "the UDP socket is bound at build");
 
-    let mut options = HttpSinkOptions::default();
-    options.client.http_version = HttpVersion::Http3;
-    options.client.tls = TlsFiles {
+    let mut config = HttpSinkConfig::new(format!("https://127.0.0.1:{quic_port}/ingest"));
+    config.client.http_version = HttpVersion::Http3;
+    config.client.tls = TlsFiles {
         ca_file: Some(certificate.cert.clone()),
         ..TlsFiles::default()
     };
-    options.client.timeout = Duration::from_secs(10);
-    let mut sink = HttpSink::new(
-        &format!("https://127.0.0.1:{quic_port}/ingest"),
-        schema(),
-        csv(),
-        options,
-    )
-    .expect("sink builds");
+    config.client.timeout = Duration::from_secs(10);
+    let mut sink = HttpSink::new(config, schema(), csv()).expect("sink builds");
 
     let writer = tokio::spawn(async move {
         sink.write_batch(&batch(&[6, 7])).await.expect("write");
@@ -3360,18 +3316,18 @@ async fn an_http3_sink_posts_to_the_push_sources_quic_endpoint() {
 #[tokio::test]
 async fn the_quic_endpoint_refuses_a_wrong_path_and_an_oversized_body() {
     let certificate = certificate();
-    let mut source = HttpPushSource::new(
-        "127.0.0.1:0",
-        csv(),
-        HttpPushOptions {
+    let mut source = HttpListenSource::new(
+        HttpListenConfig {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
             }),
             quic_bind: Some("127.0.0.1:0".to_string()),
             max_body_bytes: 16,
-            ..push_options()
+            ..listen_config()
         },
+        schema(),
+        csv(),
     )
     .expect("both sockets bind");
     let quic_port = source.quic_local_addr().expect("quic addr").port();
@@ -3381,20 +3337,14 @@ async fn the_quic_endpoint_refuses_a_wrong_path_and_an_oversized_body() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let h3_sink = |path: &str| {
-        let mut options = HttpSinkOptions::default();
-        options.client.http_version = HttpVersion::Http3;
-        options.client.tls = TlsFiles {
+        let mut config = HttpSinkConfig::new(format!("https://127.0.0.1:{quic_port}{path}"));
+        config.client.http_version = HttpVersion::Http3;
+        config.client.tls = TlsFiles {
             ca_file: Some(certificate.cert.clone()),
             ..TlsFiles::default()
         };
-        options.client.timeout = Duration::from_secs(10);
-        HttpSink::new(
-            &format!("https://127.0.0.1:{quic_port}{path}"),
-            schema(),
-            csv(),
-            options,
-        )
-        .expect("sink builds")
+        config.client.timeout = Duration::from_secs(10);
+        HttpSink::new(config, schema(), csv()).expect("sink builds")
     };
 
     let mut sink = h3_sink("/elsewhere");
@@ -3424,12 +3374,9 @@ async fn the_quic_endpoint_refuses_a_wrong_path_and_an_oversized_body() {
 /// built rather than attempted and failed.
 #[test]
 fn http3_over_a_cleartext_url_is_refused_at_build() {
-    let mut options = HttpSourceOptions {
-        declared: Some(schema()),
-        ..HttpSourceOptions::default()
-    };
-    options.client.http_version = HttpVersion::Http3;
-    let Err(err) = HttpSource::new("http://example.invalid/data.csv", csv(), options) else {
+    let mut config = HttpSourceConfig::new("http://example.invalid/data.csv");
+    config.client.http_version = HttpVersion::Http3;
+    let Err(err) = HttpSource::new(config, Some(schema()), csv()) else {
         panic!("HTTP/3 has no cleartext form");
     };
     assert_eq!(err.category(), "configuration");
@@ -3438,9 +3385,9 @@ fn http3_over_a_cleartext_url_is_refused_at_build() {
         "HttpSource: http_version \"3\" needs an https url: HTTP/3 runs over TLS"
     );
 
-    let mut options = HttpSinkOptions::default();
-    options.client.http_version = HttpVersion::Http3;
-    let Err(err) = HttpSink::new("http://example.invalid/ingest", schema(), csv(), options) else {
+    let mut config = HttpSinkConfig::new("http://example.invalid/ingest");
+    config.client.http_version = HttpVersion::Http3;
+    let Err(err) = HttpSink::new(config, schema(), csv()) else {
         panic!("HTTP/3 has no cleartext form");
     };
     assert_eq!(

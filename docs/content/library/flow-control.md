@@ -17,8 +17,8 @@ A source may yield one giant batch, or a connector tuned for a different workloa
 over whatever size it happens to produce. The runner reshapes it regardless, with a
 zero-copy `RecordBatch::slice`, admitting only the controller's current target and holding
 the remainder as carry-over for the next pass. A source does not have to cooperate for this
-to apply: it works even against `FileSource`, `HttpSource`, `S3Source`, `TcpIngestSource` and
-`ChannelSource`, none of which implement the advisory hint below.
+to apply: it works even against the `file`, `http`, `s3`, `tcp` and
+`channel` sources, none of which implement the advisory hint below.
 
 ## How the search is paced: an epoch, two arms
 
@@ -112,7 +112,7 @@ consumption: only the consumer chain's own busy time feeds a sample.
 `Continuous` and `Interval` take one sample per iteration per source. An iteration that
 spent its whole credit while the source was still live, or that left a carry-over slice, is
 backlogged and re-enters at once instead of waiting out the run mode's pacing. That keeps
-`interval_ms` the idle poll cadence rather than a throughput ceiling.
+`every_ms` the idle poll cadence rather than a throughput ceiling.
 
 `Stream` takes one sample per chunk: each arriving batch is sliced at the source's current
 target, and each slice is one workflow pass. A trailing slice smaller than the target runs
@@ -123,7 +123,7 @@ all in `stream`, because it runs without a controller there.
 
 ## What it does not do
 
-`RunMode::OneShot` engages no controller at all, because a single pass must drain every
+`RunMode::Once` engages no controller at all, because a single pass must drain every
 source to completion by definition. Admitting a credit-sized prefix and exiting would
 silently drop the rest.
 
@@ -151,11 +151,11 @@ pass, and a hinted fetch size would be a measurement choosing a pass boundary. I
 
 | Connector | Acts on the hint | What it steers |
 |---|---|---|
-| `KafkaSource` | Yes | `batch_size`: the poll window's collection target |
-| `NatsSource` | Yes | `batch_size`: the same, for a core subscription or a JetStream pull |
-| `PostgresSource` | Yes | `batch_rows`: the cursor query's `LIMIT`, or the logical-decode chunk size |
-| `MariadbSource` | Yes | `batch_rows`: the cursor query's `LIMIT`, or the binlog chunk size |
-| `FileSource`, `HttpSource`, `S3Source`, `TcpIngestSource`, `TursoSource`, `ChannelSource` | No (trait default) | Nothing; each is still governed on an ordinary path, because the runner reshapes its output |
+| `kafka` source | Yes | `batch_rows`: the poll window's collection target |
+| `nats` source | Yes | `batch_rows`: the same, for a core subscription or a JetStream pull |
+| `postgresql` source | Yes | `batch_rows`: the cursor query's `LIMIT`, or the logical-decode chunk size |
+| `mariadb` source | Yes | `batch_rows`: the cursor query's `LIMIT`, or the binlog chunk size |
+| `file`, `http`, `s3`, `tcp`, `turso` and `channel` sources | No (trait default) | Nothing; each is still governed on an ordinary path, because the runner reshapes its output |
 
 ## The decision record
 
@@ -189,4 +189,4 @@ it got there.
 
 [Tracing & metrics](@/library/tracing.md) has the spans and which module writes each
 series; [Logs, metrics and traces](@/service/operate/observability.md) lists every series
-and covers attribution and the double count.
+and covers attribution.

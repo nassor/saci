@@ -7,7 +7,8 @@
 //! [`WatermarkState`] holds the current watermark, the high-water mark across all
 //! observed event timestamps, plus an `allowed_lateness` tolerance. A row whose
 //! event timestamp falls before `current_watermark - allowed_lateness` is beyond
-//! the lateness budget and goes to a side-output instead of being reprocessed.
+//! the lateness budget and lands in `WindowResults::dropped` instead of being
+//! reprocessed.
 //!
 //! The watermark does **not** advance automatically; callers drive it via
 //! [`WatermarkState::advance`].
@@ -19,7 +20,7 @@
 /// ```
 /// # #[cfg(feature = "windows")]
 /// # {
-/// use saci::windows::watermark::WatermarkState;
+/// use saci::windows::WatermarkState;
 ///
 /// let mut wm = WatermarkState::new(500); // 500 ms of allowed lateness
 /// wm.advance(1_000);
@@ -78,7 +79,7 @@ impl WatermarkState {
     /// Returns `true` when `ts` is strictly before the lateness threshold.
     ///
     /// The threshold is `current_watermark - allowed_lateness`. A row below it
-    /// should be routed to a side-output or dropped.
+    /// is dropped.
     ///
     /// Returns `false` when the watermark has not yet been set (`i64::MIN`).
     pub fn is_beyond_lateness(&self, ts: i64) -> bool {

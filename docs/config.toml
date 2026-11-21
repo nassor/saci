@@ -107,11 +107,11 @@ path = "@/service/connectors/tcp.md"
 title = "UDP"
 path = "@/service/connectors/udp.md"
 [[extra.areas.nav.items.children]]
-title = "SACI"
-path = "@/service/connectors/saci.md"
+title = "Peer"
+path = "@/service/connectors/peer.md"
 [[extra.areas.nav.items.children]]
-title = "OpenTelemetry"
-path = "@/service/connectors/opentelemetry.md"
+title = "OTLP metrics"
+path = "@/service/connectors/otlp-metrics.md"
 [[extra.areas.nav.items.children]]
 title = "Channel"
 path = "@/service/connectors/channel.md"
@@ -262,8 +262,8 @@ path = "@/library/service/_index.md"
 title = "Writing a connector"
 path = "@/library/service/connectors.md"
 [[extra.areas.nav.items]]
-title = "Writing a transformer"
-path = "@/library/service/transformers.md"
+title = "Writing a codec"
+path = "@/library/service/codecs.md"
 [[extra.areas.nav.items]]
 title = "What the loader validates"
 path = "@/library/service/loading.md"

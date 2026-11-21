@@ -2,13 +2,13 @@
 //!
 //! `Source::request_batch_rows` carries the admission credit to the connector,
 //! and `KafkaSource`, `NatsSource` and `PostgresSource` act on it by
-//! overwriting their own `batch_size`/`batch_rows`. On a path to a windowed
+//! overwriting their own `batch_rows`. On a path to a windowed
 //! node that would let a throughput measurement choose the arrival boundaries
 //! themselves, which is where that node observes event time. So the runners
 //! withhold the hint there, exactly as they withhold the slice, and the
 //! connector keeps its declared fetch size.
 //!
-//! Both runners are covered: `run_standalone`'s drain loop, and `run_stream`'s
+//! Both runners are covered: the continuous drain loop, and the stream mode's
 //! prime phase and rotation.
 
 #![cfg(all(feature = "service", feature = "windows"))]
@@ -22,18 +22,15 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use saci::error::SaciError;
-use saci::io::source::Source;
-use saci::runtime::PipelineRuntime;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
-use saci::service::config::{
+use saci::io::Source;
+use saci::runtime::{PipelineRuntime, RuntimeOutput};
+use saci::service::BuiltWorkflow;
+use saci::service::FlowPlan;
+use saci::service::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WindowConfig, WorkflowSpec,
 };
-use saci::service::flow::FlowPlan;
-use saci::service::registry::Registry;
-use saci::service::standalone::run_standalone;
-use saci::service::stream::run_stream;
-use saci::windows::WindowSpec;
+use saci::window::WindowSpec;
 use saci::{Dataset, SaciResult};
 
 /// The one component both branches carry, timestamped so the windowed node's
@@ -139,16 +136,12 @@ impl PipelineRuntime for PassThrough {
         "pass-through"
     }
 
-    async fn run_on(&self, _data: &mut Dataset) -> SaciResult<()> {
-        Ok(())
-    }
-
-    async fn run_on_with_state(
+    async fn run_batch(
         &self,
         _data: &mut Dataset,
         _prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
-        Ok(None)
+    ) -> SaciResult<RuntimeOutput> {
+        Ok(RuntimeOutput::default())
     }
 
     fn declared_components(&self) -> Vec<&str> {
@@ -157,17 +150,16 @@ impl PipelineRuntime for PassThrough {
 
     fn template_dataset(&self) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_raw_component(SALE, Arc::clone(&self.schema));
+        dataset
+            .register_schema(SALE, Arc::clone(&self.schema))
+            .unwrap();
         dataset
     }
 }
 
 fn window_config() -> WindowConfig {
     WindowConfig {
-        spec: WindowSpec::Tumbling {
-            size_ms: 1_000,
-            offset_ms: 0,
-        },
+        spec: WindowSpec::tumbling(1_000),
         time_field: "ts".to_string(),
         key_fields: Vec::new(),
         allowed_lateness_ms: 1_000,
@@ -184,61 +176,38 @@ fn window_config() -> WindowConfig {
 /// One workflow rather than two runs, so both sources meet the same runner,
 /// the same controller settings and the same schedule: the only difference
 /// between them is what their branch ends in.
-fn two_branch_service() -> (BuiltService, Arc<Mutex<SourceLog>>, Arc<Mutex<SourceLog>>) {
+fn two_branch_service(
+    run_mode: RunMode,
+) -> (BuiltWorkflow, Arc<Mutex<SourceLog>>, Arc<Mutex<SourceLog>>) {
     let schema = sale_schema();
     let (windowed_source, windowed_log) = RecordingSource::new(&schema);
     let (plain_source, plain_log) = RecordingSource::new(&schema);
 
-    let source_node = |id: &str, source: RecordingSource, target: usize| BuiltNode {
-        id: id.to_string(),
-        name: None,
-        type_name: "RecordingSource".to_string(),
-        component: Some(SALE),
-        kind: BuiltNodeKind::Source(Box::new(source)),
-        downstream: vec![BuiltEdge {
-            node: target,
-            branch: None,
-        }],
-        artifact: None,
-        window: None,
-        heal_recovered: None,
-    };
-    let processor_node = |id: &str, window: Option<WindowConfig>| BuiltNode {
-        id: id.to_string(),
-        name: None,
-        type_name: "native".to_string(),
-        component: None,
-        kind: BuiltNodeKind::Processor {
-            runtime: Box::new(PassThrough {
+    let flow = FlowPlan::from_config(&pinned_config(run_mode.clone()));
+    let service = BuiltWorkflow::builder("hint")
+        .source("win_in", SALE, windowed_source)
+        .source("plain_in", SALE, plain_source)
+        .processor(
+            "win",
+            PassThrough {
                 schema: sale_schema(),
-            }),
-            kind: "native",
-        },
-        downstream: Vec::new(),
-        artifact: None,
-        window,
-        heal_recovered: None,
-    };
+            },
+        )
+        .processor(
+            "plain",
+            PassThrough {
+                schema: sale_schema(),
+            },
+        )
+        .window("win", window_config())
+        .link("win_in", "win")
+        .link("plain_in", "plain")
+        .run_mode(run_mode)
+        .flow(flow)
+        .build()
+        .expect("build workflow");
 
-    let nodes = vec![
-        source_node("win_in", windowed_source, 2),
-        source_node("plain_in", plain_source, 3),
-        processor_node("win", Some(window_config())),
-        processor_node("plain", None),
-    ];
-
-    (
-        BuiltService {
-            workflow_id: "hint".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(Registry::new()),
-            inspector: None,
-            dlq: None,
-        },
-        windowed_log,
-        plain_log,
-    )
+    (service, windowed_log, plain_log)
 }
 
 /// A config in `run_mode` whose every source resolves the top-level
@@ -256,12 +225,13 @@ fn pinned_config(run_mode: RunMode) -> ServiceConfig {
             data_dir: std::path::PathBuf::from("/tmp/saci-window-hint-test"),
         },
         mode: ServiceMode::Standalone {
-            config: StandaloneConfig { run_mode },
+            config: StandaloneConfig { run: run_mode },
         },
         workflows: vec![WorkflowSpec {
             id: "hint".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -313,18 +283,17 @@ fn assert_only_the_plain_branch_is_hinted(
     );
 }
 
-/// `run_standalone`'s drain loop.
+/// The continuous runner's drain loop.
 ///
 /// The windowed branch's source overshoots its 64-row credit by the tail of a
 /// 200-row arrival and is left to choose that size itself; the plain branch's
 /// source is asked for the credit before every fresh pull.
 #[tokio::test]
 async fn a_continuous_drain_hints_only_the_source_off_the_windowed_path() {
-    let (service, windowed_log, plain_log) = two_branch_service();
-    let config = pinned_config(RunMode::Continuous);
+    let (service, windowed_log, plain_log) = two_branch_service(RunMode::Continuous);
     let cancel = CancellationToken::new();
 
-    // `run_standalone`'s future is `?Send`, so it is joined in place rather
+    // The run future is `?Send`, so it is joined in place rather
     // than spawned. Every arrival is admitted in the first few backlogged
     // iterations, which skip pacing; the wait covers the drained iteration
     // that follows.
@@ -335,29 +304,24 @@ async fn a_continuous_drain_hints_only_the_source_off_the_windowed_path() {
             cancel.cancel();
         }
     };
-    let (stats, ()) = tokio::join!(
-        run_standalone(service, &config, cancel.clone(), None, None),
-        stop
-    );
+    let (stats, ()) = tokio::join!(service.run(cancel.clone()), stop);
     stats.expect("the continuous run succeeds");
 
     assert_only_the_plain_branch_is_hinted(&windowed_log, &plain_log, "continuous");
 }
 
-/// `run_stream`'s prime phase and rotation, the other two call sites.
+/// The stream runner's prime phase and rotation, the other two call sites.
 ///
 /// The prime hints every enabled source before the rotation starts, so a
 /// windowed-path source that leaked would leak there even if the rotation
 /// never polled it again.
 #[tokio::test]
 async fn a_stream_run_hints_only_the_source_off_the_windowed_path() {
-    let (service, windowed_log, plain_log) = two_branch_service();
-    let config = pinned_config(RunMode::Stream);
-    let flow = FlowPlan::from_config(&config);
+    let (service, windowed_log, plain_log) = two_branch_service(RunMode::Stream);
 
     tokio::time::timeout(
         Duration::from_secs(20),
-        run_stream(service, CancellationToken::new(), None, None, &flow),
+        service.run(CancellationToken::new()),
     )
     .await
     .expect("the stream run reaches EOF before the timeout")

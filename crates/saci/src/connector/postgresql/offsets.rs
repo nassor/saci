@@ -13,10 +13,10 @@
 //!
 //! Both cursor parts are held as `text` so one table serves integer, timestamp,
 //! date and string cursors, and an operator can reset a source by editing the
-//! row. The declared [`PgFieldType`] of `cursor_column` supplies the SQL cast
+//! row. The declared [`FieldType`] of `cursor_column` supplies the SQL cast
 //! that compares the stored text against the typed table column.
 //!
-//! [`PgFieldType`]: crate::connector::postgresql::config::PgFieldType
+//! [`FieldType`]: crate::connector::schema::FieldType
 //!
 //! `tiebreak_value` is a column of its own rather than a delimited pair inside
 //! `cursor_value`, because a composite cursor must survive a cycle that

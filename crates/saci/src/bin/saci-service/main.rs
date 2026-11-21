@@ -8,9 +8,9 @@
 //! ```text
 //! saci-service serve --config service.kdl
 //! saci-service validate --config service.kdl
-//! saci-service status --addr http://localhost:8080
+//! saci-service status --url http://localhost:8080
 //! saci-service cluster init --config service.kdl
-//! saci-service cluster status --addr http://localhost:8080
+//! saci-service cluster status --url http://localhost:8080
 //! ```
 
 // Pipelines allocate and free multi-megabyte Arrow arrays once per batch.

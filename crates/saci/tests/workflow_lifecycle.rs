@@ -1,7 +1,7 @@
 //! Workflow lifecycle control, over a real socket.
 //!
 //! The fixture is a CSV `FileSource` linked straight to a CSV `FileSink` under
-//! `run_mode kind="continuous"`: no wasm artifact, no Docker, no external
+//! `run "continuous"`: no wasm artifact, no Docker, no external
 //! service, and a runner that keeps iterating so a pause is observable as
 //! iterations that stop climbing.
 //!
@@ -23,11 +23,7 @@
 //! cargo nextest run -p saci --all-features --test workflow_lifecycle
 //! ```
 
-#![cfg(all(
-    feature = "connector-file",
-    feature = "service",
-    feature = "transformer-csv"
-))]
+#![cfg(all(feature = "connector-file", feature = "service", feature = "codec-csv"))]
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,13 +35,12 @@ use tokio::sync::RwLock;
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
-use saci::service::builder::{ServiceBuilder, rebuild_blocker};
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::http::{ServiceModeLabel, ServiceState, build_router};
-use saci::service::lifecycle::{LifecycleRegistryBuilder, PauseHandle, RunControl};
-use saci::service::standalone::StandaloneStats;
-use saci::service::{run_standalone, run_supervised};
+use saci::service::ServiceConfig;
+use saci::service::WorkflowStats;
+use saci::service::{LifecycleRegistryBuilder, PauseHandle, RunControl};
+use saci::service::{RunOptions, run_supervised};
+use saci::service::{ServiceBuilder, rebuild_blocker};
+use saci::service::{ServiceModeLabel, ServiceState, build_router};
 
 /// How long a state poll waits before it gives up and fails the test.
 const SETTLE_BUDGET: Duration = Duration::from_secs(10);
@@ -59,7 +54,7 @@ fn path_text(path: &std::path::Path) -> String {
 /// One workflow, `orders`: a CSV file straight into a CSV file.
 ///
 /// `run_mode` is `"continuous"` for a runner that keeps iterating, or
-/// `"one_shot"` for one that reaches the end of its own work.
+/// `"once"` for one that reaches the end of its own work.
 fn config_kdl(input: &str, output: &str, data_dir: &str, run_mode: &str, control: bool) -> String {
     let control = if control { "#true" } else { "#false" };
     format!(
@@ -68,26 +63,26 @@ mode "standalone"
 
 node id=1 name="saci-workflow-lifecycle" data_dir="{data_dir}"
 
-run_mode kind="{run_mode}"
+run "{run_mode}"
 
 workflow "orders" name="Orders" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="FileSource" component="Order" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="Order" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "orders_out" type="FileSink" component="Order" transformer="csv_fmt" {{
+    sink "orders_out" connector="file" component="Order" codec="csv_fmt" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -110,26 +105,26 @@ mode "standalone"
 
 node id=1 name="saci-workflow-lifecycle-pair" data_dir="{data_dir}"
 
-run_mode kind="continuous"
+run "continuous"
 
 workflow "orders" {{
-    transformer "orders_csv" format="csv" {{
-        options has_headers=#true
+    codec "orders_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="FileSource" component="Order" transformer="orders_csv" {{
+    source "orders_in" connector="file" component="Order" codec="orders_csv" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "orders_out" type="FileSink" component="Order" transformer="orders_csv" {{
+    sink "orders_out" connector="file" component="Order" codec="orders_csv" {{
         config {{
             path "{output}.orders.csv"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -137,23 +132,23 @@ workflow "orders" {{
 }}
 
 workflow "refunds" {{
-    transformer "refunds_csv" format="csv" {{
-        options has_headers=#true
+    codec "refunds_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "refunds_in" type="FileSource" component="Order" transformer="refunds_csv" {{
+    source "refunds_in" connector="file" component="Order" codec="refunds_csv" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "refunds_out" type="FileSink" component="Order" transformer="refunds_csv" {{
+    sink "refunds_out" connector="file" component="Order" codec="refunds_csv" {{
         config {{
             path "{output}.refunds.csv"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -181,25 +176,25 @@ mode "standalone"
 
 node id=1 name="saci-workflow-lifecycle-channel" data_dir="{data_dir}"
 
-run_mode kind="continuous"
+run "continuous"
 
 workflow "bridged" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="FileSource" component="Order" transformer="csv_fmt" {{
+    source "orders_in" connector="file" component="Order" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "bridge_out" type="ChannelSink" component="Order" {{
+    sink "bridge_out" connector="channel" component="Order" {{
         config name="lifecycle-bridge" {{
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -207,22 +202,22 @@ workflow "bridged" {{
 }}
 
 workflow "drain" {{
-    transformer "out_csv" format="csv" {{
-        options has_headers=#true
+    codec "out_csv" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "bridge_in" type="ChannelSource" component="Order" {{
+    source "bridge_in" connector="channel" component="Order" {{
         config name="lifecycle-bridge" {{
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
-    sink "orders_out" type="FileSink" component="Order" transformer="out_csv" {{
+    sink "orders_out" connector="file" component="Order" codec="out_csv" {{
         config {{
             path "{output}"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="float64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
         }}
     }}
 
@@ -258,12 +253,12 @@ impl Harness {
     /// start one supervisor per workflow.
     ///
     /// Must be called inside a [`LocalSet`]: a supervisor owns a
-    /// `BuiltService`, so its future is not `Send`.
+    /// `BuiltWorkflow`, so its future is not `Send`.
     async fn start(config_path: &std::path::Path) -> Self {
         saci::service::install_ring_provider();
         let config = ServiceConfig::load(config_path).expect("config loads");
 
-        let mut factory = register_builtin_factories(ServiceBuilder::new()).into_factory(&config);
+        let mut factory = ServiceBuilder::new().into_factory(&config);
         let mut built = Vec::with_capacity(config.workflows.len());
         for workflow in &config.workflows {
             built.push(factory.build(workflow).expect("workflow builds"));
@@ -283,12 +278,12 @@ impl Harness {
             .collect();
         let registry = Arc::new(registry_builder.build());
 
-        let stats: Vec<(String, Arc<RwLock<StandaloneStats>>)> = built
+        let stats: Vec<(String, Arc<RwLock<WorkflowStats>>)> = built
             .iter()
             .map(|b| {
                 (
                     b.workflow_id.clone(),
-                    Arc::new(RwLock::new(StandaloneStats::default())),
+                    Arc::new(RwLock::new(WorkflowStats::default())),
                 )
             })
             .collect();
@@ -301,7 +296,6 @@ impl Harness {
             prometheus_registry: Arc::new(prometheus::Registry::new()),
             liveness: Arc::new(AtomicU64::new(0)),
             ready: Arc::new(AtomicBool::new(true)),
-            cluster_probe: None,
             standalone_stats: Some(stats.clone()),
             inspector: None,
             lifecycle: config.http.control.then_some(registry),
@@ -333,7 +327,6 @@ impl Harness {
                 let _ = run_supervised(
                     service,
                     &config.workflows[index],
-                    &config,
                     cancel,
                     Some(live),
                     None,
@@ -444,12 +437,12 @@ async fn pause_parks_the_runner_and_resume_releases_it() {
     });
 
     let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .build(&config)
         .expect("the file workflow builds")
         .remove(0);
 
-    let live = Arc::new(RwLock::new(StandaloneStats::default()));
+    let live = Arc::new(RwLock::new(WorkflowStats::default()));
     let cancel = CancellationToken::new();
     let (handle, gate) = PauseHandle::new();
     let mut parked = handle.parked();
@@ -461,14 +454,9 @@ async fn pause_parks_the_runner_and_resume_releases_it() {
                 let live = live.clone();
                 let cancel = cancel.clone();
                 tokio::task::spawn_local(async move {
-                    run_standalone(
-                        built,
-                        &config,
-                        RunControl::new(cancel, gate),
-                        Some(live),
-                        None,
-                    )
-                    .await
+                    built
+                        .run(RunOptions::new(RunControl::new(cancel, gate)).live_stats(live))
+                        .await
                 })
             };
 
@@ -671,7 +659,7 @@ async fn stop_then_start_drains_and_rebuilds() {
         .await;
 }
 
-/// A `one_shot` workflow finishes its own work, and its supervisor returns so
+/// A `once` workflow finishes its own work, and its supervisor returns so
 /// the process can exit. Three behaviours hang off that, and this pins all
 /// three: the published state is `completed`, the entry survives for reading,
 /// and a rebuild verb answers `503` because nothing is listening any more.
@@ -683,7 +671,7 @@ async fn a_completed_workflow_cannot_be_started_again() {
     let output = dir.path().join("orders_out.csv");
     let out_text = path_text(&output);
     let config_path = fixture(dir.path(), |input, data_dir| {
-        config_kdl(input, &out_text, data_dir, "one_shot", true)
+        config_kdl(input, &out_text, data_dir, "once", true)
     });
 
     LocalSet::new()
@@ -781,7 +769,7 @@ async fn a_channel_workflow_refuses_the_rebuild_verbs_but_still_pauses() {
                 status["restart_blocked_reason"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("ChannelSink"),
+                    .contains("`channel` source or sink"),
                 "the reason names the channel halves: {status}"
             );
 
@@ -933,7 +921,7 @@ async fn a_service_wide_verb_reports_the_workflows_it_cannot_reach() {
                 report["refused"][0]["error"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("ChannelSink"),
+                    .contains("`channel` source or sink"),
                 "the refusal carries the reason: {report}"
             );
 

@@ -13,21 +13,19 @@
 #![cfg(all(
     feature = "connector-file",
     feature = "service",
-    feature = "transformer-csv",
+    feature = "codec-csv",
     feature = "wasm-host"
 ))]
 
 use std::sync::Arc;
 
 use arrow_array::UInt64Array;
+use saci::codec::csv::CsvCodec;
 use saci::component::Component;
-use saci::connector::file::FileSource;
-use saci::io::source::Source;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
-use saci::transformer::csv::CsvTransformer;
+use saci::connector::file::{FileSource, FileSourceConfig};
+use saci::io::Source;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 use tokio_util::sync::CancellationToken;
 
 #[path = "common/smoketest.rs"]
@@ -53,27 +51,27 @@ mode "standalone"
 
 node id=1 name="saci-workflow-dag" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "smoketest-chain" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "pings_in" type="FileSource" component="Ping" transformer="csv_fmt" {{
+    source "pings_in" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{input}"
-            schema_fields "seq" type="uint64" nullable=#false
+            field "seq" type="uint64" nullable=#false
         }}
     }}
 
-    wasm "first" module="{wasm_path}"
-    wasm "second" module="{wasm_path}"
+    wasm "first" path="{wasm_path}"
+    wasm "second" path="{wasm_path}"
 
-    sink "pings_out" type="FileSink" component="Ping" transformer="csv_fmt" {{
+    sink "pings_out" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{output}"
-            schema_fields "seq" type="uint64" nullable=#false
+            field "seq" type="uint64" nullable=#false
         }}
     }}
 
@@ -82,7 +80,7 @@ workflow "smoketest-chain" {{
     link from="second" to="pings_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -104,26 +102,21 @@ async fn a_two_processor_link_runs_two_real_wasmtime_instances() {
     std::fs::write(&input_path, "seq\n0\n1\n2\n3\n").expect("write csv fixture");
     let output_path = dir.path().join("pings_out.csv");
 
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(
-            &config_path_text(&wasm_path),
-            &config_path_text(&input_path),
-            &config_path_text(&output_path),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &config_path_text(&wasm_path),
+        &config_path_text(&input_path),
+        &config_path_text(&output_path),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .build(&config)
         .expect("both wasm nodes load as real wasmtime components")
         .remove(0);
     assert_eq!(built.nodes.len(), 4, "source, two processors, sink");
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -135,10 +128,10 @@ async fn a_two_processor_link_runs_two_real_wasmtime_instances() {
     // function: the output rows must equal the input rows exactly, proving
     // both real component instances actually ran the batch through the link
     // rather than the config merely parsing.
-    let mut readback = FileSource::open(
-        &output_path,
-        Arc::new(CsvTransformer::new(true)),
+    let mut readback = FileSource::new(
+        FileSourceConfig::new(&output_path),
         Some(Ping::schema()),
+        Arc::new(CsvCodec::new()),
     )
     .expect("the sink wrote a readable csv file");
     let batch = readback

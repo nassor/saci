@@ -1,8 +1,8 @@
-//! [`S3Source`]: an S3 object stream read through a transformer.
+//! [`S3Source`]: an S3 object stream read through a codec.
 //!
 //! The source lists its prefix once, then walks the listing one object at a
 //! time. Each object is streamed into an unnamed tempfile, one dedicated OS
-//! thread drives the transformer's [`BatchReader`](crate::transformer::BatchReader)
+//! thread drives the codec's [`BatchReader`](crate::codec::BatchReader)
 //! over that file, and [`Source::next_batch`] awaits the bounded channel the
 //! thread feeds. EOF is the listing exhausted; there is no re-list/tail mode,
 //! so this is a finite source every run mode can drive.
@@ -20,17 +20,18 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::io::source::Source;
-use crate::transformer::Transformer;
+use crate::io::Source;
 
-use crate::connector::s3::config::{S3SourceConfig, SchemaFrom};
+use crate::connector::SchemaFrom;
+use crate::connector::s3::config::S3SourceConfig;
 
 /// Batches the reader thread may queue before it blocks. Matches
 /// the `file` connector's.
 const CHANNEL_CAPACITY: usize = 4;
 
-/// S3 [`Source`]. The transformer decodes; this type owns the object client,
+/// S3 [`Source`]. The codec decodes; this type owns the object client,
 /// the spool file, the reader thread and the channel.
 ///
 /// # Example
@@ -39,11 +40,11 @@ const CHANNEL_CAPACITY: usize = 4;
 /// use std::sync::Arc;
 ///
 /// use arrow_schema::Schema;
-/// use saci::connector::s3::{S3ConnectionConfig, S3Source, S3SourceConfig};
-/// use saci::transformer::csv::CsvTransformer;
+/// use saci::connector::s3::{ConnectionConfig, S3Source, S3SourceConfig};
+/// use saci::codec::csv::CsvCodec;
 ///
 /// let config = S3SourceConfig {
-///     connection: S3ConnectionConfig {
+///     connection: ConnectionConfig {
 ///         bucket: "orders".to_string(),
 ///         endpoint: Some("http://127.0.0.1:9000".to_string()),
 ///         access_key_id: Some("key".to_string()),
@@ -52,20 +53,19 @@ const CHANNEL_CAPACITY: usize = 4;
 ///         ..Default::default()
 ///     },
 ///     prefix: "incoming".to_string(),
-///     schema_from: saci::connector::s3::SchemaFrom::Config,
-///     schema_fields: Vec::new(),
+///     schema_from: saci::connector::SchemaFrom::Config,
 /// };
 /// let src = S3Source::new(
 ///     config,
 ///     Arc::new(Schema::empty()),
-///     Arc::new(CsvTransformer::new(true)),
+///     Arc::new(CsvCodec::new()),
 /// )
 /// .unwrap();
 /// ```
 pub struct S3Source {
     store: Arc<dyn ObjectStore>,
     prefix: Path,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     declared: Arc<Schema>,
     schema_from: SchemaFrom,
     /// `None` until the first `next_batch` lists the prefix.
@@ -79,9 +79,9 @@ impl S3Source {
     /// first request happens inside `next_batch`.
     ///
     /// `schema` is the declared Arrow schema the config named, whatever
-    /// `schema_from` says; what the transformer receives depends on
+    /// `schema_from` says; what the codec receives depends on
     /// [`SchemaFrom`] (`Config` hands it over to project the object onto,
-    /// `Object` hides it and the object's own schema must then match field for
+    /// `Payload` hides it and the object's own schema must then match field for
     /// field).
     ///
     /// # Errors
@@ -91,13 +91,13 @@ impl S3Source {
     pub fn new(
         config: S3SourceConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         let store = config.connection.build_store("S3Source")?;
         Ok(Self {
             store,
             prefix: Path::from(config.prefix),
-            transformer,
+            codec,
             declared: schema,
             schema_from: config.schema_from,
             pending: None,
@@ -120,7 +120,7 @@ impl Source for S3Source {
     /// A location leaves the listing only when its object's batch stream ends
     /// cleanly, so every other outcome leaves it at the front: a listing
     /// error, a download or spool error, a reader the object's bytes refuse,
-    /// the `schema_from="object"` schema check, and a decode error raised part
+    /// the `schema_from="payload"` schema check, and a decode error raised part
     /// way through the object. A caller's retry therefore re-attempts that
     /// same object rather than advancing past it.
     ///
@@ -227,17 +227,17 @@ impl Source for S3Source {
             //    when the config asked the object to be the schema source.
             let declared_arg = match self.schema_from {
                 SchemaFrom::Config => Some(Arc::clone(&self.declared)),
-                SchemaFrom::Object => None,
+                SchemaFrom::Payload => None,
             };
-            let transformer = Arc::clone(&self.transformer);
+            let codec = Arc::clone(&self.codec);
             let (mut reader, object_schema) = tokio::task::spawn_blocking(move || {
-                let reader = transformer.open_reader(spool, declared_arg)?;
+                let reader = codec.open_reader(spool.into(), declared_arg)?;
                 let schema = reader.schema();
                 Ok::<_, SaciError>((reader, schema))
             })
             .await
             .map_err(|e| SaciError::generic(format!("S3Source: spawn_blocking panic: {e}")))??;
-            if self.schema_from == SchemaFrom::Object
+            if self.schema_from == SchemaFrom::Payload
                 && object_schema.fields() != self.declared.fields()
             {
                 return Err(SaciError::configuration(format!(
@@ -285,13 +285,13 @@ fn render_fields(fields: &Fields) -> String {
         .join(", ")
 }
 
-#[cfg(all(test, feature = "transformer-parquet"))]
+#[cfg(all(test, feature = "codec-parquet"))]
 mod tests {
     use arrow_schema::Schema;
     use object_store::PutPayload;
     use object_store::memory::InMemory;
 
-    use crate::transformer::parquet::ParquetTransformer;
+    use crate::codec::parquet::ParquetCodec;
 
     use super::*;
 
@@ -321,12 +321,12 @@ mod tests {
         let mut source = S3Source {
             store,
             prefix: Path::from("prefix"),
-            transformer: Arc::new(ParquetTransformer::new()),
+            codec: Arc::new(ParquetCodec::new()),
             declared: Arc::new(Schema::empty()),
-            // `Object` so the malformed bytes fail inside the Parquet
+            // `Payload` so the malformed bytes fail inside the Parquet
             // reader builder itself, not the earlier configuration check
             // on the object's own schema.
-            schema_from: SchemaFrom::Object,
+            schema_from: SchemaFrom::Payload,
             pending: None,
             current: None,
         };

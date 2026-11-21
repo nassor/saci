@@ -22,7 +22,7 @@ use arrow_array::{
 use arrow_schema::Schema;
 use saci::connector::from_kdl_str;
 use saci::connector::postgresql::{PostgresSink, PostgresSinkConfig};
-use saci::io::sink::Sink;
+use saci::io::Sink;
 use serde::Deserialize as _;
 
 fn sink(dsn: &str, body: &str) -> PostgresSink {
@@ -50,21 +50,21 @@ fn uuid_text(bytes: &[u8]) -> String {
 
 /// Every supported declared type, in the order the DDL below creates them.
 const ALL_TYPES_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"flag\" type=\"boolean\"
-schema_fields \"small\" type=\"int16\"
-schema_fields \"medium\" type=\"int32\"
-schema_fields \"real_value\" type=\"float32\"
-schema_fields \"double_value\" type=\"float64\"
-schema_fields \"label\" type=\"utf8\"
-schema_fields \"blob\" type=\"binary\"
-schema_fields \"day\" type=\"date32\"
-schema_fields \"clock\" type=\"time64_micros\"
-schema_fields \"naive_ts\" type=\"timestamp_micros\"
-schema_fields \"utc_ts\" type=\"timestamp_micros_utc\"
-schema_fields \"uid\" type=\"uuid\"
-schema_fields \"doc\" type=\"json\"
-schema_fields \"amount\" type=\"decimal128\" precision=18 scale=4
+field \"id\" type=\"int64\" nullable=#false
+field \"flag\" type=\"boolean\"
+field \"small\" type=\"int16\"
+field \"medium\" type=\"int32\"
+field \"real_value\" type=\"float32\"
+field \"double_value\" type=\"float64\"
+field \"label\" type=\"utf8\"
+field \"blob\" type=\"binary\"
+field \"day\" type=\"date32\"
+field \"clock\" type=\"time64_micros\"
+field \"naive_ts\" type=\"timestamp_micros\"
+field \"utc_ts\" type=\"timestamp_micros_utc\"
+field \"uid\" type=\"uuid\"
+field \"doc\" type=\"json\"
+field \"amount\" type=\"decimal128\" precision=18 scale=4
 ";
 
 const ALL_TYPES_DDL: &str = "CREATE TABLE wide ( \
@@ -390,9 +390,9 @@ async fn append_writes_every_supported_type_and_reads_back_equal() {
 }
 
 const SMALL_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"label\" type=\"utf8\"
-schema_fields \"seq\" type=\"int64\" nullable=#false
+field \"id\" type=\"int64\" nullable=#false
+field \"label\" type=\"utf8\"
+field \"seq\" type=\"int64\" nullable=#false
 ";
 
 fn small_batch(schema: Arc<Schema>, rows: &[(i64, &str, i64)]) -> RecordBatch {

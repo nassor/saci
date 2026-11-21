@@ -14,7 +14,7 @@ value = "yes"
 label = "Per-message"
 value = "One message per row"
 [[extra.facts]]
-label = "Needs schema_fields"
+label = "Needs field lines"
 value = "Required reading a stream, and on messages"
 [[extra.facts]]
 label = "In the server build"
@@ -25,8 +25,8 @@ the schema you declare is what gives the columns their types.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="cs-t cs-d">
-        <title id="cs-t">A csv transformer decoding bytes into rows and encoding rows back into bytes</title>
-        <desc id="cs-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is csv. The upper arrow runs left to right and is the decode path, which needs the declared schema. The lower arrow runs right to left and is the encode path, which takes the columns of the batch it is handed.</desc>
+        <title id="cs-t">A csv codec decoding bytes into rows and encoding rows back into bytes</title>
+        <desc id="cs-d">Bytes on the left and rows on the right, with a codec in the middle whose format is csv. The upper arrow runs left to right and is the decode path, which needs the declared schema. The lower arrow runs right to left and is the encode path, which takes the columns of the batch it is handed.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>
@@ -41,9 +41,9 @@ the schema you declare is what gives the columns their types.
             <rect class="blk blk-ctl" x="258" y="26" width="144" height="80" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="26" width="144" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="38" width="144" height="8"/>
-            <text class="t-lbl" x="270" y="41">transformer</text>
+            <text class="t-lbl" x="270" y="41">codec</text>
             <text class="t-sm t-ctl" x="270" y="62">format="csv"</text>
-            <text class="t-sm" x="270" y="80">options</text>
+            <text class="t-sm" x="270" y="80">config</text>
             <text class="t-sm" x="270" y="96">has_headers</text>
             <path class="arw arw-data" d="M254 86 H150" marker-end="url(#cs-a)"/>
             <text class="t-sm t-mid" x="202" y="104">encode</text>
@@ -55,8 +55,8 @@ the schema you declare is what gives the columns their types.
             <rect class="hd hd-data" x="514" y="34" width="146" height="20" rx="8"/>
             <rect class="hd hd-data" x="514" y="46" width="146" height="8"/>
             <text class="t-lbl" x="526" y="49">rows</text>
-            <text class="t-sm" x="526" y="70">id    Int64</text>
-            <text class="t-sm" x="526" y="86">price Float64</text>
+            <text class="t-sm" x="526" y="70">id    int64</text>
+            <text class="t-sm" x="526" y="86">price float64</text>
         </g>
         <defs>
             <marker id="cs-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -77,8 +77,8 @@ the schema you declare is what gives the columns their types.
 <div class="code-cap"><span>KDL</span><em>has_headers is this format's one option</em></div>
 
 ```kdl
-transformer "csv_fmt" format="csv" {
-    options has_headers=#true
+codec "csv_fmt" format="csv" {
+    config has_headers=#true
 }
 ```
 
@@ -87,13 +87,13 @@ transformer "csv_fmt" format="csv" {
 ## 2. Name it from a source or sink
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>the transformer key is a property of the node, not a config key</em></div>
+<div class="code-cap"><span>KDL</span><em>the codec key is a property of the node, not a config key</em></div>
 
 ```kdl
-source "orders_in" type="FileSource" component="Order" transformer="csv_fmt" {
+source "orders_in" connector="file" component="Order" codec="csv_fmt" {
     config path="/data/orders.csv" {
-        schema_fields "id" type="Int64" nullable=#false
-        schema_fields "total" type="Float64" nullable=#false
+        field "id" type="int64" nullable=#false
+        field "total" type="float64" nullable=#false
     }
 }
 ```
@@ -106,10 +106,10 @@ Any byte-carrying connector names it the same way: see
 ## 3. Give it a schema
 
 Reading needs a declared schema, on a stream and on messages alike, because the text says nothing
-about types. The `schema_fields` list is what names the columns and picks how each field is parsed.
+about types. The `field` lines name the columns and pick how each field is parsed.
 
 Writing takes the columns of each batch it is handed and stores no schema of its own, so
-`schema_fields` on a sink is the connector's requirement rather than this format's.
+`field` lines on a sink are the connector's requirement rather than this format's.
 
 ## Every option
 
@@ -117,7 +117,7 @@ Writing takes the columns of each batch it is handed and stores no schema of its
 |---|---|---|---|
 | `has_headers` | bool | `#true` | on a stream, the reader expects a header row and the writer emits one |
 
-The factory reads that one key and ignores anything else in the `options` table.
+Any other key is refused: `csv: unknown option '{key}'`.
 
 ## How it behaves
 
@@ -144,7 +144,8 @@ not both decode to one row.
 | Message | What to change |
 |---|---|
 | `csv: option 'has_headers' must be a boolean` | write `has_headers=#true` or `#false`, not a string |
-| `csv: reading needs a declared schema; add schema_fields` | declare `schema_fields` on the source reading this format |
+| `csv: reading needs a declared schema; add 'field' entries` | declare `field` lines on the source reading this format |
+| `csv: unknown option '{key}'` | remove the key; `has_headers` is the only one |
 
 Some errors wait for a payload rather than the config check: `csv: empty payload` means a message
 arrived with no bytes in it.

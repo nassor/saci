@@ -2,28 +2,19 @@
 //!
 //! Every struct here carries `#[serde(deny_unknown_fields)]`: a key the
 //! connector cannot honour is a configuration error, not something to drop
-//! silently. The mode enum is internally tagged on `kind`, matching the
-//! `run_mode` table the service config already uses.
+//! silently. The mode enum is internally tagged on `kind`, like the `mode`
+//! child of the other connectors.
 //!
 //! Each top-level type exposes `validate`, which the constructors in
 //! [`crate::connector::postgresql::source`](crate) and [`crate::connector::postgresql::sink`](crate) call before they build
 //! anything. Validation returns [`SaciError::Configuration`] naming the
 //! offending key on the first violation.
 
-use std::sync::Arc;
-
+use crate::connector::schema::{FieldSpec, FieldType};
 use crate::error::SaciError;
-use arrow_schema::{DataType, Field, IntervalUnit, TimeUnit};
 use serde::Deserialize;
 
 use crate::connector::postgresql::types::{PgTypeRef, resolve_pg_type, validate_forced};
-
-/// Arrow timestamp/time resolution every temporal type in this connector uses.
-///
-/// PostgreSQL stores `timestamp`, `timestamptz` and `time` as microseconds
-/// since its own epoch, so microseconds is the only resolution that neither
-/// loses precision nor pads zeros.
-const UNIT: TimeUnit = TimeUnit::Microsecond;
 
 /// Field names the `cdc_logical` mode fills from the change stream rather than
 /// from the row.
@@ -171,304 +162,121 @@ pub(crate) enum Role {
     Sink,
 }
 
-/// One declared column: its name, its Postgres-facing type, and nullability.
+/// Whether this connector maps a declared type.
 ///
-/// Flat rather than an internally tagged enum, so `deny_unknown_fields` still
-/// applies; `#[serde(flatten)]` would switch it off.
-#[derive(Deserialize, Debug, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct FieldSpec {
-    /// Column name. Matched against the server by name, never by position.
-    ///
-    /// Read from `id`, because `crate::config` puts a node's leading argument —
-    /// the `"total"` in `schema_fields "total" type="float64"` — under that
-    /// key.
-    #[serde(rename = "id")]
-    pub name: String,
-    /// Declared type. Checked against the column's Postgres OID on connect.
-    #[serde(rename = "type")]
-    pub ty: PgFieldType,
-    /// Whether the Arrow field admits NULL.
-    #[serde(default = "default_true")]
-    pub nullable: bool,
-    /// Total digits. `decimal128` only, whether as the type or as the `item`,
-    /// and required there.
-    #[serde(default)]
-    pub precision: Option<u8>,
-    /// Fractional digits. `decimal128` only, and required there.
-    #[serde(default)]
-    pub scale: Option<i8>,
-    /// Element type. `list` only, and required there.
-    ///
-    /// Typed as the same enum, so `item = "list"` parses; it is refused with a
-    /// message naming the column, because Arrow's `List` here is
-    /// one-dimensional.
-    #[serde(default)]
-    pub item: Option<PgFieldType>,
-    /// The PostgreSQL type this column really has, forcing the codec.
-    ///
-    /// Accepts every `Type::name()`, the SQL aliases, both array spellings and
-    /// a modifier anywhere after the type name: `int`, `bigint`, `double
-    /// precision`, `timestamp with time zone`, `text[]`, `_text`,
-    /// `numeric(12,2)`, `timestamp(3) with time zone`, `public.mood`. A quoted
-    /// part keeps its case and takes no alias, so `public."Mood"` names a
-    /// mixed-case enum and `"char"` the one-byte internal type. On a source it
-    /// asserts the server's own type and picks the decoder; on a sink it picks
-    /// the parameter type the value is encoded to. It never changes the Arrow
-    /// type: `type` alone decides that.
-    #[serde(default)]
-    pub pg_type: Option<String>,
+/// The connector maps these seventeen types; any other [`FieldType`] is
+/// refused when the fields are validated.
+fn supported(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::Boolean
+            | FieldType::Int16
+            | FieldType::Int32
+            | FieldType::Int64
+            | FieldType::Float32
+            | FieldType::Float64
+            | FieldType::Utf8
+            | FieldType::Binary
+            | FieldType::Date32
+            | FieldType::Time64Micros
+            | FieldType::TimestampMicros
+            | FieldType::TimestampMicrosUtc
+            | FieldType::Uuid
+            | FieldType::Json
+            | FieldType::Decimal128
+            | FieldType::IntervalMonthDayNano
+            | FieldType::List
+    )
 }
 
-/// The declared type of a column.
+/// Whether a column of this type can carry a cursor.
 ///
-/// Each maps to exactly one Arrow [`DataType`]. Which PostgreSQL types can
-/// fill it is the canonical table in [`crate::connector::postgresql::types`](crate); a type with no
-/// Arrow counterpart reaches `utf8` in PostgreSQL's canonical text form.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PgFieldType {
-    /// `bool` to Arrow `Boolean`.
-    Boolean,
-    /// `int2` to Arrow `Int16`.
-    Int16,
-    /// `int4` to Arrow `Int32`.
-    Int32,
-    /// `int8` to Arrow `Int64`.
-    Int64,
-    /// `float4` to Arrow `Float32`.
-    Float32,
-    /// `float8` to Arrow `Float64`.
-    Float64,
-    /// `text`/`varchar`/`bpchar`/`name` to Arrow `Utf8`.
-    Utf8,
-    /// `bytea` to Arrow `Binary`.
-    Binary,
-    /// `date` to Arrow `Date32`.
-    Date32,
-    /// `time` to Arrow `Time64(Microsecond)`.
-    Time64Micros,
-    /// `timestamp` to Arrow `Timestamp(Microsecond, None)`.
-    TimestampMicros,
-    /// `timestamptz` to Arrow `Timestamp(Microsecond, Some("UTC"))`.
-    TimestampMicrosUtc,
-    /// `uuid` to Arrow `FixedSizeBinary(16)`.
-    Uuid,
-    /// `json`/`jsonb` to Arrow `Utf8`, carrying the document text.
-    Json,
-    /// `numeric` to Arrow `Decimal128`. Needs `precision` and `scale`.
-    Decimal128,
-    /// `interval` to Arrow `Interval(MonthDayNano)`.
-    ///
-    /// The three components stay separate because PostgreSQL does not treat
-    /// them as interchangeable: `'1 month'` is not `'30 days'`.
-    IntervalMonthDayNano,
-    /// A one-dimensional PostgreSQL array to Arrow `List`. Needs `item`.
-    List,
+/// A cursor must be totally ordered by the same comparison Postgres and the
+/// persisted text form agree on, which rules out floats, booleans, blobs and
+/// documents.
+pub(crate) fn is_cursor_capable(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::Int16
+            | FieldType::Int32
+            | FieldType::Int64
+            | FieldType::Utf8
+            | FieldType::Date32
+            | FieldType::TimestampMicros
+            | FieldType::TimestampMicrosUtc
+    )
 }
 
-impl PgFieldType {
-    /// Whether a column of this type can carry a cursor.
-    ///
-    /// A cursor must be totally ordered by the same comparison Postgres and the
-    /// persisted text form agree on, which rules out floats, booleans, blobs and
-    /// documents.
-    pub(crate) fn is_cursor_capable(self) -> bool {
-        matches!(
-            self,
-            PgFieldType::Int16
-                | PgFieldType::Int32
-                | PgFieldType::Int64
-                | PgFieldType::Utf8
-                | PgFieldType::Date32
-                | PgFieldType::TimestampMicros
-                | PgFieldType::TimestampMicrosUtc
-        )
-    }
-
-    /// The SQL cast applied to a bound cursor parameter, so a `text` offset
-    /// column compares against a typed table column.
-    pub(crate) fn sql_cast(self) -> &'static str {
-        match self {
-            PgFieldType::Int16 => "int2",
-            PgFieldType::Int32 => "int4",
-            PgFieldType::Int64 => "int8",
-            PgFieldType::Date32 => "date",
-            PgFieldType::TimestampMicros => "timestamp",
-            PgFieldType::TimestampMicrosUtc => "timestamptz",
-            _ => "text",
-        }
-    }
-
-    /// The name used in error messages, matching the configured spelling.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            PgFieldType::Boolean => "boolean",
-            PgFieldType::Int16 => "int16",
-            PgFieldType::Int32 => "int32",
-            PgFieldType::Int64 => "int64",
-            PgFieldType::Float32 => "float32",
-            PgFieldType::Float64 => "float64",
-            PgFieldType::Utf8 => "utf8",
-            PgFieldType::Binary => "binary",
-            PgFieldType::Date32 => "date32",
-            PgFieldType::Time64Micros => "time64_micros",
-            PgFieldType::TimestampMicros => "timestamp_micros",
-            PgFieldType::TimestampMicrosUtc => "timestamp_micros_utc",
-            PgFieldType::Uuid => "uuid",
-            PgFieldType::Json => "json",
-            PgFieldType::Decimal128 => "decimal128",
-            PgFieldType::IntervalMonthDayNano => "interval_month_day_nano",
-            PgFieldType::List => "list",
-        }
+/// The SQL cast applied to a bound cursor parameter, so a `text` offset
+/// column compares against a typed table column.
+pub(crate) fn sql_cast(ty: FieldType) -> &'static str {
+    match ty {
+        FieldType::Int16 => "int2",
+        FieldType::Int32 => "int4",
+        FieldType::Int64 => "int8",
+        FieldType::Date32 => "date",
+        FieldType::TimestampMicros => "timestamp",
+        FieldType::TimestampMicrosUtc => "timestamptz",
+        _ => "text",
     }
 }
 
-impl FieldSpec {
-    /// The Arrow field this spec declares.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Configuration`] when `decimal128` is missing
-    /// `precision`/`scale` or carries an out-of-range precision, when
-    /// `precision`/`scale` are set on a type that carries no decimal, when
-    /// `item` is set on a type other than `list`, when `list` carries no
-    /// `item`, and when `item` is itself `"list"` -- Arrow's `List` here is
-    /// one-dimensional.
-    pub fn to_arrow_field(&self) -> Result<Field, SaciError> {
-        if self.item.is_some() && self.ty != PgFieldType::List {
-            return Err(SaciError::configuration(format!(
-                "field '{}': 'item' applies to type \"list\" only, not \"{}\"",
-                self.name,
-                self.ty.as_str()
-            )));
-        }
-        let carries_decimal = self.ty == PgFieldType::Decimal128
-            || (self.ty == PgFieldType::List && self.item == Some(PgFieldType::Decimal128));
-        if !carries_decimal && (self.precision.is_some() || self.scale.is_some()) {
-            return Err(SaciError::configuration(format!(
-                "field '{}': precision/scale apply to type \"decimal128\" only, not \"{}\"",
-                self.name,
-                self.ty.as_str()
-            )));
-        }
-
-        let data_type = match self.ty {
-            PgFieldType::List => {
-                let item = self.item.ok_or_else(|| {
-                    SaciError::configuration(format!(
-                        "field '{}': type \"list\" requires 'item'",
-                        self.name
-                    ))
-                })?;
-                DataType::List(Arc::new(Field::new_list_field(self.scalar(item)?, true)))
-            }
-            scalar => self.scalar(scalar)?,
-        };
-
-        Ok(Field::new(&self.name, data_type, self.nullable))
-    }
-
-    /// The Arrow type of a scalar declared type.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Configuration`] for `list`, which is not a scalar,
-    /// and for a `decimal128` whose `precision`/`scale` are missing or illegal.
-    fn scalar(&self, ty: PgFieldType) -> Result<DataType, SaciError> {
-        Ok(match ty {
-            PgFieldType::Boolean => DataType::Boolean,
-            PgFieldType::Int16 => DataType::Int16,
-            PgFieldType::Int32 => DataType::Int32,
-            PgFieldType::Int64 => DataType::Int64,
-            PgFieldType::Float32 => DataType::Float32,
-            PgFieldType::Float64 => DataType::Float64,
-            PgFieldType::Utf8 | PgFieldType::Json => DataType::Utf8,
-            PgFieldType::Binary => DataType::Binary,
-            PgFieldType::Date32 => DataType::Date32,
-            PgFieldType::Time64Micros => DataType::Time64(UNIT),
-            PgFieldType::TimestampMicros => DataType::Timestamp(UNIT, None),
-            PgFieldType::TimestampMicrosUtc => DataType::Timestamp(UNIT, Some("UTC".into())),
-            PgFieldType::Uuid => DataType::FixedSizeBinary(16),
-            PgFieldType::IntervalMonthDayNano => DataType::Interval(IntervalUnit::MonthDayNano),
-            PgFieldType::Decimal128 => {
-                let (precision, scale) = self.decimal_params()?;
-                DataType::Decimal128(precision, scale)
-            }
-            PgFieldType::List => {
-                return Err(SaciError::configuration(format!(
-                    "field '{}': 'item' must be a scalar type, not \"list\"; Arrow's List is \
-                     one-dimensional",
-                    self.name
-                )));
-            }
-        })
-    }
-
-    /// The parsed `pg_type`, when the field carries one.
-    ///
-    /// # Errors
-    ///
-    /// Returns the reason the spelling is not a PostgreSQL type name.
-    pub(crate) fn forced_pg_type(&self) -> Result<Option<PgTypeRef>, String> {
-        self.pg_type.as_deref().map(resolve_pg_type).transpose()
-    }
-
-    /// The declared `(precision, scale)` of a `decimal128` field.
-    pub(crate) fn decimal_params(&self) -> Result<(u8, i8), SaciError> {
-        let precision = self.precision.ok_or_else(|| {
-            SaciError::configuration(format!(
-                "field '{}': type \"decimal128\" requires 'precision'",
-                self.name
-            ))
-        })?;
-        let scale = self.scale.ok_or_else(|| {
-            SaciError::configuration(format!(
-                "field '{}': type \"decimal128\" requires 'scale'",
-                self.name
-            ))
-        })?;
-        if precision == 0 || precision > 38 {
-            return Err(SaciError::configuration(format!(
-                "field '{}': decimal128 precision must be within 1..=38, got {precision}",
-                self.name
-            )));
-        }
-        if scale < 0 || i16::from(scale) > i16::from(precision) {
-            return Err(SaciError::configuration(format!(
-                "field '{}': decimal128 scale must be within 0..=precision ({precision}), \
-                 got {scale}",
-                self.name
-            )));
-        }
-        Ok((precision, scale))
-    }
+/// The parsed `native_type`, when the field carries one.
+///
+/// Accepts every `Type::name()`, the SQL aliases, both array spellings and a
+/// modifier anywhere after the type name: `int`, `bigint`, `double precision`,
+/// `timestamp with time zone`, `text[]`, `_text`, `numeric(12,2)`,
+/// `timestamp(3) with time zone`, `public.mood`. A quoted part keeps its case
+/// and takes no alias, so `public."Mood"` names a mixed-case enum and `"char"`
+/// the one-byte internal type. On a source it asserts the server's own type
+/// and picks the decoder; on a sink it picks the parameter type the value is
+/// encoded to. It never changes the Arrow type: `type` alone decides that.
+///
+/// # Errors
+///
+/// Returns the reason the spelling is not a PostgreSQL type name.
+pub(crate) fn forced_pg_type(spec: &FieldSpec) -> Result<Option<PgTypeRef>, String> {
+    spec.native_type.as_deref().map(resolve_pg_type).transpose()
 }
 
 /// Validate a declared field list: non-empty, unique names, each field legal.
 fn validate_fields(what: &str, role: Role, fields: &[FieldSpec]) -> Result<(), SaciError> {
     if fields.is_empty() {
         return Err(SaciError::configuration(format!(
-            "{what}: schema_fields must declare at least one field"
+            "{what}: at least one 'field' entry is required"
         )));
     }
     for (i, field) in fields.iter().enumerate() {
         if field.name.is_empty() {
             return Err(SaciError::configuration(format!(
-                "{what}: schema_fields[{i}] has an empty 'name'"
+                "{what}: field[{i}] has an empty 'id'"
             )));
         }
         if fields[..i].iter().any(|f| f.name == field.name) {
             return Err(SaciError::configuration(format!(
-                "{what}: schema_fields declares '{}' more than once",
+                "{what}: field '{}' is declared more than once",
+                field.name
+            )));
+        }
+        if !supported(field.ty) {
+            return Err(SaciError::configuration(format!(
+                "postgresql: field '{}' has type '{}', which this connector does not map",
+                field.name, field.ty
+            )));
+        }
+        if let Some(item) = field.item
+            && !supported(item)
+        {
+            return Err(SaciError::configuration(format!(
+                "postgresql: field '{}' has item type '{item}', which this connector does not map",
                 field.name
             )));
         }
         field
-            .to_arrow_field()
+            .to_arrow()
             .map_err(|e| SaciError::configuration(format!("{what}: {}", e.message())))?;
 
-        let forced = field.forced_pg_type().map_err(|reason| {
+        let forced = forced_pg_type(field).map_err(|reason| {
             SaciError::configuration(format!("{what}: field '{}': {reason}", field.name))
         })?;
         if let Some(forced) = &forced {
@@ -494,14 +302,14 @@ fn validate_cursor_field(
 ) -> Result<(), SaciError> {
     let field = find_field(fields, column).ok_or_else(|| {
         SaciError::configuration(format!(
-            "{what}: {key} = '{column}' does not name a declared schema_fields entry"
+            "{what}: {key} = '{column}' does not name a declared 'field' entry"
         ))
     })?;
-    if !field.ty.is_cursor_capable() {
+    if !is_cursor_capable(field.ty) {
         return Err(SaciError::configuration(format!(
             "{what}: {key} = '{column}' has type \"{}\", which cannot order a cursor; use one of \
              int16, int32, int64, utf8, date32, timestamp_micros, timestamp_micros_utc",
-            field.ty.as_str()
+            field.ty
         )));
     }
     Ok(())
@@ -561,7 +369,7 @@ pub(crate) fn split_qualified(what: &str, table: &str) -> Result<(String, String
 pub struct PostgresSourceConfig {
     /// Stable identity for this source.
     ///
-    /// `SourceFactory::build` receives only the `config` sub-table, never the
+    /// `Connector::source` receives only the `config` sub-table, never the
     /// `[[sources]]` `name`, so the name is declared here too. It keys the
     /// persisted offset row, labels every metric, and prefixes every error.
     pub name: String,
@@ -570,8 +378,8 @@ pub struct PostgresSourceConfig {
     /// Which read strategy to use.
     pub mode: SourceMode,
     /// The Arrow schema every emitted batch conforms to.
-    #[serde(deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(rename = "field", deserialize_with = "crate::config::one_or_many")]
+    pub fields: Vec<FieldSpec>,
     /// Rows per emitted `RecordBatch`, and the `LIMIT` on each cursor query.
     ///
     /// Only in force when the host asks for no size:
@@ -705,7 +513,7 @@ impl PostgresSourceConfig {
         let what = "PostgresSource";
         validate_name(what, &self.name)?;
         self.connection.validate(what)?;
-        validate_fields(what, Role::Source, &self.schema_fields)?;
+        validate_fields(what, Role::Source, &self.fields)?;
 
         if self.batch_rows == 0 {
             return Err(SaciError::configuration(format!(
@@ -778,11 +586,11 @@ impl PostgresSourceConfig {
         validate_cursor_field(
             what,
             "mode.cursor_column",
-            &self.schema_fields,
+            &self.fields,
             &cursor.cursor_column,
         )?;
         if let Some(tiebreak) = &cursor.tiebreak_column {
-            validate_cursor_field(what, "mode.tiebreak_column", &self.schema_fields, tiebreak)?;
+            validate_cursor_field(what, "mode.tiebreak_column", &self.fields, tiebreak)?;
             if *tiebreak == cursor.cursor_column {
                 return Err(SaciError::configuration(format!(
                     "{what}: mode.tiebreak_column = '{tiebreak}' repeats mode.cursor_column"
@@ -799,9 +607,9 @@ impl PostgresSourceConfig {
 
     /// Reserved names belong to `cdc_logical`; no other mode can fill them.
     fn reject_reserved_fields(&self, what: &str, kind: &str) -> Result<(), SaciError> {
-        if let Some(field) = self.schema_fields.iter().find(|f| f.name.starts_with("__")) {
+        if let Some(field) = self.fields.iter().find(|f| f.name.starts_with("__")) {
             return Err(SaciError::configuration(format!(
-                "{what}: schema_fields '{}' uses the reserved '__' prefix, which only \
+                "{what}: field '{}' uses the reserved '__' prefix, which only \
                  kind = \"cdc_logical\" fills, not \"{kind}\"",
                 field.name
             )));
@@ -812,18 +620,14 @@ impl PostgresSourceConfig {
     /// Every `__`-prefixed field must be one of the five the decoder fills, and
     /// must carry the type that metadata column has.
     fn validate_reserved_fields(&self, what: &str) -> Result<(), SaciError> {
-        for field in self
-            .schema_fields
-            .iter()
-            .filter(|f| f.name.starts_with("__"))
-        {
+        for field in self.fields.iter().filter(|f| f.name.starts_with("__")) {
             let expected = match field.name.as_str() {
-                "__op" | "__table" => PgFieldType::Utf8,
-                "__lsn" | "__xid" => PgFieldType::Int64,
-                "__commit_ts" => PgFieldType::TimestampMicrosUtc,
+                "__op" | "__table" => FieldType::Utf8,
+                "__lsn" | "__xid" => FieldType::Int64,
+                "__commit_ts" => FieldType::TimestampMicrosUtc,
                 other => {
                     return Err(SaciError::configuration(format!(
-                        "{what}: schema_fields '{other}' is not a reserved metadata column; the \
+                        "{what}: field '{other}' is not a reserved metadata column; the \
                          '__' prefix is reserved, and the known names are {}",
                         RESERVED_FIELDS.join(", ")
                     )));
@@ -832,9 +636,7 @@ impl PostgresSourceConfig {
             if field.ty != expected {
                 return Err(SaciError::configuration(format!(
                     "{what}: reserved column '{}' must be declared type \"{}\", not \"{}\"",
-                    field.name,
-                    expected.as_str(),
-                    field.ty.as_str()
+                    field.name, expected, field.ty
                 )));
             }
         }
@@ -858,17 +660,17 @@ pub struct PostgresSinkConfig {
     /// `schema.table`, or bare `table` meaning `public.table`.
     pub table: String,
     /// The Arrow schema every accepted batch must match.
-    #[serde(deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(rename = "field", deserialize_with = "crate::config::one_or_many")]
+    pub fields: Vec<FieldSpec>,
     /// How rows reach the target table.
     #[serde(default)]
     pub write_mode: WriteMode,
     /// Conflict key. Required for `upsert` and `ignore_conflicts`.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
+    #[serde(default, deserialize_with = "crate::config::one_or_many")]
     pub conflict_columns: Vec<String>,
     /// `upsert` only. Empty means every declared column except the conflict
     /// columns.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
+    #[serde(default, deserialize_with = "crate::config::one_or_many")]
     pub update_columns: Vec<String>,
     /// De-duplicate staged rows with
     /// `DISTINCT ON (conflict_columns) … ORDER BY conflict_columns, <col> DESC`.
@@ -913,7 +715,7 @@ impl PostgresSinkConfig {
         let what = "PostgresSink";
         validate_name(what, &self.name)?;
         self.connection.validate(what)?;
-        validate_fields(what, Role::Sink, &self.schema_fields)?;
+        validate_fields(what, Role::Sink, &self.fields)?;
         split_qualified(what, &self.table)?;
 
         if self.chunk_rows == 0 {
@@ -954,10 +756,10 @@ impl PostgresSinkConfig {
                     )));
                 }
                 for column in &self.conflict_columns {
-                    if find_field(&self.schema_fields, column).is_none() {
+                    if find_field(&self.fields, column).is_none() {
                         return Err(SaciError::configuration(format!(
                             "{what}: conflict_columns '{column}' does not name a declared \
-                             schema_fields entry"
+                             'field' entry"
                         )));
                     }
                 }
@@ -969,10 +771,10 @@ impl PostgresSinkConfig {
                     )));
                 }
                 for column in &self.update_columns {
-                    if find_field(&self.schema_fields, column).is_none() {
+                    if find_field(&self.fields, column).is_none() {
                         return Err(SaciError::configuration(format!(
                             "{what}: update_columns '{column}' does not name a declared \
-                             schema_fields entry"
+                             'field' entry"
                         )));
                     }
                     if self.conflict_columns.iter().any(|c| c == column) {
@@ -983,11 +785,11 @@ impl PostgresSinkConfig {
                     }
                 }
                 if let Some(column) = &self.dedupe_order_column
-                    && find_field(&self.schema_fields, column).is_none()
+                    && find_field(&self.fields, column).is_none()
                 {
                     return Err(SaciError::configuration(format!(
                         "{what}: dedupe_order_column '{column}' does not name a declared \
-                         schema_fields entry"
+                         'field' entry"
                     )));
                 }
             }
@@ -1002,7 +804,7 @@ impl PostgresSinkConfig {
         if !self.update_columns.is_empty() {
             return self.update_columns.iter().map(String::as_str).collect();
         }
-        self.schema_fields
+        self.fields
             .iter()
             .map(|f| f.name.as_str())
             .filter(|name| !self.conflict_columns.iter().any(|c| c == name))
@@ -1058,7 +860,9 @@ fn default_chunk_rows() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::from_kdl_str;
+    use crate::config::from_kdl_str;
+    use arrow_schema::{DataType, Field, IntervalUnit, TimeUnit};
+    use std::sync::Arc;
 
     fn source(kdl_text: &str) -> Result<PostgresSourceConfig, String> {
         let value = from_kdl_str(kdl_text).map_err(|e| e.to_string())?;
@@ -1083,9 +887,9 @@ mode kind="polling" table="market.prices" cursor_column="updated_at" tiebreak_co
 
 notify channel="prices_changed" timeout_ms=2500
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "updated_at" type="timestamp_micros_utc" nullable=#false
-schema_fields "value" type="decimal128" precision=18 scale=4
+field "id" type="int64" nullable=#false
+field "updated_at" type="timestamp_micros_utc" nullable=#false
+field "value" type="decimal128" precision=18 scale=4
 "#;
 
     const LOGICAL: &str = r#"
@@ -1095,10 +899,10 @@ connection dsn="postgres://localhost/app"
 
 mode kind="cdc_logical" slot="saci_orders_slot" publication="saci_orders_pub" table="public.orders" max_changes_per_cycle=100
 
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__lsn" type="int64" nullable=#false
-schema_fields "__commit_ts" type="timestamp_micros_utc"
-schema_fields "id" type="int64" nullable=#false
+field "__op" type="utf8" nullable=#false
+field "__lsn" type="int64" nullable=#false
+field "__commit_ts" type="timestamp_micros_utc"
+field "id" type="int64" nullable=#false
 "#;
 
     const TRIGGER: &str = r#"
@@ -1108,8 +912,8 @@ connection dsn="postgres://localhost/app"
 
 mode kind="cdc_trigger" table="outbox" cursor_column="seq" retention="delete_acked" offset_table_autocreate=#false
 
-schema_fields "seq" type="int64" nullable=#false
-schema_fields "payload" type="json"
+field "seq" type="int64" nullable=#false
+field "payload" type="json"
 "#;
 
     const SINK: &str = r#"
@@ -1124,9 +928,9 @@ truncate_before_first_write #true
 
 connection dsn="postgres://localhost/app"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "seq" type="int64" nullable=#false
-schema_fields "total" type="decimal128" precision=12 scale=2
+field "id" type="int64" nullable=#false
+field "seq" type="int64" nullable=#false
+field "total" type="decimal128" precision=12 scale=2
 "#;
 
     #[test]
@@ -1221,25 +1025,28 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     }
 
     #[test]
-    fn empty_schema_fields_rejected() {
+    fn empty_fields_rejected() {
         // The configuration language has no empty-list literal, so the only
         // way to declare nothing is to clear the parsed list; an empty list
         // must fail validation, not parsing.
         let text = "name \"s\"\n\nconnection dsn=\"postgres://h/d\"\n\n\
              mode kind=\"polling\" table=\"t\" cursor_column=\"id\"\n\n\
-             schema_fields \"id\" type=\"int64\"\n";
+             field \"id\" type=\"int64\"\n";
         let mut cfg = source(text).unwrap();
-        cfg.schema_fields.clear();
+        cfg.fields.clear();
         rejects(
             cfg.validate().unwrap_err(),
-            "schema_fields must declare at least one field",
+            "at least one 'field' entry is required",
         );
     }
 
     #[test]
     fn duplicate_field_name_rejected() {
-        let cfg = source(&format!("{POLLING}\nschema_fields \"id\" type=\"int32\"\n")).unwrap();
-        rejects(cfg.validate().unwrap_err(), "'id' more than once");
+        let cfg = source(&format!("{POLLING}\nfield \"id\" type=\"int32\"\n")).unwrap();
+        rejects(
+            cfg.validate().unwrap_err(),
+            "'id' is declared more than once",
+        );
     }
 
     #[test]
@@ -1263,8 +1070,8 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     #[test]
     fn precision_on_non_decimal_rejected() {
         let cfg = source(&POLLING.replace(
-            "schema_fields \"id\" type=\"int64\"",
-            "schema_fields \"id\" type=\"int64\" precision=4",
+            "field \"id\" type=\"int64\"",
+            "field \"id\" type=\"int64\" precision=4",
         ))
         .unwrap();
         rejects(cfg.validate().unwrap_err(), "decimal128");
@@ -1350,10 +1157,7 @@ schema_fields "total" type="decimal128" precision=12 scale=2
 
     #[test]
     fn reserved_field_outside_cdc_logical_rejected() {
-        let cfg = source(&format!(
-            "{POLLING}\nschema_fields \"__op\" type=\"utf8\"\n"
-        ))
-        .unwrap();
+        let cfg = source(&format!("{POLLING}\nfield \"__op\" type=\"utf8\"\n")).unwrap();
         rejects(cfg.validate().unwrap_err(), "__op");
     }
 
@@ -1473,11 +1277,7 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     #[test]
     fn arrow_types_match_declared_types() {
         let cfg = source(POLLING).unwrap();
-        let fields: Vec<Field> = cfg
-            .schema_fields
-            .iter()
-            .map(|f| f.to_arrow_field().unwrap())
-            .collect();
+        let fields: Vec<Field> = cfg.fields.iter().map(|f| f.to_arrow().unwrap()).collect();
         assert_eq!(fields[0].data_type(), &DataType::Int64);
         assert!(!fields[0].is_nullable());
         assert_eq!(
@@ -1502,22 +1302,22 @@ schema_fields "total" type="decimal128" precision=12 scale=2
 
     #[test]
     fn cursor_casts_match_declared_types() {
-        assert_eq!(PgFieldType::Int64.sql_cast(), "int8");
-        assert_eq!(PgFieldType::TimestampMicrosUtc.sql_cast(), "timestamptz");
-        assert_eq!(PgFieldType::Utf8.sql_cast(), "text");
-        assert!(!PgFieldType::Float64.is_cursor_capable());
-        assert!(!PgFieldType::Uuid.is_cursor_capable());
+        assert_eq!(sql_cast(FieldType::Int64), "int8");
+        assert_eq!(sql_cast(FieldType::TimestampMicrosUtc), "timestamptz");
+        assert_eq!(sql_cast(FieldType::Utf8), "text");
+        assert!(!is_cursor_capable(FieldType::Float64));
+        assert!(!is_cursor_capable(FieldType::Uuid));
     }
 
     #[test]
     fn a_list_field_maps_to_an_arrow_list() {
         let cfg = source(&POLLING.replace(
-            "schema_fields \"value\" type=\"decimal128\" precision=18 scale=4",
-            "schema_fields \"tags\" type=\"list\" item=\"utf8\" pg_type=\"text[]\"",
+            "field \"value\" type=\"decimal128\" precision=18 scale=4",
+            "field \"tags\" type=\"list\" item=\"utf8\" native_type=\"text[]\"",
         ))
         .expect("parse");
         cfg.validate().expect("validate");
-        let field = cfg.schema_fields[2].to_arrow_field().expect("arrow field");
+        let field = cfg.fields[2].to_arrow().expect("arrow field");
         assert_eq!(
             field.data_type(),
             &DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true)))
@@ -1528,30 +1328,30 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     fn an_interval_field_maps_to_month_day_nano() {
         let spec = FieldSpec {
             name: "span".to_string(),
-            ty: PgFieldType::IntervalMonthDayNano,
+            ty: FieldType::IntervalMonthDayNano,
             nullable: true,
             precision: None,
             scale: None,
             item: None,
-            pg_type: None,
+            native_type: None,
         };
         assert_eq!(
-            spec.to_arrow_field().expect("arrow field").data_type(),
+            spec.to_arrow().expect("arrow field").data_type(),
             &DataType::Interval(IntervalUnit::MonthDayNano)
         );
-        assert!(!spec.ty.is_cursor_capable());
-        assert_eq!(spec.ty.sql_cast(), "text");
+        assert!(!is_cursor_capable(spec.ty));
+        assert_eq!(sql_cast(spec.ty), "text");
     }
 
     #[test]
     fn a_decimal_list_item_takes_the_precision_and_scale() {
         let cfg = sink(&SINK.replace(
-            "schema_fields \"total\" type=\"decimal128\" precision=12 scale=2",
-            "schema_fields \"total\" type=\"list\" item=\"decimal128\" precision=12 scale=2",
+            "field \"total\" type=\"decimal128\" precision=12 scale=2",
+            "field \"total\" type=\"list\" item=\"decimal128\" precision=12 scale=2",
         ))
         .expect("parse");
         cfg.validate().expect("validate");
-        let field = cfg.schema_fields[2].to_arrow_field().expect("arrow field");
+        let field = cfg.fields[2].to_arrow().expect("arrow field");
         assert_eq!(
             field.data_type(),
             &DataType::List(Arc::new(Field::new_list_field(
@@ -1565,22 +1365,22 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     fn the_list_keys_must_agree_with_the_declared_type() {
         let cases = [
             (
-                "schema_fields \"tags\" type=\"utf8\" item=\"utf8\"",
+                "field \"tags\" type=\"utf8\" item=\"utf8\"",
                 "'item' applies to type \"list\" only",
             ),
-            ("schema_fields \"tags\" type=\"list\"", "requires 'item'"),
+            ("field \"tags\" type=\"list\"", "requires 'item'"),
             (
-                "schema_fields \"tags\" type=\"list\" item=\"list\"",
+                "field \"tags\" type=\"list\" item=\"list\"",
                 "must be a scalar type",
             ),
             (
-                "schema_fields \"tags\" type=\"utf8\" precision=4",
+                "field \"tags\" type=\"utf8\" precision=4",
                 "precision/scale apply to type \"decimal128\" only",
             ),
         ];
         for (fields, fragment) in cases {
             let cfg = source(&POLLING.replace(
-                "schema_fields \"value\" type=\"decimal128\" precision=18 scale=4",
+                "field \"value\" type=\"decimal128\" precision=18 scale=4",
                 fields,
             ))
             .expect("parse");
@@ -1593,8 +1393,8 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     #[test]
     fn a_forced_type_the_declared_type_cannot_carry_is_a_load_time_error() {
         let cfg = source(&POLLING.replace(
-            "schema_fields \"value\" type=\"decimal128\" precision=18 scale=4",
-            "schema_fields \"value\" type=\"float64\" pg_type=\"float4\"",
+            "field \"value\" type=\"decimal128\" precision=18 scale=4",
+            "field \"value\" type=\"float64\" native_type=\"float4\"",
         ))
         .expect("parse");
         let err = cfg
@@ -1607,18 +1407,15 @@ schema_fields "total" type="decimal128" precision=12 scale=2
 
     #[test]
     fn a_sink_may_force_a_narrower_integer_than_a_source_may() {
-        let narrow = "schema_fields \"seq\" type=\"int64\" pg_type=\"int2\"";
-        let cfg = sink(&SINK.replace(
-            "schema_fields \"seq\" type=\"int64\" nullable=#false",
-            narrow,
-        ))
-        .expect("parse");
+        let narrow = "field \"seq\" type=\"int64\" native_type=\"int2\"";
+        let cfg = sink(&SINK.replace("field \"seq\" type=\"int64\" nullable=#false", narrow))
+            .expect("parse");
         cfg.validate()
             .expect("a sink range-checks the narrowing per value");
 
         let cfg = source(&POLLING.replace(
-            "schema_fields \"value\" type=\"decimal128\" precision=18 scale=4",
-            "schema_fields \"value\" type=\"int64\" pg_type=\"int2\"",
+            "field \"value\" type=\"decimal128\" precision=18 scale=4",
+            "field \"value\" type=\"int64\" native_type=\"int2\"",
         ))
         .expect("parse");
         let err = cfg.validate().expect_err("a source never widens on read");
@@ -1628,8 +1425,8 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     #[test]
     fn an_unparsable_forced_type_names_the_column() {
         let cfg = source(&POLLING.replace(
-            "schema_fields \"value\" type=\"decimal128\" precision=18 scale=4",
-            "schema_fields \"value\" type=\"utf8\" pg_type=\"int4[][]\"",
+            "field \"value\" type=\"decimal128\" precision=18 scale=4",
+            "field \"value\" type=\"utf8\" native_type=\"int4[][]\"",
         ))
         .expect("parse");
         let err = cfg
@@ -1642,8 +1439,8 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     #[test]
     fn a_forced_type_needing_the_catalog_parses_at_load_time() {
         let cfg = source(&POLLING.replace(
-            "schema_fields \"value\" type=\"decimal128\" precision=18 scale=4",
-            "schema_fields \"mood\" type=\"utf8\" pg_type=\"public.mood\"",
+            "field \"value\" type=\"decimal128\" precision=18 scale=4",
+            "field \"mood\" type=\"utf8\" native_type=\"public.mood\"",
         ))
         .expect("parse");
         cfg.validate()
@@ -1651,12 +1448,17 @@ schema_fields "total" type="decimal128" precision=12 scale=2
     }
 
     #[test]
-    fn an_unsigned_declared_type_is_still_not_a_postgres_type() {
-        let err = source(&POLLING.replace(
-            "schema_fields \"value\" type=\"decimal128\" precision=18 scale=4",
-            "schema_fields \"value\" type=\"uint64\"",
+    fn a_type_this_connector_does_not_map_is_refused() {
+        let cfg = source(&POLLING.replace(
+            "field \"value\" type=\"decimal128\" precision=18 scale=4",
+            "field \"value\" type=\"uint8\"",
         ))
-        .expect_err("PgFieldType has no unsigned variant");
-        assert!(err.contains("unknown variant `uint64`"), "{err}");
+        .expect("parse");
+        let err = cfg.validate().expect_err("uint8 has no PostgreSQL mapping");
+        assert!(err.message().contains("'value'"), "{err}");
+        assert!(
+            err.message().contains("which this connector does not map"),
+            "{err}"
+        );
     }
 }

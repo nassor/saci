@@ -8,7 +8,7 @@
 
 #![deny(missing_docs)]
 
-use saci::processor::prelude::*;
+use saci::prelude::*;
 
 const TIER_SETTLED: i64 = 0;
 const TIER_HOLD: i64 = 1;
@@ -45,8 +45,8 @@ pub struct Order {
 
 /// Compute `fee` and `review_tier` for one order using `fee_bps`, `fee_fixed`,
 /// and `hold_above` configuration keys.
-#[transform(component = Order)]
-pub fn settle(row: &mut Order, config: &Config) -> Result<()> {
+#[transform]
+pub fn settle(row: &mut Order, config: &sdk::Config) -> sdk::Result<()> {
     let fee_bps: f64 = config.get("fee_bps", 290.0)?;
     let fee_fixed: f64 = config.get("fee_fixed", 0.30)?;
     let hold_above: f64 = config.get("hold_above", 1000.0)?;
@@ -54,14 +54,14 @@ pub fn settle(row: &mut Order, config: &Config) -> Result<()> {
     if !row.valid {
         row.fee = 0.0;
         row.review_tier = TIER_REJECTED;
-        metric("settle.rejected_rows", 1.0);
+        sdk::host::metric("settle.rejected_rows", 1.0);
         return Ok(());
     }
 
     row.fee = ((row.amount * fee_bps / 10_000.0 + fee_fixed) * 100.0).round() / 100.0;
     if row.amount > hold_above {
         row.review_tier = TIER_HOLD;
-        metric("settle.hold_rows", 1.0);
+        sdk::host::metric("settle.hold_rows", 1.0);
     } else {
         row.review_tier = TIER_SETTLED;
     }
@@ -69,12 +69,11 @@ pub fn settle(row: &mut Order, config: &Config) -> Result<()> {
 }
 
 /// Export the Quick Start settlement pipeline as a `saci:pipeline@0.4.0` component.
-#[processor(name = "quickstart-settle")]
+#[processor]
 pub fn build() -> Pipeline {
-    Pipeline::builder("quickstart-settle")
-        .with::<Order>()
-        .with_system(settle_system())
-        .build()
+    Pipeline::new("quickstart-settle")
+        .component::<Order>()
+        .system(settle_system())
 }
 
 #[cfg(test)]
@@ -101,7 +100,7 @@ mod tests {
     #[test]
     fn settles_holds_and_rejects_orders() {
         let mut data = Dataset::new();
-        data.register_component::<Order>().expect("register Order");
+        data.register::<Order>().expect("register Order");
         data.append(&[
             sample(1, 0.25, false),
             sample(2, 100.0, true),
@@ -112,7 +111,7 @@ mod tests {
         pollster::block_on(build().run_on(&mut data)).expect("run");
 
         let rows = <Order as Component>::from_record_batch(
-            data.columns::<Order>().expect("Order registered"),
+            data.batch::<Order>().expect("Order registered"),
         )
         .expect("decode");
 

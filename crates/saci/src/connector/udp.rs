@@ -1,8 +1,8 @@
 //! The UDP connector: a live UDP [`Source`] and a fire-and-forget UDP
 //! [`Sink`] for SACI.
 //!
-//! [`Source`]: crate::io::source::Source
-//! [`Sink`]: crate::io::sink::Sink
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
 //!
 //! UDP delivers nothing. A datagram that leaves the socket is neither
 //! acknowledged nor retransmitted, so a peer that is down, a receive buffer
@@ -16,8 +16,8 @@
 //! address in `connect`. One datagram carries exactly one payload and no
 //! length prefix, because the datagram boundary is the frame, so the two
 //! halves are wire compatible: the
-//! [`Transformer`](crate::transformer::Transformer) the host resolved from the
-//! node's `transformer` key decodes or encodes the bytes.
+//! [`Codec`](crate::codec::Codec) the host resolved from the
+//! node's `codec` key decodes or encodes the bytes.
 //!
 //! A zero-length datagram is the liveness probe. The source answers one with a
 //! zero-length datagram to its sender and never decodes it; the sink never
@@ -33,34 +33,40 @@
 //!
 //! The source never reaches EOF, so only the stream runner can drive it. Its
 //! `config` table takes `bind`, an optional `buffer` and `multicast_group`,
-//! and a `schema_fields` array declaring the Arrow schema. The sink's takes
+//! and a `field` entry per column declaring the Arrow schema. The sink's takes
 //! `connect`, an optional `broadcast`, `max_datagram_bytes` and `probe` node,
-//! and `schema_fields`, and it runs under any run mode.
+//! and `field` entries, and it runs under any run mode.
 //!
 //! ```kdl
-//! transformer "json" format="ndjson"
+//! codec "json" format="ndjson"
 //!
-//! source "ingest" type="udp" transformer="json" component="Reading" {
+//! source "ingest" connector="udp" codec="json" component="Reading" {
 //!     config bind="0.0.0.0:9700" buffer=64 {
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //!
-//! sink "forward" type="udp" transformer="json" component="Reading" {
+//! sink "forward" connector="udp" codec="json" component="Reading" {
 //!     config connect="collector.internal:9701" max_datagram_bytes=65507 {
 //!         probe kind="icmp" interval_ms=5000 timeout_ms=1000 on_failure="refuse"
-//!         schema_fields "v" type="Int64" nullable=#false
+//!         field "v" type="int64" nullable=#false
 //!     }
 //! }
 //! ```
+
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "udp";
+
+mod config;
 
 pub mod factory;
 pub mod probe;
 pub mod sink;
 pub mod source;
 
-pub use factory::{UdpSinkFactory, UdpSourceFactory};
-pub use probe::{OnFailure, ProbeKind, ProbeSettings};
+pub use config::{UdpSinkConfig, UdpSourceConfig};
+pub use factory::UdpConnector;
+pub use probe::{OnFailure, ProbeConfig, ProbeKind};
 pub use sink::{MAX_DATAGRAM_BYTES, UdpSink};
 pub use source::UdpSource;
 

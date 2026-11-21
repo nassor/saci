@@ -45,7 +45,7 @@ use tokio_postgres::Row;
 use tokio_postgres::error::SqlState;
 
 use crate::connector::postgresql::config::{
-    FieldSpec, LogicalMode, PostgresSourceConfig, Role, SourceMode, split_qualified,
+    LogicalMode, PostgresSourceConfig, Role, SourceMode, split_qualified,
 };
 use crate::connector::postgresql::connection::{Connector, PgConnection, column_types, pg_detail};
 use crate::connector::postgresql::metrics::Instruments;
@@ -54,6 +54,7 @@ use crate::connector::postgresql::source::pgoutput::{
 };
 use crate::connector::postgresql::types::{ColumnType, resolve_wire};
 use crate::connector::postgresql::values::{ColumnBuilder, TIMESTAMP_EPOCH_OFFSET_MICROS};
+use crate::connector::schema::FieldSpec;
 
 /// Reader over one publication's changes for one table.
 pub(crate) struct LogicalReader {
@@ -122,7 +123,7 @@ impl LogicalReader {
             max_changes_per_cycle: mode.max_changes_per_cycle,
             batch_rows: cfg.batch_rows,
             max_batches_per_cycle: cfg.max_batches_per_cycle,
-            fields: cfg.schema_fields.clone(),
+            fields: cfg.fields.clone(),
             columns: Vec::new(),
             queue: VecDeque::new(),
             pending_lsn: None,
@@ -879,7 +880,7 @@ pub(crate) fn parse_lsn(text: &str) -> Result<u64, SaciError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::connector::from_kdl_str;
+    use crate::config::from_kdl_str;
     use arrow_array::{Array, Int64Array, StringArray, TimestampMicrosecondArray};
     use serde::Deserialize as _;
 
@@ -934,12 +935,12 @@ mod tests {
     }
 
     const FIELDS: &str = "
-schema_fields \"__op\" type=\"utf8\" nullable=#false
-schema_fields \"__lsn\" type=\"int64\" nullable=#false
-schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\"
-schema_fields \"__table\" type=\"utf8\" nullable=#false
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"amount\" type=\"decimal128\" precision=18 scale=4
+field \"__op\" type=\"utf8\" nullable=#false
+field \"__lsn\" type=\"int64\" nullable=#false
+field \"__commit_ts\" type=\"timestamp_micros_utc\"
+field \"__table\" type=\"utf8\" nullable=#false
+field \"id\" type=\"int64\" nullable=#false
+field \"amount\" type=\"decimal128\" precision=18 scale=4
 ";
 
     /// Decode a hand-built message sequence the way `decode_rows` would, but
@@ -950,9 +951,9 @@ schema_fields \"amount\" type=\"decimal128\" precision=18 scale=4
         messages: &[(u64, Option<u32>, Vec<u8>)],
     ) -> Result<Vec<RecordBatch>, SaciError> {
         let schema = Arc::new(arrow_schema::Schema::new(
-            cfg.schema_fields
+            cfg.fields
                 .iter()
-                .map(|spec| spec.to_arrow_field())
+                .map(|spec| spec.to_arrow())
                 .collect::<Result<Vec<_>, _>>()?,
         ));
         let mut decoder = Decoder::default();
@@ -969,7 +970,7 @@ schema_fields \"amount\" type=\"decimal128\" precision=18 scale=4
                     let relation = decoder.relation(rel_id).unwrap();
                     if relation.qualified() == "public.orders" {
                         plan = Some(RelationPlan::build(
-                            &cfg.schema_fields,
+                            &cfg.fields,
                             relation,
                             &catalog_columns(relation),
                         )?);
@@ -990,12 +991,12 @@ schema_fields \"amount\" type=\"decimal128\" precision=18 scale=4
                     let open = match builders.as_mut() {
                         Some(open) => open,
                         None => {
-                            builders = Some(plan.builders(&cfg.schema_fields, cfg.batch_rows)?);
+                            builders = Some(plan.builders(&cfg.fields, cfg.batch_rows)?);
                             builders.as_mut().unwrap()
                         }
                     };
                     plan.push_row(
-                        &cfg.schema_fields,
+                        &cfg.fields,
                         open,
                         &tuple,
                         operation,
@@ -1242,7 +1243,7 @@ schema_fields \"amount\" type=\"decimal128\" precision=18 scale=4
     fn a_text_tagged_value_decodes_through_its_declared_type() {
         let cfg = config(
             "
-schema_fields \"id\" type=\"int64\" nullable=#false
+field \"id\" type=\"int64\" nullable=#false
 ",
         );
         let batches = decode_fixture(
@@ -1273,8 +1274,8 @@ schema_fields \"id\" type=\"int64\" nullable=#false
     fn an_unchanged_toast_value_reads_as_null() {
         let cfg = config(
             "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"label\" type=\"utf8\" nullable=#true
+field \"id\" type=\"int64\" nullable=#false
+field \"label\" type=\"utf8\" nullable=#true
 ",
         );
         let one = 1i64.to_be_bytes();
@@ -1379,7 +1380,7 @@ schema_fields \"label\" type=\"utf8\" nullable=#true
                     catalog: Some(("public".to_string(), "money_amt".to_string())),
                 },
             ];
-            RelationPlan::build(&cfg.schema_fields, &relation, &columns)
+            RelationPlan::build(&cfg.fields, &relation, &columns)
         };
 
         if let Err(err) = build(DOMAIN_MONEY) {
@@ -1447,7 +1448,7 @@ schema_fields \"label\" type=\"utf8\" nullable=#true
             from_kdl_str(
                 "name \"s\"\n\nconnection dsn=\"postgres://h/d\" sslmode=\"disable\"\n\n\
                  mode kind=\"polling\" table=\"t\" cursor_column=\"id\"\n\n\
-                 schema_fields \"id\" type=\"int64\"\n",
+                 field \"id\" type=\"int64\"\n",
             )
             .unwrap(),
         )

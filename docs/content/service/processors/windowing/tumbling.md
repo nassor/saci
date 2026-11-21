@@ -197,7 +197,7 @@ Both processors declare the same block and emit one `WindowTotal` row per closed
 
 ```kdl,name=The block both processors declare
 window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
-    key_field "symbol"
+    key_fields "symbol"
 }
 ```
 
@@ -210,7 +210,7 @@ Every key of the block is listed under
 - Rust with the `wasm32-wasip3` target: `rustup target add wasm32-wasip3`.
 - Docker for NATS and PostgreSQL.
 - NATS and PostgreSQL are opt-in connectors, and this config also needs `plugin-host`: the commands
-  below pass `--features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host`.
+  below pass `--features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host,plugin-host`.
 
 ## 1. Build the processors
 
@@ -237,7 +237,7 @@ Both `window` blocks are checked at load time. On macOS and Windows set
 Linux:
 
 ```bash,name=Validate the tumbling config
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host,plugin-host -- validate \
   --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 
@@ -245,7 +245,7 @@ macOS:
 
 ```bash,name=Validate with the dylib name
 SACI_PLUGIN_LIB=target/release/libwindowing_tumbling_plugin.dylib \
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate \
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host,plugin-host -- validate \
   --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 
@@ -253,7 +253,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/release/windowing_tumbling_plugin.dll"
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- validate --config examples/windowing/tumbling/tumbling.kdl --strict
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host,plugin-host -- validate --config examples/windowing/tumbling/tumbling.kdl --strict
 ```
 
 Expected output ends with `OK: all declared types resolved in built-in
@@ -267,7 +267,7 @@ docker compose -f examples/windowing/docker-compose.yml up -d
 
 Runs the same on all three platforms. That brings up `nats:2.11-alpine` and
 `postgres:18-alpine` and runs `schema.sql` on first initialisation, creating one
-table per mode. `PostgresSink` never issues `CREATE TABLE`, and PostgreSQL only
+table per mode. The `postgresql` sink never issues `CREATE TABLE`, and PostgreSQL only
 runs init scripts against an empty data directory, so a volume whose init ran
 without `schema.sql` fails with `table ... does not exist`. Recreate it with
 `down -v` then `up -d`, or apply the SQL by hand:
@@ -290,7 +290,7 @@ Get-Content examples/windowing/schema.sql | docker compose -f examples/windowing
 Linux/macOS:
 
 ```bash,name=Start the service
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve \
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host,plugin-host -- serve \
   --config examples/windowing/tumbling/tumbling.kdl
 ```
 
@@ -298,7 +298,7 @@ Windows (PowerShell):
 
 ```powershell
 $env:SACI_PLUGIN_LIB = "target/release/windowing_tumbling_plugin.dll"
-cargo run -p saci --features server,connector-nats,connector-postgresql,transformer-ndjson,wasm-host,plugin-host -- serve --config examples/windowing/tumbling/tumbling.kdl
+cargo run -p saci --features server,connector-nats,connector-postgresql,codec-ndjson,wasm-host,plugin-host -- serve --config examples/windowing/tumbling/tumbling.kdl
 ```
 
 This config enables the inspector and binds `127.0.0.1:8080`, so the startup

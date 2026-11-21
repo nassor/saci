@@ -13,7 +13,7 @@ use std::{
 /// Insert any `Send + Sync + 'static` value; retrieve it by type parameter.
 /// Inserting a type a second time replaces the previous value.
 #[derive(Debug, Default)]
-pub struct ResourceMap {
+pub(crate) struct ResourceMap {
     inner: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
@@ -50,21 +50,6 @@ impl ResourceMap {
             .remove(&TypeId::of::<R>())
             .and_then(|b| b.downcast::<R>().ok())
             .map(|b| *b)
-    }
-
-    /// Return `true` if a resource of type `R` is registered.
-    pub fn contains<R: 'static>(&self) -> bool {
-        self.inner.contains_key(&TypeId::of::<R>())
-    }
-
-    /// Number of resources stored.
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// `true` when no resources are stored.
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
     }
 
     /// Remove all resources.
@@ -114,14 +99,6 @@ mod tests {
     }
 
     #[test]
-    fn test_contains() {
-        let mut map = ResourceMap::new();
-        assert!(!map.contains::<Config>());
-        map.insert(Config { max_retries: 0 });
-        assert!(map.contains::<Config>());
-    }
-
-    #[test]
     fn test_remove() {
         let mut map = ResourceMap::new();
         map.insert(Counter(42));
@@ -131,22 +108,13 @@ mod tests {
     }
 
     #[test]
-    fn test_len_and_is_empty() {
-        let mut map = ResourceMap::new();
-        assert!(map.is_empty());
-        map.insert(Counter(0));
-        assert_eq!(map.len(), 1);
-        map.insert(Config { max_retries: 0 });
-        assert_eq!(map.len(), 2);
-    }
-
-    #[test]
     fn test_clear() {
         let mut map = ResourceMap::new();
         map.insert(Counter(1));
         map.insert(Config { max_retries: 1 });
         map.clear();
-        assert!(map.is_empty());
+        assert!(map.get::<Counter>().is_none());
+        assert!(map.get::<Config>().is_none());
     }
 
     #[test]

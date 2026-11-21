@@ -1,39 +1,37 @@
-//! Built-in factory re-exports and registration.
+//! Built-in connector and codec re-exports and registration.
 //!
-//! Two kinds of factory reach the registry here. A connector factory builds a
-//! [`Source`](crate::io::source::Source) or a
-//! [`Sink`](crate::io::sink::Sink) that moves bytes; a transformer factory
-//! builds the byte format a connector's `format` key names. One feature per
-//! crate decides whether it is compiled in and registered:
+//! Two kinds of component reach the registry here. A [`Connector`](crate::connector::Connector) builds a
+//! [`Source`](crate::io::Source) or a [`Sink`](crate::io::Sink) that moves
+//! data; a codec factory builds the byte format a connector's `codec` key
+//! names. One feature per crate decides whether it is compiled in and
+//! registered:
 //!
-//! - `connector-channel`: [`ChannelSourceFactory`], [`ChannelSinkFactory`]
-//! - `connector-clickhouse`: [`ClickhouseSourceFactory`], [`ClickhouseSinkFactory`]
-//! - `connector-file`: [`FileSourceFactory`], [`FileSinkFactory`]
-//! - `connector-http`: [`HttpSourceFactory`], [`HttpSinkFactory`],
-//!   [`HttpPushSourceFactory`]
-//! - `connector-kafka`: [`KafkaSourceFactory`], [`KafkaSinkFactory`]
-//! - `connector-mariadb`: [`MariadbSourceFactory`], [`MariadbSinkFactory`]
-//! - `connector-nats`: [`NatsSourceFactory`], [`NatsSinkFactory`]
-//! - `connector-opentelemetry`: [`OpenTelemetryMetricsSourceFactory`],
-//!   [`OpenTelemetryMetricsSinkFactory`]
-//! - `connector-postgresql`: [`PostgresSourceFactory`], [`PostgresSinkFactory`]
-//! - `connector-redb`: [`RedbSourceFactory`], [`RedbSinkFactory`]
-//! - `connector-s3`: [`S3SourceFactory`], [`S3SinkFactory`]
-//! - `connector-saci`: [`SaciSourceFactory`], [`SaciSinkFactory`]
-//! - `connector-tcp`: [`TcpSourceFactory`], [`TcpSinkFactory`]
-//! - `connector-udp`: [`UdpSourceFactory`], [`UdpSinkFactory`]
-//! - `connector-turso`: [`TursoSourceFactory`], [`TursoSinkFactory`]
-//! - `transformer-arrow-ipc`: [`ArrowIpcTransformerFactory`]
-//! - `transformer-avro`: [`AvroTransformerFactory`]
-//! - `transformer-csv`: [`CsvTransformerFactory`]
-//! - `transformer-ndjson`: [`NdjsonTransformerFactory`]
-//! - `transformer-parquet`: [`ParquetTransformerFactory`]
+//! - `connector-channel`: [`ChannelConnector`]
+//! - `connector-clickhouse`: [`ClickhouseConnector`]
+//! - `connector-file`: [`FileConnector`]
+//! - `connector-http`: [`HttpConnector`], [`HttpListenConnector`]
+//! - `connector-kafka`: [`KafkaConnector`]
+//! - `connector-mariadb`: [`MariadbConnector`]
+//! - `connector-nats`: [`NatsConnector`]
+//! - `connector-otlp`: [`OtlpMetricsConnector`]
+//! - `connector-postgresql`: [`PostgresConnector`]
+//! - `connector-redb`: [`RedbConnector`]
+//! - `connector-s3`: [`S3Connector`]
+//! - `connector-peer`: [`PeerConnector`]
+//! - `connector-tcp`: [`TcpConnector`]
+//! - `connector-udp`: [`UdpConnector`]
+//! - `connector-turso`: [`TursoConnector`]
+//! - `codec-arrow-ipc`: [`ArrowIpcCodecFactory`]
+//! - `codec-avro`: [`AvroCodecFactory`]
+//! - `codec-csv`: [`CsvCodecFactory`]
+//! - `codec-ndjson`: [`NdjsonCodecFactory`]
+//! - `codec-parquet`: [`ParquetCodecFactory`]
 //!
-//! [`register_builtin_factories`] adds every enabled factory to a
-//! [`ServiceBuilder`] in one call. [`BUILTIN_CONNECTOR_FEATURES`] names every
-//! connector type name and [`BUILTIN_TRANSFORMER_FEATURES`] every format name
-//! the crate carries, whether or not the feature is on, so a lookup that
-//! misses can still say which feature to build with.
+//! [`ServiceBuilder::new`] adds every enabled connector and codec to the
+//! builder in one call. [`BUILTIN_CONNECTOR_FEATURES`] names every connector
+//! and [`BUILTIN_CODEC_FEATURES`] every format name the crate carries,
+//! whether or not the feature is on, so a lookup that misses can still say
+//! which feature to build with.
 //!
 //! The same question has a third shape, and this module owns its wording too:
 //! a `wasm` node, a `plugin` node and `mode "cluster"` name a **host** rather
@@ -43,125 +41,112 @@
 //! and format hints already end with, so an operator meets one sentence
 //! whatever they declared.
 
+#[cfg(feature = "codec-arrow-ipc")]
+pub use crate::codec::arrow_ipc::ArrowIpcCodecFactory;
+#[cfg(feature = "codec-avro")]
+pub use crate::codec::avro::AvroCodecFactory;
+#[cfg(feature = "codec-csv")]
+pub use crate::codec::csv::CsvCodecFactory;
+#[cfg(feature = "codec-ndjson")]
+pub use crate::codec::ndjson::NdjsonCodecFactory;
+#[cfg(feature = "codec-parquet")]
+pub use crate::codec::parquet::ParquetCodecFactory;
 #[cfg(feature = "connector-channel")]
-pub use crate::connector::channel::{ChannelSinkFactory, ChannelSourceFactory};
+pub use crate::connector::channel::ChannelConnector;
 #[cfg(feature = "connector-clickhouse")]
-pub use crate::connector::clickhouse::{ClickhouseSinkFactory, ClickhouseSourceFactory};
+pub use crate::connector::clickhouse::ClickhouseConnector;
 #[cfg(feature = "connector-file")]
-pub use crate::connector::file::{FileSinkFactory, FileSourceFactory};
+pub use crate::connector::file::FileConnector;
 #[cfg(feature = "connector-http")]
-pub use crate::connector::http::{HttpPushSourceFactory, HttpSinkFactory, HttpSourceFactory};
+pub use crate::connector::http::{HttpConnector, HttpListenConnector};
 #[cfg(feature = "connector-kafka")]
-pub use crate::connector::kafka::{KafkaSinkFactory, KafkaSourceFactory};
+pub use crate::connector::kafka::KafkaConnector;
 #[cfg(feature = "connector-mariadb")]
-pub use crate::connector::mariadb::{MariadbSinkFactory, MariadbSourceFactory};
+pub use crate::connector::mariadb::MariadbConnector;
 #[cfg(feature = "connector-nats")]
-pub use crate::connector::nats::{NatsSinkFactory, NatsSourceFactory};
-#[cfg(feature = "connector-opentelemetry")]
-pub use crate::connector::opentelemetry::{
-    OpenTelemetryMetricsSinkFactory, OpenTelemetryMetricsSourceFactory,
-};
+pub use crate::connector::nats::NatsConnector;
+#[cfg(feature = "connector-otlp")]
+pub use crate::connector::otlp::OtlpMetricsConnector;
+#[cfg(feature = "connector-peer")]
+pub use crate::connector::peer::PeerConnector;
 #[cfg(feature = "connector-postgresql")]
-pub use crate::connector::postgresql::{PostgresSinkFactory, PostgresSourceFactory};
+pub use crate::connector::postgresql::PostgresConnector;
 #[cfg(feature = "connector-redb")]
-pub use crate::connector::redb::{RedbSinkFactory, RedbSourceFactory};
+pub use crate::connector::redb::RedbConnector;
 #[cfg(feature = "connector-s3")]
-pub use crate::connector::s3::{S3SinkFactory, S3SourceFactory};
-#[cfg(feature = "connector-saci")]
-pub use crate::connector::saci::{SaciSinkFactory, SaciSourceFactory};
+pub use crate::connector::s3::S3Connector;
 #[cfg(feature = "connector-tcp")]
-pub use crate::connector::tcp::{TcpSinkFactory, TcpSourceFactory};
+pub use crate::connector::tcp::TcpConnector;
 #[cfg(feature = "connector-turso")]
-pub use crate::connector::turso::{TursoSinkFactory, TursoSourceFactory};
+pub use crate::connector::turso::TursoConnector;
 #[cfg(feature = "connector-udp")]
-pub use crate::connector::udp::{UdpSinkFactory, UdpSourceFactory};
-#[cfg(feature = "transformer-arrow-ipc")]
-pub use crate::transformer::arrow_ipc::ArrowIpcTransformerFactory;
-#[cfg(feature = "transformer-avro")]
-pub use crate::transformer::avro::AvroTransformerFactory;
-#[cfg(feature = "transformer-csv")]
-pub use crate::transformer::csv::CsvTransformerFactory;
-#[cfg(feature = "transformer-ndjson")]
-pub use crate::transformer::ndjson::NdjsonTransformerFactory;
-#[cfg(feature = "transformer-parquet")]
-pub use crate::transformer::parquet::ParquetTransformerFactory;
+pub use crate::connector::udp::UdpConnector;
 
-use crate::error::SaciError;
+use std::sync::LazyLock;
+
+use crate::connector::{Connector, Role};
+use crate::error::{SaciError, SaciResult};
 
 use super::builder::ServiceBuilder;
+use super::registry::Registry;
 
-/// Every built-in connector type name and the feature that compiles it in.
+/// Every built-in connector name and the feature that compiles it in.
 ///
-/// The keys are the strings
-/// [`SourceFactory::type_name`](crate::connector::SourceFactory::type_name) and
-/// [`SinkFactory::type_name`](crate::connector::SinkFactory::type_name) return,
-/// which is what a config's `type =` names. Both TCP halves register as
-/// `"tcp"` and both UDP halves as `"udp"`, so one entry each covers the
-/// source and the sink.
+/// The keys are the strings [`Connector::name`](crate::connector::Connector::name)
+/// returns, which is what a config's `connector =` names. One row covers both
+/// roles of a connector; `http-listen` serves sources only.
 ///
-/// Listed unconditionally, unlike the re-exports above. A factory compiled out
-/// takes its `type_name` with it, so this table is the only place a binary
-/// built without `connector-postgresql` can learn that `PostgresSource` is a
+/// Listed unconditionally, unlike the re-exports above. A connector compiled
+/// out takes its `name` with it, so this table is the only place a binary
+/// built without `connector-postgresql` can learn that `postgresql` is a
 /// connector this crate ships rather than a name nothing here provides.
 /// `builtin_connector_table_matches_the_registry` pins it against the registry
 /// in both directions.
 pub const BUILTIN_CONNECTOR_FEATURES: &[(&str, &str)] = &[
-    ("ChannelSource", "connector-channel"),
-    ("ChannelSink", "connector-channel"),
-    ("ClickhouseSource", "connector-clickhouse"),
-    ("ClickhouseSink", "connector-clickhouse"),
-    ("FileSource", "connector-file"),
-    ("FileSink", "connector-file"),
-    ("HttpSource", "connector-http"),
-    ("HttpSink", "connector-http"),
-    ("HttpPushSource", "connector-http"),
-    ("KafkaSource", "connector-kafka"),
-    ("KafkaSink", "connector-kafka"),
-    ("MariadbSource", "connector-mariadb"),
-    ("MariadbSink", "connector-mariadb"),
-    ("NatsSource", "connector-nats"),
-    ("NatsSink", "connector-nats"),
-    ("OpenTelemetryMetricsSource", "connector-opentelemetry"),
-    ("OpenTelemetryMetricsSink", "connector-opentelemetry"),
-    ("PostgresSource", "connector-postgresql"),
-    ("PostgresSink", "connector-postgresql"),
-    ("RedbSource", "connector-redb"),
-    ("RedbSink", "connector-redb"),
-    ("S3Source", "connector-s3"),
-    ("S3Sink", "connector-s3"),
+    ("channel", "connector-channel"),
+    ("clickhouse", "connector-clickhouse"),
+    ("file", "connector-file"),
+    ("http", "connector-http"),
+    ("http-listen", "connector-http"),
+    ("kafka", "connector-kafka"),
+    ("mariadb", "connector-mariadb"),
+    ("nats", "connector-nats"),
+    ("otlp-metrics", "connector-otlp"),
+    ("peer", "connector-peer"),
+    ("postgresql", "connector-postgresql"),
+    ("redb", "connector-redb"),
+    ("s3", "connector-s3"),
     ("tcp", "connector-tcp"),
+    ("turso", "connector-turso"),
     ("udp", "connector-udp"),
-    ("saci", "connector-saci"),
-    ("TursoSource", "connector-turso"),
-    ("TursoSink", "connector-turso"),
 ];
 
 /// Every built-in format name and the feature that compiles it in.
 ///
 /// The keys are the strings
-/// [`TransformerFactory::format_name`](crate::transformer::TransformerFactory::format_name)
-/// returns, which is what a `transformer` node's `format =` names. Kept apart
+/// [`CodecFactory::format_name`](crate::codec::CodecFactory::format_name)
+/// returns, which is what a `codec` node's `format =` names. Kept apart
 /// from [`BUILTIN_CONNECTOR_FEATURES`] because a format name and a connector
 /// type name are different namespaces: one table would let a `format` key
 /// answer with a connector feature.
 ///
 /// Listed unconditionally, for the same reason: a factory compiled out takes
 /// its `format_name` with it, so nothing else in a binary built without
-/// `transformer-csv` knows that `csv` is a format this crate ships.
-/// `builtin_transformer_table_matches_the_registry` pins it against the
+/// `codec-csv` knows that `csv` is a format this crate ships.
+/// `builtin_codec_table_matches_the_registry` pins it against the
 /// registry in both directions.
-pub const BUILTIN_TRANSFORMER_FEATURES: &[(&str, &str)] = &[
-    ("arrow-ipc", "transformer-arrow-ipc"),
-    ("avro", "transformer-avro"),
-    ("csv", "transformer-csv"),
-    ("ndjson", "transformer-ndjson"),
-    ("parquet", "transformer-parquet"),
+pub const BUILTIN_CODEC_FEATURES: &[(&str, &str)] = &[
+    ("arrow-ipc", "codec-arrow-ipc"),
+    ("avro", "codec-avro"),
+    ("csv", "codec-csv"),
+    ("ndjson", "codec-ndjson"),
+    ("parquet", "codec-parquet"),
 ];
 
-/// The feature that compiles in the connector registering `type_name`.
+/// The feature that compiles in the connector registering `name`.
 ///
 /// `None` for a name no connector crate here registers, which is what keeps a
-/// user-defined type out of the feature advice: `MongoSource` is not in
+/// user-defined connector out of the feature advice: `mongodb` is not in
 /// [`BUILTIN_CONNECTOR_FEATURES`], so nothing claims a flag would supply it.
 ///
 /// # Example
@@ -169,21 +154,21 @@ pub const BUILTIN_TRANSFORMER_FEATURES: &[(&str, &str)] = &[
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::factories::builtin_feature;
+/// use saci::service::builtin_feature;
 ///
-/// assert_eq!(builtin_feature("PostgresSource"), Some("connector-postgresql"));
-/// assert_eq!(builtin_feature("MongoSource"), None);
+/// assert_eq!(builtin_feature("postgresql"), Some("connector-postgresql"));
+/// assert_eq!(builtin_feature("mongodb"), None);
 /// # }
 /// ```
-pub fn builtin_feature(type_name: &str) -> Option<&'static str> {
-    tabled_feature(BUILTIN_CONNECTOR_FEATURES, type_name)
+pub fn builtin_feature(name: &str) -> Option<&'static str> {
+    tabled_feature(BUILTIN_CONNECTOR_FEATURES, name)
 }
 
-/// The feature that compiles in the transformer registering `format`.
+/// The feature that compiles in the codec registering `format`.
 ///
-/// `None` for a format no transformer crate here registers, which is what
+/// `None` for a format no codec crate here registers, which is what
 /// keeps a user-registered format out of the feature advice: `protobuf` is not
-/// in [`BUILTIN_TRANSFORMER_FEATURES`], so nothing claims a flag would supply
+/// in [`BUILTIN_CODEC_FEATURES`], so nothing claims a flag would supply
 /// it.
 ///
 /// # Example
@@ -191,14 +176,14 @@ pub fn builtin_feature(type_name: &str) -> Option<&'static str> {
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::factories::builtin_transformer_feature;
+/// use saci::service::builtin_codec_feature;
 ///
-/// assert_eq!(builtin_transformer_feature("csv"), Some("transformer-csv"));
-/// assert_eq!(builtin_transformer_feature("protobuf"), None);
+/// assert_eq!(builtin_codec_feature("csv"), Some("codec-csv"));
+/// assert_eq!(builtin_codec_feature("protobuf"), None);
 /// # }
 /// ```
-pub fn builtin_transformer_feature(format: &str) -> Option<&'static str> {
-    tabled_feature(BUILTIN_TRANSFORMER_FEATURES, format)
+pub fn builtin_codec_feature(format: &str) -> Option<&'static str> {
+    tabled_feature(BUILTIN_CODEC_FEATURES, format)
 }
 
 /// The feature paired with `key` in one of the two tables above.
@@ -210,33 +195,62 @@ fn tabled_feature(table: &[(&'static str, &'static str)], key: &str) -> Option<&
 }
 
 /// The error a [`Registry`](super::registry::Registry) lookup that missed
-/// reports, naming the feature when the type is a built-in.
+/// reports, naming the feature when the connector is a built-in.
 ///
-/// `kind` is `"source"` or `"sink"`. The message keeps its
-/// `no {kind} factory registered` opening in both arms, which is what the
-/// binary's `validate` classifies on.
+/// `role` is the node that asked. The message keeps its
+/// `no connector named '{name}' is registered` opening in both arms, which is
+/// what the binary's `validate` classifies on.
 ///
 /// Reached only after a lookup already failed, so a binary that registers its
-/// own `PostgresSource` never consults the table and never sees the hint. The
-/// hint addresses both callers that reach here, an operator running the
-/// binary and a library embedder driving `ServiceBuilder` directly, because
-/// either mistake produces this same miss.
-pub(crate) fn missing_factory_error(kind: &str, type_name: &str, node_id: &str) -> SaciError {
-    match builtin_feature(type_name) {
+/// own `postgresql` connector never consults the table and never sees the
+/// hint. The hint addresses both callers that reach here, an operator running
+/// the binary and a library embedder driving `ServiceBuilder` directly,
+/// because either mistake produces this same miss.
+pub(crate) fn missing_factory_error(role: Role, name: &str, node_id: &str) -> SaciError {
+    match builtin_feature(name) {
         Some(feature) => SaciError::configuration(format!(
-            "no {kind} factory registered for type '{type_name}' \
-             (required by {kind} '{node_id}'): that is a built-in connector this \
+            "no connector named '{name}' is registered \
+             (required by {role} '{node_id}'): that is a built-in connector this \
              binary was built without, so rebuild or reinstall with \
-             `--features {feature}`, or register your own factory under that name"
+             `--features {feature}`, or register your own connector under that name"
         )),
         None => SaciError::configuration(format!(
-            "no {kind} factory registered for type '{type_name}' \
-             (required by {kind} '{node_id}')"
+            "no connector named '{name}' is registered (required by {role} '{node_id}')"
         )),
     }
 }
 
-/// The error a [`TransformerRegistry`](crate::transformer::TransformerRegistry)
+/// The error a registered connector reports when a node asks it for a role it
+/// does not serve.
+pub(crate) fn missing_role_error(role: Role, name: &str, node_id: &str) -> SaciError {
+    SaciError::configuration(format!(
+        "connector '{name}' has no {role} (required by {role} '{node_id}')"
+    ))
+}
+
+/// Find the connector `name` for a node of `role`.
+///
+/// # Errors
+///
+/// [`missing_factory_error`] when nothing is registered under `name`;
+/// [`missing_role_error`] when the connector exists but does not serve `role`.
+pub(crate) fn lookup_connector<'a>(
+    registry: &'a Registry,
+    role: Role,
+    name: &str,
+    node_id: &str,
+) -> SaciResult<&'a dyn Connector> {
+    let connector = registry
+        .connector(name)
+        .ok_or_else(|| missing_factory_error(role, name, node_id))?;
+    if connector.roles().contains(&role) {
+        Ok(connector)
+    } else {
+        Err(missing_role_error(role, name, node_id))
+    }
+}
+
+/// The error a [`CodecRegistry`](crate::codec::CodecRegistry)
 /// lookup that missed reports, naming the feature when the format is a
 /// built-in.
 ///
@@ -246,26 +260,22 @@ pub(crate) fn missing_factory_error(kind: &str, type_name: &str, node_id: &str) 
 /// message keeps working when the hint appears.
 ///
 /// Reached only after the lookup already failed, so a binary registering its
-/// own `csv` transformer never consults the table.
-pub(crate) fn missing_transformer_error(
-    node_id: &str,
-    format: &str,
-    registered: &[&str],
-) -> SaciError {
+/// own `csv` codec never consults the table.
+pub(crate) fn missing_codec_error(node_id: &str, format: &str, registered: &[&str]) -> SaciError {
     let list = if registered.is_empty() {
         "none".to_string()
     } else {
         registered.join(", ")
     };
-    match builtin_transformer_feature(format) {
+    match builtin_codec_feature(format) {
         Some(feature) => SaciError::configuration(format!(
-            "transformer '{node_id}' names format '{format}', which no transformer is \
+            "codec '{node_id}' names format '{format}', which no codec is \
              registered for (registered: {list}): that is a built-in format this binary \
              was built without, so rebuild or reinstall with `--features {feature}`, or \
-             register your own transformer under that name"
+             register your own codec under that name"
         )),
         None => SaciError::configuration(format!(
-            "transformer '{node_id}' names format '{format}', which no transformer is \
+            "codec '{node_id}' names format '{format}', which no codec is \
              registered for (registered: {list})"
         )),
     }
@@ -277,7 +287,7 @@ pub(crate) fn missing_transformer_error(
 /// `subject` names what the config declared, `needs` the capability it needs,
 /// and `feature` the `--features` flag that compiles that capability in. The
 /// tail matches the one [`missing_factory_error`] and
-/// [`missing_transformer_error`] append, so the three read alike.
+/// [`missing_codec_error`] append, so the three read alike.
 fn capability_error(subject: &str, needs: &str, feature: &str) -> SaciError {
     SaciError::configuration(format!(
         "{subject} needs the {needs}, which this binary was built without, so \
@@ -339,120 +349,104 @@ pub fn missing_cluster_host_error() -> SaciError {
     )
 }
 
-/// Register every enabled connector's and transformer's factories into
-/// `builder`.
+/// Register every enabled connector into `registry`.
 ///
-/// A crate reaches the registry only when its feature is on. Supply the runtime
-/// separately through [`ServiceBuilder::with_runtime`] or `pipeline.wasm` in the
-/// config.
-///
-/// # Example
-///
-/// ```rust
-/// # #[cfg(feature = "service")]
-/// # {
-/// use saci::service::builder::ServiceBuilder;
-/// use saci::service::factories::register_builtin_factories;
-///
-/// let builder = register_builtin_factories(ServiceBuilder::new());
-/// # }
-/// ```
-pub fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
-    // Transformers first: a connector factory resolves its `format` key against
-    // the registry, so the format has to be in it by the time config is built.
-    #[cfg(feature = "transformer-arrow-ipc")]
-    let builder = builder.register_transformer(ArrowIpcTransformerFactory);
-
-    #[cfg(feature = "transformer-avro")]
-    let builder = builder.register_transformer(AvroTransformerFactory);
-
-    #[cfg(feature = "transformer-csv")]
-    let builder = builder.register_transformer(CsvTransformerFactory);
-
-    #[cfg(feature = "transformer-ndjson")]
-    let builder = builder.register_transformer(NdjsonTransformerFactory);
-
-    #[cfg(feature = "transformer-parquet")]
-    let builder = builder.register_transformer(ParquetTransformerFactory);
-
+/// A connector reaches the registry only when its feature is on.
+#[allow(unused_variables)]
+fn register_builtin_connectors(registry: &mut Registry) {
     #[cfg(feature = "connector-channel")]
-    let builder = builder
-        .register_source(ChannelSourceFactory)
-        .register_sink(ChannelSinkFactory)
-        .with_channel_bridge(std::sync::Arc::new(
-            crate::connector::channel::ChannelRegistry::default(),
-        ));
+    registry.register(ChannelConnector);
 
     #[cfg(feature = "connector-file")]
-    let builder = builder
-        .register_source(FileSourceFactory)
-        .register_sink(FileSinkFactory);
+    registry.register(FileConnector);
 
     #[cfg(feature = "connector-http")]
-    let builder = builder
-        .register_source(HttpSourceFactory)
-        .register_source(HttpPushSourceFactory)
-        .register_sink(HttpSinkFactory);
+    registry
+        .register(HttpConnector)
+        .register(HttpListenConnector);
 
     #[cfg(feature = "connector-kafka")]
-    let builder = builder
-        .register_source(KafkaSourceFactory)
-        .register_sink(KafkaSinkFactory);
+    registry.register(KafkaConnector);
 
     #[cfg(feature = "connector-nats")]
-    let builder = builder
-        .register_source(NatsSourceFactory)
-        .register_sink(NatsSinkFactory);
+    registry.register(NatsConnector);
 
-    #[cfg(feature = "connector-opentelemetry")]
-    let builder = builder
-        .register_source(OpenTelemetryMetricsSourceFactory)
-        .register_sink(OpenTelemetryMetricsSinkFactory);
+    #[cfg(feature = "connector-otlp")]
+    registry.register(OtlpMetricsConnector);
 
     #[cfg(feature = "connector-postgresql")]
-    let builder = builder
-        .register_source(PostgresSourceFactory)
-        .register_sink(PostgresSinkFactory);
+    registry.register(PostgresConnector);
 
     #[cfg(feature = "connector-mariadb")]
-    let builder = builder
-        .register_source(MariadbSourceFactory)
-        .register_sink(MariadbSinkFactory);
+    registry.register(MariadbConnector);
 
     #[cfg(feature = "connector-clickhouse")]
-    let builder = builder
-        .register_source(ClickhouseSourceFactory)
-        .register_sink(ClickhouseSinkFactory);
+    registry.register(ClickhouseConnector);
 
     #[cfg(feature = "connector-turso")]
-    let builder = builder
-        .register_source(TursoSourceFactory)
-        .register_sink(TursoSinkFactory);
+    registry.register(TursoConnector);
 
     #[cfg(feature = "connector-s3")]
-    let builder = builder
-        .register_source(S3SourceFactory)
-        .register_sink(S3SinkFactory);
+    registry.register(S3Connector);
 
     #[cfg(feature = "connector-tcp")]
-    let builder = builder
-        .register_source(TcpSourceFactory)
-        .register_sink(TcpSinkFactory);
+    registry.register(TcpConnector);
 
     #[cfg(feature = "connector-udp")]
-    let builder = builder
-        .register_source(UdpSourceFactory)
-        .register_sink(UdpSinkFactory);
+    registry.register(UdpConnector);
 
-    #[cfg(feature = "connector-saci")]
-    let builder = builder
-        .register_source(SaciSourceFactory)
-        .register_sink(SaciSinkFactory);
+    #[cfg(feature = "connector-peer")]
+    registry.register(PeerConnector);
 
     #[cfg(feature = "connector-redb")]
-    let builder = builder
-        .register_source(RedbSourceFactory)
-        .register_sink(RedbSinkFactory);
+    registry.register(RedbConnector);
+}
+
+/// The connectors this crate compiles in, registered once for the process.
+///
+/// What a check that has no [`ServiceBuilder`] in hand asks: config
+/// validation reads [`Connector::live`] through it, because a config is
+/// validated before any builder registers a connector of its own.
+pub(crate) fn builtin_registry() -> &'static Registry {
+    static BUILTIN: LazyLock<Registry> = LazyLock::new(|| {
+        let mut registry = Registry::new();
+        register_builtin_connectors(&mut registry);
+        registry
+    });
+    &BUILTIN
+}
+
+/// Register every enabled connector and codec into `builder`.
+/// [`ServiceBuilder::new`] is this applied to [`ServiceBuilder::empty`].
+///
+/// A crate reaches the registry only when its feature is on. Supply the runtime
+/// separately through [`ServiceBuilder::runtime`] or `pipeline.wasm` in the
+/// config.
+pub(crate) fn register_builtin_factories(builder: ServiceBuilder) -> ServiceBuilder {
+    // Codecs first: a connector resolves its `format` key against the
+    // registry, so the format has to be in it by the time config is built.
+    #[cfg(feature = "codec-arrow-ipc")]
+    let builder = builder.codec(ArrowIpcCodecFactory);
+
+    #[cfg(feature = "codec-avro")]
+    let builder = builder.codec(AvroCodecFactory);
+
+    #[cfg(feature = "codec-csv")]
+    let builder = builder.codec(CsvCodecFactory);
+
+    #[cfg(feature = "codec-ndjson")]
+    let builder = builder.codec(NdjsonCodecFactory);
+
+    #[cfg(feature = "codec-parquet")]
+    let builder = builder.codec(ParquetCodecFactory);
+
+    let mut builder = builder;
+    register_builtin_connectors(builder.registry_mut());
+
+    #[cfg(feature = "connector-channel")]
+    let builder = builder.channels(std::sync::Arc::new(
+        crate::connector::channel::ChannelRegistry::default(),
+    ));
 
     builder
 }
@@ -462,23 +456,23 @@ mod tests {
     use super::*;
 
     /// The hint arm must not disturb the opening the binary's `validate`
-    /// classifies a missing-factory error by.
+    /// classifies a missing-connector error by.
     ///
-    /// `build_all` cannot produce this message in a build that has every
+    /// `build` cannot produce this message in a build that has every
     /// connector, which is the build the suite runs, so the producer is called
     /// directly. Without this, appending the hint could silently break
     /// `is_unknown_factory_error` and turn a warning into a hard failure with
     /// no test to say so.
     #[test]
     fn the_feature_hint_keeps_the_classified_prefix() {
-        let message = missing_factory_error("source", "PostgresSource", "pg_orders").message();
+        let message = missing_factory_error(Role::Source, "postgresql", "pg_orders").message();
         assert!(
-            message.starts_with("no source factory registered"),
+            message.starts_with("no connector named 'postgresql' is registered"),
             "validate classifies on this opening: {message}"
         );
         assert!(
-            message.contains("for type 'PostgresSource'"),
-            "validate reads the type name back out of this: {message}"
+            message.contains("required by source 'pg_orders'"),
+            "the message names the node that asked: {message}"
         );
         assert!(
             message.contains("--features connector-postgresql"),
@@ -486,24 +480,34 @@ mod tests {
         );
     }
 
-    /// A type no connector here registers gets the plain message, so nothing
-    /// tells the author of a user-defined factory that a build flag supplies
-    /// it.
+    /// A name no connector here registers gets the plain message, so nothing
+    /// tells the author of a user-defined connector that a build flag
+    /// supplies it.
     #[test]
-    fn an_unknown_type_gets_no_feature_hint() {
-        let message = missing_factory_error("sink", "ClickHouseSink", "orders_out").message();
+    fn an_unknown_connector_gets_no_feature_hint() {
+        let message = missing_factory_error(Role::Sink, "clickhouse-x", "orders_out").message();
         assert_eq!(
             message,
-            "no sink factory registered for type 'ClickHouseSink' (required by sink 'orders_out')"
+            "no connector named 'clickhouse-x' is registered (required by sink 'orders_out')"
+        );
+    }
+
+    /// A registered connector asked for a role it lacks says which.
+    #[test]
+    fn a_missing_role_names_the_connector_and_the_role() {
+        let message = missing_role_error(Role::Sink, "http-listen", "out").message();
+        assert_eq!(
+            message,
+            "connector 'http-listen' has no sink (required by sink 'out')"
         );
     }
 
     /// The table is the registry's key set, in both directions.
     ///
-    /// A tenth connector registering its factories without a table entry
-    /// leaves its missing-factory error unable to name a feature, and an entry
-    /// left behind by a removed connector makes one name a feature that no
-    /// longer exists. Nothing else catches either.
+    /// A new connector registering without a table entry leaves its
+    /// missing-connector error unable to name a feature, and an entry left
+    /// behind by a removed connector makes one name a feature that no longer
+    /// exists. Nothing else catches either.
     ///
     /// Gated on `all`, the build that carries every connector, because the
     /// check is bidirectional: with a connector compiled out the registry is
@@ -512,42 +516,36 @@ mod tests {
     #[cfg(feature = "all")]
     #[test]
     fn builtin_connector_table_matches_the_registry() {
-        let builder = register_builtin_factories(ServiceBuilder::new());
-        let registry = builder.registry();
-
-        let mut registered = registry.source_names();
-        registered.extend(registry.sink_names());
-        registered.sort_unstable();
-        registered.dedup();
+        let builder = ServiceBuilder::new();
+        let registered = builder.registry().names();
 
         let mut tabled: Vec<&str> = BUILTIN_CONNECTOR_FEATURES
             .iter()
             .map(|(name, _)| *name)
             .collect();
         tabled.sort_unstable();
-        tabled.dedup();
 
         assert_eq!(
             registered, tabled,
             "register_builtin_factories registers {registered:?} but \
-             BUILTIN_CONNECTOR_FEATURES lists {tabled:?}; add the connector's type \
-             names and its feature to the table, or drop the stale entry, so a \
-             missing-factory error can name the feature to build with"
+             BUILTIN_CONNECTOR_FEATURES lists {tabled:?}; add the connector's \
+             name and its feature to the table, or drop the stale entry, so a \
+             missing-connector error can name the feature to build with"
         );
     }
 
     /// A format this crate carries but was compiled out names its feature.
     ///
-    /// A build with every transformer cannot reach this arm through
-    /// `build_all`, so the producer is called directly. The opening is pinned
+    /// A build with every codec cannot reach this arm through
+    /// `build`, so the producer is called directly. The opening is pinned
     /// too: it is what an operator greps for and what any future classifier
     /// would match on.
     #[test]
     fn a_missing_builtin_format_names_its_feature() {
-        let message = missing_transformer_error("csv_fmt", "csv", &[]).message();
+        let message = missing_codec_error("csv_fmt", "csv", &[]).message();
         assert!(
             message.starts_with(
-                "transformer 'csv_fmt' names format 'csv', which no transformer is registered for"
+                "codec 'csv_fmt' names format 'csv', which no codec is registered for"
             ),
             "the opening must survive the hint: {message}"
         );
@@ -556,42 +554,42 @@ mod tests {
             "an operator needs to see the binary carries no format at all: {message}"
         );
         assert!(
-            message.contains("--features transformer-csv"),
+            message.contains("--features codec-csv"),
             "the hint must name the feature: {message}"
         );
     }
 
-    /// A format no transformer here registers gets the plain message, so an
+    /// A format no codec here registers gets the plain message, so an
     /// embedder registering their own is never told a build flag supplies it.
     #[test]
     fn an_unknown_format_gets_no_feature_hint() {
-        let message = missing_transformer_error("pb_fmt", "protobuf", &["csv", "ndjson"]).message();
+        let message = missing_codec_error("pb_fmt", "protobuf", &["csv", "ndjson"]).message();
         assert_eq!(
             message,
-            "transformer 'pb_fmt' names format 'protobuf', which no transformer is \
+            "codec 'pb_fmt' names format 'protobuf', which no codec is \
              registered for (registered: csv, ndjson)"
         );
     }
 
-    /// The format table is the transformer registry's key set, in both
+    /// The format table is the codec registry's key set, in both
     /// directions.
     ///
-    /// A sixth transformer registering without a table entry leaves its
+    /// A sixth codec registering without a table entry leaves its
     /// missing-format error unable to name a feature, and an entry a removed
-    /// transformer left behind makes one name a feature that no longer
+    /// codec left behind makes one name a feature that no longer
     /// exists.
     ///
-    /// Gated on `all`, the build that carries every transformer, because the
+    /// Gated on `all`, the build that carries every codec, because the
     /// check is bidirectional: with one compiled out the registry is
     /// legitimately missing a name the table must still carry.
     /// `--all-features` selects it.
     #[cfg(feature = "all")]
     #[test]
-    fn builtin_transformer_table_matches_the_registry() {
-        let builder = register_builtin_factories(ServiceBuilder::new());
-        let registered = builder.registry().transformers().formats();
+    fn builtin_codec_table_matches_the_registry() {
+        let builder = ServiceBuilder::new();
+        let registered = builder.registry().codecs().names();
 
-        let mut tabled: Vec<&str> = BUILTIN_TRANSFORMER_FEATURES
+        let mut tabled: Vec<&str> = BUILTIN_CODEC_FEATURES
             .iter()
             .map(|(name, _)| *name)
             .collect();
@@ -600,15 +598,36 @@ mod tests {
         assert_eq!(
             registered, tabled,
             "register_builtin_factories registers formats {registered:?} but \
-             BUILTIN_TRANSFORMER_FEATURES lists {tabled:?}; add the format and its \
+             BUILTIN_CODEC_FEATURES lists {tabled:?}; add the format and its \
              feature to the table, or drop the stale entry, so a missing-format error \
              can name the feature to build with"
         );
     }
 
+    /// No connector lists a config key that could carry a credential in its
+    /// topology detail: the dashboard shows every listed key's value verbatim.
+    #[test]
+    fn no_builtin_detail_key_names_a_credential() {
+        let registry = builtin_registry();
+        for name in registry.names() {
+            let connector = registry.connector(name).expect("a listed name resolves");
+            for role in [Role::Source, Role::Sink] {
+                for key in connector.detail_keys(role) {
+                    for secret in ["password", "dsn", "secret", "token", "key_file", "auth"] {
+                        assert!(
+                            !key.contains(secret),
+                            "connector '{name}' lists detail key '{key}' for its {role}, \
+                             which names a credential"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// The four capability refusals name their feature and read alike.
     ///
-    /// None of them is reachable through `build_all` or
+    /// None of them is reachable through `build` or
     /// `validate_build_capabilities` in a build that carries every host,
     /// which is the build the suite runs, so the producers are called
     /// directly, the same reason

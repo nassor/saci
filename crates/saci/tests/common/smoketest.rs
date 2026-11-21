@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow_schema::{DataType, Field, Schema};
 use saci::component::Component;
@@ -104,8 +105,8 @@ pub fn load_runtime(config: HashMap<String, String>) -> WasmPipelineRuntime {
         "smoketest",
         &wasm_bytes,
         config,
-        // 60 epoch ticks of 100 ms = 6 s, plenty for an identity round-trip.
-        60,
+        // 6 s, plenty for an identity round-trip.
+        Duration::from_secs(6),
     )
     .expect("WasmPipelineRuntime::from_bytes")
 }

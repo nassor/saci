@@ -1,7 +1,7 @@
 # Order Processing: a WASM processor pipeline
 
 A processor component for `wasm32-wasip3`, written in Rust with the `saci`
-crate's `processor` feature and the `export_pipeline!` macro. The host hands it
+crate's `processor` feature and the `#[processor]` attribute. The host hands it
 one Arrow IPC payload per batch and takes one back. Inside the component, the
 DAG build, stage execution and retries run as native Rust.
 
@@ -68,7 +68,7 @@ and Windows (PowerShell) unless a block says otherwise.
    and its paths are relative to the repository root:
 
    ```text
-   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- validate --config examples/configs/standalone_wasm.kdl --strict
+   cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- validate --config examples/configs/standalone_wasm.kdl --strict
    ```
 
    The run ends with `OK: workflow graph validated`, which means the host
@@ -77,10 +77,10 @@ and Windows (PowerShell) unless a block says otherwise.
 5. Run the pipeline:
 
    ```text
-   cargo run -p saci --features server,connector-file,transformer-csv,wasm-host -- serve --config examples/configs/standalone_wasm.kdl
+   cargo run -p saci --features server,connector-file,codec-csv,wasm-host -- serve --config examples/configs/standalone_wasm.kdl
    ```
 
-   `run_mode` is `one_shot`, so `serve` processes
+   `run "once"` makes `serve` process
    `examples/configs/fixtures/order_processing_input.csv` once and exits.
 
 6. Read the output.
@@ -102,7 +102,7 @@ and Windows (PowerShell) unless a block says otherwise.
    is `-50.0`. `usd_amount` is `amount` times the rate in the config.
 
 The fixture seeds `valid` with `false` and `usd_amount` with `0.0`. The
-processor cannot add columns, and the CSV transformer turns an empty field into
+processor cannot add columns, and the CSV codec turns an empty field into
 a NULL, which the non-nullable `Transaction` schema rejects, so one blank cell
 fails the whole batch.
 
@@ -110,13 +110,14 @@ fails the whole batch.
 
 ## How failures surface
 
-The `export_pipeline!` macro converts a `SaciError` from the pipeline into the
-WIT `run-error` variant:
+The `#[processor]` attribute converts a `SaciError` from the pipeline into the
+WIT `run-error` variant: `SaciError::is_retryable()` selects `retryable`, every
+other error is `permanent`:
 
 | `SaciError` | WIT `run-error` |
 |-------------|-----------------|
-| `RetryExhausted`, `SystemExecution` | `retryable(string)` |
-| `ComponentNotFound`, `ResourceNotFound`, `EntityNotFound`, `Configuration`, `Scheduler`, `Store`, `Generic` | `permanent(string)` |
+| `RetryExhausted`, `SystemExecution`, `Store` | `retryable(string)` |
+| `ComponentNotRegistered`, `FieldNotFound`, `ResourceNotFound`, `Configuration`, `Scheduler`, `Generic` | `permanent(string)` |
 
 The wasm host reports both variants as a failed batch with the message. A panic
 becomes a wasm trap, which the host also surfaces as `permanent`, so return
@@ -130,4 +131,4 @@ page has the full variant list.
 | File | What it is |
 |------|------------|
 | `Cargo.toml` | cdylib, `wit-bindgen` as a wasm32-only dependency |
-| `src/lib.rs` | the `Transaction` component, the three systems, `build()` and `export_pipeline!(build)`; the bindings and the macro call are gated on wasm32 |
+| `src/lib.rs` | the `Transaction` component, the three systems and `build()`, annotated with `#[processor]`; the generated bindings and exports exist only on wasm32 |

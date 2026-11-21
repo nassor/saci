@@ -2,11 +2,11 @@
 //! two real WebAssembly processor instances linked in one workflow.
 //!
 //! This is the arithmetic that motivates per-node attribution: two processors
-//! each write their own count into the same process-wide total, so the
-//! unattributed series alone cannot answer "how many rows did `first`
-//! handle". Two smoketest components give an exact expected split: 4 rows
-//! through each of two processors is 8 unattributed and 4 under each
-//! processor's own id.
+//! would otherwise share one total that cannot answer "how many rows did
+//! `first` handle". Two smoketest components give an exact expected split: 4
+//! rows through each of two processors is 4 under each processor's own id and
+//! 8 summed over the `processor` attribute. Every sample is recorded once,
+//! under its own node id.
 //!
 //! Its own test binary because installing a meter provider is a
 //! process-global one-shot: any earlier `run_on` in the same process would
@@ -51,20 +51,26 @@ async fn two_linked_processors_write_independent_attributed_series() {
     let second = load_runtime(HashMap::new()).with_identity("wf".to_string(), "second".to_string());
 
     let mut first_data = seeded_dataset(&first, 4);
-    first.run_on(&mut first_data).await.expect("first run");
+    first
+        .run_batch(&mut first_data, None)
+        .await
+        .expect("first run");
 
     // `first`'s output becomes `second`'s input: `Ping` has no system, so the
     // batch passes through byte-identical, matching a real link with no
     // re-encoding between two processors.
     let ping_batch = first_data
-        .batch_for("Ping")
+        .batch_named("Ping")
         .expect("first wrote its own Ping component")
         .clone();
     let mut second_data = second.template_dataset();
     second_data
         .append_record_batch("Ping", ping_batch)
         .expect("hand first's output to second");
-    second.run_on(&mut second_data).await.expect("second run");
+    second
+        .run_batch(&mut second_data, None)
+        .await
+        .expect("second run");
 
     let text = TextEncoder::new()
         .encode_to_string(&registry.gather())
@@ -77,12 +83,12 @@ async fn two_linked_processors_write_independent_attributed_series() {
             .collect()
     };
 
-    // The batch histogram must carry both the unattributed total and one
-    // attributed series per processor.
+    // Every sample names its processor: no series carries an unattributed
+    // copy, and each processor has its own.
     let counts = lines_for(&text, "saci_processor_rows_out_total");
     assert!(
-        counts.iter().any(|line| !line.contains("processor=")),
-        "the unattributed series must still exist: {counts:?}"
+        counts.iter().all(|line| line.contains("processor=")),
+        "every sample must carry its processor id: {counts:?}"
     );
     assert!(
         counts
@@ -97,20 +103,15 @@ async fn two_linked_processors_write_independent_attributed_series() {
         "{counts:?}"
     );
 
-    // Each processor's own series must be exactly 4 rows, and the
-    // unattributed total exactly 8: each processor's own number must not be
-    // the process-wide sum.
+    // Each processor's own series is exactly 4 rows, and the sum over the
+    // attribute is 8: each processor's own number is not the process-wide
+    // total.
     let value_of = |line: &str| -> f64 {
         line.rsplit(' ')
             .next()
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or_else(|| panic!("no trailing value in {line}"))
     };
-    let unattributed = counts
-        .iter()
-        .find(|line| !line.contains("processor="))
-        .map(|line| value_of(line))
-        .expect("unattributed series");
     let first_count = counts
         .iter()
         .find(|line| line.contains(r#"processor="first""#))
@@ -121,10 +122,11 @@ async fn two_linked_processors_write_independent_attributed_series() {
         .find(|line| line.contains(r#"processor="second""#))
         .map(|line| value_of(line))
         .expect("second's own series");
+    let total: f64 = counts.iter().map(|line| value_of(line)).sum();
     assert!((first_count - 4.0).abs() < 1e-9, "got {first_count}");
     assert!((second_count - 4.0).abs() < 1e-9, "got {second_count}");
     assert!(
-        (unattributed - 8.0).abs() < 1e-9,
-        "the unattributed total sums both processors, not either one alone: got {unattributed}"
+        (total - 8.0).abs() < 1e-9,
+        "the sum over the attribute is both processors together: got {total}"
     );
 }

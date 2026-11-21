@@ -3,7 +3,7 @@
 //! Soft-skips without Docker; see `common::try_start`. Each test uses its own
 //! topic name so the whole suite can share the one broker.
 
-#![cfg(all(feature = "connector-kafka", feature = "transformer-arrow-ipc"))]
+#![cfg(all(feature = "connector-kafka", feature = "codec-arrow-ipc"))]
 
 #[path = "common/kafka.rs"]
 mod common;
@@ -20,15 +20,15 @@ use rdkafka::error::KafkaError;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
+use saci::codec::ndjson::NdjsonCodec;
 use saci::connector::kafka::{
     KafkaSink, KafkaSinkConfig, KafkaSource, KafkaSourceConfig, TopicProvision,
 };
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::{Source, drain_into_dataset};
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
+use saci::io::Sink;
+use saci::io::{Source, read_all};
 
 const COMPONENT: &str = "TestRow";
 
@@ -51,14 +51,14 @@ const DRAINED_BOUND: Duration = Duration::from_secs(15);
 const LIVE_POLL_MS: u64 = 20_000;
 
 /// The payload format most of these tests use. The factories are handed the
-/// transformer the host resolved; a direct construction like these tests'
+/// codec the host resolved; a direct construction like these tests'
 /// builds it here.
-fn ndjson() -> Arc<dyn Transformer> {
-    Arc::new(NdjsonTransformer::default())
+fn ndjson() -> Arc<dyn Codec> {
+    Arc::new(NdjsonCodec::default())
 }
 
-fn arrow_ipc() -> Arc<dyn Transformer> {
-    Arc::new(ArrowIpcTransformer::new())
+fn arrow_ipc() -> Arc<dyn Codec> {
+    Arc::new(ArrowIpcCodec::new())
 }
 
 fn schema() -> Arc<Schema> {
@@ -112,7 +112,7 @@ fn source_cfg(brokers: &str, topic: &str, group_id: &str) -> KafkaSourceConfig {
         brokers: brokers.to_string(),
         topic: topic.to_string(),
         group_id: group_id.to_string(),
-        batch_size: 1000,
+        batch_rows: 1000,
         poll_timeout_ms: 5_000,
         auto_offset_reset: "earliest".to_string(),
         commit_on_drain: true,
@@ -121,7 +121,6 @@ fn source_cfg(brokers: &str, topic: &str, group_id: &str) -> KafkaSourceConfig {
         compacted: false,
         provision: TopicProvision::default(),
         properties: BTreeMap::new(),
-        schema_fields: vec![],
     }
 }
 
@@ -135,7 +134,6 @@ fn sink_cfg(brokers: &str, topic: &str) -> KafkaSinkConfig {
         flush_timeout_ms: 30_000,
         provision: TopicProvision::default(),
         properties: BTreeMap::new(),
-        schema_fields: vec![],
     }
 }
 
@@ -243,12 +241,12 @@ async fn json_roundtrip() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    assert_sample_values(dataset.batch_for(COMPONENT).expect("component present"));
+    assert_sample_values(dataset.batch_named(COMPONENT).expect("component present"));
 }
 
 #[tokio::test]
@@ -277,12 +275,12 @@ async fn arrow_ipc_roundtrip() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    let out = dataset.batch_for(COMPONENT).expect("component present");
+    let out = dataset.batch_named(COMPONENT).expect("component present");
     assert_eq!(out.schema().fields(), schema.fields());
     assert_sample_values(out);
 }
@@ -494,8 +492,10 @@ async fn offsets_commit_between_drains() {
     )
     .expect("source builds");
     let mut first_dataset = Dataset::new();
-    first_dataset.register_raw_component(COMPONENT, schema.clone());
-    let first = drain_into_dataset(&mut first_source, &mut first_dataset, COMPONENT)
+    first_dataset
+        .register_schema(COMPONENT, schema.clone())
+        .unwrap();
+    let first = read_all(&mut first_source, &mut first_dataset, COMPONENT)
         .await
         .expect("first drain");
     assert_eq!(first, 4);
@@ -513,8 +513,8 @@ async fn offsets_commit_between_drains() {
     )
     .expect("source builds");
     let mut second_dataset = Dataset::new();
-    second_dataset.register_raw_component(COMPONENT, schema);
-    let second = drain_into_dataset(&mut second_source, &mut second_dataset, COMPONENT)
+    second_dataset.register_schema(COMPONENT, schema).unwrap();
+    let second = read_all(&mut second_source, &mut second_dataset, COMPONENT)
         .await
         .expect("second drain");
     assert_eq!(
@@ -577,12 +577,12 @@ async fn a_cancelled_window_keeps_the_messages_already_fetched() {
     let topic = kafka.topic("cancel-safe-window");
     let schema = schema();
 
-    // Live rather than `stop_at_end`, and `batch_size` 2: a window this
+    // Live rather than `stop_at_end`, and `batch_rows` 2: a window this
     // source cannot close until a second message arrives is a window that can
     // be cancelled while it holds the first.
     let mut source = KafkaSource::new(
         KafkaSourceConfig {
-            batch_size: 2,
+            batch_rows: 2,
             poll_timeout_ms: LIVE_POLL_MS,
             stop_at_end: false,
             ..source_cfg(kafka.brokers(), &topic, "cancel-safe-window-group")
@@ -604,12 +604,12 @@ async fn a_cancelled_window_keeps_the_messages_already_fetched() {
     .await;
     let first = tokio::time::timeout(DRAINED_BOUND, source.next_batch())
         .await
-        .expect("a window filled to batch_size must not wait on poll_timeout_ms")
+        .expect("a window filled to batch_rows must not wait on poll_timeout_ms")
         .expect("the first poll must not error")
         .expect("a live source blocks until it has rows");
     assert_eq!(ids_of(&first), vec![1, 2]);
 
-    // Half of what `batch_size` asks for, so the window stays open holding
+    // Half of what `batch_rows` asks for, so the window stays open holding
     // row 3 while it waits for a second row.
     produce_wave(
         kafka.brokers(),
@@ -660,7 +660,7 @@ async fn a_cancelled_poll_commits_nothing_it_did_not_hand_over() {
     // over, and still runs the commit every call makes on entry.
     let mut source = KafkaSource::new(
         KafkaSourceConfig {
-            batch_size: 4,
+            batch_rows: 4,
             poll_timeout_ms: LIVE_POLL_MS,
             stop_at_end: false,
             ..source_cfg(kafka.brokers(), &topic, group_id)
@@ -674,7 +674,7 @@ async fn a_cancelled_poll_commits_nothing_it_did_not_hand_over() {
             tokio::time::timeout(Duration::from_secs(5), source.next_batch())
                 .await
                 .is_err(),
-            "a window short of batch_size must still be open after 5 s, \
+            "a window short of batch_rows must still be open after 5 s, \
              or this test cancels nothing"
         );
     }
@@ -691,8 +691,8 @@ async fn a_cancelled_poll_commits_nothing_it_did_not_hand_over() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema);
-    let rows = drain_into_dataset(&mut second, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema).unwrap();
+    let rows = read_all(&mut second, &mut dataset, COMPONENT)
         .await
         .expect("second drain");
     assert_eq!(
@@ -956,7 +956,7 @@ async fn compacted_snapshot_deduplicates_and_applies_tombstones() {
         KafkaSourceConfig {
             key_field: Some("id".to_string()),
             compacted: true,
-            batch_size: 2,
+            batch_rows: 2,
             ..source_cfg(kafka.brokers(), &topic, "compacted-snapshot-group")
         },
         schema.clone(),
@@ -978,7 +978,7 @@ async fn compacted_snapshot_deduplicates_and_applies_tombstones() {
     assert_eq!(
         sizes,
         vec![2, 1],
-        "batch_size 2 chunks three survivors into 2 then 1"
+        "batch_rows 2 chunks three survivors into 2 then 1"
     );
     assert!(
         source.next_batch().await.expect("after eof").is_none(),
@@ -1058,7 +1058,7 @@ async fn compacted_snapshot_orders_survivors_by_partition_then_offset() {
         KafkaSourceConfig {
             key_field: Some("id".to_string()),
             compacted: true,
-            batch_size: 2,
+            batch_rows: 2,
             ..source_cfg(kafka.brokers(), &topic, "compacted-multi-partition-group")
         },
         schema(),
@@ -1070,7 +1070,7 @@ async fn compacted_snapshot_orders_survivors_by_partition_then_offset() {
     assert_eq!(
         sizes,
         vec![2, 2],
-        "batch_size 2 chunks four survivors into 2 then 2"
+        "batch_rows 2 chunks four survivors into 2 then 2"
     );
     // Not sorted before comparing: this is the order `next_batch` actually
     // returned. Partition 0's key, then partition 1's, then partition 2's
@@ -1268,8 +1268,8 @@ async fn a_zero_batch_rows_hint_still_advances_the_source() {
     source.request_batch_rows(0);
 
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(

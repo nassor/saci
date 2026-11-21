@@ -14,7 +14,7 @@
 #![cfg(all(
     feature = "connector-udp",
     feature = "service",
-    feature = "transformer-arrow-ipc",
+    feature = "codec-arrow-ipc",
     feature = "wasm-host"
 ))]
 
@@ -30,19 +30,16 @@ use tokio::net::UdpSocket;
 use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
-use saci::connector::udp::UdpSinkFactory;
-use saci::connector::{ConfigValue, ConnectorContext};
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
+use saci::connector::udp::UdpConnector;
+use saci::connector::{ConfigValue, Connector, ConnectorContext, Rebuild, Role};
 use saci::error::SaciError;
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::registry::{SinkFactory, SourceFactory};
-use saci::service::run_standalone;
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Tick";
 
@@ -56,7 +53,10 @@ fn schema() -> Arc<Schema> {
 
 fn build_pipeline(name: &str) -> Pipeline {
     let mut pipeline = Pipeline::new(name);
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
@@ -73,9 +73,9 @@ fn datagram(values: &[i64]) -> Vec<u8> {
     payload
 }
 
-/// Decode a datagram through the same transformer the config names.
+/// Decode a datagram through the same codec the config names.
 fn decode(payload: &[u8]) -> RecordBatch {
-    let mut decoder = ArrowIpcTransformer::new()
+    let mut decoder = ArrowIpcCodec::new()
         .open_message_decoder(schema())
         .expect("decoder");
     decoder.push(payload).expect("push");
@@ -99,7 +99,7 @@ fn config_path_text(path: &std::path::Path) -> String {
 }
 
 /// A free port for the source's `bind`, reserved on a datagram socket so the
-/// factory can bind one there.
+/// connector can bind one there.
 fn reserved_udp_port() -> u16 {
     let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe bind");
     let port = probe.local_addr().expect("probe addr").port();
@@ -114,25 +114,25 @@ mode "standalone"
 
 node id=1 name="saci-udp-connector" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "udp-connector-test" {{
-    transformer "ipc" format="arrow-ipc"
+    codec "ipc" format="arrow-ipc"
 
-    source "datagrams_in" type="udp" component="{COMPONENT}" transformer="ipc" {{
+    source "datagrams_in" connector="udp" component="{COMPONENT}" codec="ipc" {{
         config {{
             bind "{bind}"
             buffer 8
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
     wasm "relay" name="Relay"
 
-    sink "datagrams_out" type="udp" component="{COMPONENT}" transformer="ipc" {{
+    sink "datagrams_out" connector="udp" component="{COMPONENT}" codec="ipc" {{
         config {{
             connect "{connect}"
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
@@ -140,7 +140,7 @@ workflow "udp-connector-test" {{
     link from="relay" to="datagrams_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -167,35 +167,26 @@ async fn datagrams_pushed_into_the_udp_source_come_back_out_of_the_udp_sink() {
     let bind_addr = format!("127.0.0.1:{}", reserved_udp_port());
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        roundtrip_kdl(
-            &bind_addr,
-            &collector_addr.to_string(),
-            &config_path_text(dir.path()),
-        ),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("relay", Box::new(build_pipeline("udp_connector")))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&roundtrip_kdl(
+        &bind_addr,
+        &collector_addr.to_string(),
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("relay", build_pipeline("udp_connector"))
+        .build(&config)
         .expect("both udp halves resolve through the registry")
         .remove(0);
 
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
-    let runner_config = config.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_standalone(built, &runner_config, runner_cancel, None, None).await
-    });
+    let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
     let stats = local
         .run_until(async move {
-            // The socket is already bound by the factory, so the kernel holds
+            // The socket is already bound by the connector, so the kernel holds
             // these datagrams until the receive loop starts.
             let producer = UdpSocket::bind("127.0.0.1:0").await.expect("producer bind");
             producer
@@ -222,59 +213,43 @@ async fn datagrams_pushed_into_the_udp_source_come_back_out_of_the_udp_sink() {
     assert_eq!(stats.iteration_errors, 0);
 }
 
-fn validation_kdl(run_mode: &str, source_type: &str) -> String {
+fn validation_kdl(run: &str, source_connector: &str) -> String {
     format!(
         r#"
 mode "standalone"
 
 node id=1 data_dir="/tmp/saci-udp-validate"
 
-run_mode {run_mode}
+run {run}
 
 workflow "w" {{
-    source "in" type="{source_type}" component="{COMPONENT}"
-    sink "out" type="udp" component="{COMPONENT}"
+    source "in" connector="{source_connector}" component="{COMPONENT}"
+    sink "out" connector="udp" component="{COMPONENT}"
     link from="in" to="out"
 }}
 "#
     )
 }
 
-fn load_from_text(dir: &tempfile::TempDir, name: &str, text: &str) -> saci::SaciResult<()> {
-    let path = dir.path().join(name);
-    std::fs::write(&path, text).expect("write config");
-    ServiceConfig::load(&path).map(|_| ())
+fn load_from_text(text: &str) -> saci::SaciResult<()> {
+    ServiceConfig::from_kdl(text).map(|_| ())
 }
 
 /// The no-EOF rule reads `source` nodes, so a `udp` sink is legal in every run
 /// mode even though a `udp` source is stream-only.
 #[test]
 fn a_udp_sink_is_accepted_outside_stream_mode() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    for run_mode in [
-        r#"kind="one_shot""#,
-        r#"kind="interval" interval_ms=1000"#,
-        r#"kind="stream""#,
-    ] {
-        load_from_text(
-            &dir,
-            "sink_only.kdl",
-            &validation_kdl(run_mode, "NoopSource"),
-        )
-        .unwrap_or_else(|e| panic!("a udp sink under {run_mode} must validate: {e}"));
+    for run in [r#""once""#, r#""interval" every_ms=1000"#, r#""stream""#] {
+        load_from_text(&validation_kdl(run, "noop"))
+            .unwrap_or_else(|e| panic!("a udp sink under {run} must validate: {e}"));
     }
 }
 
 /// The mirror of the rule above: the source half is still stream-only.
 #[test]
 fn a_udp_source_is_still_rejected_outside_stream_mode() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let err = load_from_text(
-        &dir,
-        "source_one_shot.kdl",
-        &validation_kdl(r#"kind="one_shot""#, "udp"),
-    )
-    .expect_err("a udp source outside stream mode must fail");
+    let err = load_from_text(&validation_kdl(r#""once""#, "udp"))
+        .expect_err("a udp source outside stream mode must fail");
     assert_eq!(err.category(), "configuration", "got: {err}");
     assert!(err.to_string().contains("never reaches EOF"), "got: {err}");
 }
@@ -284,7 +259,7 @@ fn a_udp_source_is_still_rejected_outside_stream_mode() {
 /// A source that never stops producing, one row per poll, so the stream runner
 /// keeps handing the sink work for as long as the test needs.
 ///
-/// It is deliberately not healable (it keeps the factory trait's default
+/// It is deliberately not healable (it keeps the connector trait's default
 /// answer), so the only node this test can heal is the sink.
 struct TickSource {
     next: i64,
@@ -308,14 +283,19 @@ impl Source for TickSource {
     }
 }
 
-struct TickSourceFactory;
+/// The test-only `tick` connector: a source with no sink role.
+struct TickConnector;
 
-impl SourceFactory for TickSourceFactory {
-    fn type_name(&self) -> &'static str {
+impl Connector for TickConnector {
+    fn name(&self) -> &'static str {
         "tick"
     }
 
-    fn build(
+    fn roles(&self) -> &'static [Role] {
+        &[Role::Source]
+    }
+
+    fn source(
         &self,
         _config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -324,26 +304,31 @@ impl SourceFactory for TickSourceFactory {
     }
 }
 
-/// The real [`UdpSinkFactory`] behind a build counter, which is what makes a
-/// rebuild observable from the test.
-struct CountingUdpSinkFactory(Arc<AtomicUsize>);
+/// The real [`UdpConnector`] sink behind a build counter, which is what makes
+/// a rebuild observable from the test. It serves the sink role only, as
+/// `udp-counted`.
+struct CountingUdpConnector(Arc<AtomicUsize>);
 
-impl SinkFactory for CountingUdpSinkFactory {
-    fn type_name(&self) -> &'static str {
+impl Connector for CountingUdpConnector {
+    fn name(&self) -> &'static str {
         "udp-counted"
     }
 
-    fn build(
+    fn roles(&self) -> &'static [Role] {
+        &[Role::Sink]
+    }
+
+    fn sink(
         &self,
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        UdpSinkFactory.build(config, ctx)
+        UdpConnector.sink(config, ctx)
     }
 
-    fn rebuildable(&self, config: &ConfigValue) -> Result<(), &'static str> {
-        UdpSinkFactory.rebuildable(config)
+    fn rebuild(&self, role: Role, config: &ConfigValue) -> Rebuild {
+        UdpConnector.rebuild(role, config)
     }
 }
 
@@ -410,7 +395,7 @@ mode "standalone"
 
 node id=1 name="saci-udp-heal" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 // Only the schedule: no `enabled` key anywhere, so the sink heals under the
 // default policy.
@@ -421,29 +406,29 @@ heal {{
 }}
 
 workflow "udp-heal-test" {{
-    transformer "ipc" format="arrow-ipc"
+    codec "ipc" format="arrow-ipc"
 
-    source "ticks" type="tick" component="{COMPONENT}" {{
+    source "ticks" connector="tick" component="{COMPONENT}" {{
         config {{
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
-    sink "collector" type="udp-counted" component="{COMPONENT}" transformer="ipc" {{
+    sink "collector" connector="udp-counted" component="{COMPONENT}" codec="ipc" {{
         // One attempt: a peer that failed its probe refuses every write, so
         // the failure must reach the heal layer rather than be retried.
         retry max_attempts=1
         config {{
             connect "{connect}"
             probe kind="echo" interval_ms=100 timeout_ms=100 on_failure="refuse"
-            schema_fields "v" type="int64" nullable=#false
+            field "v" type="int64" nullable=#false
         }}
     }}
 
     link from="ticks" to="collector"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -470,29 +455,21 @@ async fn a_udp_sink_whose_peer_stops_echoing_is_rebuilt_and_resumes_once_it_echo
     let mut first = Peer::serve(socket);
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        heal_kdl(&addr.to_string(), &config_path_text(dir.path())),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
+    let config =
+        ServiceConfig::from_kdl(&heal_kdl(&addr.to_string(), &config_path_text(dir.path())))
+            .expect("config loads");
     let sink_builds = Arc::new(AtomicUsize::new(0));
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .register_source(TickSourceFactory)
-        .register_sink(CountingUdpSinkFactory(Arc::clone(&sink_builds)))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .connector(TickConnector)
+        .connector(CountingUdpConnector(Arc::clone(&sink_builds)))
+        .build(&config)
         .expect("the workflow builds")
         .remove(0);
 
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
-    let runner_config = config.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_standalone(built, &runner_config, runner_cancel, None, None).await
-    });
+    let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
     let stats = local
         .run_until(async move {
