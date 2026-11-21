@@ -27,8 +27,8 @@ use arrow_array::{
 };
 use mysql_common::value::Value;
 
-use crate::connector::mariadb::config::{FieldSpec, MariadbFieldType};
 use crate::connector::mariadb::values::{MICROS_PER_DAY, MICROS_PER_SECOND, civil_from_days};
+use crate::connector::schema::{FieldSpec, FieldType};
 
 /// The last year a `date`, `datetime` or `timestamp` column stores.
 const MAX_YEAR: u16 = 9999;
@@ -294,7 +294,7 @@ pub(crate) fn resolve_columns<'a>(
             .ok_or_else(|| {
                 SaciError::generic(format!(
                     "{what}: batch has no column '{}'; the batch schema must match the declared \
-                     schema_fields",
+                     field entries",
                     spec.name
                 ))
             })?
@@ -328,18 +328,18 @@ fn reader_kind<'a>(
     }
 
     Ok(match spec.ty {
-        MariadbFieldType::Boolean => ReaderKind::Boolean(downcast!(BooleanArray)),
-        MariadbFieldType::Int8 => ReaderKind::Int8(downcast!(Int8Array)),
-        MariadbFieldType::Int16 => ReaderKind::Int16(downcast!(Int16Array)),
-        MariadbFieldType::Int32 => ReaderKind::Int32(downcast!(Int32Array)),
-        MariadbFieldType::Int64 => ReaderKind::Int64(downcast!(Int64Array)),
-        MariadbFieldType::UInt8 => ReaderKind::UInt8(downcast!(UInt8Array)),
-        MariadbFieldType::UInt16 => ReaderKind::UInt16(downcast!(UInt16Array)),
-        MariadbFieldType::UInt32 => ReaderKind::UInt32(downcast!(UInt32Array)),
-        MariadbFieldType::UInt64 => ReaderKind::UInt64(downcast!(UInt64Array)),
-        MariadbFieldType::Float32 => ReaderKind::Float32(downcast!(Float32Array)),
-        MariadbFieldType::Float64 => ReaderKind::Float64(downcast!(Float64Array)),
-        MariadbFieldType::Decimal128 => {
+        FieldType::Boolean => ReaderKind::Boolean(downcast!(BooleanArray)),
+        FieldType::Int8 => ReaderKind::Int8(downcast!(Int8Array)),
+        FieldType::Int16 => ReaderKind::Int16(downcast!(Int16Array)),
+        FieldType::Int32 => ReaderKind::Int32(downcast!(Int32Array)),
+        FieldType::Int64 => ReaderKind::Int64(downcast!(Int64Array)),
+        FieldType::UInt8 => ReaderKind::UInt8(downcast!(UInt8Array)),
+        FieldType::UInt16 => ReaderKind::UInt16(downcast!(UInt16Array)),
+        FieldType::UInt32 => ReaderKind::UInt32(downcast!(UInt32Array)),
+        FieldType::UInt64 => ReaderKind::UInt64(downcast!(UInt64Array)),
+        FieldType::Float32 => ReaderKind::Float32(downcast!(Float32Array)),
+        FieldType::Float64 => ReaderKind::Float64(downcast!(Float64Array)),
+        FieldType::Decimal128 => {
             let decimal = downcast!(Decimal128Array);
             let (_, declared) = spec.decimal_params()?;
             if decimal.scale() != declared {
@@ -352,14 +352,18 @@ fn reader_kind<'a>(
             }
             ReaderKind::Decimal128(decimal, declared)
         }
-        MariadbFieldType::Utf8 | MariadbFieldType::Json => ReaderKind::Utf8(downcast!(StringArray)),
-        MariadbFieldType::Binary => ReaderKind::Binary(downcast!(BinaryArray)),
-        MariadbFieldType::Date32 => ReaderKind::Date32(downcast!(Date32Array)),
-        MariadbFieldType::Time64Micros => {
-            ReaderKind::Time64Micros(downcast!(Time64MicrosecondArray))
-        }
-        MariadbFieldType::TimestampMicros | MariadbFieldType::TimestampMicrosUtc => {
+        FieldType::Utf8 | FieldType::Json => ReaderKind::Utf8(downcast!(StringArray)),
+        FieldType::Binary => ReaderKind::Binary(downcast!(BinaryArray)),
+        FieldType::Date32 => ReaderKind::Date32(downcast!(Date32Array)),
+        FieldType::Time64Micros => ReaderKind::Time64Micros(downcast!(Time64MicrosecondArray)),
+        FieldType::TimestampMicros | FieldType::TimestampMicrosUtc => {
             ReaderKind::TimestampMicros(downcast!(TimestampMicrosecondArray))
+        }
+        other => {
+            return Err(SaciError::configuration(format!(
+                "{what}: column '{}' has type \"{other}\", which this connector does not map",
+                spec.name
+            )));
         }
     })
 }
@@ -404,14 +408,15 @@ mod tests {
 
     const WHAT: &str = "MariadbSink";
 
-    fn spec(name: &str, ty: MariadbFieldType) -> FieldSpec {
+    fn spec(name: &str, ty: FieldType) -> FieldSpec {
         FieldSpec {
             name: name.to_string(),
             ty,
             nullable: true,
             precision: None,
             scale: None,
-            mariadb_type: None,
+            item: None,
+            native_type: None,
         }
     }
 
@@ -419,7 +424,7 @@ mod tests {
         FieldSpec {
             precision: Some(precision),
             scale: Some(scale),
-            ..spec(name, MariadbFieldType::Decimal128)
+            ..spec(name, FieldType::Decimal128)
         }
     }
 
@@ -455,7 +460,7 @@ mod tests {
     fn a_boolean_is_zero_or_one() {
         let array = BooleanArray::from(vec![Some(true), Some(false), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Boolean), Arc::new(array)),
+            encode(&spec("c", FieldType::Boolean), Arc::new(array)),
             vec![Value::Int(1), Value::Int(0), Value::NULL]
         );
     }
@@ -464,17 +469,17 @@ mod tests {
     fn signed_integers_keep_their_extremes() {
         let array = Int8Array::from(vec![Some(i8::MIN), Some(i8::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Int8), Arc::new(array)),
+            encode(&spec("c", FieldType::Int8), Arc::new(array)),
             vec![Value::Int(-128), Value::Int(127), Value::NULL]
         );
         let array = Int16Array::from(vec![Some(i16::MIN), Some(i16::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Int16), Arc::new(array)),
+            encode(&spec("c", FieldType::Int16), Arc::new(array)),
             vec![Value::Int(-32_768), Value::Int(32_767), Value::NULL]
         );
         let array = Int32Array::from(vec![Some(i32::MIN), Some(i32::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Int32), Arc::new(array)),
+            encode(&spec("c", FieldType::Int32), Arc::new(array)),
             vec![
                 Value::Int(i64::from(i32::MIN)),
                 Value::Int(i64::from(i32::MAX)),
@@ -483,7 +488,7 @@ mod tests {
         );
         let array = Int64Array::from(vec![Some(i64::MIN), Some(i64::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Int64), Arc::new(array)),
+            encode(&spec("c", FieldType::Int64), Arc::new(array)),
             vec![Value::Int(i64::MIN), Value::Int(i64::MAX), Value::NULL]
         );
     }
@@ -492,22 +497,22 @@ mod tests {
     fn unsigned_integers_keep_their_extremes() {
         let array = UInt8Array::from(vec![Some(0), Some(u8::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::UInt8), Arc::new(array)),
+            encode(&spec("c", FieldType::UInt8), Arc::new(array)),
             vec![Value::UInt(0), Value::UInt(255), Value::NULL]
         );
         let array = UInt16Array::from(vec![Some(0), Some(u16::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::UInt16), Arc::new(array)),
+            encode(&spec("c", FieldType::UInt16), Arc::new(array)),
             vec![Value::UInt(0), Value::UInt(65_535), Value::NULL]
         );
         let array = UInt32Array::from(vec![Some(0), Some(u32::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::UInt32), Arc::new(array)),
+            encode(&spec("c", FieldType::UInt32), Arc::new(array)),
             vec![Value::UInt(0), Value::UInt(4_294_967_295), Value::NULL]
         );
         let array = UInt64Array::from(vec![Some(0), Some(u64::MAX), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::UInt64), Arc::new(array)),
+            encode(&spec("c", FieldType::UInt64), Arc::new(array)),
             vec![Value::UInt(0), Value::UInt(u64::MAX), Value::NULL]
         );
     }
@@ -516,7 +521,7 @@ mod tests {
     fn a_float32_is_bound_as_a_float() {
         let array = Float32Array::from(vec![Some(1.5_f32), Some(-0.0), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Float32), Arc::new(array)),
+            encode(&spec("c", FieldType::Float32), Arc::new(array)),
             vec![Value::Float(1.5), Value::Float(-0.0), Value::NULL]
         );
     }
@@ -525,7 +530,7 @@ mod tests {
     fn a_float64_is_bound_as_a_double() {
         let array = Float64Array::from(vec![Some(f64::MAX), Some(f64::MIN_POSITIVE), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Float64), Arc::new(array)),
+            encode(&spec("c", FieldType::Float64), Arc::new(array)),
             vec![
                 Value::Double(f64::MAX),
                 Value::Double(f64::MIN_POSITIVE),
@@ -536,7 +541,7 @@ mod tests {
 
     #[test]
     fn a_float32_that_is_not_finite_is_refused() {
-        let spec = spec("c", MariadbFieldType::Float32);
+        let spec = spec("c", FieldType::Float32);
         let array: ArrayRef = Arc::new(Float32Array::from(vec![
             1.0,
             f32::NAN,
@@ -559,7 +564,7 @@ mod tests {
 
     #[test]
     fn a_float64_that_is_not_finite_is_refused() {
-        let spec = spec("c", MariadbFieldType::Float64);
+        let spec = spec("c", FieldType::Float64);
         let array: ArrayRef = Arc::new(Float64Array::from(vec![
             f64::NAN,
             f64::INFINITY,
@@ -583,7 +588,7 @@ mod tests {
     fn a_null_float_slot_is_not_checked_for_finiteness() {
         let array = Float64Array::from(vec![None, Some(2.0)]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Float64), Arc::new(array)),
+            encode(&spec("c", FieldType::Float64), Arc::new(array)),
             vec![Value::NULL, Value::Double(2.0)]
         );
     }
@@ -664,7 +669,7 @@ mod tests {
     fn a_text_column_is_bound_as_its_utf8_bytes() {
         let array = StringArray::from(vec![Some("héllo"), Some(""), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Utf8), Arc::new(array)),
+            encode(&spec("c", FieldType::Utf8), Arc::new(array)),
             vec![
                 Value::Bytes("héllo".as_bytes().to_vec()),
                 Value::Bytes(Vec::new()),
@@ -677,7 +682,7 @@ mod tests {
     fn a_json_column_is_bound_as_its_document_text() {
         let array = StringArray::from(vec![Some(r#"{"a":[1,2]}"#), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Json), Arc::new(array)),
+            encode(&spec("c", FieldType::Json), Arc::new(array)),
             vec![Value::Bytes(br#"{"a":[1,2]}"#.to_vec()), Value::NULL]
         );
     }
@@ -686,7 +691,7 @@ mod tests {
     fn a_binary_column_is_bound_as_its_bytes() {
         let array = BinaryArray::from(vec![Some(&[0_u8, 255, 7][..]), Some(&[][..]), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Binary), Arc::new(array)),
+            encode(&spec("c", FieldType::Binary), Arc::new(array)),
             vec![
                 Value::Bytes(vec![0, 255, 7]),
                 Value::Bytes(Vec::new()),
@@ -699,7 +704,7 @@ mod tests {
     fn a_date_at_the_unix_epoch_is_1970_01_01() {
         let array = Date32Array::from(vec![Some(0), Some(19_000), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Date32), Arc::new(array)),
+            encode(&spec("c", FieldType::Date32), Arc::new(array)),
             vec![
                 Value::Date(1970, 1, 1, 0, 0, 0, 0),
                 Value::Date(2022, 1, 8, 0, 0, 0, 0),
@@ -712,7 +717,7 @@ mod tests {
     fn the_first_day_of_year_zero_is_accepted() {
         let array = Date32Array::from(vec![-719_528]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Date32), Arc::new(array)),
+            encode(&spec("c", FieldType::Date32), Arc::new(array)),
             vec![Value::Date(0, 1, 1, 0, 0, 0, 0)]
         );
     }
@@ -721,7 +726,7 @@ mod tests {
     fn the_last_day_of_year_9999_is_accepted() {
         let array = Date32Array::from(vec![2_932_896]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Date32), Arc::new(array)),
+            encode(&spec("c", FieldType::Date32), Arc::new(array)),
             vec![Value::Date(9999, 12, 31, 0, 0, 0, 0)]
         );
     }
@@ -730,7 +735,7 @@ mod tests {
     fn a_date_in_year_10000_is_refused() {
         let array: ArrayRef = Arc::new(Date32Array::from(vec![0, 2_932_897]));
         assert_eq!(
-            refusal(&spec("c", MariadbFieldType::Date32), array, 1),
+            refusal(&spec("c", FieldType::Date32), array, 1),
             "MariadbSink: column 'c' row 1: date 2932897 is outside the years 0000 to 9999 the \
              servers store"
         );
@@ -740,7 +745,7 @@ mod tests {
     fn a_date_before_year_zero_is_refused() {
         let array: ArrayRef = Arc::new(Date32Array::from(vec![-719_529]));
         assert_eq!(
-            refusal(&spec("c", MariadbFieldType::Date32), array, 0),
+            refusal(&spec("c", FieldType::Date32), array, 0),
             "MariadbSink: column 'c' row 0: date -719529 is outside the years 0000 to 9999 the \
              servers store"
         );
@@ -750,7 +755,7 @@ mod tests {
     fn midnight_is_a_time_of_zero() {
         let array = Time64MicrosecondArray::from(vec![Some(0), None]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Time64Micros), Arc::new(array)),
+            encode(&spec("c", FieldType::Time64Micros), Arc::new(array)),
             vec![Value::Time(false, 0, 0, 0, 0, 0), Value::NULL]
         );
     }
@@ -759,7 +764,7 @@ mod tests {
     fn the_last_microsecond_of_a_day_is_accepted() {
         let array = Time64MicrosecondArray::from(vec![MICROS_PER_DAY - 1]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Time64Micros), Arc::new(array)),
+            encode(&spec("c", FieldType::Time64Micros), Arc::new(array)),
             vec![Value::Time(false, 0, 23, 59, 59, 999_999)]
         );
     }
@@ -769,7 +774,7 @@ mod tests {
         let micros = 13 * MICROS_PER_HOUR + 5 * MICROS_PER_MINUTE + 9 * MICROS_PER_SECOND + 42;
         let array = Time64MicrosecondArray::from(vec![micros]);
         assert_eq!(
-            encode(&spec("c", MariadbFieldType::Time64Micros), Arc::new(array)),
+            encode(&spec("c", FieldType::Time64Micros), Arc::new(array)),
             vec![Value::Time(false, 0, 13, 5, 9, 42)]
         );
     }
@@ -778,7 +783,7 @@ mod tests {
     fn a_negative_time_is_refused() {
         let array: ArrayRef = Arc::new(Time64MicrosecondArray::from(vec![-1]));
         assert_eq!(
-            refusal(&spec("c", MariadbFieldType::Time64Micros), array, 0),
+            refusal(&spec("c", FieldType::Time64Micros), array, 0),
             "MariadbSink: column 'c' row 0: time -1 is outside a time of day"
         );
     }
@@ -787,7 +792,7 @@ mod tests {
     fn a_time_of_twenty_four_hours_is_refused() {
         let array: ArrayRef = Arc::new(Time64MicrosecondArray::from(vec![MICROS_PER_DAY]));
         assert_eq!(
-            refusal(&spec("c", MariadbFieldType::Time64Micros), array, 0),
+            refusal(&spec("c", FieldType::Time64Micros), array, 0),
             "MariadbSink: column 'c' row 0: time 86400000000 is outside a time of day"
         );
     }
@@ -796,10 +801,7 @@ mod tests {
     fn a_timestamp_at_the_unix_epoch_is_1970_01_01_midnight() {
         let array = TimestampMicrosecondArray::from(vec![Some(0), None]);
         assert_eq!(
-            encode(
-                &spec("c", MariadbFieldType::TimestampMicros),
-                Arc::new(array)
-            ),
+            encode(&spec("c", FieldType::TimestampMicros), Arc::new(array)),
             vec![Value::Date(1970, 1, 1, 0, 0, 0, 0), Value::NULL]
         );
     }
@@ -810,10 +812,7 @@ mod tests {
         let micros = 1_709_618_828_000_009_i64;
         let array = TimestampMicrosecondArray::from(vec![micros]);
         assert_eq!(
-            encode(
-                &spec("c", MariadbFieldType::TimestampMicros),
-                Arc::new(array)
-            ),
+            encode(&spec("c", FieldType::TimestampMicros), Arc::new(array)),
             vec![Value::Date(2024, 3, 5, 6, 7, 8, 9)]
         );
     }
@@ -822,10 +821,7 @@ mod tests {
     fn a_timestamp_one_microsecond_before_the_epoch_is_the_last_instant_of_1969() {
         let array = TimestampMicrosecondArray::from(vec![-1]);
         assert_eq!(
-            encode(
-                &spec("c", MariadbFieldType::TimestampMicros),
-                Arc::new(array)
-            ),
+            encode(&spec("c", FieldType::TimestampMicros), Arc::new(array)),
             vec![Value::Date(1969, 12, 31, 23, 59, 59, 999_999)]
         );
     }
@@ -834,10 +830,7 @@ mod tests {
     fn a_timestamp_one_day_before_the_epoch_is_1969_12_31_midnight() {
         let array = TimestampMicrosecondArray::from(vec![-MICROS_PER_DAY]);
         assert_eq!(
-            encode(
-                &spec("c", MariadbFieldType::TimestampMicros),
-                Arc::new(array)
-            ),
+            encode(&spec("c", FieldType::TimestampMicros), Arc::new(array)),
             vec![Value::Date(1969, 12, 31, 0, 0, 0, 0)]
         );
     }
@@ -847,16 +840,10 @@ mod tests {
         let micros = 1_709_618_828_000_009_i64;
         let plain = TimestampMicrosecondArray::from(vec![micros]);
         let zoned = TimestampMicrosecondArray::from(vec![micros]).with_timezone("Asia/Tokyo");
-        let utc = encode(
-            &spec("c", MariadbFieldType::TimestampMicrosUtc),
-            Arc::new(zoned),
-        );
+        let utc = encode(&spec("c", FieldType::TimestampMicrosUtc), Arc::new(zoned));
         assert_eq!(
             utc,
-            encode(
-                &spec("c", MariadbFieldType::TimestampMicros),
-                Arc::new(plain)
-            )
+            encode(&spec("c", FieldType::TimestampMicros), Arc::new(plain))
         );
         assert_eq!(utc, vec![Value::Date(2024, 3, 5, 6, 7, 8, 9)]);
     }
@@ -867,7 +854,7 @@ mod tests {
             2_932_897 * MICROS_PER_DAY,
         ]));
         assert_eq!(
-            refusal(&spec("c", MariadbFieldType::TimestampMicros), array, 0),
+            refusal(&spec("c", FieldType::TimestampMicros), array, 0),
             "MariadbSink: column 'c' row 0: date 2932897 is outside the years 0000 to 9999 the \
              servers store"
         );
@@ -877,7 +864,7 @@ mod tests {
     fn the_smallest_timestamp_is_refused_without_overflow() {
         let array: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![i64::MIN]));
         assert!(
-            refusal(&spec("c", MariadbFieldType::TimestampMicros), array, 0)
+            refusal(&spec("c", FieldType::TimestampMicros), array, 0)
                 .contains("is outside the years 0000 to 9999")
         );
     }
@@ -886,9 +873,9 @@ mod tests {
     fn a_missing_column_is_refused_with_a_hint_at_the_schema() {
         let batch = one_column("other", Arc::new(Int64Array::from(vec![1])));
         assert_eq!(
-            resolve_refusal(&spec("c", MariadbFieldType::Int64), &batch),
+            resolve_refusal(&spec("c", FieldType::Int64), &batch),
             "MariadbSink: batch has no column 'c'; the batch schema must match the declared \
-             schema_fields"
+             field entries"
         );
     }
 
@@ -896,7 +883,7 @@ mod tests {
     fn a_column_of_another_arrow_type_is_refused() {
         let batch = one_column("c", Arc::new(Int32Array::from(vec![1])));
         assert_eq!(
-            resolve_refusal(&spec("c", MariadbFieldType::Int64), &batch),
+            resolve_refusal(&spec("c", FieldType::Int64), &batch),
             "MariadbSink: column 'c' is declared type \"int64\" but the batch holds Int32"
         );
     }
@@ -905,7 +892,7 @@ mod tests {
     fn a_json_column_over_a_binary_array_is_refused() {
         let batch = one_column("c", Arc::new(BinaryArray::from(vec![&b"{}"[..]])));
         assert!(
-            resolve_refusal(&spec("c", MariadbFieldType::Json), &batch)
+            resolve_refusal(&spec("c", FieldType::Json), &batch)
                 .contains("declared type \"json\" but the batch holds Binary")
         );
     }
@@ -929,7 +916,7 @@ mod tests {
             .with_precision_and_scale(18, 2)
             .expect("decimal");
         let batch = one_column("c", Arc::new(array));
-        let bare = spec("c", MariadbFieldType::Decimal128);
+        let bare = spec("c", FieldType::Decimal128);
         assert!(
             resolve_refusal(&bare, &batch).contains("requires 'precision'"),
             "a declaration without precision and scale names the missing key"
@@ -950,8 +937,8 @@ mod tests {
             ],
         )
         .expect("batch");
-        let a = spec("a", MariadbFieldType::Int64);
-        let b = spec("b", MariadbFieldType::Utf8);
+        let a = spec("a", FieldType::Int64);
+        let b = spec("b", FieldType::Utf8);
         let readers = resolve_columns(WHAT, &batch, &[&b, &a]).expect("resolve");
         assert_eq!(
             readers[0].value(0).expect("value"),
@@ -978,8 +965,8 @@ mod tests {
     #[test]
     fn row_values_appends_and_leaves_earlier_content_untouched() {
         let batch = two_column_batch();
-        let id = spec("id", MariadbFieldType::Int64);
-        let name = spec("name", MariadbFieldType::Utf8);
+        let id = spec("id", FieldType::Int64);
+        let name = spec("name", FieldType::Utf8);
         let readers = resolve_columns(WHAT, &batch, &[&id, &name]).expect("resolve");
 
         let mut out = Vec::new();
@@ -1012,8 +999,8 @@ mod tests {
             ],
         )
         .expect("batch");
-        let id = spec("id", MariadbFieldType::Int64);
-        let x = spec("x", MariadbFieldType::Float64);
+        let id = spec("id", FieldType::Int64);
+        let x = spec("x", FieldType::Float64);
         let readers = resolve_columns(WHAT, &batch, &[&id, &x]).expect("resolve");
 
         let mut out = Vec::new();

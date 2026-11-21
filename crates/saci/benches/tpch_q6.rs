@@ -44,7 +44,7 @@ use saci::SaciError;
 use saci::component::Component;
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
-use saci::system::{ParallelSystem, ResourceUpdate, SliceWriteSet, System, SystemMeta, WriteSet};
+use saci::system::{ParallelSystem, SliceWriteSet, System, SystemMeta, WriteSet};
 use serde::{Deserialize, Serialize};
 
 mod support;
@@ -373,19 +373,16 @@ struct FilterStage {
 impl ParallelSystem for FilterStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("q6_filter")
-            .read(self.component, "l_shipdate")
-            .read(self.component, "l_discount")
-            .read(self.component, "l_quantity")
-            .write_resource::<FilterMask>()
+            .reads_named(self.component, "l_shipdate")
+            .reads_named(self.component, "l_discount")
+            .reads_named(self.component, "l_quantity")
+            .writes_resource::<FilterMask>()
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for(self.component)
-            .ok_or_else(|| SaciError::generic("lineitem component not found"))?;
+        let batch = pipeline.batch_named(self.component)?;
         let mask = compute_filter_mask(batch)?;
-        let update = ResourceUpdate::new(FilterMask(Arc::new(mask)));
-        Ok(WriteSet::new().with_resource(update))
+        Ok(WriteSet::new().with_resource(FilterMask(Arc::new(mask))))
     }
 }
 
@@ -481,16 +478,14 @@ struct ComputeStage {
 impl ParallelSystem for ComputeStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("q6_compute")
-            .read(self.component, "l_extendedprice")
-            .read(self.component, "l_discount")
-            .read_resource::<FilterMask>()
-            .write("Revenue", "piece")
+            .reads_named(self.component, "l_extendedprice")
+            .reads_named(self.component, "l_discount")
+            .reads_resource::<FilterMask>()
+            .writes_named("Revenue", "piece")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let batch = pipeline
-            .batch_for(self.component)
-            .ok_or_else(|| SaciError::generic("lineitem component not found"))?;
+        let batch = pipeline.batch_named(self.component)?;
         let price_arr = batch
             .column_by_name("l_extendedprice")
             .ok_or_else(|| SaciError::generic("l_extendedprice not found"))?
@@ -511,23 +506,31 @@ impl ParallelSystem for ComputeStage {
             .map(|(p, d)| p * d)
             .collect();
 
-        Ok(WriteSet::new().put("Revenue", "piece", Arc::new(Float64Array::from(pieces))))
+        Ok(WriteSet::new().put_named("Revenue", "piece", Arc::new(Float64Array::from(pieces))))
+    }
+
+    fn sliced(&self) -> bool {
+        true
     }
 
     fn run_slice(
         &self,
         pipeline: &Dataset,
         rows: std::ops::Range<u32>,
-    ) -> Option<Result<SliceWriteSet, SaciError>> {
-        let batch = pipeline.batch_for(self.component)?;
+    ) -> Result<SliceWriteSet, SaciError> {
+        let batch = pipeline.batch_named(self.component)?;
         let price_arr = batch
-            .column_by_name("l_extendedprice")?
+            .column_by_name("l_extendedprice")
+            .ok_or_else(|| SaciError::generic("l_extendedprice not found"))?
             .as_any()
-            .downcast_ref::<Float64Array>()?;
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SaciError::generic("l_extendedprice wrong type"))?;
         let disc_arr = batch
-            .column_by_name("l_discount")?
+            .column_by_name("l_discount")
+            .ok_or_else(|| SaciError::generic("l_discount not found"))?
             .as_any()
-            .downcast_ref::<Float64Array>()?;
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SaciError::generic("l_discount wrong type"))?;
         let start = rows.start as usize;
         let len = (rows.end - rows.start) as usize;
         let price_slice = price_arr.slice(start, len);
@@ -541,7 +544,7 @@ impl ParallelSystem for ComputeStage {
             .map(|(p, d)| p * d)
             .collect();
         let arr: Arc<dyn arrow_array::Array> = Arc::new(Float64Array::from(pieces));
-        Some(Ok(SliceWriteSet::new(rows).put("Revenue", "piece", arr)))
+        Ok(SliceWriteSet::new(rows).put_named("Revenue", "piece", arr))
     }
 }
 
@@ -592,21 +595,15 @@ struct AggregateStage;
 impl System for AggregateStage {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("q6_aggregate")
-            .read("Revenue", "piece")
-            .read_resource::<FilterMask>()
-            .write_resource::<Q6Revenue>()
+            .reads_named("Revenue", "piece")
+            .reads_resource::<FilterMask>()
+            .writes_resource::<Q6Revenue>()
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let mask_arr = pipeline
-            .get_resource::<FilterMask>()
-            .ok_or_else(|| SaciError::generic("FilterMask not found"))?
-            .0
-            .clone();
+        let mask_arr = pipeline.resource::<FilterMask>()?.0.clone();
 
-        let rev_batch = pipeline
-            .batch_for("Revenue")
-            .ok_or_else(|| SaciError::generic("Revenue not found"))?;
+        let rev_batch = pipeline.batch_named("Revenue")?;
         let piece_arr = rev_batch
             .column_by_name("piece")
             .ok_or_else(|| SaciError::generic("piece not found"))?
@@ -633,8 +630,8 @@ impl System for AggregateStage {
 
 fn build_narrow_pipeline(batch: &RecordBatch) -> Dataset {
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<Lineitem>().unwrap();
-    pipeline.register_component::<Revenue>().unwrap();
+    pipeline.register::<Lineitem>().unwrap();
+    pipeline.register::<Revenue>().unwrap();
     pipeline
         .append_record_batch("Lineitem", batch.clone())
         .unwrap();
@@ -650,8 +647,10 @@ fn build_narrow_pipeline(batch: &RecordBatch) -> Dataset {
 
 fn build_wide_pipeline(wide_batch: &RecordBatch) -> Dataset {
     let mut pipeline = Dataset::new();
-    pipeline.register_raw_component("WideLineitem", wide_lineitem_schema());
-    pipeline.register_component::<Revenue>().unwrap();
+    pipeline
+        .register_schema("WideLineitem", wide_lineitem_schema())
+        .unwrap();
+    pipeline.register::<Revenue>().unwrap();
     pipeline
         .append_record_batch("WideLineitem", wide_batch.clone())
         .unwrap();
@@ -705,35 +704,35 @@ fn bench_q6(c: &mut Criterion) {
         let scalar_narrow = scalar_q6_narrow(&narrow_batch);
         let scalar_wide = scalar_q6_wide(&wide_batch);
 
-        let mut wl_n = Pipeline::new("q6_narrow_check");
-        wl_n.data = build_narrow_pipeline(&narrow_batch);
-        wl_n.add_parallel_system(FilterStage {
-            component: "Lineitem",
-        });
-        wl_n.add_parallel_system(ComputeStage {
-            component: "Lineitem",
-        });
-        wl_n.add_system(AggregateStage);
+        let mut wl_n = Pipeline::new("q6_narrow_check")
+            .parallel_system(FilterStage {
+                component: "Lineitem",
+            })
+            .parallel_system(ComputeStage {
+                component: "Lineitem",
+            })
+            .system(AggregateStage);
+        *wl_n.data_mut() = build_narrow_pipeline(&narrow_batch);
         rt.block_on(wl_n.run()).unwrap();
         let arrow_narrow = wl_n
-            .data
+            .data()
             .get_resource::<Q6Revenue>()
             .map(|r| r.0)
             .unwrap_or(0.0);
         assert_revenue_close("narrow", scalar_narrow, arrow_narrow);
 
-        let mut wl_w = Pipeline::new("q6_wide_check");
-        wl_w.data = build_wide_pipeline(&wide_batch);
-        wl_w.add_parallel_system(FilterStage {
-            component: "WideLineitem",
-        });
-        wl_w.add_parallel_system(ComputeStage {
-            component: "WideLineitem",
-        });
-        wl_w.add_system(AggregateStage);
+        let mut wl_w = Pipeline::new("q6_wide_check")
+            .parallel_system(FilterStage {
+                component: "WideLineitem",
+            })
+            .parallel_system(ComputeStage {
+                component: "WideLineitem",
+            })
+            .system(AggregateStage);
+        *wl_w.data_mut() = build_wide_pipeline(&wide_batch);
         rt.block_on(wl_w.run()).unwrap();
         let arrow_wide = wl_w
-            .data
+            .data()
             .get_resource::<Q6Revenue>()
             .map(|r| r.0)
             .unwrap_or(0.0);
@@ -815,7 +814,7 @@ fn bench_q6(c: &mut Criterion) {
                         .run(std::hint::black_box(&ds_clean)),
                     )
                     .unwrap();
-                std::hint::black_box(ws.resource_updates.len())
+                std::hint::black_box(ws.len())
             })
         });
 
@@ -829,7 +828,7 @@ fn bench_q6(c: &mut Criterion) {
                         .run(std::hint::black_box(&ds_clean)),
                     )
                     .unwrap();
-                std::hint::black_box(ws.fields.len())
+                std::hint::black_box(ws.len())
             })
         });
 
@@ -895,18 +894,18 @@ fn bench_q6(c: &mut Criterion) {
 
     group.bench_function("narrow_saci", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("q6_narrow");
-            wl.data = build_narrow_pipeline(std::hint::black_box(&narrow_batch));
-            wl.add_parallel_system(FilterStage {
-                component: "Lineitem",
-            });
-            wl.add_parallel_system(ComputeStage {
-                component: "Lineitem",
-            });
-            wl.add_system(AggregateStage);
+            let mut wl = Pipeline::new("q6_narrow")
+                .parallel_system(FilterStage {
+                    component: "Lineitem",
+                })
+                .parallel_system(ComputeStage {
+                    component: "Lineitem",
+                })
+                .system(AggregateStage);
+            *wl.data_mut() = build_narrow_pipeline(std::hint::black_box(&narrow_batch));
             rt.block_on(wl.run()).unwrap();
             let r = wl
-                .data
+                .data()
                 .get_resource::<Q6Revenue>()
                 .map(|r| r.0)
                 .unwrap_or(0.0);
@@ -923,18 +922,18 @@ fn bench_q6(c: &mut Criterion) {
 
     group.bench_function("wide_saci", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("q6_wide");
-            wl.data = build_wide_pipeline(std::hint::black_box(&wide_batch));
-            wl.add_parallel_system(FilterStage {
-                component: "WideLineitem",
-            });
-            wl.add_parallel_system(ComputeStage {
-                component: "WideLineitem",
-            });
-            wl.add_system(AggregateStage);
+            let mut wl = Pipeline::new("q6_wide")
+                .parallel_system(FilterStage {
+                    component: "WideLineitem",
+                })
+                .parallel_system(ComputeStage {
+                    component: "WideLineitem",
+                })
+                .system(AggregateStage);
+            *wl.data_mut() = build_wide_pipeline(std::hint::black_box(&wide_batch));
             rt.block_on(wl.run()).unwrap();
             let r = wl
-                .data
+                .data()
                 .get_resource::<Q6Revenue>()
                 .map(|r| r.0)
                 .unwrap_or(0.0);

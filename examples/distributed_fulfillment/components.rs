@@ -4,18 +4,14 @@
 //! ones, which start at defaults and are filled stage by stage. `Invoice`
 //! starts empty and gains rows in Stage 3.
 
-use std::sync::Arc;
-
-use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use saci::component::Component;
-use saci::system::FieldRef;
+use saci::Component;
 
 /// A customer order flowing through the fulfillment pipeline. The generator
 /// writes the input fields; each remaining field records the system and stage
 /// that fills it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     /// Unique order ID (UUID string).
     pub id: String,
@@ -47,51 +43,9 @@ pub struct Order {
     pub processing_status: String,
 }
 
-impl Component for Order {
-    fn name() -> &'static str {
-        "Order"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("customer_id", DataType::Utf8, false),
-            Field::new("product_id", DataType::Utf8, false),
-            Field::new("quantity", DataType::Int64, false),
-            Field::new("amount_original", DataType::Float64, false),
-            Field::new("currency", DataType::Utf8, false),
-            Field::new("amount_usd", DataType::Float64, false),
-            Field::new("region", DataType::Utf8, false),
-            Field::new("fraud_score", DataType::Float64, false),
-            Field::new("tax_rate", DataType::Float64, false),
-            Field::new("tax_amount", DataType::Float64, false),
-            Field::new("validation_status", DataType::Utf8, false),
-            Field::new("inventory_status", DataType::Utf8, false),
-            Field::new("processing_status", DataType::Utf8, false),
-        ]))
-    }
-}
-
-impl Order {
-    pub const ID: FieldRef<Order> = FieldRef::new("id");
-    pub const CUSTOMER_ID: FieldRef<Order> = FieldRef::new("customer_id");
-    pub const PRODUCT_ID: FieldRef<Order> = FieldRef::new("product_id");
-    pub const QUANTITY: FieldRef<Order> = FieldRef::new("quantity");
-    pub const AMOUNT_ORIGINAL: FieldRef<Order> = FieldRef::new("amount_original");
-    pub const CURRENCY: FieldRef<Order> = FieldRef::new("currency");
-    pub const AMOUNT_USD: FieldRef<Order> = FieldRef::new("amount_usd");
-    pub const REGION: FieldRef<Order> = FieldRef::new("region");
-    pub const FRAUD_SCORE: FieldRef<Order> = FieldRef::new("fraud_score");
-    pub const TAX_RATE: FieldRef<Order> = FieldRef::new("tax_rate");
-    pub const TAX_AMOUNT: FieldRef<Order> = FieldRef::new("tax_amount");
-    pub const VALIDATION_STATUS: FieldRef<Order> = FieldRef::new("validation_status");
-    pub const INVENTORY_STATUS: FieldRef<Order> = FieldRef::new("inventory_status");
-    pub const PROCESSING_STATUS: FieldRef<Order> = FieldRef::new("processing_status");
-}
-
 /// A generated invoice. `GenerateInvoiceSystem` appends one row per order in
 /// Stage 3; rejected orders get `status = "skipped"`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
     /// Matches the originating `Order.id`.
     pub order_id: String,
@@ -107,22 +61,4 @@ pub struct Invoice {
     pub issued_at: String,
     /// "issued" (approved orders) | "skipped" (rejected orders).
     pub status: String,
-}
-
-impl Component for Invoice {
-    fn name() -> &'static str {
-        "Invoice"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("order_id", DataType::Utf8, false),
-            Field::new("subtotal", DataType::Float64, false),
-            Field::new("tax_rate", DataType::Float64, false),
-            Field::new("tax_amount", DataType::Float64, false),
-            Field::new("total", DataType::Float64, false),
-            Field::new("issued_at", DataType::Utf8, false),
-            Field::new("status", DataType::Utf8, false),
-        ]))
-    }
 }

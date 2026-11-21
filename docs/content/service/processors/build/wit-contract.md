@@ -148,7 +148,7 @@ record pipeline-descriptor {
 Do not hand-roll this by copying another schema's value. Derive the
 fingerprint from the declared row type at build or init time, using the FNV-1a
 algorithm specified in [The wire format](@/library/reference/wire-format.md).
-Rust's `saci::processor` SDK computes it automatically from `#[derive(Component)]`.
+Rust's `#[processor]` reports it automatically from the components the pipeline registers.
 
 ### run-metrics and run-result
 
@@ -184,16 +184,16 @@ The host reads all four fields of a `run-result`. Fill the `run-metrics` record 
 because those five numbers are what an operator sees for this node. Anything the record has no
 field for goes through `host-io::metric`, under whatever name you pass.
 
-`routes` is the routing channel. A pipeline routes its output by inserting a
-`RouteDecision` resource into the batch dataset before the systems finish:
+`routes` is the routing channel. A pipeline routes its output by inserting an
+`sdk::RouteDecision` resource into the batch dataset before the systems finish:
 
 ```rust,name=Routing a batch to one branch
-data.insert_resource(RouteDecision(vec!["high".to_string()]));
+data.insert_resource(sdk::RouteDecision::to(["high"]));
 ```
 
-The host reads it after the systems run and delivers the output only to the
-links whose `branch` names one of those values. Absent, the host multicasts to
-every downstream link.
+`sdk::RouteDecision::none()` delivers to no branch. The host reads the decision after the
+systems run and delivers the output only to the links whose `branch` names one of its
+values. Absent, the host multicasts to every downstream link.
 
 ### run-error
 

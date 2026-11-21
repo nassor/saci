@@ -1,4 +1,4 @@
-//! The MariaDB and MySQL source and sink factories.
+//! The MariaDB and MySQL [`Connector`].
 //!
 //! Both deserialise the whole `config` sub-table with serde rather than reading
 //! [`ConfigValue`] keys by hand: the connector's configuration is dozens of fields
@@ -12,28 +12,34 @@
 
 use serde::Deserialize;
 
-use crate::connector::{ConfigValue, ConnectorContext, SinkFactory, SourceFactory};
+use crate::connector::{ConfigValue, Connector, ConnectorContext, Rebuild, Role};
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::io::source::Source;
+use crate::io::{Sink, Source};
 
 use crate::connector::mariadb::{
     MariadbSink, MariadbSinkConfig, MariadbSource, MariadbSourceConfig,
 };
 
-/// Factory for [`MariadbSource`].
+/// Connector for MariaDB and MySQL, named `mariadb`: builds [`MariadbSource`]
+/// and [`MariadbSink`].
 ///
-/// The `config` table is [`MariadbSourceConfig`]: a `name`, a `connection`
-/// table, a `mode` table tagged by `kind` (`polling`, `cdc_trigger` or
-/// `cdc_binlog`), and a `schema_fields` array declaring the Arrow schema.
-pub struct MariadbSourceFactory;
+/// A `source` node's `config` table is [`MariadbSourceConfig`]: a `name`, a
+/// `connection` table, a `mode` table tagged by `kind` (`polling`,
+/// `cdc_trigger` or `cdc_binlog`), and one or more `field` entries declaring the
+/// Arrow schema.
+///
+/// A `sink` node's `config` table is [`MariadbSinkConfig`]: a `name`, a
+/// `connection` table, the target `table`, one or more `field` entries, and the
+/// `write_mode` (`append`, `upsert`, `ignore_conflicts` or `apply_changes`)
+/// with its conflict columns.
+pub struct MariadbConnector;
 
-impl SourceFactory for MariadbSourceFactory {
-    fn type_name(&self) -> &'static str {
-        "MariadbSource"
+impl Connector for MariadbConnector {
+    fn name(&self) -> &'static str {
+        super::NAME
     }
 
-    fn build(
+    fn source(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -45,27 +51,7 @@ impl SourceFactory for MariadbSourceFactory {
         Ok(Box::new(MariadbSource::new(cfg)?))
     }
 
-    /// The offset lives in the offset table, server side, so a fresh reader
-    /// resumes where the last committed read left off.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
-    }
-}
-
-/// Factory for [`MariadbSink`].
-///
-/// The `config` table is [`MariadbSinkConfig`]: a `name`, a `connection`
-/// table, the target `table`, a `schema_fields` array, and the `write_mode`
-/// (`append`, `upsert`, `ignore_conflicts` or `apply_changes`) with its
-/// conflict columns.
-pub struct MariadbSinkFactory;
-
-impl SinkFactory for MariadbSinkFactory {
-    fn type_name(&self) -> &'static str {
-        "MariadbSink"
-    }
-
-    fn build(
+    fn sink(
         &self,
         config: &ConfigValue,
         _ctx: &ConnectorContext,
@@ -75,15 +61,33 @@ impl SinkFactory for MariadbSinkFactory {
         Ok(Box::new(MariadbSink::new(cfg)?))
     }
 
-    /// Rows accepted but not yet flushed stay buffered across an outage and
+    /// A source keeps its offset in the offset table, server side, so a fresh
+    /// reader resumes where the last committed read left off. A sink keeps rows
+    /// it has accepted but not yet flushed buffered across an outage and
     /// `connection.reconnect` re-establishes the session itself, so a second
-    /// build would discard rows this one can still write.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Err(
-            "rows accepted but not yet flushed stay buffered across an outage and \
-             connection.reconnect re-establishes the session itself; a second build \
-             would discard them",
-        )
+    /// build would discard rows the first can still write.
+    fn rebuild(&self, role: Role, _config: &ConfigValue) -> Rebuild {
+        match role {
+            Role::Source => Rebuild::Yes,
+            Role::Sink => Rebuild::No(
+                "rows accepted but not yet flushed stay buffered across an outage and \
+                 connection.reconnect re-establishes the session itself; a second build \
+                 would discard them",
+            ),
+        }
+    }
+
+    fn detail_keys(&self, role: Role) -> &'static [&'static str] {
+        match role {
+            Role::Source => &[
+                "mode.kind",
+                "mode.table",
+                "mode.position",
+                "mode.snapshot",
+                "mode.install_triggers",
+            ],
+            Role::Sink => &["table", "write_mode"],
+        }
     }
 }
 
@@ -100,7 +104,7 @@ connection dsn="mysql://user:pw@db:3306/shop" ssl_mode="disabled"
 
 mode kind="polling" table="shop.orders" cursor_column="id"
 
-schema_fields "id" type="int64" nullable=#false
+field "id" type="int64" nullable=#false
 "#;
 
     const SINK: &str = r#"
@@ -111,34 +115,53 @@ conflict_columns "id"
 
 connection dsn="mysql://user:pw@db:3306/shop" ssl_mode="disabled"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "total" type="float64"
+field "id" type="int64" nullable=#false
+field "total" type="float64"
 "#;
 
     fn value(text: &str) -> ConfigValue {
         from_kdl_str(text).expect("parse")
     }
 
-    // MariaDB and MySQL carry their own wire format, so neither factory reads a
-    // transformer and every build below is handed none.
+    // MariaDB and MySQL carry their own wire format, so neither role reads a
+    // codec and every build below is handed none.
 
     #[test]
-    fn the_source_factory_builds_from_its_config_table() {
-        let source = MariadbSourceFactory
-            .build(&value(SOURCE), &ConnectorContext::new(None))
+    fn the_connector_is_named_mariadb_and_serves_both_roles() {
+        assert_eq!(MariadbConnector.name(), "mariadb");
+        assert_eq!(MariadbConnector.roles(), &[Role::Source, Role::Sink]);
+        assert!(!MariadbConnector.live(&value(SOURCE)));
+        assert_eq!(
+            MariadbConnector.detail_keys(Role::Source),
+            &[
+                "mode.kind",
+                "mode.table",
+                "mode.position",
+                "mode.snapshot",
+                "mode.install_triggers",
+            ]
+        );
+        assert_eq!(
+            MariadbConnector.detail_keys(Role::Sink),
+            &["table", "write_mode"]
+        );
+    }
+
+    #[test]
+    fn the_source_builds_from_its_config_table() {
+        let source = MariadbConnector
+            .source(&value(SOURCE), &ConnectorContext::new(None))
             .expect("source built");
-        assert_eq!(MariadbSourceFactory.type_name(), "MariadbSource");
         let schema = source.schema();
         assert_eq!(schema.fields().len(), 1);
         assert_eq!(schema.field(0).name(), "id");
     }
 
     #[test]
-    fn the_sink_factory_builds_from_its_config_table() {
-        let sink = MariadbSinkFactory
-            .build(&value(SINK), &ConnectorContext::new(None))
+    fn the_sink_builds_from_its_config_table() {
+        let sink = MariadbConnector
+            .sink(&value(SINK), &ConnectorContext::new(None))
             .expect("sink built");
-        assert_eq!(MariadbSinkFactory.type_name(), "MariadbSink");
         let schema = sink.schema();
         assert_eq!(schema.fields().len(), 2);
         assert_eq!(schema.field(1).name(), "total");
@@ -147,7 +170,7 @@ schema_fields "total" type="float64"
     #[test]
     fn a_misspelled_key_is_a_configuration_error_naming_it() {
         // `Box<dyn Source>` is not `Debug`, so the rejection is destructured.
-        let Err(err) = MariadbSourceFactory.build(
+        let Err(err) = MariadbConnector.source(
             &value(&SOURCE.replace("batch_rows", "batch_row")),
             &ConnectorContext::new(None),
         ) else {
@@ -164,7 +187,7 @@ schema_fields "total" type="float64"
 
     #[test]
     fn a_misspelled_sink_key_is_a_configuration_error_naming_it() {
-        let Err(err) = MariadbSinkFactory.build(
+        let Err(err) = MariadbConnector.sink(
             &value(&SINK.replace("write_mode", "write_mod")),
             &ConnectorContext::new(None),
         ) else {
@@ -181,7 +204,7 @@ schema_fields "total" type="float64"
 
     #[test]
     fn a_failed_validation_reaches_the_caller() {
-        let Err(err) = MariadbSinkFactory.build(
+        let Err(err) = MariadbConnector.sink(
             &value(&SINK.replace("conflict_columns \"id\"\n", "")),
             &ConnectorContext::new(None),
         ) else {
@@ -197,10 +220,13 @@ schema_fields "total" type="float64"
 
     #[test]
     fn the_source_may_be_rebuilt_and_the_sink_may_not() {
-        assert!(MariadbSourceFactory.rebuildable(&value(SOURCE)).is_ok());
-        let reason = MariadbSinkFactory
-            .rebuildable(&value(SINK))
-            .expect_err("a sink holds buffered rows");
+        assert_eq!(
+            MariadbConnector.rebuild(Role::Source, &value(SOURCE)),
+            Rebuild::Yes
+        );
+        let Rebuild::No(reason) = MariadbConnector.rebuild(Role::Sink, &value(SINK)) else {
+            panic!("a sink holds buffered rows");
+        };
         assert!(reason.contains("buffered"), "{reason}");
     }
 }

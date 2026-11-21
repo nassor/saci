@@ -187,6 +187,38 @@ impl LoadedPlugin {
         unsafe { (self.calls.free_buffer)(self.calls.instance, buffer) };
         copied
     }
+
+    /// Run `f` over a plugin-owned buffer in place, then hand the buffer back
+    /// to the plugin's `free_buffer`, even if `f` panics.
+    ///
+    /// For a buffer the host only reads once, such as the output IPC it
+    /// decodes: no copy is made. A null buffer runs `f(&[])` and frees
+    /// nothing.
+    pub(crate) fn read_buffer<R>(&self, buffer: SaciBuffer, f: impl FnOnce(&[u8]) -> R) -> R {
+        if buffer.is_null() {
+            return f(&[]);
+        }
+
+        /// Frees the buffer when dropped, so an unwinding `f` cannot leak it.
+        struct FreeOnDrop<'a> {
+            plugin: &'a LoadedPlugin,
+            buffer: SaciBuffer,
+        }
+        impl Drop for FreeOnDrop<'_> {
+            fn drop(&mut self) {
+                let calls = &self.plugin.calls;
+                unsafe { (calls.free_buffer)(calls.instance, self.buffer) };
+            }
+        }
+
+        let guard = FreeOnDrop {
+            plugin: self,
+            buffer,
+        };
+        // SAFETY: the plugin wrote this buffer and promises `len` initialised
+        // bytes at `ptr`; the guard frees it only after `f` returns.
+        f(unsafe { guard.buffer.as_bytes() })
+    }
 }
 
 impl Drop for LoadedPlugin {

@@ -7,7 +7,7 @@ marks each row valid or invalid, the settlement stage (`settle.wasm`) writes
 the fee and the review tier, and the rows land in a PostgreSQL `settlements`
 table.
 
-<img src="../../docs/static/quickstart-flow.svg" alt="The quickstart_publish example sends NDJSON authorisations to a NATS subject. A saci-service process reads the subject with a NatsSource, runs the validate stage and then the settle stage, and a PostgresSink upserts the rows into a PostgreSQL settlements table." width="660">
+<img src="../../docs/static/quickstart-flow.svg" alt="The quickstart_publish example sends NDJSON authorisations to a NATS subject. A saci-service process reads the subject with a nats source, runs the validate stage and then the settle stage, and a postgresql sink upserts the rows into a PostgreSQL settlements table." width="660">
 
 Delivery is at-most-once: the stream runner acknowledges nothing and keeps no
 checkpoints, so a service killed mid-batch loses that batch.
@@ -38,7 +38,7 @@ and Windows (PowerShell).
    `validate.wasm` and `settle.wasm`.
 
 2. Start NATS and PostgreSQL. `schema.sql` creates the destination table on
-   first initialisation, because `PostgresSink` never issues `CREATE TABLE`:
+   first initialisation, because the `postgresql` sink never issues `CREATE TABLE`:
 
    ```text
    docker compose -f examples/quickstart/docker-compose.yml up -d

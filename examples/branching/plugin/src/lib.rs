@@ -2,7 +2,7 @@
 //!
 //! The native counterpart of `examples/branching/wasm`: declares one
 //! component, `Order { id, priority }`, and one system, `route_batch`, which
-//! reads the batch's first row and inserts a [`RouteDecision`] naming the
+//! reads the batch's first row and inserts a [`sdk::RouteDecision`] naming the
 //! branch that row selects:
 //!
 //! - `priority = "high"` → branch `premium`
@@ -29,10 +29,9 @@
 
 use std::sync::Arc;
 
-use saci::plugin::RouteDecision;
-use saci::plugin::arrow_array::StringArray;
-use saci::plugin::arrow_schema::{DataType, Field, Schema};
-use saci::plugin::prelude::*;
+use saci::arrow_array::StringArray;
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// A row of the demo workload: an id plus the priority that selects the branch.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -56,16 +55,13 @@ impl Component for Order {
     }
 }
 
-/// Insert a [`RouteDecision`] naming the branch the first row selects.
+/// Insert a [`sdk::RouteDecision`] naming the branch the first row selects.
 ///
 /// `high` and `low` map to the `premium` and `standard` branches in
 /// `examples/branching/branching.kdl`; an unrecognised priority or an empty
 /// batch routes the output nowhere.
 fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Order>()
-        .ok_or_else(|| SaciError::generic("branching: Order component missing"))?
-        .clone();
+    let batch = data.batch::<Order>()?.clone();
     let schema = batch.schema();
     let priority_idx = schema
         .index_of("priority")
@@ -86,25 +82,20 @@ fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
             }
         }
     };
-    data.insert_resource(RouteDecision(branch));
+    data.insert_resource(sdk::RouteDecision::to(branch));
     Ok(())
 }
 
 /// Build the branching demo pipeline.
 ///
-/// Called lazily by the `export_plugin!` macro on the first `describe` or
+/// Called lazily by the `#[plugin]` thunks on the first `describe` or
 /// `run-batch` call, and constructed exactly once per loaded library.
+#[plugin]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("branching-plugin");
-    pipeline
-        .data
-        .register_component::<Order>()
-        .expect("register Order");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("route_batch").read("Order", "priority"),
-        route_batch,
-    ));
-    pipeline
+    Pipeline::new("branching-plugin")
+        .component::<Order>()
+        .system(system_fn(
+            SystemMeta::new("route_batch").reads_named("Order", "priority"),
+            route_batch,
+        ))
 }
-
-saci::export_plugin!(build);

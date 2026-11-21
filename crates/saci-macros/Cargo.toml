@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "Derive and attribute macros for the SACI processor SDK: #[derive(Component)], #[transform], #[fold] and #[processor]."
+description = "Derive and attribute macros for SACI: #[derive(Component)], #[transform], #[fold], #[processor] and #[plugin]."
 keywords = ["saci", "arrow", "wasm", "proc-macro", "derive"]
 categories = ["wasm", "development-tools::procedural-macro-helpers"]
 

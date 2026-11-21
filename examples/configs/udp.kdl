@@ -31,10 +31,10 @@ node id=1 name="saci-udp" data_dir="${SACI_DATA_DIR:-/tmp/saci-udp}"
 
 // The source never reaches EOF: it blocks until the next datagram arrives.
 // Only the stream runner can drive that, so config validation rejects
-// `type="udp"` on a source node in any other run mode. One workflow pass runs
+// `connector="udp"` on a source node in any other run mode. One workflow pass runs
 // per arriving datagram. The sink half carries no such rule and runs in every
 // mode.
-run_mode kind="stream"
+run "stream"
 
 // Adaptive flow control: every other source (this one included) hands over
 // whatever it produced and the runner slices it at the target, so the
@@ -51,19 +51,19 @@ flow_control {
 // One workflow declares the whole DAG: the byte format each end speaks, the
 // source, the processor, the sink, and the explicit links between them.
 workflow "ticks" {
-    // The transformer that decodes and encodes each datagram's payload.
-    // "ndjson" is one JSON object per datagram, decoded against schema_fields
-    // below, which is the natural shape for a transport that carries one
+    // The codec that decodes and encodes each datagram's payload.
+    // "ndjson" is one JSON object per datagram, decoded against the `field`
+    // lines below, which is the natural shape for a transport that carries one
     // message per datagram. "arrow-ipc" is one whole RecordBatch per datagram
     // instead, and needs max_chunk_bytes low enough that a batch still fits
-    // max_datagram_bytes. connector-udp pulls in transformer-ndjson.
-    transformer "json_fmt" format="ndjson"
+    // max_datagram_bytes. connector-udp pulls in codec-ndjson.
+    codec "json_fmt" format="ndjson"
 
     // ---------------------------------------------------------------- source
 
     // The processor's `describe()` supplies the component list, so `component`
     // on this source and the sink below must name components it declares.
-    source "ticks_in" type="udp" component="Tick" transformer="json_fmt" {
+    source "ticks_in" connector="udp" component="Tick" codec="json_fmt" {
         config {
             // Receive address. Producers send datagrams here; several at once
             // is fine, and ordering holds for neither one producer nor many.
@@ -79,22 +79,22 @@ workflow "ticks" {
             // a fan-out feed several receivers read:
             //   multicast_group "239.255.0.1"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "price" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "price" type="float64" nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "process_ticks" module="pipelines/ticks.wasm"
+    wasm "process_ticks" path="pipelines/ticks.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // A different component than the source's: the processor declares both,
-    // reads Tick and writes EnrichedTick. A sink's schema_fields must match
+    // reads Tick and writes EnrichedTick. A sink's `field` lines must match
     // the component's RecordBatch field for field, in order.
 
-    sink "ticks_out" type="udp" component="EnrichedTick" transformer="json_fmt" {
+    sink "ticks_out" connector="udp" component="EnrichedTick" codec="json_fmt" {
         config {
             // Peer to send to. Resolved when the factory is built and opened
             // on the first batch. Name several addresses to fan out; every
@@ -121,8 +121,8 @@ workflow "ticks" {
             // costs one timeout_ms however many addresses `connect` names.
             probe kind="icmp" interval_ms=5000 timeout_ms=1000 on_failure="refuse"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "price" type="float64" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "price" type="float64" nullable=#true
         }
     }
 
@@ -131,7 +131,7 @@ workflow "ticks" {
 }
 
 // HTTP control plane. /metrics carries the service's own counters.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a 15% grade:
 // one workflow.batch span opens per arriving datagram, so a live producer at

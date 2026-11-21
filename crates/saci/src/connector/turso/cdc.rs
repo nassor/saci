@@ -14,7 +14,7 @@
 
 use serde_json::Value as Json;
 
-use crate::connector::turso::config::{FieldSpec, TursoFieldType};
+use crate::connector::schema::{FieldSpec, FieldType};
 use crate::connector::turso::types::{Scalar, parse_decimal, rescale};
 
 /// The operation letter a `change_type` denotes, or `None` for the COMMIT
@@ -69,19 +69,19 @@ pub(crate) fn decode_cdc_field(
         )
     };
     match spec.ty {
-        TursoFieldType::Int64 => match value.as_i64() {
+        FieldType::Int64 => match value.as_i64() {
             Some(i) => Ok(Some(Scalar::Int64(i))),
             None => Err(mismatch(value)),
         },
-        TursoFieldType::Float64 => match value.as_f64() {
+        FieldType::Float64 => match value.as_f64() {
             Some(f) => Ok(Some(Scalar::Float64(f))),
             None => Err(mismatch(value)),
         },
-        TursoFieldType::Utf8 => match value.as_str() {
+        FieldType::Utf8 => match value.as_str() {
             Some(s) => Ok(Some(Scalar::Utf8(s.to_string()))),
             None => Err(mismatch(value)),
         },
-        TursoFieldType::Bool => match value.as_i64() {
+        FieldType::Boolean => match value.as_i64() {
             Some(0) => Ok(Some(Scalar::Bool(false))),
             Some(1) => Ok(Some(Scalar::Bool(true))),
             _ => Err(format!(
@@ -90,7 +90,7 @@ pub(crate) fn decode_cdc_field(
                 json_kind(value)
             )),
         },
-        TursoFieldType::Binary => match value.as_str() {
+        FieldType::Binary => match value.as_str() {
             Some(s) => decode_blob(s)
                 .map(|b| Some(Scalar::Binary(b)))
                 .ok_or_else(|| {
@@ -101,7 +101,7 @@ pub(crate) fn decode_cdc_field(
                 }),
             None => Err(mismatch(value)),
         },
-        TursoFieldType::Decimal128 => {
+        FieldType::Decimal128 => {
             let (_, scale) = spec.decimal_params().map_err(|e| e.message())?;
             match value {
                 Json::String(s) => parse_decimal(s, scale)
@@ -114,6 +114,10 @@ pub(crate) fn decode_cdc_field(
                 _ => Err(mismatch(value)),
             }
         }
+        other => Err(format!(
+            "column '{}': type '{other}' is not mapped by turso",
+            spec.name
+        )),
     }
 }
 

@@ -27,7 +27,7 @@ use saci::distributed::checkpoint::{
 use saci::distributed::partition::{BatchClaim, PartitionSource};
 use saci::distributed::runner::{DistributedRunner, RunnerConfig};
 use saci::distributed::strategy::CheckpointStrategy;
-use saci::runtime::PipelineRuntime;
+use saci::runtime::{PipelineRuntime, RuntimeOutput};
 use saci::{Dataset, SaciError, SaciResult};
 use uuid::Uuid;
 
@@ -69,15 +69,11 @@ impl PipelineRuntime for MockCounterRuntime {
         "mock-counter"
     }
 
-    async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-        self.run_on_with_state(data, None).await.map(|_| ())
-    }
-
-    async fn run_on_with_state(
+    async fn run_batch(
         &self,
         _data: &mut Dataset,
         prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
+    ) -> SaciResult<RuntimeOutput> {
         self.seen_priors
             .lock()
             .unwrap()
@@ -91,7 +87,10 @@ impl PipelineRuntime for MockCounterRuntime {
         }
 
         let next = Self::decode(prior) + 1;
-        Ok(Some(next.to_le_bytes().to_vec()))
+        Ok(RuntimeOutput {
+            state: Some(next.to_le_bytes().to_vec()),
+            routes: None,
+        })
     }
 
     fn template_dataset(&self) -> Dataset {
@@ -275,7 +274,7 @@ async fn a_new_runner_starts_cold() {
     );
 }
 
-/// A runtime error from `run_on_with_state` releases the claim rather than acking
+/// A runtime error from `run_batch` releases the claim rather than acking
 /// it, and writes no state.
 #[tokio::test]
 async fn runtime_error_releases_claim_and_writes_no_state() {

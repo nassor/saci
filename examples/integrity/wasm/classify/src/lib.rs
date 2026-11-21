@@ -10,7 +10,7 @@
 //! independently.
 //!
 //! Routing is per batch, which is why the publisher packs one priority per
-//! Kafka message. The [`RouteDecision`] names two branches: the priority
+//! Kafka message. The [`sdk::RouteDecision`] names two branches: the priority
 //! branch (`express` or `standard`, one HTTP sink each) and the constant
 //! `all` branch feeding the channel bridge into the `settle` workflow.
 //! `WorkflowSpec::validate` requires every outbound link of a node to be
@@ -27,28 +27,13 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::arrow_array::{
+use saci::arrow_array::{
     BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
 };
-use saci::processor::arrow_schema::{DataType, Field, FieldRef, Schema};
-use saci::processor::prelude::*;
-use saci::processor::{ProcessorState, RouteDecision};
+use saci::arrow_schema::{DataType, Field, FieldRef, Schema};
+use saci::prelude::*;
 
 /// Branch every non-express batch routes to.
 pub const BRANCH_STANDARD: &str = "standard";
@@ -235,16 +220,6 @@ impl Component for CatalogState {
     }
 }
 
-/// Report a metric through `host-io::metric`; a no-op outside wasm, where the
-/// host bindings do not exist.
-#[cfg(target_arch = "wasm32")]
-fn report_metric(name: &str, value: f64) {
-    crate::bindings::saci::pipeline::host_io::metric(name, value);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn report_metric(_name: &str, _value: f64) {}
-
 /// The canonical text a [`ClassifiedOrder`]'s checksum is taken over.
 ///
 /// The verifier rebuilds this string from the row it received and hashes it
@@ -305,22 +280,12 @@ fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T, S
 /// to.
 ///
 /// A batch carrying only catalog rows produces no output and an empty
-/// [`RouteDecision`], so nothing is delivered downstream for it.
+/// [`sdk::RouteDecision`], so nothing is delivered downstream for it.
 pub fn classify_impl(data: &mut Dataset) -> Result<(), SaciError> {
-    let catalog = data
-        .columns::<Catalog>()
-        .ok_or_else(|| SaciError::generic("classify: Catalog component missing"))?
-        .clone();
-    let orders = data
-        .columns::<Order>()
-        .ok_or_else(|| SaciError::generic("classify: Order component missing"))?
-        .clone();
+    let catalog = data.batch::<Catalog>()?.clone();
+    let orders = data.batch::<Order>()?.clone();
 
-    let state = data
-        .get_resource_mut::<ProcessorState<CatalogState>>()
-        .ok_or_else(|| {
-            SaciError::generic("classify: ProcessorState<CatalogState> resource missing")
-        })?;
+    let state = data.resource_mut::<sdk::State<CatalogState>>()?;
     // The SDK serialises the resource as rows of the state component; exactly
     // one row carries the whole catalog.
     if state.rows.is_empty() {
@@ -334,8 +299,8 @@ pub fn classify_impl(data: &mut Dataset) -> Result<(), SaciError> {
         let known = catalog_state.entries.len();
         // An empty decision routes nowhere: a catalog-only batch must not
         // reach a sink, and must not warn about a branch no link carries.
-        data.insert_resource(RouteDecision(Vec::new()));
-        report_metric("classify.catalog_skus", known as f64);
+        data.insert_resource(sdk::RouteDecision::none());
+        sdk::host::metric("classify.catalog_skus", known as f64);
         return Ok(());
     }
 
@@ -394,57 +359,45 @@ pub fn classify_impl(data: &mut Dataset) -> Result<(), SaciError> {
     // The borrow through `state` ends here (NLL), before `data.append` below.
 
     data.append::<ClassifiedOrder>(&rows)?;
-    data.insert_resource(RouteDecision(vec![
+    data.insert_resource(sdk::RouteDecision::to([
         batch_branch.to_string(),
         BRANCH_ALL.to_string(),
     ]));
-    report_metric("classify.catalog_skus", known as f64);
-    report_metric("classify.unknown_skus", unknown_skus as f64);
+    sdk::host::metric("classify.catalog_skus", known as f64);
+    sdk::host::metric("classify.unknown_skus", unknown_skus as f64);
     Ok(())
 }
 
 /// Build the classification pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
+#[processor]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("integrity-classify");
-    pipeline
-        .data
-        .register_component::<Catalog>()
-        .expect("register Catalog");
-    pipeline
-        .data
-        .register_component::<Order>()
-        .expect("register Order");
-    pipeline
-        .data
-        .register_component::<ClassifiedOrder>()
-        .expect("register ClassifiedOrder");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("classify")
-            .read_component("Order")
-            .read_component("Catalog")
-            .write_component("ClassifiedOrder"),
-        classify_impl,
-    ));
-    pipeline
+    Pipeline::new("integrity-classify")
+        .state::<CatalogState>()
+        .component::<Catalog>()
+        .component::<Order>()
+        .component::<ClassifiedOrder>()
+        .system(system_fn(
+            SystemMeta::new("classify")
+                .reads_all::<Order>()
+                .reads_all::<Catalog>()
+                .writes_all::<ClassifiedOrder>(),
+            classify_impl,
+        ))
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build, state = CatalogState);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci::processor::__rt::{ProcessorStateSpec, Stateful};
 
     fn dataset_with_state() -> Dataset {
         let mut data = Dataset::new();
-        data.register_component::<Catalog>().unwrap();
-        data.register_component::<Order>().unwrap();
-        data.register_component::<ClassifiedOrder>().unwrap();
-        <Stateful<CatalogState> as ProcessorStateSpec>::restore(&mut data, None).unwrap();
+        data.register::<Catalog>().unwrap();
+        data.register::<Order>().unwrap();
+        data.register::<ClassifiedOrder>().unwrap();
+        build().restore_state(&mut data, None).unwrap();
         data
     }
 
@@ -470,10 +423,10 @@ mod tests {
     }
 
     /// The emitted rows, read back off the dataset the way a sink's
-    /// transformer would.
+    /// codec would.
     fn emitted(data: &Dataset) -> Vec<(i64, f64, bool, String, i64)> {
         let batch = data
-            .batch_for("ClassifiedOrder")
+            .batch_named("ClassifiedOrder")
             .expect("ClassifiedOrder batch");
         let id = column::<Int64Array>(batch, "order_id").unwrap();
         let total = column::<Float64Array>(batch, "line_total").unwrap();
@@ -494,7 +447,8 @@ mod tests {
     }
 
     fn routes(data: &Dataset) -> Option<Vec<String>> {
-        data.get_resource::<RouteDecision>().map(|r| r.0.clone())
+        data.get_resource::<sdk::RouteDecision>()
+            .map(|r| r.branches().to_vec())
     }
 
     /// One workflow item, as the stream runner drives it: a fresh dataset, the
@@ -506,11 +460,11 @@ mod tests {
         order_rows: &[Order],
     ) -> (Dataset, Option<Vec<u8>>) {
         let mut data = dataset_with_state();
-        <Stateful<CatalogState> as ProcessorStateSpec>::restore(&mut data, prior).unwrap();
+        build().restore_state(&mut data, prior).unwrap();
         data.append::<Catalog>(catalog_rows).unwrap();
         data.append::<Order>(order_rows).unwrap();
         classify_impl(&mut data).unwrap();
-        let next = <Stateful<CatalogState> as ProcessorStateSpec>::capture(&data).unwrap();
+        let next = build().capture_state(&data).unwrap();
         (data, next)
     }
 

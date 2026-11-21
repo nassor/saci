@@ -1,7 +1,7 @@
 //! The whole standalone service path over MariaDB and MySQL: config file,
 //! factories, source drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this
 //! is the end to end proof that a `connector-mariadb` build moves rows from one
 //! table through a pipeline and into another, and that a binlog snapshot on a
 //! MariaDB server replicates into a MySQL server through `apply_changes`. The
@@ -23,10 +23,8 @@ use arrow_schema::{DataType, Field, Schema};
 use mysql_async::prelude::Queryable;
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
-use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
+use saci::service::ServiceConfig;
+use saci::service::{BuiltNodeKind, ServiceBuilder};
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -171,13 +169,16 @@ fn change_schema() -> Arc<Schema> {
 /// source's and the run is observable in the output table.
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("mariadb_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
-    pipeline.add_system(system_fn(
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
+    pipeline = pipeline.system(system_fn(
         SystemMeta::new("double_total")
-            .read(COMPONENT, "total")
-            .write(COMPONENT, "total"),
+            .reads_named(COMPONENT, "total")
+            .writes_named(COMPONENT, "total"),
         |data: &mut Dataset| {
-            let Some(batch) = data.batch_for(COMPONENT) else {
+            let Ok(batch) = data.batch_named(COMPONENT) else {
                 return Ok(());
             };
             if batch.num_rows() == 0 {
@@ -190,7 +191,7 @@ fn build_pipeline() -> Pipeline {
                 .downcast_ref::<Int64Array>()
                 .expect("int64 total");
             let doubled: Int64Array = totals.iter().map(|v| v.map(|v| v * 2)).collect();
-            data.apply_write_set(WriteSet::new().put(COMPONENT, "total", Arc::new(doubled)))
+            data.apply_write_set(WriteSet::new().put_named(COMPONENT, "total", Arc::new(doubled)))
         },
     ));
     pipeline
@@ -201,8 +202,9 @@ fn build_pipeline() -> Pipeline {
 fn passthrough_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("mariadb_service_passthrough");
     pipeline
-        .data
-        .register_raw_component(CHANGE_COMPONENT, change_schema());
+        .data_mut()
+        .register_schema(CHANGE_COMPONENT, change_schema())
+        .unwrap();
     pipeline
 }
 
@@ -214,10 +216,10 @@ mode "standalone"
 
 node id=1 name="saci-mariadb-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "mariadb-service-test" {{
-    source "orders_in" type="MariadbSource" component="{COMPONENT}" {{
+    source "orders_in" connector="mariadb" component="{COMPONENT}" {{
         config {{
             name "orders_in"
             batch_rows 40
@@ -229,15 +231,15 @@ workflow "mariadb-service-test" {{
 
             mode kind="polling" table="orders_in" cursor_column="id"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="MariadbSink" component="{COMPONENT}" {{
+    sink "orders_out" connector="mariadb" component="{COMPONENT}" {{
         config {{
             name "orders_out"
             table "orders_out"
@@ -249,9 +251,9 @@ workflow "mariadb-service-test" {{
                 ssl_mode "disabled"
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -259,7 +261,7 @@ workflow "mariadb-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -275,10 +277,10 @@ mode "standalone"
 
 node id=1 name="saci-mariadb-binlog-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "mariadb-binlog-test" {{
-    source "orders_in" type="MariadbSource" component="{CHANGE_COMPONENT}" {{
+    source "orders_in" connector="mariadb" component="{CHANGE_COMPONENT}" {{
         config {{
             name "orders_in"
             batch_rows 40
@@ -290,16 +292,16 @@ workflow "mariadb-binlog-test" {{
 
             mode kind="cdc_binlog" table="orders_src" snapshot="initial"
 
-            schema_fields "__op" type="utf8" nullable=#false
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "__op" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="MariadbSink" component="{CHANGE_COMPONENT}" {{
+    sink "orders_out" connector="mariadb" component="{CHANGE_COMPONENT}" {{
         config {{
             name "orders_out"
             table "orders_dst"
@@ -311,10 +313,10 @@ workflow "mariadb-binlog-test" {{
                 ssl_mode "disabled"
             }}
 
-            schema_fields "__op" type="utf8" nullable=#false
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "__op" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -322,7 +324,7 @@ workflow "mariadb-binlog-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -330,17 +332,13 @@ observability log_level="warn"
 }
 
 /// Build the config at `path` with `pipeline` as the `transform` runtime.
-fn build(
-    path: &std::path::Path,
-    pipeline: Pipeline,
-) -> (ServiceConfig, saci::service::builder::BuiltService) {
+fn build(path: &std::path::Path, pipeline: Pipeline) -> saci::service::BuiltWorkflow {
     let config = ServiceConfig::load(path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(pipeline))
-        .build_all(&config)
+    ServiceBuilder::new()
+        .runtime("transform", pipeline)
+        .build(&config)
         .expect("service builds")
-        .remove(0);
-    (config, built)
+        .remove(0)
 }
 
 #[tokio::test]
@@ -374,8 +372,9 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
     let path = dir.path().join("service.kdl");
     std::fs::write(&path, polling_config_kdl(&dsn, &data_dir)).expect("write config");
 
-    let (config, built) = build(&path, build_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, build_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -403,8 +402,9 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
     // committed at the *start* of the next cycle, so a rerun replays. That is
     // the documented at-least-once contract, and `write_mode = "upsert"` is
     // what makes the replay harmless.
-    let (config, built) = build(&path, build_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, build_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("second run");
     assert_eq!(
@@ -429,9 +429,9 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
     source_only.workflows[0]
         .links
         .retain(|l| l.from != "orders_out" && l.to != "orders_out");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&source_only)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&source_only)
         .expect("service builds")
         .remove(0);
     let mut source = built
@@ -443,19 +443,20 @@ async fn a_mariadb_polling_source_and_sink_move_rows_through_the_standalone_runn
         })
         .expect("source node present");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema());
-    let first = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema()).unwrap();
+    let first = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("first cycle");
     dataset.clear();
-    let second = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    let second = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("second cycle");
     assert_eq!(first, 100);
     assert_eq!(second, 0, "the second cycle is caught up");
 
-    let (config, built) = build(&path, build_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, build_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("third run");
     assert_eq!(
@@ -514,8 +515,9 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
     .expect("write config");
 
     // The snapshot reads the 50 existing rows as `R` and the sink applies them.
-    let (config, built) = build(&path, passthrough_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, passthrough_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("snapshot run");
     assert_eq!(stats.iteration_errors, 0);
@@ -534,9 +536,9 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
     source_only.workflows[0]
         .links
         .retain(|l| l.from != "orders_out" && l.to != "orders_out");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(passthrough_pipeline()))
-        .build_all(&source_only)
+    let built = ServiceBuilder::new()
+        .runtime("transform", passthrough_pipeline())
+        .build(&source_only)
         .expect("service builds")
         .remove(0);
     let mut source = built
@@ -548,15 +550,16 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
         })
         .expect("source node present");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(CHANGE_COMPONENT, change_schema());
-    saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
+    dataset
+        .register_schema(CHANGE_COMPONENT, change_schema())
+        .unwrap();
+    saci::io::read_all(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
         .await
         .expect("first cycle");
     dataset.clear();
-    let caught_up =
-        saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
-            .await
-            .expect("second cycle");
+    let caught_up = saci::io::read_all(source.as_mut(), &mut dataset, CHANGE_COMPONENT)
+        .await
+        .expect("second cycle");
     assert_eq!(caught_up, 0, "the position is stored and nothing is new");
     drop(source);
 
@@ -574,8 +577,9 @@ async fn a_binlog_snapshot_replicates_mariadb_into_mysql_with_apply_changes() {
         source_conn.query_drop(statement).await.expect(statement);
     }
 
-    let (config, built) = build(&path, passthrough_pipeline());
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let built = build(&path, passthrough_pipeline());
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("change run");
     assert_eq!(stats.iteration_errors, 0);

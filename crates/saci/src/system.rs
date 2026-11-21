@@ -1,70 +1,58 @@
 //! [`System`]: the processing unit for the Arrow-backed pipeline.
 //!
 //! `System` operates on [`Dataset`] and declares data access at **field
-//! granularity** via [`FieldAccess`] pairs `(component_name, field_name)`.
-//! Field-level declarations let two systems that write different fields of the
-//! same component share a pipeline stage.
+//! granularity** through [`SystemMeta`]. Field-level declarations let two
+//! systems that write different fields of the same component share a pipeline
+//! stage.
 //!
 //! ## Quick start
 //!
 //! ```rust
-//! #
-//! # {
-//! use std::sync::Arc;
-//! use arrow_schema::{DataType, Field, Schema};
-//! use async_trait::async_trait;
-//! use saci::component::Component;
-//! use saci::system::{System, SystemMeta};
-//! use saci::dataset::Dataset;
-//! use saci::SaciError;
+//! use saci::prelude::*;
 //! use serde::{Deserialize, Serialize};
 //!
-//! #[derive(Serialize, Deserialize)]
+//! #[derive(Component, Serialize, Deserialize)]
 //! struct Price { value: f64 }
-//! impl Component for Price {
-//!     fn name() -> &'static str { "Price" }
-//!     fn schema() -> Arc<Schema> {
-//!         Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, false)]))
-//!     }
-//! }
 //!
 //! struct PrintPriceSystem;
 //!
 //! #[async_trait]
 //! impl System for PrintPriceSystem {
 //!     fn meta(&self) -> SystemMeta {
-//!         SystemMeta::new("print_price")
-//!             .read("Price", "value")
+//!         SystemMeta::new("print_price").reads(Price::VALUE)
 //!     }
-//!     async fn run(&self, _data: &mut Dataset) -> Result<(), saci::SaciError> {
+//!     async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
 //!         Ok(())
 //!     }
 //! }
-//! # }
 //! ```
 
-pub mod closure;
-pub mod field;
-pub mod meta;
-pub mod write_set;
+mod closure;
+mod field;
+mod meta;
+mod write_set;
 
-pub use closure::{FnSystem, system_fn};
+pub use closure::{parallel_fn, system_fn};
 pub use field::{FieldAccess, FieldRef};
 pub use meta::SystemMeta;
-pub use write_set::{ResourceUpdate, SliceWriteSet, WriteSet};
+#[cfg(feature = "engine")]
+pub(crate) use write_set::merge_entries;
+pub use write_set::{SliceWriteSet, WriteSet};
+
+use std::ops::Range;
 
 use async_trait::async_trait;
 
 use crate::dataset::Dataset;
 use crate::error::SaciError;
-use crate::retry::SystemConfig;
+use crate::retry::RetryMode;
 
 /// A processing unit that operates on a [`Dataset`] and declares field-level
 /// data access via [`SystemMeta`].
 ///
 /// Only [`run`](Self::run) is required. Override [`meta`](Self::meta) to
 /// declare field-level read/write dependencies for the scheduler, and
-/// [`config`](Self::config) to change retry behaviour.
+/// [`retry`](Self::retry) to retry a transient failure.
 ///
 /// Override [`run_sync`](Self::run_sync) to return `Some(result)` when the
 /// system body is purely synchronous: the scheduler then calls it directly and
@@ -74,43 +62,27 @@ use crate::retry::SystemConfig;
 /// # Example
 ///
 /// ```rust
-/// #
-/// # {
-/// use std::sync::Arc;
-/// use arrow_schema::{DataType, Field, Schema};
+/// use saci::prelude::*;
 /// use arrow_array::Float64Array;
-/// use async_trait::async_trait;
-/// use saci::component::Component;
-/// use saci::system::{System, SystemMeta};
-/// use saci::dataset::Dataset;
-/// use saci::SaciError;
 /// use serde::{Deserialize, Serialize};
 ///
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(Component, Serialize, Deserialize)]
 /// struct Score { value: f64 }
-/// impl Component for Score {
-///     fn name() -> &'static str { "Score" }
-///     fn schema() -> Arc<Schema> {
-///         Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, false)]))
-///     }
-/// }
 ///
 /// struct SumScoreSystem;
 ///
 /// #[async_trait]
 /// impl System for SumScoreSystem {
 ///     fn meta(&self) -> SystemMeta {
-///         SystemMeta::new("sum_score").read("Score", "value")
+///         SystemMeta::new("sum_score").reads(Score::VALUE)
 ///     }
-///     async fn run(&self, data: &mut Dataset) -> Result<(), SaciError> {
-///         if let Some(col) = data.column::<Score>("value") {
-///             let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
-///             let _sum: f64 = arr.values().iter().sum();
-///         }
+///     async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
+///         let col = data.column(Score::VALUE)?;
+///         let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+///         let _sum: f64 = arr.values().iter().sum();
 ///         Ok(())
 ///     }
 /// }
-/// # }
 /// ```
 #[async_trait]
 pub trait System: Send + Sync {
@@ -123,11 +95,10 @@ pub trait System: Send + Sync {
         SystemMeta::new(std::any::type_name::<Self>())
     }
 
-    /// Returns the retry configuration for this system.
-    ///
-    /// Defaults to [`SystemConfig::default()`] (exponential backoff, 3 retries).
-    fn config(&self) -> SystemConfig {
-        SystemConfig::default()
+    /// How a failed run is retried. The default is [`RetryMode::None`]; only
+    /// an error whose [`SaciError::is_retryable`] is true is ever retried.
+    fn retry(&self) -> RetryMode {
+        RetryMode::None
     }
 
     /// Execute this system against the given dataset.
@@ -163,123 +134,129 @@ pub const STAGE_INLINE_THRESHOLD: u32 = 100_000;
 /// Where [`System`] takes `&mut Dataset`, `ParallelSystem` takes `&Dataset`, so
 /// systems with disjoint field writes can run concurrently in one stage.
 ///
+/// Implement either [`run`](Self::run), or [`sliced`](Self::sliced) and
+/// [`run_slice`](Self::run_slice).
+///
 /// ## Slice parallelism
 ///
-/// Override [`run_slice`](Self::run_slice) to opt into intra-system slice
-/// parallelism: the scheduler splits `data.row_range()` into `num_cpus` chunks,
-/// runs each chunk in parallel via rayon, then calls
-/// [`merge_slices`](Self::merge_slices) to combine the results. Returning
-/// `None`, the default, opts out.
+/// A system whose [`sliced`](Self::sliced) returns `true` writes its kernel
+/// once in [`run_slice`](Self::run_slice): the scheduler splits
+/// `data.row_range()` into `num_cpus` chunks, runs each chunk in parallel via
+/// rayon, then calls [`merge_slices`](Self::merge_slices) to combine the
+/// results. Below [`SLICE_PARALLEL_THRESHOLD`] rows, the default `run` calls
+/// `run_slice` once over the whole range.
 ///
 /// ## Resource updates
 ///
 /// The dataset is immutable during parallel execution, so resource mutations
-/// travel as [`ResourceUpdate`] values attached to the returned `WriteSet`. The
+/// travel on the returned `WriteSet` ([`WriteSet::with_resource`]). The
 /// scheduler applies them on the main thread after columns are committed.
 ///
 /// ## Example
 ///
 /// ```rust
-/// #
-/// # {
 /// use std::sync::Arc;
-/// use std::collections::HashMap;
-/// use arrow_array::{ArrayRef, Float64Array};
-/// use arrow_schema::{DataType, Field, Schema};
-/// use async_trait::async_trait;
-/// use saci::component::Component;
-/// use saci::system::{ParallelSystem, SystemMeta, WriteSet};
-/// use saci::dataset::Dataset;
-/// use saci::SaciError;
+/// use saci::prelude::*;
+/// use arrow_array::Float64Array;
 /// use serde::{Deserialize, Serialize};
 ///
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(Component, Serialize, Deserialize)]
 /// struct Score { value: f64 }
-/// impl Component for Score {
-///     fn name() -> &'static str { "Score" }
-///     fn schema() -> Arc<Schema> {
-///         Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, false)]))
-///     }
-/// }
 ///
 /// struct DoubleScoreSystem;
 ///
 /// #[async_trait]
 /// impl ParallelSystem for DoubleScoreSystem {
 ///     fn meta(&self) -> SystemMeta {
-///         SystemMeta::new("double_score")
-///             .read("Score", "value")
-///             .write("Score", "value")
+///         SystemMeta::new("double_score").reads(Score::VALUE).writes(Score::VALUE)
 ///     }
-///     async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError> {
-///         let col = data.column::<Score>("value")
-///             .ok_or_else(|| SaciError::generic("Score.value not found"))?;
+///     async fn run(&self, data: &Dataset) -> SaciResult<WriteSet> {
+///         let col = data.column(Score::VALUE)?;
 ///         let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
 ///         let doubled: Vec<f64> = arr.values().iter().map(|&v| v * 2.0).collect();
-///         Ok(WriteSet::new().put("Score", "value", Arc::new(Float64Array::from(doubled))))
+///         Ok(WriteSet::new().put(Score::VALUE, Arc::new(Float64Array::from(doubled))))
 ///     }
 /// }
-/// # }
 /// ```
 #[async_trait]
 pub trait ParallelSystem: Send + Sync {
     /// Returns metadata describing this system's name and data access patterns.
     fn meta(&self) -> SystemMeta;
 
-    /// Returns the retry configuration for this system.
-    fn config(&self) -> SystemConfig {
-        SystemConfig::default()
+    /// How a failed run is retried. The default is [`RetryMode::None`].
+    fn retry(&self) -> RetryMode {
+        RetryMode::None
     }
 
     /// Execute this system against an **immutable** dataset view, producing a
     /// [`WriteSet`] to be applied atomically after the stage completes.
-    async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError>;
+    ///
+    /// The default runs [`run_slice`](Self::run_slice) once over every row and
+    /// passes the result through [`merge_slices`](Self::merge_slices).
+    async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError> {
+        self.merge_slices(vec![self.run_slice(data, data.row_range())?])
+    }
+
+    /// Synchronous fast-path: when this returns `Some(result)`, the scheduler
+    /// uses it and never builds the async state machine of
+    /// [`run`](Self::run). The default returns `None`.
+    ///
+    /// Systems created with [`parallel_fn`] automatically implement this.
+    fn run_sync(&self, _data: &Dataset) -> Option<Result<WriteSet, SaciError>> {
+        None
+    }
+
+    /// `true` when [`run_slice`](Self::run_slice) is implemented and the
+    /// scheduler may split a large dataset across threads. Defaults to `false`.
+    fn sliced(&self) -> bool {
+        false
+    }
 
     /// Execute this system over one row-range slice.
     ///
-    /// When this returns `Some(result)`, the scheduler splits the row range
-    /// into chunks (one per CPU core) and executes each chunk in parallel via
-    /// rayon (inside `spawn_blocking`). Results are merged with
+    /// Called only when [`sliced`](Self::sliced) returns `true`, from rayon
+    /// inside `spawn_blocking`. Results are merged with
     /// [`merge_slices`](Self::merge_slices).
-    ///
-    /// Return `None` to opt out of slice parallelism (the default).
-    fn run_slice(
-        &self,
-        _data: &Dataset,
-        _rows: std::ops::Range<u32>,
-    ) -> Option<Result<SliceWriteSet, SaciError>> {
-        None
+    fn run_slice(&self, _data: &Dataset, _rows: Range<u32>) -> Result<SliceWriteSet, SaciError> {
+        Err(SaciError::configuration(
+            "ParallelSystem: implement `run`, or `sliced` and `run_slice`",
+        ))
     }
 
     /// Merge per-slice results into one [`WriteSet`].
     ///
     /// The default implementation concatenates each field's array segments
-    /// in order using [`arrow_select::concat::concat`].
+    /// in order using [`arrow_select::concat::concat`]; a single slice is
+    /// moved through without copying.
     ///
     /// Override when a system needs special merging, such as reducing
     /// per-slice statistics to a single scalar.
-    fn merge_slices(&self, slices: Vec<SliceWriteSet>) -> Result<WriteSet, SaciError> {
+    fn merge_slices(&self, mut slices: Vec<SliceWriteSet>) -> Result<WriteSet, SaciError> {
         use arrow_select::concat::concat;
 
-        if slices.is_empty() {
-            return Ok(WriteSet::new());
+        if slices.len() == 1
+            && let Some(only) = slices.pop()
+        {
+            let mut ws = WriteSet::new();
+            for (component, field, array) in only.iter() {
+                ws = ws.put_named(component, field, array.clone());
+            }
+            return Ok(ws);
         }
-
-        let keys: Vec<(&'static str, &'static str)> = slices[0].fields.keys().cloned().collect();
+        let Some(first) = slices.first() else {
+            return Ok(WriteSet::new());
+        };
 
         let mut ws = WriteSet::new();
-        for key in keys {
+        for (component, field, _) in first.iter() {
             let arrays: Vec<&dyn arrow_array::Array> = slices
                 .iter()
-                .filter_map(|s| s.fields.get(&key))
+                .filter_map(|s| s.get_named(component, field))
                 .map(|a| a.as_ref())
                 .collect();
-            if arrays.is_empty() {
-                continue;
-            }
             let merged = concat(&arrays)
                 .map_err(|e| SaciError::generic(format!("merge_slices concat error: {e}")))?;
-            ws = ws.put(key.0, key.1, merged);
+            ws = ws.put_named(component, field, merged);
         }
 
         Ok(ws)
@@ -299,7 +276,6 @@ mod tests {
     use crate::component::Component;
     use crate::dataset::Dataset;
     use crate::error::SaciError;
-    use crate::retry::SystemConfig;
 
     #[derive(Serialize, Deserialize)]
     struct Order {
@@ -326,33 +302,7 @@ mod tests {
     #[async_trait]
     impl System for ReadIdSystem {
         fn meta(&self) -> SystemMeta {
-            SystemMeta::new("read_id").read("Order", "id")
-        }
-        async fn run(&self, _data: &mut Dataset) -> Result<(), SaciError> {
-            Ok(())
-        }
-    }
-
-    #[allow(dead_code)]
-    struct WriteTotalSystem;
-
-    #[async_trait]
-    impl System for WriteTotalSystem {
-        fn meta(&self) -> SystemMeta {
-            SystemMeta::new("write_total").write("Order", "total")
-        }
-        async fn run(&self, _data: &mut Dataset) -> Result<(), SaciError> {
-            Ok(())
-        }
-    }
-
-    #[allow(dead_code)]
-    struct ReadComponentSystem;
-
-    #[async_trait]
-    impl System for ReadComponentSystem {
-        fn meta(&self) -> SystemMeta {
-            SystemMeta::new("read_order").read_component("Order")
+            SystemMeta::new("read_id").reads_named("Order", "id")
         }
         async fn run(&self, _data: &mut Dataset) -> Result<(), SaciError> {
             Ok(())
@@ -377,14 +327,14 @@ mod tests {
     #[test]
     fn test_meta_name_is_set() {
         let sys = ReadIdSystem;
-        assert_eq!(sys.meta().name, "read_id");
+        assert_eq!(sys.meta().name(), "read_id");
     }
 
     #[test]
     fn test_meta_reads_field() {
         let meta = SystemMeta::new("test")
-            .read("Order", "id")
-            .read("Order", "total");
+            .reads_named("Order", "id")
+            .reads_named("Order", "total");
         assert_eq!(meta.reads.len(), 2);
         assert_eq!(meta.reads[0].component, "Order");
         assert_eq!(meta.reads[0].field, "id");
@@ -392,41 +342,36 @@ mod tests {
 
     #[test]
     fn test_meta_writes_field() {
-        let meta = SystemMeta::new("test").write("Order", "total");
+        let meta = SystemMeta::new("test").writes_named("Order", "total");
         assert_eq!(meta.writes.len(), 1);
         assert_eq!(meta.writes[0].field, "total");
     }
 
     #[test]
-    fn test_meta_read_component() {
-        let meta = SystemMeta::new("test").read_component("Order");
+    fn test_meta_reads_all() {
+        let meta = SystemMeta::new("test").reads_all::<Order>();
         assert_eq!(meta.reads_components, vec!["Order"]);
     }
 
     #[test]
-    fn test_meta_write_component() {
-        let meta = SystemMeta::new("test").write_component("Order");
+    fn test_meta_writes_all_named() {
+        let meta = SystemMeta::new("test").writes_all_named("Order");
         assert_eq!(meta.writes_components, vec!["Order"]);
     }
 
     #[test]
     fn test_meta_resources() {
         let meta = SystemMeta::new("test")
-            .read_resource::<MyResource>()
-            .write_resource::<MyResource>();
+            .reads_resource::<MyResource>()
+            .writes_resource::<MyResource>();
         assert_eq!(meta.reads_resources.len(), 1);
         assert_eq!(meta.writes_resources.len(), 1);
         assert_eq!(meta.reads_resources[0], TypeId::of::<MyResource>());
     }
 
     #[test]
-    fn test_default_config_is_exponential_backoff() {
-        let sys = ReadIdSystem;
-        let config = sys.config();
-        assert_eq!(
-            config.retry_mode.max_attempts(),
-            SystemConfig::default().retry_mode.max_attempts()
-        );
+    fn test_default_retry_is_none() {
+        assert!(matches!(ReadIdSystem.retry(), RetryMode::None));
     }
 
     #[test]
@@ -440,17 +385,17 @@ mod tests {
         }
         let meta = AnonymousSystem.meta();
         assert!(
-            meta.name.contains("AnonymousSystem"),
+            meta.name().contains("AnonymousSystem"),
             "expected type name, got: {}",
-            meta.name
+            meta.name()
         );
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     #[tokio::test]
     async fn test_system_run_is_callable() {
         let mut data = Dataset::new();
-        data.register_component::<Order>().unwrap();
+        data.register::<Order>().unwrap();
         let sys = ReadIdSystem;
         assert!(sys.run(&mut data).await.is_ok());
     }

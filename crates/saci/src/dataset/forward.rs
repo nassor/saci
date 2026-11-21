@@ -26,7 +26,7 @@ impl Dataset {
                 continue;
             }
             let batch = self
-                .batch_for(name)
+                .batch_named(name)
                 .expect("component present in schemas() must have a batch")
                 .clone();
             appended += batch.num_rows();
@@ -75,8 +75,8 @@ mod tests {
     #[test]
     fn forward_into_copies_only_components_the_destination_declares() {
         let mut src = Dataset::new();
-        src.register_component::<Order>().unwrap();
-        src.register_component::<Audit>().unwrap();
+        src.register::<Order>().unwrap();
+        src.register::<Audit>().unwrap();
         src.append::<Order>(&[Order { id: 1 }, Order { id: 2 }])
             .unwrap();
         src.append::<Audit>(&[
@@ -90,13 +90,13 @@ mod tests {
         .unwrap();
 
         let mut dst = Dataset::new();
-        dst.register_component::<Order>().unwrap();
+        dst.register::<Order>().unwrap();
 
         let appended = src.forward_into(&mut dst).unwrap();
         assert_eq!(appended, 2);
         assert_eq!(dst.rows(), 2);
         assert!(
-            dst.batch_for("Audit").is_none(),
+            dst.batch_named("Audit").is_err(),
             "a component the destination never registered must not appear"
         );
     }
@@ -104,14 +104,14 @@ mod tests {
     #[test]
     fn forward_into_is_a_no_op_when_nothing_overlaps() {
         let mut src = Dataset::new();
-        src.register_component::<Audit>().unwrap();
+        src.register::<Audit>().unwrap();
         src.append::<Audit>(&[Audit {
             note: "x".to_string(),
         }])
         .unwrap();
 
         let mut dst = Dataset::new();
-        dst.register_component::<Order>().unwrap();
+        dst.register::<Order>().unwrap();
 
         let appended = src.forward_into(&mut dst).unwrap();
         assert_eq!(appended, 0);
@@ -121,15 +121,16 @@ mod tests {
     #[test]
     fn forward_into_propagates_schema_mismatch() {
         let mut src = Dataset::new();
-        src.register_component::<Order>().unwrap();
+        src.register::<Order>().unwrap();
         src.append::<Order>(&[Order { id: 1 }]).unwrap();
 
         let mut dst = Dataset::new();
         // Registered under the same name but an incompatible schema.
-        dst.register_raw_component(
+        dst.register_schema(
             "Order",
             Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)])),
-        );
+        )
+        .unwrap();
 
         let err = src.forward_into(&mut dst).unwrap_err();
         assert_eq!(err.category(), "generic");

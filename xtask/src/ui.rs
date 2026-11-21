@@ -2,7 +2,7 @@
 //! `crates/saci/assets/ui/`.
 //!
 //! The dashboard is a client-side-rendered Leptos app compiled to
-//! `wasm32-unknown-unknown`. `crates/saci/src/service/inspector_api.rs`
+//! `wasm32-unknown-unknown`. `crates/saci/src/service/http/inspector.rs`
 //! embeds the output with `include_str!`/`include_bytes!`, so the four
 //! filenames are a contract:
 //!

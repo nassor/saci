@@ -25,12 +25,12 @@
 //! peer and fails only when the batch reached nobody. A live peer therefore
 //! never receives the runner's retry of a batch it already took.
 //!
-//! Payload bytes come from the transformer's message surface
-//! ([`encode_messages`](Transformer::encode_messages)), the same surface the
+//! Payload bytes come from the codec's message surface
+//! ([`encode_messages`](Codec::encode_messages)), the same surface the
 //! Kafka, NATS and TCP sinks publish from. Whether the format has a message
 //! surface at all is a property of the config, so
-//! [`connect`](UdpSink::connect) settles it while building rather than on the
-//! first batch, the way `TcpSink::connect` does.
+//! [`new`](UdpSink::new) settles it while building rather than on the
+//! first batch, the way `TcpSink::new` does.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -42,12 +42,13 @@ use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
+use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::transformer::Transformer;
+use crate::io::Sink;
 
 use crate::connector::udp::DATAGRAM_BUFFER_BYTES;
-use crate::connector::udp::probe::{self, Liveness, OnFailure, ProbeSettings};
+use crate::connector::udp::UdpSinkConfig;
+use crate::connector::udp::probe::{self, Liveness, OnFailure, ProbeConfig};
 
 /// The largest payload an IPv4 datagram carries: 65535 bytes minus the 20 byte
 /// IP header and the 8 byte UDP header. IPv6 with a jumbogram could carry
@@ -57,16 +58,16 @@ pub const MAX_DATAGRAM_BYTES: usize = 65_507;
 /// Fire-and-forget UDP sink: one encoded message out, one datagram on the
 /// wire.
 ///
-/// [`connect`](Self::connect) resolves every address and opens nothing, so
+/// [`new`](Self::new) resolves every address and opens nothing, so
 /// `saci-service validate` passes while every peer is down. The sockets open
 /// on the first [`write_batch`](Sink::write_batch).
 pub struct UdpSink {
     peers: Vec<Peer>,
     broadcast: bool,
     max_datagram_bytes: usize,
-    probe: Option<ProbeSettings>,
+    probe: Option<ProbeConfig>,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// `Some` once the sockets opened with a `probe` configured.
     probe_task: Option<JoinHandle<()>>,
     opened: bool,
@@ -95,37 +96,42 @@ struct ProbeTarget {
 }
 
 impl UdpSink {
-    /// Resolve every `connect` address and prepare the sink without opening a
-    /// socket.
+    /// Resolve every `config.connect` address and prepare the sink without
+    /// opening a socket.
     ///
     /// Each entry is a `host:port` string, and its first resolved address is
-    /// that peer for the sink's lifetime. `broadcast` enables `SO_BROADCAST`
-    /// on every socket. `max_datagram_bytes` caps one message, so a batch
-    /// holding a larger one is refused whole. `probe` asks each peer from time
-    /// to time whether it is still there.
+    /// that peer for the sink's lifetime. `config.broadcast` enables
+    /// `SO_BROADCAST` on every socket. `config.max_datagram_bytes` caps one
+    /// message, so a batch holding a larger one is refused whole.
+    /// `config.probe` asks each peer from time to time whether it is still
+    /// there.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `transformer` declares no
-    /// [`message_shape`](Transformer::message_shape), if `connect` is empty or
+    /// Returns [`SaciError::Configuration`] if `codec` declares no
+    /// [`message_shape`](Codec::message_shape), if `connect` is empty or
     /// an address cannot be resolved, if `max_datagram_bytes` is zero or above
     /// [`MAX_DATAGRAM_BYTES`], if `probe` is combined with `broadcast` or a
     /// multicast address, or if a probe interval or timeout is zero.
-    pub fn connect(
-        connect: &[String],
-        broadcast: bool,
-        max_datagram_bytes: usize,
-        probe: Option<ProbeSettings>,
+    pub fn new(
+        config: UdpSinkConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
+        let UdpSinkConfig {
+            connect,
+            broadcast,
+            max_datagram_bytes,
+            probe,
+        } = config;
+
         // The declaration is the whole answer for every batch this sink will
         // ever encode, so asking once here is what makes a format with no
         // message surface a config error rather than a failed first write.
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "UdpSink: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
 
@@ -136,7 +142,7 @@ impl UdpSink {
         }
 
         let mut peers = Vec::with_capacity(connect.len());
-        for address in connect {
+        for address in &connect {
             let addr = address
                 .to_socket_addrs()
                 .map_err(|e| {
@@ -172,7 +178,7 @@ impl UdpSink {
                     "UdpSink: 'probe' needs one answering peer; it cannot be combined with 'broadcast' or a multicast 'connect' address",
                 ));
             }
-            if settings.interval.is_zero() || settings.timeout.is_zero() {
+            if settings.interval_ms == 0 || settings.timeout_ms == 0 {
                 return Err(SaciError::configuration(
                     "UdpSink: probe 'interval_ms' and 'timeout_ms' must be at least 1",
                 ));
@@ -185,7 +191,7 @@ impl UdpSink {
             max_datagram_bytes,
             probe,
             schema,
-            transformer,
+            codec,
             probe_task: None,
             opened: false,
         })
@@ -267,8 +273,8 @@ impl UdpSink {
             self.probe_task = Some(tokio::spawn(async move {
                 // Starting one interval out, because the inline round above is
                 // this peer set's answer for the interval that just began.
-                let start = tokio::time::Instant::now() + settings.interval;
-                let mut rounds = tokio::time::interval_at(start, settings.interval);
+                let start = tokio::time::Instant::now() + settings.interval();
+                let mut rounds = tokio::time::interval_at(start, settings.interval());
                 // A round that overran its interval must not be followed by a
                 // burst of catch-up rounds against the same peers.
                 rounds.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -351,7 +357,7 @@ impl Peer {
 /// however many peers there are. Probing them in turn would put `N` timeouts
 /// on the first write and stretch the gap between rounds by as much again.
 /// `buffers` holds one receive buffer per target, in the same order.
-async fn probe_round(targets: &[ProbeTarget], settings: ProbeSettings, buffers: &mut [Vec<u8>]) {
+async fn probe_round(targets: &[ProbeTarget], settings: ProbeConfig, buffers: &mut [Vec<u8>]) {
     let rounds = targets
         .iter()
         .zip(buffers.iter_mut())
@@ -363,13 +369,13 @@ async fn probe_round(targets: &[ProbeTarget], settings: ProbeSettings, buffers: 
 ///
 /// Only a transition is logged, so a peer that stays down costs one line
 /// rather than one per interval.
-async fn probe_one(target: &ProbeTarget, settings: ProbeSettings, buf: &mut [u8]) {
+async fn probe_one(target: &ProbeTarget, settings: ProbeConfig, buf: &mut [u8]) {
     // The address names the peer in a transition log line and nowhere else, so
     // a build without `tracing` still consumes it.
     #[cfg(not(feature = "tracing"))]
     let _ = &target.addr;
     let was_down = target.down.load(Ordering::Relaxed);
-    match probe::probe(&target.socket, settings.kind, settings.timeout, buf).await {
+    match probe::probe(&target.socket, settings.kind, settings.timeout(), buf).await {
         Liveness::Up => {
             if was_down {
                 target.down.store(false, Ordering::Relaxed);
@@ -396,7 +402,7 @@ impl Sink for UdpSink {
     /// Encode `batch` and send one datagram per message to every peer,
     /// opening the sockets first if this is the first batch.
     ///
-    /// A batch the transformer encodes to no payloads sends nothing and
+    /// A batch the codec encodes to no payloads sends nothing and
     /// succeeds, whatever the peers are doing: there is nothing for one to
     /// refuse. A batch holding a message above `max_datagram_bytes` sends
     /// nothing either: the check runs before the first send, so such a batch
@@ -404,12 +410,12 @@ impl Sink for UdpSink {
     ///
     /// # Errors
     ///
-    /// Returns the transformer's error when the batch cannot be encoded, and
+    /// Returns the codec's error when the batch cannot be encoded, and
     /// [`SaciError::Generic`] when a message exceeds `max_datagram_bytes`,
     /// when a socket cannot be opened, or when no peer accepted the batch,
     /// naming every peer and why.
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
-        let payloads = self.transformer.encode_messages(batch)?;
+        let payloads = self.codec.encode_messages(batch)?;
 
         // Nothing to deliver, so no peer can fail to take it. Reporting a
         // write error here would hand an empty batch to `retry`, `heal` and
@@ -433,7 +439,7 @@ impl Sink for UdpSink {
 
         let refuse = matches!(
             self.probe,
-            Some(ProbeSettings {
+            Some(ProbeConfig {
                 on_failure: OnFailure::Refuse,
                 ..
             })
@@ -493,13 +499,13 @@ impl Drop for UdpSink {
     }
 }
 
-#[cfg(all(test, feature = "transformer-arrow-ipc"))]
+#[cfg(all(test, feature = "codec-arrow-ipc"))]
 mod tests {
     use super::*;
+    use crate::codec::arrow_ipc::ArrowIpcCodec;
+    use crate::codec::ndjson::NdjsonCodec;
+    use crate::codec::{MessageDecoder, MessageShape};
     use crate::connector::udp::probe::ProbeKind;
-    use crate::transformer::arrow_ipc::ArrowIpcTransformer;
-    use crate::transformer::ndjson::NdjsonTransformer;
-    use crate::transformer::{MessageDecoder, MessageShape};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
     use std::sync::atomic::AtomicUsize;
@@ -511,14 +517,14 @@ mod tests {
     }
 
     /// The datagram rule is what this crate owns; the payload codec is the
-    /// transformer's, and its own tests cover the encode paths.
-    fn arrow_ipc() -> Arc<dyn Transformer> {
-        Arc::new(ArrowIpcTransformer::new())
+    /// codec's, and its own tests cover the encode paths.
+    fn arrow_ipc() -> Arc<dyn Codec> {
+        Arc::new(ArrowIpcCodec::new())
     }
 
     /// One message per row, so a three-row batch is three datagrams.
-    fn ndjson() -> Arc<dyn Transformer> {
-        Arc::new(NdjsonTransformer::new(64))
+    fn ndjson() -> Arc<dyn Codec> {
+        Arc::new(NdjsonCodec::new().infer_max(64))
     }
 
     fn batch(values: &[i64]) -> RecordBatch {
@@ -533,11 +539,29 @@ mod tests {
         vec![one.to_string()]
     }
 
-    fn probe_settings(on_failure: OnFailure) -> ProbeSettings {
-        ProbeSettings {
+    /// A sink built from the pieces a test varies.
+    fn sink_with(
+        connect: &[String],
+        broadcast: bool,
+        max_datagram_bytes: usize,
+        probe: Option<ProbeConfig>,
+        schema: Arc<Schema>,
+        codec: Arc<dyn Codec>,
+    ) -> Result<UdpSink, SaciError> {
+        let config = UdpSinkConfig {
+            connect: connect.to_vec(),
+            broadcast,
+            max_datagram_bytes,
+            probe,
+        };
+        UdpSink::new(config, schema, codec)
+    }
+
+    fn probe_settings(on_failure: OnFailure) -> ProbeConfig {
+        ProbeConfig {
             kind: ProbeKind::Echo,
-            interval: Duration::from_millis(100),
-            timeout: Duration::from_millis(100),
+            interval_ms: 100,
+            timeout_ms: 100,
             on_failure,
         }
     }
@@ -546,11 +570,11 @@ mod tests {
     /// only way to observe "no payloads, no datagrams" without a real codec
     /// that does it. It declares a shape, so it must carry a whole message
     /// surface: the decoder half is `arrow-ipc`'s, unexercised here but real,
-    /// because [`Transformer::message_shape`] answers for both directions at
+    /// because [`Codec::message_shape`] answers for both directions at
     /// once.
     struct NoMessages;
 
-    impl Transformer for NoMessages {
+    impl Codec for NoMessages {
         fn format(&self) -> &'static str {
             "no-messages"
         }
@@ -559,7 +583,7 @@ mod tests {
             &self,
             schema: Arc<Schema>,
         ) -> Result<Box<dyn MessageDecoder>, SaciError> {
-            ArrowIpcTransformer::new().open_message_decoder(schema)
+            ArrowIpcCodec::new().open_message_decoder(schema)
         }
 
         fn encode_messages(&self, _batch: &RecordBatch) -> Result<Vec<Vec<u8>>, SaciError> {
@@ -576,7 +600,7 @@ mod tests {
     /// surface, so the gate is exercised against a stand-in.
     struct NoMessageSurface;
 
-    impl Transformer for NoMessageSurface {
+    impl Codec for NoMessageSurface {
         fn format(&self) -> &'static str {
             "no-surface"
         }
@@ -659,7 +683,7 @@ mod tests {
 
     #[test]
     fn connect_resolves_the_configured_addresses() {
-        let sink = UdpSink::connect(
+        let sink = sink_with(
             &["127.0.0.1:9701".to_string(), "127.0.0.1:9702".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -673,7 +697,7 @@ mod tests {
 
     #[test]
     fn connect_rejects_an_address_with_no_port() {
-        let err = UdpSink::connect(
+        let err = sink_with(
             &["127.0.0.1".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -691,7 +715,7 @@ mod tests {
     /// batch can change whether the format has a message surface.
     #[test]
     fn connect_refuses_a_format_with_no_message_codec() {
-        let err = UdpSink::connect(
+        let err = sink_with(
             &["127.0.0.1:9701".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -710,7 +734,7 @@ mod tests {
     /// `saci-service validate` passes without it.
     #[test]
     fn connect_opens_no_socket() {
-        let sink = UdpSink::connect(
+        let sink = sink_with(
             &["127.0.0.1:1".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -725,7 +749,7 @@ mod tests {
 
     #[test]
     fn connect_rejects_an_oversized_max_datagram_bytes() {
-        let err = UdpSink::connect(
+        let err = sink_with(
             &["127.0.0.1:9701".to_string()],
             false,
             MAX_DATAGRAM_BYTES + 1,
@@ -745,7 +769,7 @@ mod tests {
     /// A broadcast socket has no one peer to read an answer from.
     #[test]
     fn connect_refuses_a_probe_with_broadcast() {
-        let err = UdpSink::connect(
+        let err = sink_with(
             &["127.0.0.1:9701".to_string()],
             true,
             MAX_DATAGRAM_BYTES,
@@ -761,7 +785,7 @@ mod tests {
 
     #[test]
     fn connect_refuses_a_probe_with_a_multicast_peer() {
-        let err = UdpSink::connect(
+        let err = sink_with(
             &["239.255.0.1:9".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -776,13 +800,13 @@ mod tests {
     }
 
     /// The datagram rule: one message, one datagram, and the payload bytes are
-    /// the transformer's own.
+    /// the codec's own.
     #[tokio::test]
     async fn write_batch_sends_one_datagram_per_message() {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -828,7 +852,7 @@ mod tests {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -868,8 +892,8 @@ mod tests {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(&addrs(addr), false, 8, None, test_schema(), arrow_ipc())
-            .expect("resolve");
+        let mut sink =
+            sink_with(&addrs(addr), false, 8, None, test_schema(), arrow_ipc()).expect("resolve");
         let err = sink
             .write_batch(&batch(&[1, 2, 3]))
             .await
@@ -890,7 +914,7 @@ mod tests {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -910,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_without_a_batch_is_ok() {
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &["127.0.0.1:1".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -931,7 +955,7 @@ mod tests {
             second.local_addr().expect("addr").to_string(),
         ];
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &connect,
             false,
             MAX_DATAGRAM_BYTES,
@@ -964,7 +988,7 @@ mod tests {
             "127.0.0.1:1".to_string(),
         ];
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &connect,
             false,
             MAX_DATAGRAM_BYTES,
@@ -991,7 +1015,7 @@ mod tests {
     async fn a_refused_probe_fails_the_write_and_a_returning_peer_lifts_it() {
         let peer = TestPeer::bind(false).await;
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(peer.addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -1041,7 +1065,7 @@ mod tests {
     async fn warn_keeps_sending_to_a_down_peer() {
         let peer = TestPeer::bind(false).await;
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(peer.addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -1075,7 +1099,7 @@ mod tests {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             true,
             MAX_DATAGRAM_BYTES,
@@ -1110,7 +1134,7 @@ mod tests {
 
     #[test]
     fn max_datagram_bytes_at_the_ceiling_is_accepted() {
-        UdpSink::connect(
+        sink_with(
             &["127.0.0.1:9701".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -1123,7 +1147,7 @@ mod tests {
 
     #[test]
     fn max_datagram_bytes_zero_is_refused() {
-        let err = UdpSink::connect(
+        let err = sink_with(
             &["127.0.0.1:9701".to_string()],
             false,
             0,
@@ -1142,7 +1166,7 @@ mod tests {
 
     #[test]
     fn connect_rejects_an_empty_list() {
-        let err = UdpSink::connect(
+        let err = sink_with(
             &[],
             false,
             MAX_DATAGRAM_BYTES,
@@ -1159,8 +1183,8 @@ mod tests {
     #[test]
     fn connect_refuses_a_zero_probe_interval() {
         let mut settings = probe_settings(OnFailure::Refuse);
-        settings.interval = Duration::ZERO;
-        let err = UdpSink::connect(
+        settings.interval_ms = 0;
+        let err = sink_with(
             &["127.0.0.1:9701".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -1177,8 +1201,8 @@ mod tests {
     #[test]
     fn connect_refuses_a_zero_probe_timeout() {
         let mut settings = probe_settings(OnFailure::Refuse);
-        settings.timeout = Duration::ZERO;
-        let err = UdpSink::connect(
+        settings.timeout_ms = 0;
+        let err = sink_with(
             &["127.0.0.1:9701".to_string()],
             false,
             MAX_DATAGRAM_BYTES,
@@ -1204,7 +1228,7 @@ mod tests {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             false,
             payload_len,
@@ -1225,7 +1249,7 @@ mod tests {
                 .expect("recv_from");
         assert_eq!(n, payload_len);
 
-        let mut refusing_sink = UdpSink::connect(
+        let mut refusing_sink = sink_with(
             &addrs(addr),
             false,
             payload_len - 1,
@@ -1255,7 +1279,7 @@ mod tests {
         let collector = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -1290,14 +1314,14 @@ mod tests {
     async fn dropping_the_sink_stops_the_probe() {
         let peer = TestPeer::bind(true).await;
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(peer.addr),
             false,
             MAX_DATAGRAM_BYTES,
-            Some(ProbeSettings {
+            Some(ProbeConfig {
                 kind: ProbeKind::Echo,
-                interval: Duration::from_millis(50),
-                timeout: Duration::from_millis(50),
+                interval_ms: 50,
+                timeout_ms: 50,
                 on_failure: OnFailure::Refuse,
             }),
             test_schema(),
@@ -1334,7 +1358,7 @@ mod tests {
         let second = TestPeer::bind(false).await;
         let connect = vec![first.addr.to_string(), second.addr.to_string()];
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &connect,
             false,
             MAX_DATAGRAM_BYTES,
@@ -1368,7 +1392,7 @@ mod tests {
         let down = TestPeer::bind(false).await;
         let connect = vec![up.addr.to_string(), down.addr.to_string()];
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &connect,
             false,
             MAX_DATAGRAM_BYTES,
@@ -1398,7 +1422,7 @@ mod tests {
     async fn a_peer_that_stops_echoing_is_refused_after_its_next_round() {
         let peer = TestPeer::bind(true).await;
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(peer.addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -1442,7 +1466,7 @@ mod tests {
         };
         let addr = collector.local_addr().expect("local_addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             false,
             MAX_DATAGRAM_BYTES,
@@ -1480,7 +1504,7 @@ mod tests {
         let second = TestPeer::bind(false).await;
         let connect = vec![first.addr.to_string(), second.addr.to_string()];
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &connect,
             false,
             MAX_DATAGRAM_BYTES,
@@ -1516,14 +1540,14 @@ mod tests {
         ];
         let connect: Vec<String> = peers.iter().map(|p| p.addr.to_string()).collect();
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &connect,
             false,
             MAX_DATAGRAM_BYTES,
-            Some(ProbeSettings {
+            Some(ProbeConfig {
                 kind: ProbeKind::Echo,
-                interval: Duration::from_secs(5),
-                timeout: Duration::from_millis(300),
+                interval_ms: 5000,
+                timeout_ms: 300,
                 on_failure: OnFailure::Refuse,
             }),
             test_schema(),
@@ -1561,7 +1585,7 @@ mod tests {
         drop(closed);
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("parse addr");
 
-        let mut sink = UdpSink::connect(
+        let mut sink = sink_with(
             &addrs(addr),
             false,
             MAX_DATAGRAM_BYTES,

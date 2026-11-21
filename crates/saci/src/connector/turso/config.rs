@@ -2,8 +2,8 @@
 //!
 //! Every struct here carries `#[serde(deny_unknown_fields)]`: a key the
 //! connector cannot honour is a configuration error, not something to drop
-//! silently. The source-mode enum is internally tagged on `kind`, matching the
-//! `run_mode` table the service config already uses.
+//! silently. The source-mode enum is internally tagged on `kind`, like the
+//! `mode` child of the other connectors.
 //!
 //! Each top-level type exposes `validate`, which the constructors call before
 //! they build anything. Validation returns [`SaciError::Configuration`] naming
@@ -11,9 +11,9 @@
 
 use std::collections::HashSet;
 
-use arrow_schema::{DataType, Field};
 use serde::Deserialize;
 
+use crate::connector::schema::{FieldSpec, FieldType};
 use crate::error::SaciError;
 
 // ------------------------------------------------------------------ defaults
@@ -161,163 +161,46 @@ impl Default for SyncConfig {
 
 // -------------------------------------------------------------------- fields
 
-/// The Arrow type a declared column carries.
+/// Whether the connector maps a declared type.
 ///
-/// SQLite is dynamically typed, so this is the type the connector coerces each
-/// value to; a value that cannot be coerced is a loud error rather than a silent
-/// widening. There is deliberately no unsigned variant: the engine's only
-/// integer is a signed 64-bit one.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TursoFieldType {
-    /// `TEXT` to Arrow `Utf8`. Also the declared type for a date/timestamp
-    /// column, which SQLite stores as text.
-    Utf8,
-    /// `INTEGER` to Arrow `Int64`.
-    Int64,
-    /// `REAL` to Arrow `Float64`. An integer value is widened.
-    Float64,
-    /// `INTEGER` 0/1 to Arrow `Boolean`. SQLite has no boolean type.
-    Bool,
-    /// `BLOB` to Arrow `Binary`.
-    Binary,
-    /// `TEXT`/`INTEGER` to Arrow `Decimal128`. Needs `precision` and `scale`.
-    Decimal128,
+/// SQLite is dynamically typed, so a declared type is the type the connector
+/// coerces each value to; a value that cannot be coerced is a loud error rather
+/// than a silent widening. There is deliberately no unsigned type: the engine's
+/// only integer is a signed 64-bit one.
+fn supported(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::Utf8
+            | FieldType::Int64
+            | FieldType::Float64
+            | FieldType::Boolean
+            | FieldType::Binary
+            | FieldType::Decimal128
+    )
 }
 
-impl TursoFieldType {
-    /// The name used in error messages, matching the configured spelling.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            TursoFieldType::Utf8 => "utf8",
-            TursoFieldType::Int64 => "int64",
-            TursoFieldType::Float64 => "float64",
-            TursoFieldType::Bool => "bool",
-            TursoFieldType::Binary => "binary",
-            TursoFieldType::Decimal128 => "decimal128",
-        }
-    }
-
-    /// Whether a column of this type can carry a `polling` cursor.
-    ///
-    /// A cursor must be totally ordered by the comparison SQLite applies to it
-    /// and by the text form the offset table stores, which rules out booleans,
-    /// blobs and scaled decimals.
-    pub(crate) fn is_cursor_capable(self) -> bool {
-        matches!(
-            self,
-            TursoFieldType::Int64 | TursoFieldType::Float64 | TursoFieldType::Utf8
-        )
-    }
-}
-
-/// One declared column: its name, type, and nullability.
+/// Whether a column of this type can carry a `polling` cursor.
 ///
-/// Flat rather than an internally tagged enum, so `deny_unknown_fields` still
-/// applies; `#[serde(flatten)]` would switch it off.
-#[derive(Deserialize, Debug, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct FieldSpec {
-    /// Column name. Matched against the database by name, never by position.
-    ///
-    /// Read from `id`, because `crate::config` puts a node's leading argument
-    /// under that key: the `"total"` in `schema_fields "total" type="float64"`.
-    #[serde(rename = "id")]
-    pub name: String,
-    /// Declared type. Every value is coerced to it; a mismatch is an error.
-    #[serde(rename = "type")]
-    pub ty: TursoFieldType,
-    /// Whether the Arrow field admits NULL.
-    #[serde(default = "default_true")]
-    pub nullable: bool,
-    /// Total digits. `decimal128` only, and required there.
-    #[serde(default)]
-    pub precision: Option<u8>,
-    /// Fractional digits. `decimal128` only, and required there.
-    #[serde(default)]
-    pub scale: Option<i8>,
-}
-
-impl FieldSpec {
-    /// The Arrow field this spec declares.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Configuration`] when `decimal128` is missing
-    /// `precision`/`scale` or carries an out-of-range one, or when
-    /// `precision`/`scale` are set on a type that carries no decimal.
-    pub fn to_arrow_field(&self) -> Result<Field, SaciError> {
-        if self.ty != TursoFieldType::Decimal128
-            && (self.precision.is_some() || self.scale.is_some())
-        {
-            return Err(SaciError::configuration(format!(
-                "field '{}': precision/scale apply to type \"decimal128\" only, not \"{}\"",
-                self.name,
-                self.ty.as_str()
-            )));
-        }
-        let data_type = match self.ty {
-            TursoFieldType::Utf8 => DataType::Utf8,
-            TursoFieldType::Int64 => DataType::Int64,
-            TursoFieldType::Float64 => DataType::Float64,
-            TursoFieldType::Bool => DataType::Boolean,
-            TursoFieldType::Binary => DataType::Binary,
-            TursoFieldType::Decimal128 => {
-                let (precision, scale) = self.decimal_params()?;
-                DataType::Decimal128(precision, scale)
-            }
-        };
-        Ok(Field::new(&self.name, data_type, self.nullable))
-    }
-
-    /// The parsed `precision` and `scale` of a `decimal128` field.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Configuration`] when either is missing or out of
-    /// range.
-    pub(crate) fn decimal_params(&self) -> Result<(u8, i8), SaciError> {
-        let precision = self.precision.ok_or_else(|| {
-            SaciError::configuration(format!(
-                "field '{}': type \"decimal128\" requires 'precision'",
-                self.name
-            ))
-        })?;
-        let scale = self.scale.ok_or_else(|| {
-            SaciError::configuration(format!(
-                "field '{}': type \"decimal128\" requires 'scale'",
-                self.name
-            ))
-        })?;
-        if !(1..=38).contains(&precision) {
-            return Err(SaciError::configuration(format!(
-                "field '{}': 'precision' must be within 1..=38, got {precision}",
-                self.name
-            )));
-        }
-        if scale < 0 || scale > precision as i8 {
-            return Err(SaciError::configuration(format!(
-                "field '{}': 'scale' must be within 0..={precision}, got {scale}",
-                self.name
-            )));
-        }
-        Ok((precision, scale))
-    }
+/// A cursor must be totally ordered by the comparison SQLite applies to it
+/// and by the text form the offset table stores, which rules out booleans,
+/// blobs and scaled decimals.
+pub(crate) fn is_cursor_capable(ty: FieldType) -> bool {
+    matches!(ty, FieldType::Int64 | FieldType::Float64 | FieldType::Utf8)
 }
 
 /// The `__`-prefixed fields the `cdc` mode fills from the change stream,
 /// with the declared type each requires.
-pub(crate) const RESERVED_CDC_FIELDS: [(&str, TursoFieldType); 6] = [
-    ("__op", TursoFieldType::Utf8),
-    ("__change_id", TursoFieldType::Int64),
-    ("__change_time", TursoFieldType::Int64),
-    ("__txn_id", TursoFieldType::Int64),
-    ("__table", TursoFieldType::Utf8),
-    ("__rowid", TursoFieldType::Int64),
+pub(crate) const RESERVED_CDC_FIELDS: [(&str, FieldType); 6] = [
+    ("__op", FieldType::Utf8),
+    ("__change_id", FieldType::Int64),
+    ("__change_time", FieldType::Int64),
+    ("__txn_id", FieldType::Int64),
+    ("__table", FieldType::Utf8),
+    ("__rowid", FieldType::Int64),
 ];
 
 /// The required type of a reserved CDC field name, if it is one.
-pub(crate) fn reserved_cdc_type(name: &str) -> Option<TursoFieldType> {
+pub(crate) fn reserved_cdc_type(name: &str) -> Option<FieldType> {
     RESERVED_CDC_FIELDS
         .iter()
         .find(|(n, _)| *n == name)
@@ -329,15 +212,32 @@ pub(crate) fn reserved_cdc_type(name: &str) -> Option<TursoFieldType> {
 fn validate_fields(what: &str, cdc: bool, fields: &[FieldSpec]) -> Result<(), SaciError> {
     if fields.is_empty() {
         return Err(SaciError::configuration(format!(
-            "{what}: schema_fields must declare at least one field"
+            "{what}: at least one 'field' entry is required"
         )));
     }
     let mut seen = HashSet::new();
-    for field in fields {
-        validate_ident(what, "schema_fields id", &field.name)?;
+    for (i, field) in fields.iter().enumerate() {
+        if field.name.is_empty() {
+            return Err(SaciError::configuration(format!(
+                "{what}: field[{i}] has an empty 'id'"
+            )));
+        }
+        validate_ident(what, "field id", &field.name)?;
         if !seen.insert(field.name.as_str()) {
             return Err(SaciError::configuration(format!(
-                "{what}: duplicate schema_fields name '{}'",
+                "{what}: field '{}' is declared more than once",
+                field.name
+            )));
+        }
+        if !supported(field.ty) {
+            return Err(SaciError::configuration(format!(
+                "turso: field '{}' has type '{}', which this connector does not map",
+                field.name, field.ty
+            )));
+        }
+        if field.native_type.is_some() {
+            return Err(SaciError::configuration(format!(
+                "turso: field '{}' sets 'native_type', which this connector does not use",
                 field.name
             )));
         }
@@ -360,7 +260,7 @@ fn validate_fields(what: &str, cdc: bool, fields: &[FieldSpec]) -> Result<(), Sa
                 }
             }
         }
-        field.to_arrow_field()?;
+        field.to_arrow()?;
     }
     Ok(())
 }
@@ -448,8 +348,12 @@ pub struct TursoSourceConfig {
     #[serde(default)]
     pub sync: SyncConfig,
     /// The declared Arrow schema.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(
+        default,
+        rename = "field",
+        deserialize_with = "crate::config::one_or_many"
+    )]
+    pub fields: Vec<FieldSpec>,
 }
 
 /// The read strategy, chosen by `kind`.
@@ -548,7 +452,7 @@ impl TursoSourceConfig {
         validate_fields(
             &format!("source '{}'", self.name),
             matches!(self.mode, SourceMode::Cdc(_)),
-            &self.schema_fields,
+            &self.fields,
         )?;
 
         match &self.mode {
@@ -557,7 +461,7 @@ impl TursoSourceConfig {
                 validate_ident(&what, "table", &polling.table)?;
                 validate_ident(&what, "offset_table", &polling.offset_table)?;
                 match self.field(&polling.cursor_column) {
-                    Some(field) if field.ty.is_cursor_capable() => {}
+                    Some(field) if is_cursor_capable(field.ty) => {}
                     Some(field) => {
                         return Err(SaciError::configuration(format!(
                             "{what}: cursor_column '{}' is \"{}\"; a cursor must be \
@@ -568,14 +472,15 @@ impl TursoSourceConfig {
                     }
                     None => {
                         return Err(SaciError::configuration(format!(
-                            "{what}: cursor_column '{}' is not a declared schema_field",
+                            "{what}: cursor_column '{}' does not name a declared 'field' \
+                             entry",
                             polling.cursor_column
                         )));
                     }
                 }
                 if let Some(tie) = &polling.tiebreak_column {
                     match self.field(tie) {
-                        Some(field) if field.ty.is_cursor_capable() => {}
+                        Some(field) if is_cursor_capable(field.ty) => {}
                         Some(field) => {
                             return Err(SaciError::configuration(format!(
                                 "{what}: tiebreak_column '{tie}' is \"{}\"; a cursor must be \
@@ -585,7 +490,8 @@ impl TursoSourceConfig {
                         }
                         None => {
                             return Err(SaciError::configuration(format!(
-                                "{what}: tiebreak_column '{tie}' is not a declared schema_field"
+                                "{what}: tiebreak_column '{tie}' does not name a declared \
+                                 'field' entry"
                             )));
                         }
                     }
@@ -611,7 +517,7 @@ impl TursoSourceConfig {
     }
 
     fn field(&self, name: &str) -> Option<&FieldSpec> {
-        self.schema_fields.iter().find(|f| f.name == name)
+        self.fields.iter().find(|f| f.name == name)
     }
 }
 
@@ -655,8 +561,12 @@ pub struct TursoSinkConfig {
     #[serde(default)]
     pub capture: Option<CaptureConfig>,
     /// The declared Arrow schema.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<FieldSpec>,
+    #[serde(
+        default,
+        rename = "field",
+        deserialize_with = "crate::config::one_or_many"
+    )]
+    pub fields: Vec<FieldSpec>,
 }
 
 /// How the sink resolves a row that collides with an existing one.
@@ -749,7 +659,7 @@ impl TursoSinkConfig {
             )));
         }
         self.connection.validate(&what)?;
-        validate_fields(&what, false, &self.schema_fields)?;
+        validate_fields(&what, false, &self.fields)?;
 
         if self.write_mode != WriteMode::Append {
             if self.conflict_columns.is_empty() {
@@ -763,16 +673,16 @@ impl TursoSinkConfig {
                 )));
             }
             for column in &self.conflict_columns {
-                if !self.schema_fields.iter().any(|f| &f.name == column) {
+                if !self.fields.iter().any(|f| &f.name == column) {
                     return Err(SaciError::configuration(format!(
-                        "{what}: conflict_columns entry '{column}' is not a declared \
-                         schema_field"
+                        "{what}: conflict_columns entry '{column}' does not name a declared \
+                         'field' entry"
                     )));
                 }
             }
             if self.write_mode == WriteMode::Upsert
                 && self
-                    .schema_fields
+                    .fields
                     .iter()
                     .all(|f| self.conflict_columns.contains(&f.name))
             {

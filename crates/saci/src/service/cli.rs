@@ -5,8 +5,8 @@
 //! [`main`], or [`main_with`] to register its own factories.
 //!
 //! clap 4 derive defines the CLI shape. Every subcommand has its own args
-//! struct; global options (config path, address, log overrides) are
-//! collected in [`GlobalOpts`] and flattened into the root [`Cli`] struct.
+//! struct; the one global option (the config path) is [`GlobalOpts`],
+//! flattened into the root [`Cli`] struct.
 
 pub mod commands;
 
@@ -17,14 +17,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::service::ServiceBuilder;
 
-/// Run the `saci-service` command line with the built-in factories.
+/// Run the `saci-service` command line with the built-in connectors.
 pub fn main() -> ExitCode {
     main_with(|builder| builder)
 }
 
 /// Run the `saci-service` command line, handing the [`ServiceBuilder`] that
 /// `serve` and `validate` build from to `customize` after the built-in
-/// factories are registered.
+/// connectors and codecs are registered.
 ///
 /// Parses the process arguments, loads a `.env` file from the working
 /// directory if one exists (an existing variable is never overridden), and
@@ -32,27 +32,31 @@ pub fn main() -> ExitCode {
 ///
 /// ```no_run
 /// use saci::SaciError;
-/// use saci::connector::{ConfigValue, ConnectorContext, SourceFactory};
-/// use saci::io::source::Source;
+/// use saci::connector::{ConfigValue, Connector, ConnectorContext, Role};
+/// use saci::io::Source;
 ///
-/// struct MySourceFactory;
+/// struct MyConnector;
 ///
-/// impl SourceFactory for MySourceFactory {
-///     fn type_name(&self) -> &'static str {
-///         "MySource"
+/// impl Connector for MyConnector {
+///     fn name(&self) -> &'static str {
+///         "my-source"
 ///     }
 ///
-///     fn build(
+///     fn roles(&self) -> &'static [Role] {
+///         &[Role::Source]
+///     }
+///
+///     fn source(
 ///         &self,
 ///         _config: &ConfigValue,
 ///         _ctx: &ConnectorContext,
 ///     ) -> Result<Box<dyn Source>, SaciError> {
-///         Err(SaciError::configuration("MySource is not implemented yet"))
+///         Err(SaciError::configuration("my-source is not implemented yet"))
 ///     }
 /// }
 ///
 /// fn main() -> std::process::ExitCode {
-///     saci::service::cli::main_with(|builder| builder.register_source(MySourceFactory))
+///     saci::service::cli::main_with(|builder| builder.connector(MyConnector))
 /// }
 /// ```
 pub fn main_with<F>(customize: F) -> ExitCode
@@ -127,22 +131,6 @@ pub struct GlobalOpts {
         global = true
     )]
     pub config: PathBuf,
-
-    /// HTTP control-plane address to query (for status/cluster commands).
-    #[arg(long, env = "SACI_ADDR", global = true)]
-    pub addr: Option<String>,
-
-    /// Log format override.
-    #[arg(long, env = "SACI_LOG_FORMAT", global = true, value_enum)]
-    pub log_format: Option<LogFormatArg>,
-
-    /// Log level override applied to the tracing filter.
-    #[arg(long, env = "SACI_LOG_LEVEL", global = true)]
-    pub log_level: Option<String>,
-
-    /// OTLP/HTTP collector base URL for span export. Empty disables it.
-    #[arg(long, env = "SACI_OTLP_ENDPOINT", global = true)]
-    pub otlp_endpoint: Option<String>,
 }
 
 /// Top-level subcommands.
@@ -168,29 +156,41 @@ pub struct ServeArgs {
     #[arg(long, env = "SACI_NODE_ID")]
     pub node_id: Option<u64>,
 
-    /// Override the HTTP bind port (0 = OS-assigned ephemeral port).
+    /// Override the HTTP bind address (`host:port`; port 0 = OS-assigned).
     ///
-    /// Takes precedence over the `http.bind` port in the config file.
-    /// Useful for testing: pass `--port 0` and read the bound address from
-    /// stdout (`saci-service listening on <addr>`).
-    #[arg(long, env = "SACI_HTTP_PORT")]
-    pub port: Option<u16>,
+    /// Replaces `http.bind` from the config file whole. Useful for testing:
+    /// pass `--bind 127.0.0.1:0` and read the bound address from stdout
+    /// (`saci-service listening on <addr>`).
+    #[arg(long, env = "SACI_HTTP_BIND", value_name = "ADDR")]
+    pub bind: Option<String>,
+
+    /// Log format override.
+    #[arg(long, env = "SACI_LOG_FORMAT", value_enum)]
+    pub log_format: Option<LogFormatArg>,
+
+    /// Log level override applied to the tracing filter.
+    #[arg(long, env = "SACI_LOG_LEVEL")]
+    pub log_level: Option<String>,
+
+    /// OTLP/HTTP collector base URL for span export. Empty disables it.
+    #[arg(long, env = "SACI_OTLP_ENDPOINT")]
+    pub otlp_endpoint: Option<String>,
 }
 
 /// Arguments for the `validate` subcommand.
 #[derive(clap::Args, Debug)]
 pub struct ValidateArgs {
     // Config path comes from GlobalOpts --config.
-    /// Treat unknown factory types as errors rather than warnings.
+    /// Treat unknown connector names as errors rather than warnings.
     ///
-    /// A type no crate here provides (a user-defined factory registered at
+    /// A name no crate here provides (a user-defined connector registered at
     /// serve time) warns and the command exits 0; `--strict` makes it a
-    /// non-zero exit. A type that is a built-in connector this binary was
+    /// non-zero exit. A name that is a built-in connector this binary was
     /// built without is an error in both modes, since no serve-time
     /// registration can supply it.
     #[arg(long)]
     pub strict: bool,
-    /// Build only sources, sinks and transformers; skip processor nodes and
+    /// Build only sources, sinks and codecs; skip processor nodes and
     /// the workflow-graph check that needs their built components.
     ///
     /// For a config naming a processor module not present on disk (a
@@ -207,6 +207,12 @@ pub struct StatusArgs {
     /// Fetch the full /status JSON (default: show a summary).
     #[arg(long)]
     pub full: bool,
+
+    /// Base URL of the node to query (for example `http://localhost:8080`).
+    ///
+    /// Defaults to `http://{http.bind}` from `--config`.
+    #[arg(long, env = "SACI_URL")]
+    pub url: Option<String>,
 }
 
 /// Cluster management subcommands.
@@ -214,16 +220,14 @@ pub struct StatusArgs {
 pub enum ClusterCmd {
     /// Initialize a new cluster on this node. Only run once per cluster.
     Init,
-    /// Join an existing cluster by contacting the leader.
-    Join {
-        /// HTTP address of the leader node (e.g., http://10.0.0.1:8080).
-        #[arg(long)]
-        leader: String,
+    /// Show cluster status from a running node's HTTP API.
+    Status {
+        /// Base URL of the node (for example `http://10.0.0.1:8080`).
+        ///
+        /// Defaults to `http://{http.bind}` from `--config`.
+        #[arg(long, env = "SACI_URL")]
+        url: Option<String>,
     },
-    /// Leave the cluster gracefully. Removes this node from Raft membership.
-    Leave,
-    /// Show cluster status (membership, roles, commit index, etc.).
-    Status,
 }
 
 /// Log format selection for CLI override.

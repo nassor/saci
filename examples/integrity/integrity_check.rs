@@ -10,24 +10,24 @@
 //!
 //! ```text
 //! docker compose -f examples/integrity/docker-compose.yml up -d
-//! cargo run -p saci --example integrity_check --features service,transformer-arrow-ipc,transformer-csv,transformer-ndjson,transformer-parquet
+//! cargo run -p saci --example integrity_check --features service,codec-arrow-ipc,codec-csv,codec-ndjson,codec-parquet
 //! # then, in two more terminals, the two services the example drives:
 //! cargo run -p saci \
-//!     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,transformer-ndjson,transformer-csv,transformer-arrow-ipc,wasm-host,windows \
+//!     --features server,connector-kafka,connector-nats,connector-http,connector-channel,connector-file,codec-ndjson,codec-csv,codec-arrow-ipc,wasm-host,windows \
 //!     -- serve --config examples/integrity/integrity.kdl
 //! cargo run -p saci \
-//!     --features server,connector-postgresql,connector-http,transformer-parquet,wasm-host \
+//!     --features server,connector-postgresql,connector-http,codec-parquet,wasm-host \
 //!     -- serve --config examples/integrity/integrity_audit.kdl
 //! ```
 //!
 //! # Two services, not one
 //!
-//! `run_mode` is global to a config. `examples/integrity/integrity.kdl` runs
-//! `kind="stream"` and holds the `ingest` and `settle` workflows; its control
+//! `run` is global to a config. `examples/integrity/integrity.kdl` declares
+//! `run "stream"` and holds the `ingest` and `settle` workflows; its control
 //! plane is `--stream-url`. A stream-mode source that reports EOF leaves the
 //! rotation permanently, which is right for the catalog `FileSource` and fatal
 //! for a `PostgresSource`, so the CDC half lives in
-//! `examples/integrity/integrity_audit.kdl` under `kind="interval"`, with the
+//! `examples/integrity/integrity_audit.kdl` under `run "interval"`, with the
 //! `audit` workflow and the `--audit-url` control plane.
 //!
 //! # Flags
@@ -97,7 +97,6 @@
 //! and every recomputed value matching.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -113,12 +112,12 @@ use axum::http::StatusCode;
 use axum::routing::post;
 // `random_range` lives on `RngExt` in rand 0.10, not on `Rng`.
 use rand::{RngExt as _, SeedableRng as _};
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
+use saci::codec::csv::CsvCodec;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::codec::parquet::ParquetCodec;
 use saci::inspector_wire::{ServiceLifecycleReport, WorkflowStatus};
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
-use saci::transformer::csv::CsvTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
-use saci::transformer::parquet::ParquetTransformer;
 use tokio_util::sync::CancellationToken;
 
 /// Simulated epoch the example's clock starts at, milliseconds.
@@ -128,7 +127,7 @@ const WINDOW_SIZE_MS: i64 = 10_000;
 /// Lateness budget the `settle` workflow declares.
 const ALLOWED_LATENESS_MS: i64 = 2_000;
 /// Orders packed into one Kafka message. The source is configured
-/// `batch_size 1` with flow control off, so one message is exactly one batch
+/// `batch_rows 1` with flow control off, so one message is exactly one batch
 /// and every row in it routes the same way.
 const ORDERS_PER_MESSAGE: usize = 5;
 /// The consumer group `integrity.kdl` gives `orders_kafka`. Deleted with the
@@ -608,7 +607,7 @@ impl Verifier {
     }
 }
 
-// ── decoding a sink body through the real transformers ──────────────────────
+// ── decoding a sink body through the real codecs ────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SinkKind {
@@ -636,45 +635,26 @@ impl SinkKind {
         }
     }
 
-    /// The transformer, and the schema to declare. `arrow-ipc` and `parquet`
+    /// The codec, and the schema to declare. `arrow-ipc` and `parquet`
     /// are given none, so each body's own schema governs the read.
-    fn reader_setup(self) -> (Box<dyn Transformer>, Option<Arc<Schema>>) {
+    fn reader_setup(self) -> (Box<dyn Codec>, Option<Arc<Schema>>) {
         match self {
-            Self::Express => (
-                Box::new(NdjsonTransformer::default()),
-                Some(classified_schema()),
-            ),
+            Self::Express => (Box::new(NdjsonCodec::default()), Some(classified_schema())),
             // `HttpSink` writes through the stream surface, which emits the
             // header row `has_headers` asks for; the message surface would
             // not.
-            Self::Standard => (
-                Box::new(CsvTransformer::new(true)),
-                Some(classified_schema()),
-            ),
-            Self::Window => (Box::new(ArrowIpcTransformer::new()), None),
-            Self::Audit => (Box::new(ParquetTransformer::new()), None),
+            Self::Standard => (Box::new(CsvCodec::new()), Some(classified_schema())),
+            Self::Window => (Box::new(ArrowIpcCodec::new()), None),
+            Self::Audit => (Box::new(ParquetCodec::new()), None),
         }
     }
 }
 
-/// Spool the body to a temp file and pull every batch out of it.
-///
-/// `open_reader` takes a `std::fs::File` because Parquet reads its footer
-/// before any row group, so an in-memory body has to land on disk first. This
-/// is what `HttpSource` does with a response body.
+/// Pull every batch out of the body, which the codec reads from memory.
 fn decode(sink: SinkKind, body: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
-    let (transformer, declared) = sink.reader_setup();
-    let mut tmp =
-        tempfile::NamedTempFile::new().map_err(|e| format!("temp file for the body: {e}"))?;
-    tmp.write_all(body)
-        .and_then(|()| tmp.flush())
-        .map_err(|e| format!("writing the body to a temp file: {e}"))?;
-    let file = tmp
-        .reopen()
-        .map_err(|e| format!("reopening the spooled body: {e}"))?;
-
-    let mut reader = transformer
-        .open_reader(file, declared)
+    let (codec, declared) = sink.reader_setup();
+    let mut reader = codec
+        .open_reader(body.to_vec().into(), declared)
         .map_err(|e| format!("{}: open_reader: {e}", sink.label()))?;
     let schema = reader.schema();
     let mut batches = Vec::new();
@@ -847,13 +827,8 @@ fn check_ndjson_field_names(registry: &mut Registry, body: &[u8], expected: &Sch
 }
 
 fn decode_inferred_ndjson(body: &[u8]) -> Result<Arc<Schema>, String> {
-    let mut tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-    tmp.write_all(body)
-        .and_then(|()| tmp.flush())
-        .map_err(|e| e.to_string())?;
-    let file = tmp.reopen().map_err(|e| e.to_string())?;
-    let reader = NdjsonTransformer::default()
-        .open_reader(file, None)
+    let reader = NdjsonCodec::default()
+        .open_reader(body.to_vec().into(), None)
         .map_err(|e| e.to_string())?;
     Ok(reader.schema())
 }

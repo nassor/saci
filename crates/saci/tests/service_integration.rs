@@ -8,7 +8,7 @@
 //! cargo test --test service_integration --all-features -- --test-threads=4
 //! ```
 //!
-//! Tests pass `--port 0` and parse the `saci-service listening on <addr>` line from
+//! Tests pass `--bind 127.0.0.1:0` and parse the `saci-service listening on <addr>` line from
 //! stdout, so no port is hardcoded. Each test gets its own
 //! [`tempfile::TempDir`] for `node.data_dir`, and [`Service`] kills and reaps
 //! the child even if the test panics.
@@ -75,7 +75,7 @@ impl Drop for Service {
 }
 
 impl Service {
-    /// Spawn `serve --config <path> --port 0` and wait for its bind address.
+    /// Spawn `serve --config <path> --bind 127.0.0.1:0` and wait for its bind address.
     ///
     /// # Panics
     ///
@@ -88,8 +88,8 @@ impl Service {
             .arg("serve")
             .arg("--config")
             .arg(config_path)
-            .arg("--port")
-            .arg("0")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::from(stderr_sink))
             .spawn()
@@ -314,22 +314,22 @@ mode "standalone"
 
 node id=1 data_dir="{data_dir_str}"
 
-run_mode kind="continuous"
+run "continuous"
 
 workflow "smoke" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
-    source "in" type="FileSource" component="Ping" transformer="csv_fmt" {{
+    source "in" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{input_path_str}"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }}
     }}
-    sink "out" type="FileSink" component="Ping" transformer="csv_fmt" {{
+    sink "out" connector="file" component="Ping" codec="csv_fmt" {{
         config {{
             path "{output_path_str}"
-            schema_fields "id" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
         }}
     }}
     link from="in" to="out"
@@ -443,9 +443,10 @@ async fn test_serve_health_endpoint_returns_200() {
 
 /// `/metrics` must carry series that real code writes, not just descriptors.
 ///
-/// `saci_workflow_runs_total` comes from the standalone runner's iteration
+/// `saci_workflow_passes_total` comes from the standalone runner's pass
 /// counter and the three service gauges come from the HTTP watchdog tick, so a
-/// body containing all four proves both writers ran.
+/// body containing all four proves both writers ran. The pass counter is
+/// recorded once per workflow, so every sample of it names its `workflow`.
 #[tokio::test]
 async fn test_metrics_endpoint_exposes_written_series() {
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -454,8 +455,8 @@ async fn test_metrics_endpoint_exposes_written_series() {
     let mut service = Service::spawn(config.path());
     let metrics_url = service.url("/metrics");
     let expected = [
-        "saci_workflow_runs_total",
-        "saci_liveness_counter",
+        "saci_workflow_passes_total{",
+        "saci_watchdog_ticks_total",
         "saci_ready",
         "saci_uptime_seconds",
     ];
@@ -471,6 +472,20 @@ async fn test_metrics_endpoint_exposes_written_series() {
         assert!(
             body.contains(name),
             "/metrics should carry {name}, body was:\n{body}"
+        );
+    }
+    let passes: Vec<&str> = body
+        .lines()
+        .filter(|line| line.starts_with("saci_workflow_passes_total{"))
+        .collect();
+    assert!(
+        !passes.is_empty(),
+        "/metrics should carry a saci_workflow_passes_total sample, body was:\n{body}"
+    );
+    for line in &passes {
+        assert!(
+            line.contains("workflow=\""),
+            "every saci_workflow_passes_total sample names its workflow: {line}"
         );
     }
     assert!(
@@ -495,7 +510,7 @@ async fn test_status_subcommand_hits_running_service() {
     let addr = service.url("");
     let output = std::process::Command::new(BIN)
         .arg("status")
-        .arg("--addr")
+        .arg("--url")
         .arg(&addr)
         .output()
         .expect("failed to run status");
@@ -513,5 +528,57 @@ async fn test_status_subcommand_hits_running_service() {
     assert!(
         status_stdout.contains("node"),
         "status output should contain 'node': {status_stdout}"
+    );
+}
+
+/// `serve` is callable as a library: cancelling `ServeOptions::shutdown` drains
+/// the runner, the HTTP server and the watchdog inside the budget and reports
+/// `Clean`, with `announce: false` keeping stdout quiet.
+///
+/// This is the only test in the binary that calls `serve` in-process, so the
+/// process-wide tracing subscriber and meter provider it installs are its own.
+#[tokio::test]
+async fn test_serve_returns_clean_after_shutdown_token_fires() {
+    use saci::service::{ServeExit, ServeOptions, ServiceBuilder, ServiceConfig, serve};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let config_file = write_standalone_config(dir.path());
+    let text = std::fs::read_to_string(config_file.path()).expect("read config");
+    let config = ServiceConfig::from_kdl(&text).expect("config parses");
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let options = ServeOptions {
+        config_path: None,
+        announce: false,
+        shutdown: Some(shutdown.clone()),
+    };
+    // `serve` runs its runners inline and is not `Send`, so it shares this
+    // task with the trigger instead of being spawned. `fired` records that
+    // the token was cancelled before `serve` returned: a runner that ended on
+    // its own would also yield `Clean`, and this tells the two apart.
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    let stop = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        shutdown.cancel();
+    };
+    let run = async {
+        let exit = serve(config, ServiceBuilder::new(), options).await;
+        (exit, fired.load(std::sync::atomic::Ordering::SeqCst))
+    };
+    let ((exit, stopped_by_token), ()) =
+        tokio::time::timeout(STARTUP_BUDGET + SHUTDOWN_BUDGET, async {
+            tokio::join!(run, stop)
+        })
+        .await
+        .expect("serve must stop within its budget");
+
+    assert!(
+        stopped_by_token,
+        "serve returned before the shutdown token was cancelled"
+    );
+    assert_eq!(
+        exit.expect("serve returns Ok after a requested shutdown"),
+        ServeExit::Clean
     );
 }

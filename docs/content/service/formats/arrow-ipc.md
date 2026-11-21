@@ -14,7 +14,7 @@ value = "yes"
 label = "Per-message"
 value = "One message per batch"
 [[extra.facts]]
-label = "Needs schema_fields"
+label = "Needs field lines"
 value = "Optional reading a stream, required writing and on messages"
 [[extra.facts]]
 label = "In the server build"
@@ -25,8 +25,8 @@ worth naming, because the payload already holds the columns the workflow works o
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 132" role="img" aria-labelledby="ai-t ai-d">
-        <title id="ai-t">An arrow-ipc transformer decoding a stream into rows and encoding rows back into a stream</title>
-        <desc id="ai-d">Bytes on the left and rows on the right, with a transformer node in the middle whose format is arrow-ipc. The upper arrow runs left to right and is the decode path, which reads the schema out of the stream header. The lower arrow runs right to left and is the encode path, which writes one whole stream per call. One message is one whole stream.</desc>
+        <title id="ai-t">An arrow-ipc codec decoding a stream into rows and encoding rows back into a stream</title>
+        <desc id="ai-d">Bytes on the left and rows on the right, with a codec in the middle whose format is arrow-ipc. The upper arrow runs left to right and is the decode path, which reads the schema out of the stream header. The lower arrow runs right to left and is the encode path, which writes one whole stream per call. One message is one whole stream.</desc>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="34" width="150" height="64" rx="8"/>
             <rect class="hd hd-data" x="0" y="34" width="150" height="20" rx="8"/>
@@ -41,9 +41,9 @@ worth naming, because the payload already holds the columns the workflow works o
             <rect class="blk blk-ctl" x="258" y="26" width="144" height="80" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="26" width="144" height="20" rx="8"/>
             <rect class="hd hd-ctl" x="258" y="38" width="144" height="8"/>
-            <text class="t-lbl" x="270" y="41">transformer</text>
+            <text class="t-lbl" x="270" y="41">codec</text>
             <text class="t-sm t-ctl" x="270" y="62">format="arrow-ipc"</text>
-            <text class="t-sm" x="270" y="80">no options</text>
+            <text class="t-sm" x="270" y="80">no config</text>
             <text class="t-sm" x="270" y="96">one whole stream</text>
             <path class="arw arw-data" d="M254 86 H150" marker-end="url(#ai-a)"/>
             <text class="t-sm t-mid" x="202" y="104">encode</text>
@@ -55,7 +55,7 @@ worth naming, because the payload already holds the columns the workflow works o
             <rect class="hd hd-data" x="514" y="34" width="146" height="20" rx="8"/>
             <rect class="hd hd-data" x="514" y="46" width="146" height="8"/>
             <text class="t-lbl" x="526" y="49">rows</text>
-            <text class="t-sm" x="526" y="70">price Float64</text>
+            <text class="t-sm" x="526" y="70">price float64</text>
             <text class="t-sm" x="526" y="86">already columnar</text>
         </g>
         <defs>
@@ -74,10 +74,10 @@ worth naming, because the payload already holds the columns the workflow works o
 ## 1. Declare it
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>no options, so the node is one line</em></div>
+<div class="code-cap"><span>KDL</span><em>no config, so the node is one line</em></div>
 
 ```kdl
-transformer "ipc" format="arrow-ipc"
+codec "ipc" format="arrow-ipc"
 ```
 
 </div>
@@ -85,28 +85,28 @@ transformer "ipc" format="arrow-ipc"
 ## 2. Name it from a source or sink
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>a tcp source straight to a Kafka sink, both on one declared transformer</em></div>
+<div class="code-cap"><span>KDL</span><em>a tcp source straight to a Kafka sink, both on one declared codec</em></div>
 
 ```kdl
-run_mode kind="stream"
+run "stream"
 
 workflow "ticks" {
-    transformer "ipc" format="arrow-ipc"
+    codec "ipc" format="arrow-ipc"
 
-    source "ticks_in" type="tcp" component="Tick" transformer="ipc" {
+    source "ticks_in" connector="tcp" component="Tick" codec="ipc" {
         config {
             bind "0.0.0.0:9500"
 
-            schema_fields "price" type="Float64" nullable=#false
+            field "price" type="float64" nullable=#false
         }
     }
 
-    sink "ticks_out" type="KafkaSink" component="Tick" transformer="ipc" {
+    sink "ticks_out" connector="kafka" component="Tick" codec="ipc" {
         config {
             brokers "localhost:9092"
             topic "ticks-enriched"
 
-            schema_fields "price" type="float64" nullable=#false
+            field "price" type="float64" nullable=#false
         }
     }
 
@@ -116,7 +116,7 @@ workflow "ticks" {
 
 </div>
 
-On files the same transformer works on the stream surface, and there the source needs no columns at
+On files the same codec works on the stream surface, and there the source needs no columns at
 all:
 
 <div class="code">
@@ -124,17 +124,17 @@ all:
 
 ```kdl
 workflow "ticks_files" {
-    transformer "ipc" format="arrow-ipc"
+    codec "ipc" format="arrow-ipc"
 
-    source "ticks_in" type="FileSource" component="Tick" transformer="ipc" {
+    source "ticks_in" connector="file" component="Tick" codec="ipc" {
         config path="/data/ticks.arrows"
     }
 
-    sink "ticks_out" type="FileSink" component="Tick" transformer="ipc" {
+    sink "ticks_out" connector="file" component="Tick" codec="ipc" {
         config path="/data/ticks-enriched.arrows" {
             truncate #true
 
-            schema_fields "price" type="Float64" nullable=#false
+            field "price" type="float64" nullable=#false
         }
     }
 
@@ -146,11 +146,11 @@ workflow "ticks_files" {
 
 ## 3. Give it a schema
 
-A stream read takes its schema from the stream. Declare `schema_fields` as well and it becomes a
+A stream read takes its schema from the stream. Declare `field` lines as well and they become a
 projection target: a column the declaration does not name is dropped, a column it names and the
 stream lacks is an error, and a column whose type differs is cast. An HTTP or S3 source that wants
-the stream's own schema instead keeps `schema_fields` for the link check and reads with
-`schema_from "body"` or `schema_from "object"`, which compares the two rather than projecting.
+the stream's own schema instead keeps `field` lines for the link check and reads with
+`schema_from "payload"`, which compares the two rather than projecting.
 
 On a message node the declared schema is required, and a payload carrying other columns is
 projected onto it the same way.
@@ -159,7 +159,7 @@ A sink always declares it, because that is the schema the stream header is writt
 
 ## Every option
 
-None. The `options` table is accepted and no key is read from it.
+None. Any key in the `config` table is refused: `arrow-ipc: unknown option '{key}'`.
 
 ## How it behaves
 
@@ -181,7 +181,7 @@ without reading, so this format reports no row estimate.
 
 | Message | What to change |
 |---|---|
-| `tcp config requires a 'schema_fields' list` | declare `schema_fields` on the message node, where it is required |
+| `tcp config requires at least one 'field' entry` | declare `field` lines on the message node, where they are required |
 
 Some errors wait for the bytes rather than the config check:
 `arrow-ipc: casting to the declared schema: ...` means the stream is missing a column the

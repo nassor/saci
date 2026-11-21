@@ -9,7 +9,7 @@ label = "Direction"
 value = "Source and sink"
 [[extra.facts]]
 label = "Format"
-value = "None: batches arrive already typed, so no transformer is named"
+value = "None: batches arrive already typed, so no codec is named"
 [[extra.facts]]
 label = "Run modes"
 value = "Any"
@@ -73,7 +73,7 @@ SQLite-compatible database. This page pins the engine at `0.8.2`.
 - For an embedded database, a writable path. The file is created on first use.
 - For a synced replica, the local path plus a `remote` block naming the endpoint URL and an auth
   token. A `turso://` or `libsql://` URL is rewritten to `https://`.
-- No transformer. Batches arrive and leave already typed.
+- No codec. Batches arrive and leave already typed.
 
 ## 1. Read from a database: the source node
 
@@ -84,13 +84,13 @@ drive it. One `mode` child picks the read strategy.
 <div class="code-cap"><span>KDL</span><em>an embedded database, read incrementally by a cursor column</em></div>
 
 ```kdl
-source "turso_orders" type="TursoSource" component="OrderChange" {
+source "turso_orders" connector="turso" component="OrderChange" {
     config name="turso_orders" batch_rows=4096 {
         connection path="orders.db"
         mode kind="polling" table="orders" cursor_column="id"
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "status" type="utf8" nullable=#true
-        schema_fields "total" type="float64" nullable=#true
+        field "id" type="int64" nullable=#false
+        field "status" type="utf8" nullable=#true
+        field "total" type="float64" nullable=#true
     }
 }
 ```
@@ -155,13 +155,13 @@ forces MVCC logical-log pulls when a server will not auto-negotiate them.
 <div class="code-cap"><span>KDL</span><em>an upserting sink in the same file</em></div>
 
 ```kdl
-sink "turso_enriched" type="TursoSink" component="EnrichedOrder" {
+sink "turso_enriched" connector="turso" component="EnrichedOrder" {
     config name="turso_enriched" table="enriched_orders" \
         write_mode="upsert" conflict_columns="id" {
         connection path="orders.db"
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "status" type="utf8" nullable=#true
-        schema_fields "total" type="float64" nullable=#true
+        field "id" type="int64" nullable=#false
+        field "status" type="utf8" nullable=#true
+        field "total" type="float64" nullable=#true
     }
 }
 ```
@@ -219,7 +219,7 @@ from the repository root, so the binary loads the gitignored `.env`.
 Runs the same on Linux, macOS and Windows (PowerShell):
 
 <div class="code">
-<div class="code-cap"><span>Shell</span><em>validate opens no database: both factories stop after parsing</em></div>
+<div class="code-cap"><span>Shell</span><em>validate opens no database: both halves stop after parsing</em></div>
 
 ```text
 cargo run -p saci --features server,connector-turso,wasm-host --bin saci-service -- \
@@ -230,7 +230,7 @@ cargo run -p saci --features server,connector-turso,wasm-host --bin saci-service
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
 ```
 
 The first drain cycle is where a missing table or file surfaces.
@@ -275,12 +275,14 @@ declared `utf8`, because SQLite stores those as text.
 | `utf8` | `TEXT` | `Utf8` |
 | `int64` | `INTEGER` | `Int64` |
 | `float64` | `REAL`, or an `INTEGER` widened | `Float64` |
-| `bool` | `INTEGER` 0/1 | `Boolean` |
+| `boolean` | `INTEGER` 0/1 | `Boolean` |
 | `binary` | `BLOB` | `Binary` |
 | `decimal128` | `TEXT` or `INTEGER`, with `precision` and `scale` | `Decimal128` |
 
-There is no unsigned integer: the engine's only integer is a signed 64-bit one, so a `uint64`
-schema field is refused while the node's config is parsed.
+The `type` names are lower case, and an unknown key on a `field` line is a configuration error naming
+the key. There is no unsigned integer: the engine's only integer is a signed 64-bit one, so a `uint64`
+field is refused while the node's config is parsed, as `turso: field '{name}' has type 'uint64',
+which this connector does not map`. Every other name outside the table is refused the same way.
 
 ## Every key
 
@@ -294,7 +296,7 @@ Source keys:
 | `connection` | table | required | `path`, plus an optional `encryption` block and an optional `remote` block |
 | `mode` | table | required | `kind="polling"`, `"dump"` or `"cdc"`, with the mode's own keys |
 | `sync` | table | both `#true` | `pull_before_read`, `push_after_write` |
-| `schema_fields` | list of fields | required | the Arrow schema |
+| `field` | lines | required | the Arrow schema |
 
 `polling` adds `table`, `cursor_column`, an optional `tiebreak_column`, `offset_table`
 (default `saci_source_offsets`) and an optional `initial`. `dump` adds `table`. `cdc` adds `table`,
@@ -319,7 +321,7 @@ Sink keys:
 | `connection` | table | required | `path`, plus an optional `encryption` block and an optional `remote` block |
 | `sync` | table | both `#true` | `pull_before_read`, `push_after_write` |
 | `capture` | table | none | `mode` (`id`, `before`, `after`, `full`) and an optional `table` |
-| `schema_fields` | list of fields | required | the Arrow schema |
+| `field` | lines | required | the Arrow schema |
 
 An unrecognised key inside `config` is a load-time error, not a silently ignored setting.
 
@@ -329,9 +331,9 @@ An unrecognised key inside `config` is a load-time error, not a silently ignored
 |---|---|
 | `connection.path must not be empty` | give the node a database file |
 | `connection.remote.token must not be empty` | supply the auth token, usually as `${SACI_TURSO_TOKEN}` |
-| `cursor_column '…' is not a declared schema_field` | declare it, or fix its spelling |
+| `cursor_column '…' does not name a declared 'field' entry` | declare it, or fix its spelling |
 | `cursor_column '…' is "binary"; a cursor must be int64, float64 or utf8` | pick an ordered column |
-| `"…" prefixed field names are reserved` | `__`-prefixed names exist only in the `cdc` mode |
+| `'…' is a reserved field name, available only in the "cdc" mode` | `__`-prefixed names exist only in the `cdc` mode |
 | `retention "delete_acked" is not allowed on a synced connection` | leave the change table to the sync engine, or use `keep` |
 | `change table 'turso_cdc' does not exist` | run `PRAGMA capture_data_changes_conn('full')` on the writing connection |
 | `conflict_columns […] do not match a PRIMARY KEY or UNIQUE constraint` | add a unique index, or fix the column list |
@@ -339,6 +341,7 @@ An unrecognised key inside `config` is a load-time error, not a silently ignored
 | `connection.encryption applies to an embedded database only` | drop the `remote` block or the `encryption` block |
 | `transaction "concurrent" needs MVCC, which the engine makes mutually exclusive with change capture` | drop the `capture` block, or use another transaction mode |
 | `table '…' has no column '…'` | fix the target table or the declared schema |
+| `turso: field '{name}' has type '{ty}', which this connector does not map` | declare one of the `type` names in the table under Declared types |
 
 ## Next
 

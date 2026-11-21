@@ -242,7 +242,7 @@ The plugin works on the same `Order` rows as `examples/wasm/settle/`, so
 `plugin` node naming the library, and the two `link` lines name the new node.
 
 ```kdl,name=The standalone settle config, with a plugin node instead
-plugin "settle" library="examples/plugins/settle-go/libsettle_go.so" {
+plugin "settle" path="examples/plugins/settle-go/libsettle_go.so" {
     config "settle.rate_JPY"="0.0068"
 }
 
@@ -255,19 +255,19 @@ link from="settle" to="csv_out"
 Linux/macOS:
 
 ```bash,name=Validate then serve
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate \
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- validate \
   --config examples/configs/standalone_settle.kdl --strict
 
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve \
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- serve \
   --config examples/configs/standalone_settle.kdl
 ```
 
 Windows (PowerShell):
 
 ```powershell
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- validate --config examples/configs/standalone_settle.kdl --strict
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- validate --config examples/configs/standalone_settle.kdl --strict
 
-cargo run -p saci --features server,connector-file,transformer-csv,plugin-host -- serve --config examples/configs/standalone_settle.kdl
+cargo run -p saci --features server,connector-file,codec-csv,plugin-host -- serve --config examples/configs/standalone_settle.kdl
 ```
 
 The config runs once and writes `/tmp/saci-settle-out.csv`. The plugin's own log line reports

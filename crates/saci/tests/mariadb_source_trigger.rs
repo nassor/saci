@@ -17,7 +17,7 @@ use common::Server;
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
 use saci::connector::mariadb::MariadbSource;
-use saci::io::source::Source;
+use saci::io::Source;
 
 common::on_every_server!(
     outbox_mode_reads_the_operator_table_and_delete_acked_prunes_it,
@@ -52,13 +52,13 @@ common::on_every_server!(
 );
 
 const ORDERS_FIELDS: &str = "
-schema_fields \"__op\" type=\"utf8\" nullable=#false
-schema_fields \"__seq\" type=\"uint64\" nullable=#false
-schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false
-schema_fields \"__table\" type=\"utf8\" nullable=#false
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"label\" type=\"utf8\"
-schema_fields \"qty\" type=\"int32\"
+field \"__op\" type=\"utf8\" nullable=#false
+field \"__seq\" type=\"uint64\" nullable=#false
+field \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false
+field \"__table\" type=\"utf8\" nullable=#false
+field \"id\" type=\"int64\" nullable=#false
+field \"label\" type=\"utf8\"
+field \"qty\" type=\"int32\"
 ";
 
 /// The installed-trigger source `name` over `orders`, with `mode_extra` added to
@@ -174,9 +174,9 @@ async fn outbox_mode_reads_the_operator_table_and_delete_acked_prunes_it(server:
         &server.dsn(),
         "name \"outbox\"\nbatch_rows 2\n\n\
          mode kind=\"cdc_trigger\" table=\"outbox\" cursor_column=\"id\" retention=\"delete_acked\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"payload\" type=\"utf8\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"payload\" type=\"utf8\"\n",
     );
     let batches = common::drain(&mut source).await;
     assert_eq!(ids(&batches), vec![1, 2, 3, 4, 5, 6]);
@@ -226,7 +226,7 @@ async fn a_delete_acked_outbox_over_an_unsigned_cursor_above_two_to_the_63_prune
         &server.dsn(),
         "name \"ubox\"\nbatch_rows 2\nmax_batches_per_cycle 1\n\n\
          mode kind=\"cdc_trigger\" table=\"ubox\" cursor_column=\"id\" retention=\"delete_acked\"\n\
-         schema_fields \"id\" type=\"uint64\" nullable=#false\n",
+         field \"id\" type=\"uint64\" nullable=#false\n",
     );
     assert_eq!(common::drain(&mut source).await[0].num_rows(), 2);
     // The next cycle commits ids 1 and 2 and prunes exactly them.
@@ -477,12 +477,12 @@ async fn a_changelog_in_a_latin1_schema_still_captures_an_emoji_row(server: &Ser
         &server.dsn(),
         "name \"latin\"\nbatch_rows 100\n\n\
          mode kind=\"cdc_trigger\" table=\"latin_db.w\" install_triggers=#true\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"__seq\" type=\"uint64\" nullable=#false\n\
-         schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
-         schema_fields \"__table\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"label\" type=\"utf8\"\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"__seq\" type=\"uint64\" nullable=#false\n\
+         field \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
+         field \"__table\" type=\"utf8\" nullable=#false\n\
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"label\" type=\"utf8\"\n",
     );
     assert!(common::drain(&mut source).await.is_empty());
 
@@ -520,13 +520,13 @@ async fn a_zero_date_row_does_not_fail_the_writers_statement(server: &Server) {
         &server.dsn(),
         "name \"zd\"\nbatch_rows 100\n\n\
          mode kind=\"cdc_trigger\" table=\"zd\" install_triggers=#true\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"__seq\" type=\"uint64\" nullable=#false\n\
-         schema_fields \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
-         schema_fields \"__table\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"id\" type=\"int32\" nullable=#false\n\
-         schema_fields \"d\" type=\"date32\"\n\
-         schema_fields \"n\" type=\"int32\"\n",
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"__seq\" type=\"uint64\" nullable=#false\n\
+         field \"__commit_ts\" type=\"timestamp_micros_utc\" nullable=#false\n\
+         field \"__table\" type=\"utf8\" nullable=#false\n\
+         field \"id\" type=\"int32\" nullable=#false\n\
+         field \"d\" type=\"date32\"\n\
+         field \"n\" type=\"int32\"\n",
     );
     assert!(common::drain(&mut source).await.is_empty());
 
@@ -854,9 +854,9 @@ async fn an_outbox_row_committed_after_a_later_one_is_delivered_and_never_pruned
         "name \"gapbox\"\nbatch_rows 100\n\n\
          mode kind=\"cdc_trigger\" table=\"outbox\" cursor_column=\"id\" \
          retention=\"delete_acked\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"payload\" type=\"utf8\"\n",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"payload\" type=\"utf8\"\n",
     );
     assert!(common::drain(&mut source).await.is_empty());
 

@@ -1,40 +1,25 @@
-use std::collections::HashMap;
+use std::ops::Range;
 
 use arrow_array::ArrayRef;
 
+use crate::component::Component;
 use crate::dataset::Dataset;
 
-/// A boxed, type-erased resource mutation produced by a [`ParallelSystem`](super::ParallelSystem).
-///
-/// Parallel systems hold an immutable pipeline reference, so they cannot mutate
-/// resources in place. They return `ResourceUpdate` closures that the pipeline
-/// applies on the main thread once all parallel write sets are merged.
-///
-/// Create instances with [`ResourceUpdate::new`].
-pub struct ResourceUpdate {
+use super::field::FieldRef;
+
+/// One `(component, field)` column write.
+pub(crate) type FieldWrite = ((&'static str, &'static str), ArrayRef);
+
+/// A boxed, type-erased resource mutation produced by a
+/// [`ParallelSystem`](super::ParallelSystem), applied on the main thread once
+/// every write set of the stage is merged.
+pub(crate) struct ResourceUpdate {
     apply: Box<dyn FnOnce(&mut Dataset) + Send>,
 }
 
 impl ResourceUpdate {
-    /// Build a resource update that inserts or replaces resource `R` with `value`.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// #
-    /// # {
-    /// use saci::system::ResourceUpdate;
-    /// use saci::dataset::Dataset;
-    ///
-    /// struct MyCount(u32);
-    ///
-    /// let update = ResourceUpdate::new(MyCount(42));
-    /// let mut data = Dataset::new();
-    /// update.apply(&mut data);
-    /// assert_eq!(data.get_resource::<MyCount>().unwrap().0, 42);
-    /// # }
-    /// ```
-    pub fn new<R: Send + Sync + 'static>(value: R) -> Self {
+    /// An update that inserts or replaces resource `R` with `value`.
+    pub(crate) fn new<R: Send + Sync + 'static>(value: R) -> Self {
         Self {
             apply: Box::new(move |data: &mut Dataset| {
                 data.insert_resource(value);
@@ -43,15 +28,38 @@ impl ResourceUpdate {
     }
 
     /// Apply the update to the dataset, consuming `self`.
-    pub fn apply(self, data: &mut Dataset) {
+    pub(crate) fn apply(self, data: &mut Dataset) {
         (self.apply)(data);
     }
 }
 
-impl std::fmt::Debug for ResourceUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResourceUpdate").finish_non_exhaustive()
+/// Insert `array` under `key`, replacing an entry already present for it.
+///
+/// A write set holds a handful of fields, so a linear scan beats hashing.
+fn put_entry(fields: &mut Vec<FieldWrite>, key: (&'static str, &'static str), array: ArrayRef) {
+    match fields.iter_mut().find(|(k, _)| *k == key) {
+        Some(entry) => entry.1 = array,
+        None => fields.push((key, array)),
     }
+}
+
+/// Merge `other` into `fields`, replacing any key both hold.
+#[cfg(feature = "engine")]
+pub(crate) fn merge_entries(fields: &mut Vec<FieldWrite>, other: Vec<FieldWrite>) {
+    if fields.is_empty() {
+        *fields = other;
+        return;
+    }
+    for (key, array) in other {
+        put_entry(fields, key, array);
+    }
+}
+
+fn get_entry<'a>(fields: &'a [FieldWrite], component: &str, field: &str) -> Option<&'a ArrayRef> {
+    fields
+        .iter()
+        .find(|((c, f), _)| *c == component && *f == field)
+        .map(|(_, a)| a)
 }
 
 /// A set of column writes produced by a [`ParallelSystem`](super::ParallelSystem) during one
@@ -66,71 +74,97 @@ impl std::fmt::Debug for ResourceUpdate {
 /// field-level DAG, and applies them atomically via
 /// [`Dataset::apply_write_set`](crate::dataset::Dataset::apply_write_set).
 ///
-/// ## Builder API
-///
 /// ```rust
-/// #
-/// # {
 /// use std::sync::Arc;
 /// use arrow_array::Float64Array;
-/// use saci::system::WriteSet;
+/// use saci::WriteSet;
 ///
 /// let array = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]));
-/// let ws = WriteSet::new()
-///     .put("Order", "total", array);
-/// assert_eq!(ws.fields.len(), 1);
-/// # }
+/// let ws = WriteSet::new().put_named("Order", "total", array);
+/// assert_eq!(ws.len(), 1);
 /// ```
+#[derive(Default)]
 pub struct WriteSet {
-    /// Map of (component name, field name) → new column data.
-    pub fields: HashMap<(&'static str, &'static str), ArrayRef>,
-    /// Resource mutations to apply on the main thread after columns are committed.
-    pub resource_updates: Vec<ResourceUpdate>,
+    fields: Vec<FieldWrite>,
+    resource_updates: Vec<ResourceUpdate>,
 }
 
 impl WriteSet {
     /// Create an empty `WriteSet`.
     pub fn new() -> Self {
-        Self {
-            fields: HashMap::new(),
-            resource_updates: Vec::new(),
-        }
+        Self::default()
     }
 
-    /// Add a column update for `(component, field)`.
-    ///
-    /// The `array` must have the correct length for the pipeline's current row
-    /// count. Calling `put` twice for the same key replaces the previous entry.
-    pub fn put(mut self, component: &'static str, field: &'static str, array: ArrayRef) -> Self {
-        self.fields.insert((component, field), array);
+    /// Write one field of `C`. A second `put` of the same field replaces the
+    /// first.
+    pub fn put<C: Component>(self, field: FieldRef<C>, array: ArrayRef) -> Self {
+        self.put_named(C::name(), field.name(), array)
+    }
+
+    /// Write `field` of the component named `component`. A second `put` of
+    /// the same field replaces the first.
+    pub fn put_named(
+        mut self,
+        component: &'static str,
+        field: &'static str,
+        array: ArrayRef,
+    ) -> Self {
+        put_entry(&mut self.fields, (component, field), array);
         self
     }
 
-    /// Attach a resource update to this write set.
-    ///
-    /// The update is applied on the main thread (single-threaded) after all
-    /// column writes in the stage have been committed.
-    pub fn with_resource(mut self, update: ResourceUpdate) -> Self {
-        self.resource_updates.push(update);
+    /// Insert or replace resource `R` with `value` once the stage's column
+    /// writes are committed, on the main thread.
+    pub fn with_resource<R: Send + Sync + 'static>(mut self, value: R) -> Self {
+        self.resource_updates.push(ResourceUpdate::new(value));
         self
+    }
+
+    /// Number of column writes.
+    pub fn len(&self) -> usize {
+        self.fields.len()
     }
 
     /// Returns `true` if no fields and no resource updates are present.
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty() && self.resource_updates.is_empty()
     }
-}
 
-impl Default for WriteSet {
-    fn default() -> Self {
-        Self::new()
+    /// The array written to `component.field`, if any.
+    pub fn get_named(&self, component: &str, field: &str) -> Option<&ArrayRef> {
+        get_entry(&self.fields, component, field)
+    }
+
+    /// Every column write as `(component, field, array)`, in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &'static str, &ArrayRef)> {
+        self.fields.iter().map(|((c, f), a)| (*c, *f, a))
+    }
+
+    /// The column writes and the resource updates, for the stage executor.
+    pub(crate) fn into_parts(self) -> (Vec<FieldWrite>, Vec<ResourceUpdate>) {
+        (self.fields, self.resource_updates)
+    }
+
+    /// Rebuild a write set from parts [`into_parts`](Self::into_parts) took.
+    #[cfg(feature = "engine")]
+    pub(crate) fn from_parts(
+        fields: Vec<FieldWrite>,
+        resource_updates: Vec<ResourceUpdate>,
+    ) -> Self {
+        Self {
+            fields,
+            resource_updates,
+        }
     }
 }
 
 impl std::fmt::Debug for WriteSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WriteSet")
-            .field("fields", &self.fields.keys().collect::<Vec<_>>())
+            .field(
+                "fields",
+                &self.fields.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            )
             .field("resource_updates_count", &self.resource_updates.len())
             .finish()
     }
@@ -139,37 +173,73 @@ impl std::fmt::Debug for WriteSet {
 /// A partial write produced by one row-range slice of a [`ParallelSystem`](super::ParallelSystem)
 /// running with intra-system slice parallelism.
 ///
-/// The `slice_rows` range identifies which rows this slice covers, so that
+/// [`rows`](Self::rows) identifies which rows this slice covers, so that
 /// [`ParallelSystem::merge_slices`](super::ParallelSystem::merge_slices) can
 /// concatenate the segments in order.
 pub struct SliceWriteSet {
-    /// Map of (component name, field name) → column segment for `slice_rows`.
-    pub fields: HashMap<(&'static str, &'static str), ArrayRef>,
-    /// The row range this slice covers within the full pipeline.
-    pub slice_rows: std::ops::Range<u32>,
+    fields: Vec<FieldWrite>,
+    rows: Range<u32>,
 }
 
 impl SliceWriteSet {
     /// Create an empty `SliceWriteSet` for the given row range.
-    pub fn new(slice_rows: std::ops::Range<u32>) -> Self {
+    pub fn new(rows: Range<u32>) -> Self {
         Self {
-            fields: HashMap::new(),
-            slice_rows,
+            fields: Vec::new(),
+            rows,
         }
     }
 
-    /// Add a column segment for `(component, field)` within this slice.
-    pub fn put(mut self, component: &'static str, field: &'static str, array: ArrayRef) -> Self {
-        self.fields.insert((component, field), array);
+    /// Write one field of `C` for this slice's rows.
+    pub fn put<C: Component>(self, field: FieldRef<C>, array: ArrayRef) -> Self {
+        self.put_named(C::name(), field.name(), array)
+    }
+
+    /// Write `field` of the component named `component` for this slice's rows.
+    pub fn put_named(
+        mut self,
+        component: &'static str,
+        field: &'static str,
+        array: ArrayRef,
+    ) -> Self {
+        put_entry(&mut self.fields, (component, field), array);
         self
+    }
+
+    /// The row range this slice covers within the full dataset.
+    pub fn rows(&self) -> Range<u32> {
+        self.rows.clone()
+    }
+
+    /// Number of column segments.
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Returns `true` if the slice writes no field.
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// The segment written to `component.field`, if any.
+    pub fn get_named(&self, component: &str, field: &str) -> Option<&ArrayRef> {
+        get_entry(&self.fields, component, field)
+    }
+
+    /// Every segment as `(component, field, array)`, in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &'static str, &ArrayRef)> {
+        self.fields.iter().map(|((c, f), a)| (*c, *f, a))
     }
 }
 
 impl std::fmt::Debug for SliceWriteSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SliceWriteSet")
-            .field("fields", &self.fields.keys().collect::<Vec<_>>())
-            .field("slice_rows", &self.slice_rows)
+            .field(
+                "fields",
+                &self.fields.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            )
+            .field("rows", &self.rows)
             .finish()
     }
 }
@@ -184,57 +254,56 @@ mod tests {
     fn test_write_set_new_is_empty() {
         let ws = WriteSet::new();
         assert!(ws.is_empty());
-        assert!(ws.fields.is_empty());
-        assert!(ws.resource_updates.is_empty());
+        assert_eq!(ws.len(), 0);
     }
 
     #[test]
     fn test_write_set_put_adds_field() {
         let arr = Arc::new(Float64Array::from(vec![1.0, 2.0]));
-        let ws = WriteSet::new().put("Order", "total", arr);
-        assert_eq!(ws.fields.len(), 1);
+        let ws = WriteSet::new().put_named("Order", "total", arr);
+        assert_eq!(ws.len(), 1);
         assert!(!ws.is_empty());
     }
 
     #[test]
     fn test_write_set_put_replaces_same_key() {
-        let arr1 = Arc::new(Float64Array::from(vec![1.0]));
-        let arr2 = Arc::new(Float64Array::from(vec![2.0]));
-        let ws = WriteSet::new()
-            .put("Order", "total", arr1)
-            .put("Order", "total", arr2);
-        assert_eq!(ws.fields.len(), 1);
+        let arr1: ArrayRef = Arc::new(Float64Array::from(vec![1.0]));
+        let arr2: ArrayRef = Arc::new(Float64Array::from(vec![2.0]));
+        let ws = WriteSet::new().put_named("Order", "total", arr1).put_named(
+            "Order",
+            "total",
+            Arc::clone(&arr2),
+        );
+        assert_eq!(ws.len(), 1);
+        assert!(Arc::ptr_eq(ws.get_named("Order", "total").unwrap(), &arr2));
     }
 
     #[test]
     fn test_write_set_with_resource() {
-        struct MyCount(#[allow(dead_code)] u32);
-        let ws = WriteSet::new().with_resource(ResourceUpdate::new(MyCount(1)));
-        assert_eq!(ws.resource_updates.len(), 1);
-        assert!(!ws.is_empty());
-    }
-
-    #[test]
-    fn test_resource_update_applies_to_dataset() {
         struct MyCount(u32);
-        let update = ResourceUpdate::new(MyCount(42));
+        let ws = WriteSet::new().with_resource(MyCount(1));
+        assert!(!ws.is_empty());
+        let (_, updates) = ws.into_parts();
         let mut data = Dataset::new();
-        update.apply(&mut data);
-        assert_eq!(data.get_resource::<MyCount>().unwrap().0, 42);
+        for update in updates {
+            update.apply(&mut data);
+        }
+        assert_eq!(data.get_resource::<MyCount>().unwrap().0, 1);
     }
 
     #[test]
     fn test_slice_write_set_new() {
         let sws = SliceWriteSet::new(0..100);
-        assert_eq!(sws.slice_rows, 0..100);
-        assert!(sws.fields.is_empty());
+        assert_eq!(sws.rows(), 0..100);
+        assert!(sws.is_empty());
     }
 
     #[test]
     fn test_slice_write_set_put() {
         let arr = Arc::new(Float64Array::from(vec![1.0, 2.0]));
-        let sws = SliceWriteSet::new(0..2).put("Score", "value", arr);
-        assert_eq!(sws.fields.len(), 1);
+        let sws = SliceWriteSet::new(0..2).put_named("Score", "value", arr);
+        assert_eq!(sws.len(), 1);
+        assert!(sws.get_named("Score", "value").is_some());
     }
 
     #[test]
@@ -242,13 +311,5 @@ mod tests {
         let ws = WriteSet::new();
         let dbg = format!("{ws:?}");
         assert!(dbg.contains("WriteSet"));
-    }
-
-    #[test]
-    fn test_resource_update_debug() {
-        struct Dummy;
-        let ru = ResourceUpdate::new(Dummy);
-        let dbg = format!("{ru:?}");
-        assert!(dbg.contains("ResourceUpdate"));
     }
 }

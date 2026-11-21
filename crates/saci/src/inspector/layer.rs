@@ -2,7 +2,7 @@
 //!
 //! ## Why a layer, not an OTel span exporter
 //!
-//! [`init_logging`](crate::service::logging::init_logging) already composes
+//! [`init_logging`](crate::service::init_logging) already composes
 //! `env_filter` → `fmt_layer` → [`SpanMetricsLayer`](crate::service::SpanMetricsLayer)
 //! → `otel_layer` onto one `tracing_subscriber::registry()`. Adding a second
 //! span pipeline (an OTel `SpanExporter` behind its own tracer provider) would

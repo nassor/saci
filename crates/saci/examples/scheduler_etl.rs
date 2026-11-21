@@ -17,50 +17,19 @@
 use std::sync::Arc;
 
 use arrow_array::{BooleanArray, Float64Array};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
-
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::system::{FieldRef, System, SystemMeta, system_fn};
+use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// A financial transaction in columnar form. `amount` is in `currency`;
 /// ValidateSystem sets `valid` when the amount is positive, and EnrichSystem
 /// fills `usd_amount` from the FX rate.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
 struct Transaction {
     id: u64,
     amount: f64,
     currency: String,
     valid: bool,
     usd_amount: f64,
-}
-
-impl Component for Transaction {
-    fn name() -> &'static str {
-        "Transaction"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::UInt64, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("currency", DataType::Utf8, false),
-            Field::new("valid", DataType::Boolean, false),
-            Field::new("usd_amount", DataType::Float64, false),
-        ]))
-    }
-}
-
-impl Transaction {
-    const ID: FieldRef<Transaction> = FieldRef::new("id");
-    const AMOUNT: FieldRef<Transaction> = FieldRef::new("amount");
-    const CURRENCY: FieldRef<Transaction> = FieldRef::new("currency");
-    const VALID: FieldRef<Transaction> = FieldRef::new("valid");
-    const USD_AMOUNT: FieldRef<Transaction> = FieldRef::new("usd_amount");
 }
 
 /// FX rates used by EnrichSystem, USD as base.
@@ -99,7 +68,7 @@ struct IngestSystem;
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("Transaction")
+        SystemMeta::new("ingest").writes_all::<Transaction>()
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
@@ -188,10 +157,7 @@ impl System for ValidateSystem {
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let batch = pipeline
-            .columns::<Transaction>()
-            .ok_or_else(|| SaciError::generic("Transaction batch not found"))?
-            .clone();
+        let batch = pipeline.batch::<Transaction>()?.clone();
 
         let n;
         let valid_flags: Vec<bool>;
@@ -243,18 +209,13 @@ impl System for EnrichSystem {
             .reads(Transaction::AMOUNT)
             .reads(Transaction::CURRENCY)
             .writes(Transaction::USD_AMOUNT)
-            .read_resource::<FxRates>()
+            .reads_resource::<FxRates>()
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
-        let rates = pipeline
-            .get_resource::<FxRates>()
-            .ok_or_else(|| SaciError::generic("FxRates resource not found"))?;
+        let rates = pipeline.resource::<FxRates>()?;
 
-        let batch = pipeline
-            .columns::<Transaction>()
-            .ok_or_else(|| SaciError::generic("Transaction batch not found"))?
-            .clone();
+        let batch = pipeline.batch::<Transaction>()?.clone();
 
         let n;
         let usd_amounts: Vec<f64>;
@@ -305,7 +266,7 @@ fn make_report_system() -> impl System {
             .reads(Transaction::CURRENCY)
             .reads(Transaction::VALID)
             .reads(Transaction::USD_AMOUNT)
-            .write_resource::<Report>(),
+            .writes_resource::<Report>(),
         |data| {
             let n;
             let mut valid_count = 0usize;
@@ -396,25 +357,24 @@ fn make_report_system() -> impl System {
 
 #[tokio::main]
 async fn main() -> Result<(), SaciError> {
-    let mut pipeline = Pipeline::builder("etl")
-        .with::<Transaction>()
-        .with_resource(FxRates {
+    let mut pipeline = Pipeline::new("etl")
+        .component::<Transaction>()
+        .resource(FxRates {
             eur: 1.08,
             gbp: 1.27,
             jpy: 0.0067,
             cad: 0.74,
         })
-        .with_system(IngestSystem)
-        .with_system(ValidateSystem)
-        .with_system(EnrichSystem)
-        .with_system(make_report_system())
-        .build();
+        .system(IngestSystem)
+        .system(ValidateSystem)
+        .system(EnrichSystem)
+        .system(make_report_system());
 
     println!("Starting ETL pipeline...");
 
     pipeline.run().await?;
 
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan()?.to_vec();
     println!();
     println!("Stage layout (field-level DAG):");
     for (i, stage) in stages.iter().enumerate() {
@@ -423,10 +383,7 @@ async fn main() -> Result<(), SaciError> {
     println!("  (ValidateSystem and EnrichSystem share stage 1");
     println!("   because they write disjoint fields of Transaction)");
 
-    let report = pipeline
-        .data()
-        .get_resource::<Report>()
-        .ok_or_else(|| SaciError::generic("Report resource missing after pipeline run"))?;
+    let report = pipeline.data().resource::<Report>()?;
     println!();
     println!(
         "Pipeline complete: {}/{} valid, {} rejected, ${:.2} total USD",

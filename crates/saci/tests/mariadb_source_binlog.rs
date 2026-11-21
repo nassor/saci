@@ -14,17 +14,17 @@ use arrow_array::types::{Int64Type, TimestampMicrosecondType, UInt64Type};
 use arrow_array::{Array as _, RecordBatch};
 use common::{Flavor, Server, drain, source};
 use mysql_async::prelude::Queryable;
-use saci::io::source::Source as _;
+use saci::io::Source as _;
 
 /// The metadata and data fields most cases declare.
 const ORDER_FIELDS: &str = r#"
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__table" type="utf8" nullable=#false
-schema_fields "__binlog_file" type="utf8" nullable=#false
-schema_fields "__binlog_pos" type="uint64" nullable=#false
-schema_fields "__commit_ts" type="timestamp_micros_utc" nullable=#false
-schema_fields "id" type="int64" nullable=#false
-schema_fields "note" type="utf8"
+field "__op" type="utf8" nullable=#false
+field "__table" type="utf8" nullable=#false
+field "__binlog_file" type="utf8" nullable=#false
+field "__binlog_pos" type="uint64" nullable=#false
+field "__commit_ts" type="timestamp_micros_utc" nullable=#false
+field "id" type="int64" nullable=#false
+field "note" type="utf8"
 "#;
 
 /// One change as a test reads it.
@@ -341,8 +341,8 @@ async fn snapshot_without_a_declared_key_is_refused(server: &Server) {
     .await;
 
     let fields_without_id = r#"
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "note" type="utf8"
+field "__op" type="utf8" nullable=#false
+field "note" type="utf8"
 "#;
     let mut undeclared = source(
         &server.dsn(),
@@ -355,7 +355,7 @@ schema_fields "note" type="utf8"
     assert!(
         err.message().contains(
             "snapshot \"initial\" pages 'saci.orders' by its primary key, so every key column \
-             must be declared in schema_fields (missing: 'id')"
+             must be declared in 'field' entries (missing: 'id')"
         ),
         "{}",
         err.message()
@@ -499,10 +499,10 @@ async fn a_cycle_cut_by_max_batches_per_cycle_loses_nothing(server: &Server) {
 async fn an_added_column_is_picked_up_mid_stream(server: &Server) {
     orders(server).await;
     let fields = r#"
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "id" type="int64" nullable=#false
-schema_fields "note" type="utf8"
-schema_fields "extra" type="int32"
+field "__op" type="utf8" nullable=#false
+field "id" type="int64" nullable=#false
+field "note" type="utf8"
+field "extra" type="int32"
 "#;
     // `extra` is declared before the server has it; the first read after the
     // ALTER finds it.
@@ -510,7 +510,7 @@ schema_fields "extra" type="int32"
         &server.dsn(),
         &format!(
             "name \"alter_cdc\"\nbatch_rows 100\n\nmode kind=\"cdc_binlog\" table=\"orders\"\n{}",
-            fields.replace("schema_fields \"extra\" type=\"int32\"\n", "")
+            fields.replace("field \"extra\" type=\"int32\"\n", "")
         ),
     );
     assert!(drain(&mut src).await.is_empty());
@@ -647,20 +647,20 @@ async fn enum_set_bit_year_timestamp_and_unsigned_decode_like_polling(server: &S
     )
     .await;
     let data_fields = r#"
-schema_fields "id" type="int64" nullable=#false
-schema_fields "e" type="utf8" nullable=#false
-schema_fields "s" type="utf8" nullable=#false
-schema_fields "b" type="uint64" nullable=#false
-schema_fields "y" type="int16" nullable=#false
-schema_fields "ts" type="timestamp_micros_utc"
-schema_fields "u" type="uint8" nullable=#false
-schema_fields "w" type="uint32" nullable=#false
-schema_fields "m" type="uint32" nullable=#false
-schema_fields "dt" type="timestamp_micros"
-schema_fields "d" type="decimal128" precision=10 scale=2 nullable=#false
-schema_fields "f" type="float64" nullable=#false
-schema_fields "j" type="utf8"
-schema_fields "t" type="time64_micros"
+field "id" type="int64" nullable=#false
+field "e" type="utf8" nullable=#false
+field "s" type="utf8" nullable=#false
+field "b" type="uint64" nullable=#false
+field "y" type="int16" nullable=#false
+field "ts" type="timestamp_micros_utc"
+field "u" type="uint8" nullable=#false
+field "w" type="uint32" nullable=#false
+field "m" type="uint32" nullable=#false
+field "dt" type="timestamp_micros"
+field "d" type="decimal128" precision=10 scale=2 nullable=#false
+field "f" type="float64" nullable=#false
+field "j" type="utf8"
+field "t" type="time64_micros"
 "#;
     let mut binlog = source(
         &server.dsn(),
@@ -790,11 +790,11 @@ async fn extreme_values_render_the_same_text_from_the_binlog_and_polling(server:
         "dec1", "dec2", "dec3", "js",
     ];
     let fields: String =
-        std::iter::once("schema_fields \"id\" type=\"int64\" nullable=#false\n".to_string())
+        std::iter::once("field \"id\" type=\"int64\" nullable=#false\n".to_string())
             .chain(
                 names
                     .iter()
-                    .map(|name| format!("schema_fields \"{name}\" type=\"utf8\"\n")),
+                    .map(|name| format!("field \"{name}\" type=\"utf8\"\n")),
             )
             .collect();
     binlog_and_polling_agree(
@@ -836,29 +836,29 @@ async fn extreme_values_decode_the_same_typed_value_from_the_binlog_and_polling(
         "bin4", "vb", "bl", "txt", "c", "bt", "ubit", "yr",
     ];
     let fields = r#"
-schema_fields "id" type="int64" nullable=#false
-schema_fields "tm" type="time64_micros"
-schema_fields "d" type="date32"
-schema_fields "dt" type="timestamp_micros"
-schema_fields "ts" type="timestamp_micros_utc"
-schema_fields "mi" type="int32" nullable=#false
-schema_fields "si" type="int16" nullable=#false
-schema_fields "ti" type="int8" nullable=#false
-schema_fields "flag" type="boolean" nullable=#false
-schema_fields "bi" type="int64" nullable=#false
-schema_fields "ubi" type="uint64" nullable=#false
-schema_fields "f" type="float32" nullable=#false
-schema_fields "dbl" type="float64" nullable=#false
-schema_fields "dec1" type="decimal128" precision=38 scale=10 nullable=#false
-schema_fields "dec2" type="decimal128" precision=5 scale=0 nullable=#false
-schema_fields "bin4" type="binary"
-schema_fields "vb" type="binary"
-schema_fields "bl" type="binary"
-schema_fields "txt" type="utf8"
-schema_fields "c" type="utf8"
-schema_fields "bt" type="uint64"
-schema_fields "ubit" type="uint64"
-schema_fields "yr" type="int16"
+field "id" type="int64" nullable=#false
+field "tm" type="time64_micros"
+field "d" type="date32"
+field "dt" type="timestamp_micros"
+field "ts" type="timestamp_micros_utc"
+field "mi" type="int32" nullable=#false
+field "si" type="int16" nullable=#false
+field "ti" type="int8" nullable=#false
+field "flag" type="boolean" nullable=#false
+field "bi" type="int64" nullable=#false
+field "ubi" type="uint64" nullable=#false
+field "f" type="float32" nullable=#false
+field "dbl" type="float64" nullable=#false
+field "dec1" type="decimal128" precision=38 scale=10 nullable=#false
+field "dec2" type="decimal128" precision=5 scale=0 nullable=#false
+field "bin4" type="binary"
+field "vb" type="binary"
+field "bl" type="binary"
+field "txt" type="utf8"
+field "c" type="utf8"
+field "bt" type="uint64"
+field "ubit" type="uint64"
+field "yr" type="int16"
 "#;
     binlog_and_polling_agree(
         server,
@@ -909,13 +909,13 @@ async fn wide_enum_set_geometry_json_and_large_values_decode_alike(server: &Serv
         labels("m", 40)
     );
     let fields = r#"
-schema_fields "id" type="int64" nullable=#false
-schema_fields "e300" type="utf8"
-schema_fields "s40" type="utf8"
-schema_fields "g" type="binary"
-schema_fields "jd" type="json"
-schema_fields "big" type="utf8"
-schema_fields "blob2" type="binary"
+field "id" type="int64" nullable=#false
+field "e300" type="utf8"
+field "s40" type="utf8"
+field "g" type="binary"
+field "jd" type="json"
+field "big" type="utf8"
+field "blob2" type="binary"
 "#;
     binlog_and_polling_agree(
         server,
@@ -950,8 +950,8 @@ async fn a_type_changed_by_the_last_event_of_a_cycle_is_decoded_with_its_new_typ
     let mut src = source(
         &server.dsn(),
         "name \"retyped_cdc\"\nbatch_rows 100\n\nmode kind=\"cdc_binlog\" table=\"retyped\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"n\" type=\"int64\"",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"n\" type=\"int64\"",
     );
     assert!(drain(&mut src).await.is_empty());
 
@@ -1038,10 +1038,10 @@ async fn a_table_with_generated_columns_is_read(server: &Server) {
     let mut src = source(
         &server.dsn(),
         "name \"gen_cdc\"\nbatch_rows 100\n\nmode kind=\"cdc_binlog\" table=\"gen\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"a\" type=\"int32\" nullable=#false\n\
-         schema_fields \"s\" type=\"int32\"\n\
-         schema_fields \"z\" type=\"int32\" nullable=#false",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"a\" type=\"int32\" nullable=#false\n\
+         field \"s\" type=\"int32\"\n\
+         field \"z\" type=\"int32\" nullable=#false",
     );
     assert!(drain(&mut src).await.is_empty());
     run(server, &["INSERT INTO gen (id, a) VALUES (1, 5)"]).await;
@@ -1122,9 +1122,9 @@ async fn an_invisible_column_is_counted_in_the_row_image(server: &Server) {
     let mut src = source(
         &server.dsn(),
         "name \"hidden_cdc\"\nbatch_rows 100\n\nmode kind=\"cdc_binlog\" table=\"hidden\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"secret\" type=\"int32\"\n\
-         schema_fields \"note\" type=\"utf8\"",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"secret\" type=\"int32\"\n\
+         field \"note\" type=\"utf8\"",
     );
     assert!(drain(&mut src).await.is_empty());
     run(
@@ -1331,11 +1331,11 @@ async fn the_stored_position_follows_other_tables_and_a_rotation_but_not_its_own
 fn history_config(name: &str, table: &str, mode: &str, columns: &[(&str, &str)]) -> String {
     let mut text = format!(
         "name \"{name}\"\nbatch_rows 100\n\nmode kind=\"cdc_binlog\" table=\"{table}\" {mode}\n\
-         schema_fields \"__op\" type=\"utf8\" nullable=#false\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n"
+         field \"__op\" type=\"utf8\" nullable=#false\n\
+         field \"id\" type=\"int64\" nullable=#false\n"
     );
     for (column, ty) in columns {
-        text.push_str(&format!("schema_fields \"{column}\" type=\"{ty}\"\n"));
+        text.push_str(&format!("field \"{column}\" type=\"{ty}\"\n"));
     }
     text
 }
@@ -1611,10 +1611,7 @@ async fn a_declared_column_missing_from_a_definition_is_null_or_refused_by_its_n
     )
     .await;
 
-    let required = format!(
-        "{}schema_fields \"extra\" type=\"int64\" nullable=#false\n",
-        narrow
-    );
+    let required = format!("{}field \"extra\" type=\"int64\" nullable=#false\n", narrow);
     let err = source(&server.dsn(), &required)
         .next_batch()
         .await
@@ -1625,7 +1622,7 @@ async fn a_declared_column_missing_from_a_definition_is_null_or_refused_by_its_n
         err.message()
     );
 
-    let typo = format!("{narrow}schema_fields \"exra\" type=\"int64\"\n");
+    let typo = format!("{narrow}field \"exra\" type=\"int64\"\n");
     let err = source(&server.dsn(), &typo)
         .next_batch()
         .await
@@ -2119,14 +2116,14 @@ common::on_every_server!(
 // ----------------------------------------------------------------------------
 
 const GTID_FIELDS: &str = r#"
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "__table" type="utf8" nullable=#false
-schema_fields "__binlog_file" type="utf8" nullable=#false
-schema_fields "__binlog_pos" type="uint64" nullable=#false
-schema_fields "__gtid" type="utf8"
-schema_fields "__commit_ts" type="timestamp_micros_utc" nullable=#false
-schema_fields "id" type="int64" nullable=#false
-schema_fields "note" type="utf8"
+field "__op" type="utf8" nullable=#false
+field "__table" type="utf8" nullable=#false
+field "__binlog_file" type="utf8" nullable=#false
+field "__binlog_pos" type="uint64" nullable=#false
+field "__gtid" type="utf8"
+field "__commit_ts" type="timestamp_micros_utc" nullable=#false
+field "id" type="int64" nullable=#false
+field "note" type="utf8"
 "#;
 
 #[tokio::test]
@@ -2578,8 +2575,8 @@ async fn mariadb_uuid_column_is_refused_in_binlog_mode() {
     let mut src = source(
         &server.dsn(),
         "name \"uuid_cdc\"\n\nmode kind=\"cdc_binlog\" table=\"ids\"\n\
-         schema_fields \"id\" type=\"int64\" nullable=#false\n\
-         schema_fields \"u\" type=\"utf8\"",
+         field \"id\" type=\"int64\" nullable=#false\n\
+         field \"u\" type=\"utf8\"",
     );
     let err = src.next_batch().await.expect_err("refused");
     assert_eq!(err.category(), "configuration", "{}", err.message());

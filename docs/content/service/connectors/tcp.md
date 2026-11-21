@@ -1,6 +1,6 @@
 +++
 title = "TCP"
-description = "Two halves of one frame: a source that listens and a sink that dials, with the payload decoded and encoded by the transformer you name."
+description = "Two halves of one frame: a source that listens and a sink that dials, with the payload decoded and encoded by the codec you name."
 template = "subpage.html"
 weight = 7
 aliases = ["/connectors/tcp/"]
@@ -79,7 +79,7 @@ each result to a collector it dials.
 - A producer that writes frames to that port. The two halves speak the same frame, so a `tcp` sink
   in one service feeds a `tcp` source in another.
 - A collector listening on the sink's `connect` address, before the first batch is written.
-- `run_mode kind="stream"` whenever a `tcp` source is declared. The source blocks for the next
+- `run "stream"` whenever a `tcp` source is declared. The source blocks for the next
   frame and never reaches EOF, and validation rejects it in any other run mode. A `tcp` sink carries
   no such rule.
 - The processor component the config names, at `pipelines/ticks.wasm`, for the `serve` step.
@@ -88,13 +88,13 @@ each result to a collector it dials.
 
 ## 1. Declare the format
 
-A frame's payload is bytes, so both halves name a declared `transformer`.
+A frame's payload is bytes, so both halves name a declared `codec`.
 
 <div class="code">
 <div class="code-cap"><span>KDL</span><em>one whole batch per frame</em></div>
 
 ```kdl
-transformer "ipc" format="arrow-ipc"
+codec "ipc" format="arrow-ipc"
 ```
 
 </div>
@@ -107,16 +107,16 @@ Any format with a message codec works. [ndjson](@/service/formats/ndjson.md),
 ## 2. Read from a listening port: the source node
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>a tcp source needs run_mode kind="stream"</em></div>
+<div class="code-cap"><span>KDL</span><em>a tcp source needs run "stream"</em></div>
 
 ```kdl
-source "ticks_in" type="tcp" component="Tick" transformer="ipc" {
+source "ticks_in" connector="tcp" component="Tick" codec="ipc" {
     config {
         bind "0.0.0.0:9500"
         buffer 64
         max_frame_bytes 8388608
 
-        schema_fields "price" type="Float64" nullable=#false
+        field "price" type="float64" nullable=#false
     }
 }
 ```
@@ -127,7 +127,7 @@ source "ticks_in" type="tcp" component="Tick" transformer="ipc" {
 decoded batches queue before the source pushes back on its producers. `max_frame_bytes` caps one
 frame, and a producer that exceeds it loses its own connection and nothing else.
 
-`schema_fields` is required, because the decoder is built from it while the node is built. That is
+`field` lines are required, because the decoder is built from them while the node is built. That is
 also where a format with no message decoder is refused.
 
 ## 3. Write to a collector: the sink node
@@ -136,23 +136,23 @@ also where a format with no message decoder is refused.
 <div class="code-cap"><span>KDL</span><em>the sink resolves the address at build and dials on the first batch</em></div>
 
 ```kdl
-sink "ticks_out" type="tcp" component="EnrichedTick" transformer="ipc" {
+sink "ticks_out" connector="tcp" component="EnrichedTick" codec="ipc" {
     config {
         connect "collector.internal:9600"
 
-        schema_fields "price" type="Float64" nullable=#false
+        field "price" type="float64" nullable=#false
     }
 }
 ```
 
 </div>
 
-`connect` is the peer this sink dials. `schema_fields` is required here too, and one batch becomes
+`connect` is the peer this sink dials. `field` lines are required here too, and one batch becomes
 one frame per message the format encodes, which for arrow-ipc is one frame per batch.
 
 ## 4. Validate and run
 
-`examples/configs/tcp.kdl` declares both nodes and sets `run_mode kind="stream"`.
+`examples/configs/tcp.kdl` declares both nodes and sets `run "stream"`.
 
 Runs the same on Linux, macOS and Windows (PowerShell):
 
@@ -167,7 +167,7 @@ saci-service validate --config examples/configs/tcp.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: ticks (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
@@ -228,32 +228,34 @@ Source:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `bind` | string | required | the address the listener accepts producers on |
-| `buffer` | integer | `64` | decoded batches queued before backpressure |
-| `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default |
-| `schema_fields` | list of fields | required | the schema each payload decodes against |
+| `buffer` | integer | `64` | decoded batches queued before backpressure; at least 1 |
+| `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default; at least 1 |
+| `field` | lines | required | the schema each payload decodes against |
 
 Sink:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `connect` | string | required | the peer this sink dials |
-| `schema_fields` | list of fields | required | the schema the frames are written with |
+| `field` | lines | required | the schema the frames are written with |
 
-An unrecognised key inside `config` is ignored rather than rejected on this connector.
+An unrecognised key inside `config` is a configuration error naming the key, and so is a value of the wrong type. `field` lines sit beside these keys on both halves.
 
 ## When it refuses to start
 
 | Message | What to change |
 |---|---|
-| `tcp source config requires a 'bind' string` | add `bind "host:port"` to the source's `config` |
-| `tcp sink config requires a 'connect' string` | add `connect "host:port"` to the sink's `config` |
-| `tcp moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
+| ``TcpSource config: missing field `bind` `` | add `bind "host:port"` to the source's `config` |
+| ``TcpSink config: missing field `connect` `` | add `connect "host:port"` to the sink's `config` |
+| ``TcpSource config: unknown field `{key}`, expected one of `bind`, `buffer`, `max_frame_bytes` `` | fix the key's spelling, or drop it |
+| `tcp: '{key}' must be at least 1` | give `buffer` or `max_frame_bytes` a positive value |
+| `tcp moves bytes and needs a 'codec' key naming a declared codec` | add `codec="<id>"` to the node |
 | `format '{format}' does not support decoding discrete messages` | name a format that decodes discrete messages |
 | `TcpSink: format '{format}' has no message codec` | the same, for the sink |
-| `TcpIngestSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
+| `TcpSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
 | `TcpSink: cannot resolve 'connect' address '{connect}': {e}` | fix the host name or the port |
 | `TcpSink: 'connect' address '{connect}' resolved to no address` | the same, when the name resolves to nothing |
-| `source type 'tcp' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `run_mode kind="stream"`, or drop the `tcp` source |
+| `source connector 'tcp' never reaches EOF; it requires standalone mode with run "stream"` | set `run "stream"`, or drop the `tcp` source |
 
 ## Next
 

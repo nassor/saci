@@ -2,7 +2,7 @@
 //!
 //! Declares one component, `Order { id, priority }`, and one system,
 //! `route_batch`, which reads the batch's first row and inserts a
-//! [`RouteDecision`] naming the branch that row selects:
+//! [`sdk::RouteDecision`] naming the branch that row selects:
 //!
 //! - `priority = "high"` → branch `high`
 //! - `priority = "low"`  → branch `low`
@@ -28,26 +28,11 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::RouteDecision;
-use saci::processor::arrow_array::StringArray;
-use saci::processor::arrow_schema::{DataType, Field, Schema};
-use saci::processor::prelude::*;
+use saci::arrow_array::StringArray;
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// A row of the demo workload: an id plus the priority that selects the branch.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -71,7 +56,7 @@ impl Component for Order {
     }
 }
 
-/// Insert a [`RouteDecision`] naming the branch the first row selects.
+/// Insert a [`sdk::RouteDecision`] naming the branch the first row selects.
 ///
 /// `high` and `low` map to the same-named branches in
 /// `examples/branching/branching.kdl`; an unrecognised priority or an empty
@@ -79,10 +64,7 @@ impl Component for Order {
 /// host's `run-batch` Arrow IPC payload is a fully materialised dataset, not a
 /// stream.
 fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
-    let batch = data
-        .columns::<Order>()
-        .ok_or_else(|| SaciError::generic("branching: Order component missing"))?
-        .clone();
+    let batch = data.batch::<Order>()?.clone();
     let schema = batch.schema();
     let priority_idx = schema
         .index_of("priority")
@@ -103,26 +85,20 @@ fn route_batch(data: &mut Dataset) -> Result<(), SaciError> {
             }
         }
     };
-    data.insert_resource(RouteDecision(branch));
+    data.insert_resource(sdk::RouteDecision::to(branch));
     Ok(())
 }
 
 /// Build the branching demo pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
+#[processor]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("branching");
-    pipeline
-        .data
-        .register_component::<Order>()
-        .expect("register Order");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("route_batch").read("Order", "priority"),
-        route_batch,
-    ));
-    pipeline
+    Pipeline::new("branching")
+        .component::<Order>()
+        .system(system_fn(
+            SystemMeta::new("route_batch").reads_named("Order", "priority"),
+            route_batch,
+        ))
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build);

@@ -22,10 +22,10 @@ user-level skills under `~/.agents/skills/`, shared by every project.
 
 | Skill | Read before |
 |---|---|
-| `saci-connectors` | touching `crates/saci/src/connector.rs` or anything under `crates/saci/src/connector/`, a `SourceFactory`/`SinkFactory` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
-| `saci-transformers` | touching `crates/saci/src/transformer.rs` or anything under `crates/saci/src/transformer/`, a `format` registration, or a transformer option |
-| `saci-processors` | touching `crates/saci/src/processor.rs` or `processor/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/arrow-ipc-conformance/`, or `examples/{wasm,quickstart,conformance}/` |
-| `saci-plugins` | touching `crates/saci/src/{plugin.rs,plugin/,plugin_abi.rs}`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
+| `saci-connectors` | touching `crates/saci/src/connector.rs` or anything under `crates/saci/src/connector/`, a `Connector` registration, `ConnectorContext`, a connector config under `examples/configs/`, `connector_matrix.rs` or `xtask/src/matrix.rs` |
+| `saci-codecs` | touching `crates/saci/src/codec.rs` or anything under `crates/saci/src/codec/`, a `format` registration, or a codec option |
+| `saci-processors` | touching `crates/saci/src/sdk.rs` or `sdk/`, `saci-macros`, any `wit/pipeline.wit`, `crates/saci/src/wasm_host/`, `packages/arrow-ipc-conformance/`, or `examples/{wasm,quickstart,conformance}/` |
+| `saci-plugins` | touching `crates/saci/src/sdk/plugin_rt.rs`, `crates/saci-macros/src/plugin.rs`, `crates/saci/src/plugin_abi.rs`, `saci-plugin-smoketest`, `crates/saci/src/plugin_host/`, `crates/saci/src/service/plugin_loader.rs`, or `examples/plugins/` |
 | `saci-service` | touching `crates/saci/src/{service,distributed,inspector,bin}/`, `src/metrics.rs`, `src/inspector_wire.rs`, `crates/saci-service-ui`, or `examples/{native,branching,windowing,multi_workflow,integrity,distributed_fulfillment}/` |
 | `technical-writer`, then `saci-docs` | writing or editing any `//`, `///` or `//!` comment, anything under `docs/`, `README.md`, a skill, or any other prose: the first holds the writing rules, the second the SACI surfaces, site layout, diagram classes and docs build commands |
 | `rust-best-practices` | the finishing review of every changed `.rs` file |
@@ -33,7 +33,7 @@ user-level skills under `~/.agents/skills/`, shared by every project.
 | `ponytail` | designing or writing any change: the smallest change that fully solves the task |
 
 The five `saci-*` area skills are documentation of record. A change to how a connector,
-transformer, processor, plugin, or the service and its dashboard works (a new or removed crate,
+codec, processor, plugin, or the service and its dashboard works (a new or removed crate,
 a renamed type, a changed trait method, a new config key, a new metric series, a changed build
 step, fixture or example) updates the matching skill in the same change; each skill's last
 section, "Keep this skill current", lists its triggers. A skill that lags the code is a defect
@@ -59,7 +59,7 @@ cargo xtask check-wasm-processor                             # saci still builds
 cargo xtask bench tpch_q6                                    # Benchmarks, always via the harness
 cargo check --examples --all-features                        # Verify examples compile; --all-features keeps connector-gated examples compiled
 cargo build -p saci --features server --bin saci-service     # The server binary
-cargo xtask server --connectors=file --transformers=csv --processors=wasm  # A server binary with only the named parts
+cargo xtask server --connectors=file --codecs=csv --processors=wasm  # A server binary with only the named parts
 cargo run -p saci --example scheduler_etl                    # Run an example
 cargo run -p saci --example first_pipeline                   # The native tutorial's example
 cargo run -p saci --example distributed_scheduler --features distributed  # No external service
@@ -152,7 +152,7 @@ both this file and `ci.yml`: nextest does not run doctests.
 Five commands cover the feature configurations. Four of them widen: `--workspace --lib` is the
 library default, the engine alone; `-p saci --no-default-features --features
 service,connector-channel --lib` is the narrowest runnable service plus the channel connector its
-unit tests drive, registering no other connector and no transformer; `-p saci --features server
+unit tests drive, registering no other connector and no codec; `-p saci --features server
 --lib` is the `server` bundle, which registers only the `BUILTIN_CONNECTOR_FEATURES` entries
 whose feature is on; and `--workspace --all-features` registers every one of them. The fifth,
 `-p saci --no-default-features --features service,wasm-host,plugin-host,connector-channel --lib`,
@@ -223,12 +223,12 @@ crates/
 │                             #                 one_or_many, substitute_env_vars, substitute_vars.
 │                             #                 A parse failure after substitution names the
 │                             #                 variables inserted, never a value.
-│                             #   connector     SourceFactory, SinkFactory, ConnectorContext,
+│                             #   connector     Connector, ConnectorContext,
 │                             #                 NodeIdentity, bridge::ChannelBridge, and one child
 │                             #                 module per connector. skill saci-connectors
-│                             #   transformer   Transformer, BatchReader, BatchWriter,
-│                             #                 MessageDecoder, TransformerRegistry, and one child
-│                             #                 module per byte format. skill saci-transformers
+│                             #   codec         Codec, CodecFactory, CodecRegistry, BatchReader,
+│                             #                 BatchWriter, MessageDecoder, ReadInput, and one
+│                             #                 child module per byte format. skill saci-codecs
 │                             #   processor     Processor SDK; `wit/` holds the canonical WIT
 │                             #                 package. skill saci-processors
 │                             #   plugin, plugin_abi
@@ -276,12 +276,14 @@ The **default** is `engine` alone.
 
 Engine:
 
-- `engine` (**default**): the columnar engine plus the `Source`/`Sink` traits (implies `io`).
-- `runtime`: tokio and rayon stage parallelism. Cannot target wasm32-wasip3.
-- `io`: the `Source`/`Sink` traits and the schema cast helpers (implies `runtime`).
+- `engine` (**default**): the columnar engine with tokio and rayon stage parallelism, plus the
+  `Source`/`Sink` traits and the schema cast helpers. Implies `derive`. Cannot target
+  wasm32-wasip3.
+- `derive`: `#[derive(Component)]`, `#[transform]` and `#[fold]`. Needs no tokio, so a
+  wasm32-wasip3 processor carries it.
 - `windows`: windowed aggregation. `WindowedSystem`, watermarks, `WindowAccumulator`. The
-  `WindowSpec` geometry enum sits outside the feature, in `window_spec.rs`, so a host parses a
-  `window` declaration in every build; `saci::windows` re-exports it.
+  `WindowSpec` geometry enum sits outside the feature, in `window.rs`, so a host parses a
+  `window` declaration in every build; `saci::window::WindowSpec`, also in `saci::prelude`.
 - `tracing`: `tracing` crate integration across the engine, the connectors and the host. Gates
   the events and the three nested spans `pipeline/execution.rs` opens (`pipeline.run`,
   `pipeline.stage`, `system.execute`).
@@ -289,18 +291,21 @@ Engine:
 
 Authoring SDKs, each for a different artifact:
 
-- `processor`: the wasm32-wasip3 processor SDK in `saci::processor`, Component Model Async
-  execution, the `#[derive(Component)]`/`#[transform]`/`#[fold]`/`#[processor]` macros and
-  `export_pipeline!`. A processor crate depends on `saci` with
-  `default-features = false, features = ["processor"]`, so tokio stays out.
-- `plugin`: the native plugin SDK in `saci::plugin` and `export_plugin!`, for a cdylib the host
-  `dlopen`s.
+- `processor`: the wasm32-wasip3 processor SDK, Component Model Async execution. `#[processor]`
+  on a `fn build() -> Pipeline` exports the `saci:pipeline` world. A processor crate depends on
+  `saci` with `default-features = false, features = ["processor"]`, so tokio stays out.
+- `plugin`: the native plugin SDK. `#[plugin]` on a `fn build() -> Pipeline` exports the C ABI
+  in `saci::plugin_abi` from a cdylib the host `dlopen`s.
+
+Both SDKs share `saci::sdk` (`State`, `RouteDecision`, `Config`, `Error`, `Result`, `host`) and the
+`#[derive(Component)]`, `#[transform]` and `#[fold]` macros, which the `derive` feature provides.
+The macros and `sdk` are exported at the crate root and in `saci::prelude`.
 
 Connectors and formats: `connector-<name>` compiles `saci::connector::<name>`,
-`transformer-<format>` compiles `saci::transformer::<format>`. `connectors` enables the seven
+`codec-<format>` compiles `saci::codec::<format>`. `connectors` enables the seven
 that need nothing installed or already running (`channel`, `file`, `redb`, `http`, `tcp`, `udp`,
-`saci`); `transformers` enables all five formats. `connector-kafka`, `connector-nats` and
-`connector-udp` imply `transformer-ndjson`, `connector-tcp` implies `transformer-arrow-ipc`.
+`peer`); `codecs` enables all five formats. `connector-kafka`, `connector-nats` and
+`connector-udp` imply `codec-ndjson`, `connector-tcp` implies `codec-arrow-ipc`.
 TLS is always compiled into the PostgreSQL, MariaDB and ClickHouse connectors.
 `connector-kafka` needs `cmake` and a C toolchain for vendored librdkafka.
 
@@ -308,7 +313,7 @@ Host: `service` (KDL config, Registry, runners, HTTP control plane, the `saci-se
 `wasm-host` and `plugin-host` (the two processor hosts, `saci::wasm_host` and
 `saci::plugin_host`), `distributed`, `distributed-raft`, `service-cluster`, `inspector`,
 `parquet-checkpoint`, `trace-context`, `mimalloc`. A `connector-*` feature registers its
-factories only when `service` is on too. The full table and what each implies is in skill
+connector only when `service` is on too. The full table and what each implies is in skill
 `saci-service`.
 
 Bundles: `server` is what `cargo install saci --features server` builds: `service`, `wasm-host`,
@@ -318,7 +323,8 @@ host and a Raft cluster node, but excludes `conformance`, the corpus generator's
 `crates/saci/tests/feature_bundles.rs` holds both bundles to those rules.
 
 A custom server is a binary depending on `saci` with the features it wants and a `main` that
-calls `saci::service::cli::main()`, or `main_with` to register its own factories.
+calls `saci::service::cli::main()`, or `main_with` to register its own connector with `ServiceBuilder::connector`. A binary that
+owns its startup calls `saci::service::serve(config, builder, ServeOptions { .. })`.
 
 ### Columnar engine (the `saci` crate root)
 
@@ -326,71 +332,85 @@ calls `saci::service::cli::main()`, or `main_with` to register its own factories
   Arrow `Schema`. Rows serialize via `serde_arrow`.
 - **`Dataset`** (`src/dataset.rs` plus the ten-file `src/dataset/` submodule): Arrow-backed
   columnar container. Each registered component holds a `Vec<RecordBatch>` of appended chunks, and
-  a read (`batch_for`, `column`, `view`) goes through `get_or_build_merged`, which concatenates
+  a read (`batch`, `batch_named`, `column`, `view`) goes through `get_or_build_merged`, which concatenates
   them once into a `merged_cache` entry; `chunks.rs` owns that merge. A component may hold fewer
   rows than the dataset's row count (a windowing processor's reduced result component), never more.
   Holds a `SchemaRegistry`, a `ResourceMap`, and an alive bitmap. Supports batch `append`, soft
-  delete (`mark_dead`), compaction, and IPC round-trip. Builder: `DatasetBuilder`. Canonical path:
+  delete (`mark_dead`), compaction, and IPC round-trip. Build one with `Dataset::new()` and
+  `register::<C>()`, or let `Pipeline::component::<C>()` do it. Canonical path:
   `saci::dataset::Dataset`.
 - **`Row`** (`src/row.rs`): stable row index (`u32`). Invalidated by `compact`.
 - **`Resource`** (`src/resource.rs`): boxed Rust singleton stored in `Dataset`, keyed by `TypeId`.
   Not columnar, and **not** serialized by `write_ipc`. The processor SDK relies on that to keep
   cross-batch state out of the data plane.
-- **`Source`/`Sink` traits** (`src/io/`, `io` feature): `Source::finish`, like `Sink::finish`, is
+- **`Source`/`Sink` traits** (`src/io/`, `engine` feature): `Source::finish`, like `Sink::finish`, is
   called once after the last `next_batch`, and defaults to nothing. It is where a source whose
   delivery is a commitment makes it durable, so a caller that dropped the source instead sees the
-  same data again; every wrapper (`Box`, `CastingSource`, `RetryingSource`, `HealingSource`)
+  same data again; every wrapper (`Box`, `RetryingSource`, `HealingSource`)
   forwards it, and the service's runners call it per exit path after the sinks are finished.
 - **`System` trait** (`src/system.rs`): `meta()` declares field-level read/write access,
-  `async fn run(&self, data: &mut Dataset)` does the work, `run_sync` is an optional sync fast path.
+  `async fn run(&self, data: &mut Dataset)` does the work, `run_sync` is an optional sync fast path,
+  and `retry()` returns the `RetryMode` for the system (default `RetryMode::None`).
   Written as a struct impl or via the `system_fn` closure helper.
 - **`Pipeline`** (`src/pipeline.rs` plus `src/pipeline/`): self-contained workload
-  `{ name, data: Dataset, systems, DAG stages, sources, sinks }`. Builds a conflict graph from
-  `SystemMeta`, topologically sorts it into stages, and runs them with per-system retry. Builder:
-  `PipelineBuilder`.
+  `{ name, data: Dataset, systems, DAG stages, sources, sinks }`, built as a consuming chain
+  (`Pipeline::new(..).component::<C>().system(..)`). Builds a conflict graph from
+  `SystemMeta`, topologically sorts it into stages, and runs them with per-system retry.
 - **`Scheduler`** (`src/scheduler.rs`): multi-pipeline orchestrator over `Vec<Pipeline>`. `tick()`
-  runs every pipeline once, walking a dependency DAG built from `PipelineConfig`. Reachable from
+  runs every pipeline once, walking a dependency DAG built from `PipelineConfig`
+  (`after`, `after_data`, `priority`, `pause_when`). Reachable from
   library code only: a `ServiceConfig` declares `workflow` nodes, and the runners walk
-  `BuiltService::nodes` themselves, so the config-driven binary never builds one.
+  `BuiltWorkflow::nodes` themselves, so the config-driven binary never builds one.
 
 #### Dataset API
 
 ```rust
+use saci::prelude::*;
+
+#[derive(Component, Serialize, Deserialize)]
+struct Price { id: i64, value: f64 }   // generates Price::ID and Price::VALUE (FieldRef consts)
+
 let mut dataset = Dataset::new();
-dataset.register_component::<Price>()?;          // must precede append
+dataset.register::<Price>()?;                    // must precede append
 dataset.append::<Price>(&rows)?;                 // returns Range<Row>
-let col = dataset.column::<Price>("value");      // -> Option<ArrayRef>
+let col = dataset.column(Price::VALUE)?;         // SaciResult<&ArrayRef>
+let batch = dataset.batch::<Price>()?;           // SaciResult<&RecordBatch>
+dataset.set_column(Price::VALUE, new_col)?;      // replace one column
+let rates = dataset.resource::<TaxRate>()?;      // SaciResult<&TaxRate>
 dataset.mark_dead(row);                          // soft delete
 dataset.compact();                               // filter dead rows
 dataset.write_ipc(&mut buf)?;                    // serialize
 let dataset2 = Dataset::read_ipc(&mut &buf[..])?;
 ```
 
+A schema known only at run time registers with `register_schema(name, schema)` and reads with
+`batch_named(name)` and `column_named(name, field)`. An unregistered component is
+`ComponentNotRegistered`; a missing field is `FieldNotFound`.
+
 #### Pipeline API
 
 ```rust
-// Inline construction
-let mut pipeline = Pipeline::new("etl");
-pipeline.data_mut().register_component::<Price>()?;
+let mut pipeline = Pipeline::new("etl")
+    .component::<Price>()
+    .resource(TaxRate(0.1))
+    .system(EnrichPrice);
 pipeline.data_mut().append::<Price>(&rows)?;
-pipeline.add_system(EnrichPrice);
-pipeline.run().await?;                           // validate + DAG + retry
-
-// Builder pattern
-let pipeline = Pipeline::builder("etl")
-    .with::<Price>()
-    .with_resource(TaxRate(0.1))
-    .with_system(EnrichPrice)
-    .build();
+let stats = pipeline.run().await?;               // validate + DAG + retry; returns RunStats
 ```
+
+`run()` drains every attached source (`.source(component, src)`) into its component, runs the
+stages, then writes each component to its sink (`.sink(component, sink)`) and calls `finish`.
+`RunStats` carries `rows_produced`, `systems_run`, `elapsed` and `retries`. A registration
+failure inside the chain surfaces from `validate()`, `plan()` and every `run*`.
 
 `run_on(&self, data: &mut Dataset)` is the escape hatch for hosts that own their own dataset. It
 executes the system DAG against an external dataset without touching the template pipeline's data,
-sources, or sinks. `run_on_with_stats` is the same call returning the per-call `RunStats`, which is
+sources, or sinks, and returns the per-call `RunStats`, which is
 how the processor SDK fills the WIT `run-metrics` record.
 
-**`PipelineRuntime`** (`src/runtime.rs`, `runtime` feature) is the host-side seam a swappable
-backend implements: `name`, `run_on`, `run_on_with_state`, `declared_components`,
+**`PipelineRuntime`** (`src/runtime.rs`, `engine` feature) is the host-side seam a swappable
+backend implements: `name`, `run_batch(data, prior) -> SaciResult<RuntimeOutput { state, routes }>`,
+`declared_components`,
 `descriptor_info`, `template_dataset`. `descriptor_info() -> RuntimeDescriptorInfo { name, version,
 stateful, schema_fingerprint }` has a default empty body and is the one generic way a host holding
 `Box<dyn PipelineRuntime>` can read what an out-of-process runtime says about **itself**:
@@ -400,7 +420,7 @@ beyond `name()`. `RuntimeDescriptorInfo::name` is not `name()`: the latter is wh
 passed at construction, and what that is differs per runtime kind. A config-loaded `wasm` node gets
 its own declared node id (`ServiceBuilder` calls `loader.load(&spec.id, &spec)`, forwarded into
 `WasmPipelineRuntime::from_bytes`), a `plugin` node gets the plugin manifest's name, and a
-`with_runtime` native pipeline gets the pipeline's own name.
+`ServiceBuilder::runtime` native pipeline gets the pipeline's own name.
 
 #### System & SystemMeta (`src/system.rs`)
 
@@ -409,11 +429,14 @@ pipeline uses this to build a conflict graph and group non-conflicting systems i
 
 ```rust
 SystemMeta::new("enrich")
-    .read("Order", "id")
-    .write("Order", "total")
-    .read_component("Price")       // expands to all fields of Price
-    .read_resource::<TaxRate>();
+    .reads(Order::ID)
+    .writes(Order::TOTAL)
+    .reads_all::<Price>()          // every field of Price
+    .reads_resource::<TaxRate>();
 ```
+
+A component known only at run time uses `reads_named("Order", "id")`, `writes_named(..)`,
+`reads_all_named("Price")` and `writes_all_named(..)`. `writes_resource::<R>()` declares a write.
 
 Conflict rules (B registered after A):
 1. Write-after-read: A writes F, B reads F, so B depends on A
@@ -424,34 +447,45 @@ Conflict rules (B registered after A):
 System trait signatures:
 - `async fn run(&self, data: &mut Dataset) -> SaciResult<()>` for exclusive access
 - `async fn run(&self, data: &Dataset) -> SaciResult<WriteSet>` for `ParallelSystem`, a read-only
-  pass
+  pass. `WriteSet::put(Order::TOTAL, array)` writes a column, `put_named(component, field, array)`
+  takes runtime names, and `with_resource(value)` publishes a resource. A `ParallelSystem` that
+  implements `sliced() -> true` and `run_slice(data, rows)` gets `run` for free and runs row slices
+  in parallel on large batches. `parallel_fn(meta, |data| ..)` wraps a closure.
 
 #### Retry (`src/retry.rs`)
 
-`RetryMode`: `None`, `Fixed`, or `ExponentialBackoff` (default: 3 retries, 100 ms base, 2.0x
-multiplier, 30 s cap, 0.1 jitter). `SystemConfig` wraps a `RetryMode` and is returned by
-`System::config()`. Every system run goes through one of two drivers that share the attempt-counting
-core: `run_with_retries` (async, `tokio::time::sleep`) and `run_with_retries_blocking`
-(`std::thread::sleep`, for the rayon/`spawn_blocking` stage path).
+`RetryMode`: `None` (the default), `Fixed`, or `ExponentialBackoff` (`RetryMode::exponential(n)`:
+100 ms base, 2.0x multiplier, 30 s cap, 0.1 jitter). `System::retry()` and
+`ParallelSystem::retry()` return the mode. Only errors where `SaciError::is_retryable()` is true
+are retried; any other error returns at once, unwrapped. A failure after at least one retry is
+`RetryExhausted`. Every system run goes through one of two drivers that share the attempt-counting
+core and take `&RetryMode`: `run_with_retries` (async, `tokio::time::sleep`) and
+`run_with_retries_blocking` (`std::thread::sleep`, for the rayon/`spawn_blocking` stage path).
 
 #### Error types (`src/error.rs`)
 
-`SaciError` variants: `SystemExecution`, `ComponentNotFound`, `EntityNotFound`, `ResourceNotFound`,
+`SaciError` variants: `SystemExecution`, `ComponentNotRegistered`, `FieldNotFound`, `ResourceNotFound`,
 `Store`, `Scheduler`, `Configuration`, `RetryExhausted`, `Generic`. With the `distributed` feature:
 `Distributed`, `LeaseExpired`. Alias: `SaciResult<T>`. `PartialEq`/`Eq` are derived.
+`is_retryable()` is true for `SystemExecution`, `Store`, `RetryExhausted` and, under `distributed`,
+`Distributed` and `LeaseExpired`.
 
 #### Windowed aggregation (`src/windows/`, `windows` feature)
 
-`WindowedSystem` and `WindowedSystemBuilder` assign rows to tumbling, sliding, or session windows,
-track watermarks, aggregate per key, and publish results as a `WindowResults` resource.
+`WindowedSystem` assigns rows to tumbling, sliding, or session windows,
+tracks watermarks, aggregates per key, and publishes results as a `WindowResults` resource.
+`WindowedSystem::new(FieldRef, spec, function)` or `new_named(component, time_field, spec,
+function)` builds it; `key_by` and `allowed_lateness_ms` chain on. `WindowFunction::sum`, `min`,
+`max`, `count`, `mean` and `process` build the function. The `windows` submodules are private:
+`saci::windows` exports the types flat, with `key_hash` for the window key hash.
 `WindowAccumulator` is the component that carries open-window state across batches; the host
 persists it through `CheckpointStore`.
 
 ### Host (`service` and the modules beside it)
 
-The host is documented in four skills. `saci-connectors` and `saci-transformers` carry the IO
-layer: a connector moves bytes, a transformer turns bytes into `RecordBatch`es and back, and
-`ServiceBuilder` resolves a node's `transformer` id against the `TransformerRegistry` so no
+The host is documented in four skills. `saci-connectors` and `saci-codecs` carry the IO
+layer: a connector moves bytes, a codec turns bytes into `RecordBatch`es and back, and
+`ServiceBuilder` resolves a node's `codec` id against the `CodecRegistry` so no
 connector resolves a format itself. `saci-processors` carries the wasm host (`src/wasm_host/`)
 and the processor SDK; `saci-plugins` carries the native plugin host and SDK. `saci-service`
 carries the rest: the distributed runner and Raft consensus (`src/distributed/`); config,
@@ -464,13 +498,16 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
 - All async traits use `#[async_trait]`; `PipelineRuntime` uses `#[async_trait(?Send)]`.
 - Tracing instrumentation is behind `#[cfg(feature = "tracing")]`, and every such site keeps a
   `#[cfg(not(feature = "tracing"))]` fallback so the value is still consumed.
-- Metric call sites carry no `#[cfg]`: `crate::metrics::Instruments` has an identical, `#[inline]`,
-  empty method surface when the `metrics` feature is off. Do not wrap a metric call in
-  `#[cfg(feature = "metrics")]`.
+- Metric call sites carry no `#[cfg]`: `crate::metrics::Instruments` and the four handles it
+  binds (`WorkflowMetrics`, `SourceMetrics`, `ProcessorMetrics`, `SinkMetrics`) have an identical,
+  `#[inline]`, empty method surface when the `metrics` feature is off. Bind a handle once per node
+  and reuse it; the id's attribute is built once, in the handle. Only values that vary per call
+  (a branch name, a processor-chosen metric name) build an attribute at the call. Do not wrap a
+  metric call in `#[cfg(feature = "metrics")]`.
 - `saci::prelude` is the documented entry point for a downstream embedder: the engine types plus
-  whatever the enabled `processor`, `connector-*` and `transformer-*` features add.
-  `saci::processor::prelude` and `saci::plugin::prelude` are the narrower preludes of the two
-  authoring SDKs.
+  whatever the enabled `processor`, `connector-*` and `codec-*` features add.
+  An authoring crate (wasm processor or native plugin) writes `use saci::prelude::*;` and reaches
+  the SDK types through `sdk::`.
 - An example that needs nothing outside the `saci` crate (no processor component, plugin, config
   file or external service) lives in `crates/saci/examples/`, so the published package carries
   it. Every other runnable example lives under the top-level `examples/` directory, grouped by
@@ -485,7 +522,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
 - Tests live in `#[cfg(test)]` modules within each source file; integration tests are in each crate's
   `tests/`, run through `cargo nextest`. See "Testing" for the fast/full profile split, the
   Docker soft-skip convention, and why testcontainers-backed tests are safe to run in parallel.
-- Every new source connector, sink connector, transformer, and processor runtime is added to
+- Every new source connector, sink connector, codec, and processor runtime is added to
   `crates/saci/tests/connector_matrix.rs`'s dimension lists and its `live_slices!` lists
   in the same change that introduces it; `dimensions_cover_the_registry` and
   `every_slice_has_a_test` fail on an omission. Skill `saci-connectors` has the checklist.
@@ -509,7 +546,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   skill `rust-performance`'s triage workflow, validated with
   `cargo xtask bench <name>` before/after. The wasm host/processor boundary's instrument is
   `cargo xtask bench wasm_roundtrip` (`crates/saci/benches/wasm_roundtrip.rs`), which
-  reports store lifecycle, host IPC encode, host IPC decode and the full `run_on_with_state`
+  reports store lifecycle, host IPC encode, host IPC decode and the full `run_batch`
   round trip as separate groups, since a change there routinely moves cost between phases while
   leaving the total flat.
 - `arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide. It is the host to processor wire format and the

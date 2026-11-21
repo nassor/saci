@@ -68,8 +68,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::SaciError;
-use crate::io::cast_batch;
-use crate::io::sink::Sink;
+use crate::io::{Sink, cast_batch};
 use arrow_array::RecordBatch;
 use arrow_cast::CastOptions;
 use arrow_ipc::writer::StreamWriter;
@@ -134,9 +133,9 @@ impl ClickhouseSink {
         config.validate()?;
 
         let fields = config
-            .schema_fields
+            .fields
             .iter()
-            .map(|f| f.to_arrow_field())
+            .map(|f| f.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
         let client = build_client(&config.connection)?;
@@ -462,16 +461,15 @@ impl Sink for ClickhouseSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::clickhouse::config::{
-        ClickhouseConnectionConfig, ClickhouseFieldType, FieldSpec, WriteMode,
-    };
+    use crate::connector::clickhouse::config::{ConnectionConfig, WriteMode};
+    use crate::connector::schema::{FieldSpec, FieldType};
     use std::collections::HashMap;
 
     #[tokio::test]
     async fn sink_initialization_and_buffering() {
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -481,12 +479,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -513,7 +513,7 @@ mod tests {
         use arrow_array::Int64Array;
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -523,12 +523,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -563,7 +565,7 @@ mod tests {
 
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -573,12 +575,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -607,7 +611,7 @@ mod tests {
 
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -617,12 +621,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,
@@ -725,7 +731,7 @@ mod tests {
     fn sink_at(url: &str, flush_rows: usize) -> ClickhouseSink {
         let config = ClickhouseSinkConfig {
             name: "out".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: url.to_string(),
                 user: None,
                 password: None,
@@ -735,12 +741,14 @@ mod tests {
                 settings: HashMap::new(),
             },
             table: "events".to_string(),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             write_mode: WriteMode::Append,
             chunk_rows: 1000,

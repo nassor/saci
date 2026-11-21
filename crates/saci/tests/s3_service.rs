@@ -1,20 +1,20 @@
-//! The whole standalone service path over S3: config file, factories, source
+//! The whole standalone service path over S3: config file, connector, source
 //! drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this is
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this is
 //! the end to end proof that a `connector-s3` build moves rows from one S3
 //! prefix through a pipeline into another via the registered
-//! `S3SourceFactory`/`S3SinkFactory`, not just via the connector's own
+//! `S3Connector`, not just via the connector's own
 //! direct API (already covered by the S3 connector's own tests, `crates/saci/tests/s3_round_trip.rs`).
 //!
-//! The first test needs no daemon: neither factory opens a connection at build
+//! The first test needs no daemon: the connector opens no connection at build
 //! time, so a config pointing at an unreachable endpoint still builds. The
 //! second soft-skips without Docker.
 
 #![cfg(all(
     feature = "connector-s3",
     feature = "service",
-    feature = "transformer-ndjson"
+    feature = "codec-ndjson"
 ))]
 
 use std::sync::Arc;
@@ -22,8 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use saci::connector::SchemaFrom;
 use saci::connector::s3::{
-    Flush, S3ConnectionConfig, S3Sink, S3SinkConfig, S3Source, S3SourceConfig, SchemaFrom,
+    ConnectionConfig, Flush, S3Sink, S3SinkConfig, S3Source, S3SourceConfig,
 };
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
@@ -32,11 +33,9 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_util::sync::CancellationToken;
 
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
-use saci::transformer::ndjson::NdjsonTransformer;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 
@@ -54,23 +53,26 @@ fn schema() -> Arc<Schema> {
 /// covered by the S3 connector's own tests).
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("s3_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
-fn config_kdl(connection: &S3ConnectionConfig, in_prefix: &str, out_prefix: &str) -> String {
+fn config_kdl(connection: &ConnectionConfig, in_prefix: &str, out_prefix: &str) -> String {
     format!(
         r#"
 mode "standalone"
 
 node id=1 name="saci-s3-service" data_dir="/tmp/saci-s3-service"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "s3-service-test" {{
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="S3Source" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="s3" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             prefix "{in_prefix}"
 
@@ -82,15 +84,15 @@ workflow "s3-service-test" {{
                 allow_http #true
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="S3Sink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="s3" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             prefix "{out_prefix}"
             suffix ".ndjson"
@@ -104,9 +106,9 @@ workflow "s3-service-test" {{
                 allow_http #true
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
@@ -114,7 +116,7 @@ workflow "s3-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#,
@@ -130,7 +132,7 @@ observability log_level="warn"
 /// needed.
 #[tokio::test]
 async fn the_s3_factories_build_without_reaching_the_endpoint() {
-    let connection = S3ConnectionConfig {
+    let connection = ConnectionConfig {
         bucket: "test".to_string(),
         endpoint: Some("http://127.0.0.1:1".to_string()),
         access_key_id: Some("key".to_string()),
@@ -139,17 +141,15 @@ async fn the_s3_factories_build_without_reaching_the_endpoint() {
         ..Default::default()
     };
     let raw = config_kdl(&connection, "in", "out");
-    let path = tempfile::NamedTempFile::new().expect("temp config");
-    std::fs::write(path.path(), &raw).expect("write config");
-    let config = ServiceConfig::load(path.path()).expect("config loads");
-    register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&raw).expect("config loads");
+    ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds without reaching the endpoint");
 }
 
 /// Start a RustFS container, or return `None` with a printed reason.
-async fn start_rustfs() -> Option<(ContainerAsync<GenericImage>, S3ConnectionConfig)> {
+async fn start_rustfs() -> Option<(ContainerAsync<GenericImage>, ConnectionConfig)> {
     const ACCESS_KEY: &str = "saciaccesskey";
     const SECRET_KEY: &str = "sacisecretkey";
 
@@ -174,7 +174,7 @@ async fn start_rustfs() -> Option<(ContainerAsync<GenericImage>, S3ConnectionCon
         }
     };
     let bucket = format!("saci-{}", nanos_since_epoch());
-    let connection = S3ConnectionConfig {
+    let connection = ConnectionConfig {
         bucket,
         endpoint: Some(format!("http://127.0.0.1:{port}")),
         access_key_id: Some(ACCESS_KEY.to_string()),
@@ -263,10 +263,9 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
                 max_bytes: 0,
                 max_age_ms: 0,
             },
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(
@@ -279,7 +278,7 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await
@@ -287,20 +286,16 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
         seed_sink.finish().await.expect("seed finish");
     }
 
-    let path = tempfile::NamedTempFile::new().expect("temp config");
-    std::fs::write(
-        path.path(),
-        config_kdl(&connection, &in_prefix, &out_prefix),
-    )
-    .expect("write config");
-    let config = ServiceConfig::load(path.path()).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(&connection, &in_prefix, &out_prefix))
+        .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -314,20 +309,19 @@ async fn an_s3_source_and_sink_move_rows_through_the_standalone_runner() {
             connection,
             prefix: out_prefix,
             schema_from: SchemaFrom::Config,
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("readback source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema);
-    let rows = saci::io::source::drain_into_dataset(&mut read_source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema).unwrap();
+    let rows = saci::io::read_all(&mut read_source, &mut dataset, COMPONENT)
         .await
         .expect("drain output prefix");
     assert_eq!(rows, 3);
 
-    let out = dataset.batch_for(COMPONENT).expect("component present");
+    let out = dataset.batch_named(COMPONENT).expect("component present");
     let ids = out
         .column(0)
         .as_any()

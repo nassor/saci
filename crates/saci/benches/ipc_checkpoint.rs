@@ -162,7 +162,7 @@ fn generate_mixed_rows(n: usize, seed: u64) -> (Vec<MixedRow>, RecordBatch) {
 
 fn build_pipeline(batch: RecordBatch) -> Dataset {
     let mut pipeline = Dataset::new();
-    pipeline.register_raw_component("Mixed", mixed_schema());
+    pipeline.register_schema("Mixed", mixed_schema()).unwrap();
     pipeline.append_record_batch("Mixed", batch).unwrap();
     pipeline
 }

@@ -105,9 +105,7 @@ fn i64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array, 
 }
 
 fn print_rows(label: &str, dataset: &Dataset) -> Result<(), Box<dyn Error>> {
-    let batch = dataset
-        .batch_for(COMPONENT)
-        .ok_or("the returned dataset has no Counter component")?;
+    let batch = dataset.batch_named(COMPONENT)?;
     let id = i64_column(batch, "id")?;
     let seen = i64_column(batch, "seen")?;
     let rows: Vec<String> = (0..batch.num_rows())
@@ -140,8 +138,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     println!("\n── batch 1 (no prior state) ──");
     let mut first = counter_dataset(&runtime)?;
     let checkpoint = runtime
-        .run_on_with_state(&mut first, None)
+        .run_batch(&mut first, None)
         .await?
+        .state
         .ok_or("a stateful plugin must return a checkpoint")?;
     print_rows("rows", &first)?;
     println!("  checkpoint: {} bytes", checkpoint.len());
@@ -149,8 +148,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     println!("\n── batch 2 (checkpoint from batch 1 fed back as `prior`) ──");
     let mut second = counter_dataset(&runtime)?;
     let next = runtime
-        .run_on_with_state(&mut second, Some(checkpoint.as_slice()))
+        .run_batch(&mut second, Some(checkpoint.as_slice()))
         .await?
+        .state
         .ok_or("a stateful plugin must return a checkpoint")?;
     print_rows("rows", &second)?;
     println!("  checkpoint: {} bytes", next.len());

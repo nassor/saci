@@ -1,25 +1,19 @@
-//! The config to factory path for `MariadbSource` and `MariadbSink`.
+//! The config to connector path for `MariadbSource` and `MariadbSink`.
 //!
-//! No database: both factories are synchronous and open no connection, so this
+//! No database: both roles are synchronous and open no connection, so this
 //! exercises exactly what `saci-service validate` does: env-var substitution,
 //! parsing, cross-field validation, and schema construction.
 
 #![cfg(all(feature = "connector-mariadb", feature = "service"))]
 
-use std::path::PathBuf;
-
 use arrow_schema::{DataType, TimeUnit};
 use saci::pipeline::Pipeline;
-use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
+use saci::service::ServiceConfig;
+use saci::service::{BuiltNodeKind, ServiceBuilder};
 
-/// Write `body` to a temp file and load it as a service config.
+/// Parse `body` as a service config.
 fn load(body: &str) -> Result<ServiceConfig, saci::error::SaciError> {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path: PathBuf = dir.path().join("service.kdl");
-    std::fs::write(&path, body).expect("write config");
-    ServiceConfig::load(&path)
+    ServiceConfig::from_kdl(body)
 }
 
 fn config_body(data_dir: &str) -> String {
@@ -29,10 +23,10 @@ mode "standalone"
 
 node id=1 name="saci-mariadb-test" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "mariadb-factories-test" {{
-    source "maria_orders" type="MariadbSource" component="OrderChange" {{
+    source "maria_orders" connector="mariadb" component="OrderChange" {{
         config {{
             name "maria_orders"
             batch_rows 256
@@ -44,16 +38,16 @@ workflow "mariadb-factories-test" {{
 
             mode kind="cdc_binlog" table="shop.orders" snapshot="initial" server_id=4100
 
-            schema_fields "__op" type="utf8" nullable=#false
-            schema_fields "__commit_ts" type="timestamp_micros_utc"
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "amount" type="decimal128" precision=18 scale=4
+            field "__op" type="utf8" nullable=#false
+            field "__commit_ts" type="timestamp_micros_utc"
+            field "id" type="int64" nullable=#false
+            field "amount" type="decimal128" precision=18 scale=4
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "maria_enriched" type="MariadbSink" component="EnrichedOrder" {{
+    sink "maria_enriched" connector="mariadb" component="EnrichedOrder" {{
         config {{
             name "maria_enriched"
             table "shop.enriched_orders"
@@ -65,9 +59,9 @@ workflow "mariadb-factories-test" {{
                 ssl_mode "disabled"
             }}
 
-            schema_fields "__op" type="utf8" nullable=#false
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="decimal128" precision=12 scale=2
+            field "__op" type="utf8" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="decimal128" precision=12 scale=2
         }}
     }}
 
@@ -75,7 +69,7 @@ workflow "mariadb-factories-test" {{
     link from="transform" to="maria_enriched"
 }}
 
-http disabled=#true
+http enabled=#false
 "#
     )
 }
@@ -105,9 +99,9 @@ fn a_declared_source_and_sink_are_built_with_their_declared_schemas() {
     let config = load(&config_body(&data_dir)).expect("config loads");
 
     // `impl PipelineRuntime for Pipeline` means no wasm fixture is needed.
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(Pipeline::new("test")))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", Pipeline::new("test"))
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
@@ -168,10 +162,10 @@ fn a_misspelled_key_fails_the_build_as_a_configuration_error() {
     let body = config_body(&data_dir).replace("batch_rows 256", "batch_row 256");
     let config = load(&body).expect("config still parses: the typo is inside the config node");
 
-    // `BuiltService` is not `Debug`, so the rejection is destructured.
-    let Err(err) = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(Pipeline::new("test")))
-        .build_all(&config)
+    // `BuiltWorkflow` is not `Debug`, so the rejection is destructured.
+    let Err(err) = ServiceBuilder::new()
+        .runtime("transform", Pipeline::new("test"))
+        .build(&config)
     else {
         panic!("the typo must fail the build");
     };
@@ -190,9 +184,9 @@ fn a_cross_field_violation_fails_the_build() {
     );
     let config = load(&body).expect("config loads");
 
-    let Err(err) = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(Pipeline::new("test")))
-        .build_all(&config)
+    let Err(err) = ServiceBuilder::new()
+        .runtime("transform", Pipeline::new("test"))
+        .build(&config)
     else {
         panic!("the snapshot/initial combination must be rejected");
     };
@@ -209,14 +203,14 @@ fn apply_changes_without_a_declared_op_field_fails_the_build() {
     set_dsn();
     let (_dir, data_dir) = data_dir();
     let body = config_body(&data_dir).replace(
-        "            schema_fields \"__op\" type=\"utf8\" nullable=#false\n            schema_fields \"id\" type=\"int64\" nullable=#false\n            schema_fields \"total\"",
-        "            schema_fields \"id\" type=\"int64\" nullable=#false\n            schema_fields \"total\"",
+        "            field \"__op\" type=\"utf8\" nullable=#false\n            field \"id\" type=\"int64\" nullable=#false\n            field \"total\"",
+        "            field \"id\" type=\"int64\" nullable=#false\n            field \"total\"",
     );
     let config = load(&body).expect("config loads");
 
-    let Err(err) = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(Pipeline::new("test")))
-        .build_all(&config)
+    let Err(err) = ServiceBuilder::new()
+        .runtime("transform", Pipeline::new("test"))
+        .build(&config)
     else {
         panic!("apply_changes without __op must be rejected");
     };
@@ -225,18 +219,18 @@ fn apply_changes_without_a_declared_op_field_fails_the_build() {
 }
 
 /// Both shipped `examples/configs/mariadb*.kdl` must parse and their IO tables
-/// must be accepted by the factories.
+/// must be accepted by the connector.
 ///
 /// Gated on `wasm` because the examples declare a `wasm` node, which the
-/// config parser only knows about with that feature on. The factories are
-/// driven directly rather than through `ServiceBuilder::build_all`, which would
+/// config parser only knows about with that feature on. The connector is
+/// driven directly rather than through `ServiceBuilder::build`, which would
 /// also try to load the module the examples point at.
 #[cfg(feature = "wasm-host")]
 #[test]
 fn the_shipped_example_configs_load_and_their_io_tables_are_accepted() {
+    use saci::connector::mariadb::MariadbConnector;
+    use saci::service::Connector;
     use saci::service::ConnectorContext;
-    use saci::service::factories::{MariadbSinkFactory, MariadbSourceFactory};
-    use saci::service::registry::{SinkFactory, SourceFactory};
 
     // SAFETY: single-threaded test setup.
     unsafe {
@@ -254,17 +248,17 @@ fn the_shipped_example_configs_load_and_their_io_tables_are_accepted() {
             .unwrap_or_else(|e| panic!("the shipped example {file} must load: {e}"));
         assert_eq!(config.workflows[0].sources.len(), 1, "{file}");
         assert_eq!(config.workflows[0].sinks.len(), 1, "{file}");
-        assert_eq!(config.workflows[0].sources[0].type_name, "MariadbSource");
-        assert_eq!(config.workflows[0].sinks[0].type_name, "MariadbSink");
+        assert_eq!(config.workflows[0].sources[0].connector, "mariadb");
+        assert_eq!(config.workflows[0].sinks[0].connector, "mariadb");
 
         // MariaDB declares its own schema, so it reads no `format` key and no
-        // bound transformer is needed.
+        // bound codec is needed.
         let ctx = ConnectorContext::new(None);
-        let source = MariadbSourceFactory
-            .build(&config.workflows[0].sources[0].config, &ctx)
+        let source = MariadbConnector
+            .source(&config.workflows[0].sources[0].config, &ctx)
             .unwrap_or_else(|e| panic!("{file}: the example source must be accepted: {e}"));
-        let sink = MariadbSinkFactory
-            .build(&config.workflows[0].sinks[0].config, &ctx)
+        let sink = MariadbConnector
+            .sink(&config.workflows[0].sinks[0].config, &ctx)
             .unwrap_or_else(|e| panic!("{file}: the example sink must be accepted: {e}"));
         assert_eq!(source.schema().fields().len(), source_fields, "{file}");
         assert_eq!(sink.schema().fields().len(), sink_fields, "{file}");

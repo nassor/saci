@@ -1,10 +1,10 @@
-//! The whole standalone service path over Kafka: config file, factories,
+//! The whole standalone service path over Kafka: config file, connector,
 //! source drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this
 //! is the end to end proof that a `connector-kafka` build moves rows from one
 //! topic through a pipeline and into another via the registered
-//! `KafkaSourceFactory`/`KafkaSinkFactory`, not just via the connector's
+//! `KafkaConnector`, not just via the connector's
 //! own direct API (already covered by the Kafka connector's own tests, `crates/saci/tests/kafka_roundtrip.rs`).
 //!
 //! Soft-skips without Docker.
@@ -32,12 +32,10 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio_util::sync::CancellationToken;
 
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::dlq::DlqRegistry;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
-use saci::transformer::ndjson::NdjsonTransformer;
+use saci::codec::ndjson::NdjsonCodec;
+use saci::service::DlqRegistry;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 
@@ -120,7 +118,10 @@ fn schema() -> Arc<Schema> {
 /// (already covered by `crates/saci/src/connector/kafka.rs`'s own tests).
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("kafka_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
@@ -141,12 +142,12 @@ mode "standalone"
 
 node id=1 name="saci-kafka-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "kafka-service-test" {{
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="KafkaSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="kafka" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             brokers "{brokers}"
             topic "{input_topic}"
@@ -154,22 +155,22 @@ workflow "kafka-service-test" {{
             stop_at_end #true
             poll_timeout_ms 20000
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="KafkaSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="kafka" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             brokers "{brokers}"
             topic "{output_topic}"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
@@ -177,7 +178,7 @@ workflow "kafka-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -205,10 +206,9 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
             flush_timeout_ms: 30_000,
             provision: TopicProvision::default(),
             properties: Default::default(),
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(
@@ -221,7 +221,7 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await
@@ -231,21 +231,21 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().display().to_string().replace('\\', "/");
-    let path = dir.path().join("service.kdl");
-    std::fs::write(
-        &path,
-        config_kdl(&brokers, &input_topic, &output_topic, &data_dir),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &brokers,
+        &input_topic,
+        &output_topic,
+        &data_dir,
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -260,7 +260,7 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
             brokers,
             topic: output_topic,
             group_id: "kafka-service-readback".to_string(),
-            batch_size: 1000,
+            batch_rows: 1000,
             poll_timeout_ms: 5_000,
             auto_offset_reset: "earliest".to_string(),
             commit_on_drain: true,
@@ -269,20 +269,19 @@ async fn a_kafka_source_and_sink_move_rows_through_the_standalone_runner() {
             compacted: false,
             provision: TopicProvision::default(),
             properties: Default::default(),
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("readback source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema);
-    let rows = saci::io::source::drain_into_dataset(&mut read_source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema).unwrap();
+    let rows = saci::io::read_all(&mut read_source, &mut dataset, COMPONENT)
         .await
         .expect("drain output topic");
     assert_eq!(rows, 3);
 
-    let out = dataset.batch_for(COMPONENT).expect("component present");
+    let out = dataset.batch_named(COMPONENT).expect("component present");
     let ids = out
         .column(0)
         .as_any()
@@ -360,7 +359,7 @@ mode "standalone"
 
 node id=1 name="saci-kafka-dlq" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "kafka-dlq-test" {{
     dlq "kafka" {{
@@ -372,9 +371,9 @@ workflow "kafka-dlq-test" {{
         }}
     }}
 
-    transformer "ndjson_fmt" format="ndjson"
+    codec "ndjson_fmt" format="ndjson"
 
-    source "orders_in" type="KafkaSource" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    source "orders_in" connector="kafka" component="{COMPONENT}" codec="ndjson_fmt" {{
         config {{
             brokers "{brokers}"
             topic "{input_topic}"
@@ -382,29 +381,29 @@ workflow "kafka-dlq-test" {{
             stop_at_end #true
             poll_timeout_ms 20000
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="ndjson_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="ndjson_fmt" {{
         retry {{ max_attempts 1 }}
         heal {{ enabled #false }}
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "name" type="utf8"
-            schema_fields "total" type="float64"
+            field "id" type="int64" nullable=#false
+            field "name" type="utf8"
+            field "total" type="float64"
         }}
     }}
 
     link from="orders_in" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -437,10 +436,9 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
             flush_timeout_ms: 30_000,
             provision: TopicProvision::default(),
             properties: Default::default(),
-            schema_fields: vec![],
         },
         schema.clone(),
-        Arc::new(NdjsonTransformer::default()),
+        Arc::new(NdjsonCodec::default()),
     )
     .expect("seed sink builds");
     let seed_batch = RecordBatch::try_new(
@@ -453,7 +451,7 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     )
     .expect("valid batch");
     {
-        use saci::io::sink::Sink;
+        use saci::io::Sink;
         seed_sink
             .write_batch(&seed_batch)
             .await
@@ -469,23 +467,20 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     let refused = dead_url();
     let mut shared: Option<Arc<DlqRegistry>> = None;
 
-    /// Load `kdl` and run it once, sharing `registry` when there is one.
+    /// Parse `kdl` and run it once, sharing `registry` when there is one.
     async fn run_once(
-        dir: &std::path::Path,
-        name: &str,
         kdl: String,
         registry: Option<Arc<DlqRegistry>>,
-    ) -> (saci::service::standalone::StandaloneStats, Arc<DlqRegistry>) {
-        let path = dir.join(name);
-        std::fs::write(&path, kdl).expect("write config");
-        let config = ServiceConfig::load(&path).expect("config loads");
+    ) -> (saci::service::WorkflowStats, Arc<DlqRegistry>) {
+        let config = ServiceConfig::from_kdl(&kdl).expect("config loads");
         let registry = registry.unwrap_or_else(|| Arc::new(DlqRegistry::from_config(&config)));
-        let built = register_builtin_factories(ServiceBuilder::new())
-            .with_dlq_registry(Arc::clone(&registry))
-            .build_all(&config)
+        let built = ServiceBuilder::new()
+            .dlq_registry(Arc::clone(&registry))
+            .build(&config)
             .expect("service builds")
             .remove(0);
-        let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+        let stats = built
+            .run(CancellationToken::new())
             .await
             .expect("one-shot run");
         (stats, registry)
@@ -493,8 +488,6 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
 
     // Run 1: the endpoint refuses the connection, so the batch is stored.
     let (stats, registry) = run_once(
-        dir.path(),
-        "run1.kdl",
         dlq_config_kdl(&brokers, &input_topic, &dlq_topic, &refused, &data_dir),
         shared.take(),
     )
@@ -515,8 +508,6 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     // input topic is drained under the same group, so nothing new arrives.
     let (accepted, collector) = collect(1);
     let (stats, registry) = run_once(
-        dir.path(),
-        "run2.kdl",
         dlq_config_kdl(&brokers, &input_topic, &dlq_topic, &accepted, &data_dir),
         Some(registry),
     )
@@ -538,8 +529,6 @@ async fn a_kafka_store_records_a_refused_batch_and_replays_it() {
     // Run 3: the store is empty, so the replay makes no connection attempt
     // and the refused address is never dialed again.
     let (stats, _) = run_once(
-        dir.path(),
-        "run3.kdl",
         dlq_config_kdl(&brokers, &input_topic, &dlq_topic, &refused, &data_dir),
         Some(registry),
     )

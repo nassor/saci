@@ -110,9 +110,7 @@ fn fixture_rows() -> Vec<Order> {
 /// and the fixture.
 fn order_dataset() -> Dataset {
     let mut dataset = Dataset::new();
-    dataset
-        .register_component::<Order>()
-        .expect("register Order");
+    dataset.register::<Order>().expect("register Order");
     dataset
 }
 

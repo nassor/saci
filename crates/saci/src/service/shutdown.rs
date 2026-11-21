@@ -11,7 +11,7 @@
 //! # #[cfg(feature = "service")]
 //! # {
 //! use std::time::Duration;
-//! use saci::service::shutdown::ShutdownCoordinator;
+//! use saci::service::ShutdownCoordinator;
 //!
 //! #[tokio::main]
 //! async fn main() {

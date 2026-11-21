@@ -31,17 +31,15 @@ use tokio_util::sync::CancellationToken;
 
 use saci::connector::channel::{ChannelSink, ChannelSource};
 use saci::error::SaciError;
-use saci::io::source::Source;
-use saci::runtime::PipelineRuntime;
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
-use saci::service::config::{
+use saci::io::Source;
+use saci::runtime::{PipelineRuntime, RuntimeOutput};
+use saci::service::FlowPlan;
+use saci::service::WorkflowStats;
+use saci::service::{BuiltWorkflow, BuiltWorkflowBuilder};
+use saci::service::{
     FlowControlConfig, HttpConfig, NodeConfig, ObservabilityConfig, RunMode, ServiceConfig,
     ServiceMode, StandaloneConfig, WorkflowSpec,
 };
-use saci::service::flow::FlowPlan;
-use saci::service::registry::Registry;
-use saci::service::standalone::{StandaloneStats, run_standalone};
-use saci::service::stream::run_stream;
 use saci::{Dataset, SaciResult};
 
 const COMP: &str = "values";
@@ -70,17 +68,13 @@ impl PipelineRuntime for FixedCostRuntime {
         "fixed-cost"
     }
 
-    async fn run_on(&self, _data: &mut Dataset) -> SaciResult<()> {
-        tokio::time::sleep(self.per_pass).await;
-        Ok(())
-    }
-
-    async fn run_on_with_state(
+    async fn run_batch(
         &self,
-        data: &mut Dataset,
+        _data: &mut Dataset,
         _prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
-        self.run_on(data).await.map(|()| None)
+    ) -> SaciResult<RuntimeOutput> {
+        tokio::time::sleep(self.per_pass).await;
+        Ok(RuntimeOutput::default())
     }
 
     fn declared_components(&self) -> Vec<&str> {
@@ -89,7 +83,9 @@ impl PipelineRuntime for FixedCostRuntime {
 
     fn template_dataset(&self) -> Dataset {
         let mut dataset = Dataset::new();
-        dataset.register_raw_component(COMP, Arc::clone(&self.schema));
+        dataset
+            .register_schema(COMP, Arc::clone(&self.schema))
+            .unwrap();
         dataset
     }
 }
@@ -127,74 +123,21 @@ impl Source for SlowPollSource {
 }
 
 /// Assemble `source` -> one [`FixedCostRuntime`] -> one [`ChannelSink`], the
-/// topological order every runner requires.
+/// topological order every runner requires. Returns the builder; [`finish`]
+/// picks the run mode and flow policy.
 fn service_with(
     source: Box<dyn Source>,
     schema: Arc<Schema>,
     per_pass: Duration,
-) -> (BuiltService, mpsc::Receiver<RecordBatch>) {
+) -> (BuiltWorkflowBuilder, mpsc::Receiver<RecordBatch>) {
     let (sink, rx) = ChannelSink::new(Arc::clone(&schema), 4_096);
-    let nodes = vec![
-        BuiltNode {
-            id: "in".to_string(),
-            name: None,
-            type_name: "ChannelSource".to_string(),
-            component: Some(COMP),
-            kind: BuiltNodeKind::Source(source),
-            downstream: vec![BuiltEdge {
-                node: 1,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "work".to_string(),
-            name: None,
-            type_name: "native".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(FixedCostRuntime {
-                    schema: Arc::clone(&schema),
-                    per_pass,
-                }),
-                kind: "native",
-            },
-            downstream: vec![BuiltEdge {
-                node: 2,
-                branch: None,
-            }],
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-        BuiltNode {
-            id: "out".to_string(),
-            name: None,
-            type_name: "ChannelSink".to_string(),
-            component: Some(COMP),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            #[cfg(feature = "windows")]
-            window: None,
-            heal_recovered: None,
-        },
-    ];
-    (
-        BuiltService {
-            workflow_id: "flow".to_string(),
-            workflow_name: None,
-            nodes,
-            registry: Arc::new(Registry::new()),
-            inspector: None,
-            dlq: None,
-        },
-        rx,
-    )
+    let builder = BuiltWorkflow::builder("flow")
+        .source("in", COMP, source)
+        .processor("work", FixedCostRuntime { schema, per_pass })
+        .sink("out", COMP, sink)
+        .link("in", "work")
+        .link("work", "out");
+    (builder, rx)
 }
 
 /// A channel source preloaded with `batches` batches of `rows_per_batch`
@@ -204,7 +147,7 @@ fn preloaded_source(
     batches: usize,
     rows_per_batch: usize,
 ) -> Box<dyn Source> {
-    let (tx, source) = ChannelSource::new(Arc::clone(schema), batches + 1);
+    let (source, tx) = ChannelSource::new(Arc::clone(schema), batches + 1);
     for b in 0..batches {
         let start = (b * rows_per_batch) as i64;
         let end = start + rows_per_batch as i64;
@@ -228,12 +171,13 @@ fn config_with(run_mode: RunMode, flow: FlowControlConfig) -> ServiceConfig {
             data_dir: std::path::PathBuf::from("/tmp/saci-flow-test"),
         },
         mode: ServiceMode::Standalone {
-            config: StandaloneConfig { run_mode },
+            config: StandaloneConfig { run: run_mode },
         },
         workflows: vec![WorkflowSpec {
             id: "flow".to_string(),
             name: None,
-            transformers: Vec::new(),
+            codecs: Vec::new(),
+            schemas: Vec::new(),
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
@@ -246,6 +190,19 @@ fn config_with(run_mode: RunMode, flow: FlowControlConfig) -> ServiceConfig {
         observability: ObservabilityConfig::default(),
         variables: std::collections::HashMap::new(),
     }
+}
+
+/// Build `builder` in `run_mode` under the flow policy `flow` resolves to.
+fn finish(
+    builder: BuiltWorkflowBuilder,
+    run_mode: RunMode,
+    flow: FlowControlConfig,
+) -> BuiltWorkflow {
+    builder
+        .run_mode(run_mode.clone())
+        .flow(FlowPlan::from_config(&config_with(run_mode, flow)))
+        .build()
+        .expect("the hand-built workflow is valid")
 }
 
 /// A fast-adapting policy: the shipped one-minute epoch and four-sample arms
@@ -285,23 +242,20 @@ fn values(chunks: &[RecordBatch]) -> Vec<i64> {
     out
 }
 
-/// Drive `service` under `config` until `total` rows have reached the sink (or
+/// Drive `service` until `total` rows have reached the sink (or
 /// a generous deadline passes), then cancel and join.
 ///
 /// A `PipelineRuntime` future is `?Send`, so the runner runs on a `LocalSet`
 /// exactly as the stream-mode tests drive it.
 async fn run_until_rows(
-    service: BuiltService,
-    config: ServiceConfig,
+    service: BuiltWorkflow,
     rx: &mut mpsc::Receiver<RecordBatch>,
     total: usize,
-) -> (StandaloneStats, Vec<RecordBatch>) {
+) -> (WorkflowStats, Vec<RecordBatch>) {
     let cancel = CancellationToken::new();
     let runner_cancel = cancel.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_standalone(service, &config, runner_cancel, None, None).await
-    });
+    let handle = local.spawn_local(async move { service.run(runner_cancel).await });
 
     let mut chunks = local
         .run_until(async {
@@ -344,9 +298,9 @@ async fn flow_control_delivers_every_row_exactly_once_in_order_while_adapting_up
     let schema = test_schema();
     let source = preloaded_source(&schema, BATCHES, ROWS_PER_BATCH);
     let (service, mut rx) = service_with(source, Arc::clone(&schema), Duration::from_millis(3));
-    let config = config_with(RunMode::Continuous, quick_flow(256));
+    let service = finish(service, RunMode::Continuous, quick_flow(256));
 
-    let (stats, chunks) = run_until_rows(service, config, &mut rx, TOTAL).await;
+    let (stats, chunks) = run_until_rows(service, &mut rx, TOTAL).await;
 
     let delivered = values(&chunks);
     assert_eq!(
@@ -376,7 +330,7 @@ async fn flow_control_delivers_every_row_exactly_once_in_order_while_adapting_up
     );
 }
 
-/// `interval_ms` is the idle poll cadence, not a throughput cap: an iteration
+/// `every_ms` is the idle poll cadence, not a throughput cap: an iteration
 /// that left work pending re-enters at once.
 #[tokio::test]
 async fn a_backlogged_interval_iteration_does_not_wait_out_the_poll_interval() {
@@ -388,14 +342,13 @@ async fn a_backlogged_interval_iteration_does_not_wait_out_the_poll_interval() {
     let source = preloaded_source(&schema, BATCHES, ROWS_PER_BATCH);
     let (service, mut rx) = service_with(source, Arc::clone(&schema), Duration::from_millis(1));
     // One minute between polls: only a drained iteration may pay it.
-    let config = config_with(
-        RunMode::Interval {
-            interval_ms: 60_000,
-        },
+    let service = finish(
+        service,
+        RunMode::Interval { every_ms: 60_000 },
         quick_flow(256),
     );
 
-    let (stats, chunks) = run_until_rows(service, config, &mut rx, TOTAL).await;
+    let (stats, chunks) = run_until_rows(service, &mut rx, TOTAL).await;
 
     assert_eq!(
         values(&chunks).len(),
@@ -425,17 +378,16 @@ async fn a_re_chunked_source_batch_is_one_arrival_carrying_all_its_rows() {
     // experiment happens to settle on. `ChannelSource` ignores the row hint,
     // so the runner receives all 2048 rows in one pull and re-chunks them
     // itself.
-    let config = config_with(
-        RunMode::Interval {
-            interval_ms: 60_000,
-        },
+    let service = finish(
+        service,
+        RunMode::Interval { every_ms: 60_000 },
         FlowControlConfig {
             rows: Some(PIN),
             ..FlowControlConfig::default()
         },
     );
 
-    let (stats, chunks) = run_until_rows(service, config, &mut rx, ROWS).await;
+    let (stats, chunks) = run_until_rows(service, &mut rx, ROWS).await;
 
     let delivered = values(&chunks);
     assert!(
@@ -457,7 +409,7 @@ async fn a_re_chunked_source_batch_is_one_arrival_carrying_all_its_rows() {
     let source_node = stats
         .nodes
         .iter()
-        .find(|node| node.id == "in")
+        .find(|node| &*node.id == "in")
         .expect("the source node appears in the per-node breakdown");
     assert_eq!(
         source_node.batches, 1,
@@ -478,17 +430,16 @@ async fn a_disabled_flow_control_run_drains_a_finite_source_in_one_iteration() {
     let schema = test_schema();
     let source = preloaded_source(&schema, BATCHES, ROWS_PER_BATCH);
     let (service, mut rx) = service_with(source, Arc::clone(&schema), Duration::from_millis(1));
-    let config = config_with(
-        RunMode::Interval {
-            interval_ms: 60_000,
-        },
+    let service = finish(
+        service,
+        RunMode::Interval { every_ms: 60_000 },
         FlowControlConfig {
             enabled: Some(false),
             ..FlowControlConfig::default()
         },
     );
 
-    let (stats, chunks) = run_until_rows(service, config, &mut rx, TOTAL).await;
+    let (stats, chunks) = run_until_rows(service, &mut rx, TOTAL).await;
 
     assert_eq!(values(&chunks).len(), TOTAL);
     assert_eq!(
@@ -525,13 +476,17 @@ async fn a_slow_source_poll_is_not_consumer_time() {
         next_value: 0,
     });
     let (service, rx) = service_with(source, Arc::clone(&schema), Duration::from_millis(3));
-    let config = config_with(RunMode::Stream, quick_flow(START_ROWS));
-    let flow = FlowPlan::from_config(&config);
+    let flow = FlowPlan::from_config(&config_with(RunMode::Stream, quick_flow(START_ROWS)));
     assert_eq!(
         flow.for_source("in").target_latency_ms,
         250,
         "stream mode carries the latency objective this test relies on"
     );
+    let service = service
+        .run_mode(RunMode::Stream)
+        .flow(flow)
+        .build()
+        .expect("the hand-built workflow is valid");
 
     // The sink is drained concurrently, as a live consumer would: a backlog
     // nobody consumes is real pressure and would back the target off, which is
@@ -545,7 +500,8 @@ async fn a_slow_source_poll_is_not_consumer_time() {
         chunks
     });
     let started = Instant::now();
-    let stats = run_stream(service, CancellationToken::new(), None, None, &flow)
+    let stats = service
+        .run(CancellationToken::new())
         .await
         .expect("the stream run reaches EOF");
     let elapsed = started.elapsed();
@@ -587,14 +543,14 @@ async fn a_disabled_stream_run_passes_each_arriving_batch_through_unsliced() {
     let schema = test_schema();
     let source = preloaded_source(&schema, BATCHES, ROWS_PER_BATCH);
     let (service, rx) = service_with(source, Arc::clone(&schema), Duration::from_millis(1));
-    let config = config_with(
+    let service = finish(
+        service,
         RunMode::Stream,
         FlowControlConfig {
             enabled: Some(false),
             ..FlowControlConfig::default()
         },
     );
-    let flow = FlowPlan::from_config(&config);
 
     let collector = tokio::spawn(async move {
         let mut rx = rx;
@@ -604,7 +560,8 @@ async fn a_disabled_stream_run_passes_each_arriving_batch_through_unsliced() {
         }
         chunks
     });
-    let stats = run_stream(service, CancellationToken::new(), None, None, &flow)
+    let stats = service
+        .run(CancellationToken::new())
         .await
         .expect("the stream run reaches EOF");
     let chunks = collector.await.expect("the collector task joins");
@@ -635,14 +592,14 @@ async fn a_re_chunked_stream_arrival_is_one_drained_batch() {
     let schema = test_schema();
     let source = preloaded_source(&schema, 1, ROWS);
     let (service, rx) = service_with(source, Arc::clone(&schema), Duration::from_millis(1));
-    let config = config_with(
+    let service = finish(
+        service,
         RunMode::Stream,
         FlowControlConfig {
             rows: Some(PIN),
             ..FlowControlConfig::default()
         },
     );
-    let flow = FlowPlan::from_config(&config);
 
     let collector = tokio::spawn(async move {
         let mut rx = rx;
@@ -652,7 +609,8 @@ async fn a_re_chunked_stream_arrival_is_one_drained_batch() {
         }
         chunks
     });
-    let stats = run_stream(service, CancellationToken::new(), None, None, &flow)
+    let stats = service
+        .run(CancellationToken::new())
         .await
         .expect("the stream run reaches EOF");
     let chunks = collector.await.expect("the collector task joins");
@@ -679,7 +637,7 @@ async fn a_re_chunked_stream_arrival_is_one_drained_batch() {
     let source_node = stats
         .nodes
         .iter()
-        .find(|node| node.id == "in")
+        .find(|node| &*node.id == "in")
         .expect("the source node appears in the per-node breakdown");
     assert_eq!(
         source_node.batches, 1,
@@ -706,7 +664,7 @@ async fn a_stream_tail_is_finished_before_a_sibling_source_is_polled() {
 
     let schema = test_schema();
     let big = preloaded_source(&schema, 1, BIG_ROWS);
-    let (tx, sibling) = ChannelSource::new(Arc::clone(&schema), 8);
+    let (sibling, tx) = ChannelSource::new(Arc::clone(&schema), 8);
     for batch in 0..SIBLING_BATCHES {
         let start = SIBLING_BASE + batch * SIBLING_ROWS;
         tx.try_send(batch_of(&schema, (start..start + SIBLING_ROWS).collect()))
@@ -715,86 +673,27 @@ async fn a_stream_tail_is_finished_before_a_sibling_source_is_polled() {
     drop(tx);
 
     let (sink, rx) = ChannelSink::new(Arc::clone(&schema), 4_096);
-    let service = BuiltService {
-        workflow_id: "flow".to_string(),
-        workflow_name: None,
-        nodes: vec![
-            BuiltNode {
-                id: "big".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some(COMP),
-                kind: BuiltNodeKind::Source(big),
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "sibling".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some(COMP),
-                kind: BuiltNodeKind::Source(Box::new(sibling)),
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "work".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(FixedCostRuntime {
-                        schema: Arc::clone(&schema),
-                        per_pass: Duration::from_millis(1),
-                    }),
-                    kind: "native",
+    let service = finish(
+        BuiltWorkflow::builder("flow")
+            .source("big", COMP, big)
+            .source("sibling", COMP, sibling)
+            .processor(
+                "work",
+                FixedCostRuntime {
+                    schema: Arc::clone(&schema),
+                    per_pass: Duration::from_millis(1),
                 },
-                downstream: vec![BuiltEdge {
-                    node: 3,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "out".to_string(),
-                name: None,
-                type_name: "ChannelSink".to_string(),
-                component: Some(COMP),
-                kind: BuiltNodeKind::Sink(Box::new(sink)),
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ],
-        registry: Arc::new(Registry::new()),
-        inspector: None,
-        dlq: None,
-    };
-    let config = config_with(
+            )
+            .sink("out", COMP, sink)
+            .link("big", "work")
+            .link("sibling", "work")
+            .link("work", "out"),
         RunMode::Stream,
         FlowControlConfig {
             rows: Some(PIN),
             ..FlowControlConfig::default()
         },
     );
-    let flow = FlowPlan::from_config(&config);
 
     let collector = tokio::spawn(async move {
         let mut rx = rx;
@@ -804,7 +703,8 @@ async fn a_stream_tail_is_finished_before_a_sibling_source_is_polled() {
         }
         chunks
     });
-    let stats = run_stream(service, CancellationToken::new(), None, None, &flow)
+    let stats = service
+        .run(CancellationToken::new())
         .await
         .expect("the stream run reaches EOF");
     let delivered = values(&collector.await.expect("the collector task joins"));
@@ -866,9 +766,9 @@ mod windowed {
     use super::*;
 
     use arrow_array::{Array, Float64Array, StringArray};
-    use saci::service::config::WindowConfig;
-    use saci::windows::WindowSpec;
-    use saci::windows::watermark::WatermarkState;
+    use saci::service::WindowConfig;
+    use saci::window::{WindowSpec, tumbling_id};
+    use saci::windows::WatermarkState;
 
     /// Inbound component: one sale at an instant in event time.
     const SALE: &str = "Sale";
@@ -944,25 +844,18 @@ mod windowed {
             "windowing"
         }
 
-        async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-            self.run_on_with_state(data, None).await.map(|_| ())
-        }
-
-        async fn run_on_with_state(
+        async fn run_batch(
             &self,
             data: &mut Dataset,
             prior: Option<&[u8]>,
-        ) -> SaciResult<Option<Vec<u8>>> {
+        ) -> SaciResult<RuntimeOutput> {
             let mut state: WindowState = match prior {
                 Some(blob) => serde_json::from_slice(blob)
                     .map_err(|e| SaciError::generic(format!("window state decode: {e}")))?,
                 None => WindowState::default(),
             };
 
-            let batch = data
-                .batch_for(SALE)
-                .cloned()
-                .ok_or_else(|| SaciError::generic("Sale component missing"))?;
+            let batch = data.batch_named(SALE)?.clone();
 
             let mut watermark = WatermarkState::new(WINDOW_LATENESS_MS);
             if let Some(previous) = state.watermark_ms {
@@ -996,7 +889,7 @@ mod windowed {
                 }
 
                 for i in accepted {
-                    let window_id = WindowSpec::assign_tumbling(ts.value(i), WINDOW_SIZE_MS, 0);
+                    let window_id = tumbling_id(ts.value(i), WINDOW_SIZE_MS, 0);
                     let symbol = sym.value(i);
                     match state
                         .open
@@ -1065,7 +958,10 @@ mod windowed {
 
             let blob = serde_json::to_vec(&state)
                 .map_err(|e| SaciError::generic(format!("window state encode: {e}")))?;
-            Ok(Some(blob))
+            Ok(RuntimeOutput {
+                state: Some(blob),
+                routes: None,
+            })
         }
 
         fn declared_components(&self) -> Vec<&str> {
@@ -1074,8 +970,12 @@ mod windowed {
 
         fn template_dataset(&self) -> Dataset {
             let mut dataset = Dataset::new();
-            dataset.register_raw_component(SALE, Arc::clone(&self.in_schema));
-            dataset.register_raw_component(TOTAL, Arc::clone(&self.out_schema));
+            dataset
+                .register_schema(SALE, Arc::clone(&self.in_schema))
+                .unwrap();
+            dataset
+                .register_schema(TOTAL, Arc::clone(&self.out_schema))
+                .unwrap();
             dataset
         }
     }
@@ -1131,7 +1031,7 @@ mod windowed {
         offset_ms: i64,
         amount_base: i64,
     ) -> Box<dyn Source> {
-        let (tx, source) = ChannelSource::new(Arc::clone(schema), batches + 1);
+        let (source, tx) = ChannelSource::new(Arc::clone(schema), batches + 1);
         for b in 0..batches {
             tx.try_send(sale_batch(
                 schema,
@@ -1208,7 +1108,7 @@ mod windowed {
         late_offset: usize,
         back_ms: i64,
     ) -> Box<dyn Source> {
-        let (tx, source) = ChannelSource::new(Arc::clone(schema), batches + 1);
+        let (source, tx) = ChannelSource::new(Arc::clone(schema), batches + 1);
         for b in 0..batches {
             tx.try_send(late_row_batch(
                 schema,
@@ -1226,82 +1126,41 @@ mod windowed {
 
     /// `sources -> one windowed processor -> one [`ChannelSink`]`, in
     /// topological order. The processor node declares the `window` block, which
-    /// is what makes it a windowed node to the runner.
+    /// is what makes it a windowed node to the runner. Returns the builder;
+    /// [`finish`] picks the run mode and flow policy.
     fn windowed_service(
         sources: Vec<Box<dyn Source>>,
-    ) -> (BuiltService, mpsc::Receiver<RecordBatch>) {
+    ) -> (BuiltWorkflowBuilder, mpsc::Receiver<RecordBatch>) {
         let in_schema = sale_schema();
         let out_schema = total_schema();
         let (sink, rx) = ChannelSink::new(Arc::clone(&out_schema), 4_096);
-        let processor = sources.len();
-        let mut nodes: Vec<BuiltNode> = sources
-            .into_iter()
-            .enumerate()
-            .map(|(i, source)| BuiltNode {
-                id: format!("in{i}"),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some(SALE),
-                kind: BuiltNodeKind::Source(source),
-                downstream: vec![BuiltEdge {
-                    node: processor,
-                    branch: None,
-                }],
-                artifact: None,
-                window: None,
-                heal_recovered: None,
-            })
-            .collect();
-        nodes.push(BuiltNode {
-            id: "win".to_string(),
-            name: None,
-            type_name: "native".to_string(),
-            component: None,
-            kind: BuiltNodeKind::Processor {
-                runtime: Box::new(WindowingRuntime {
+        let ids: Vec<String> = (0..sources.len()).map(|i| format!("in{i}")).collect();
+        let mut builder = BuiltWorkflow::builder("flow");
+        for (id, source) in ids.iter().zip(sources) {
+            builder = builder.source(id, SALE, source);
+        }
+        builder = builder
+            .processor(
+                "win",
+                WindowingRuntime {
                     in_schema,
                     out_schema: Arc::clone(&out_schema),
-                }),
-                kind: "native",
-            },
-            downstream: vec![BuiltEdge {
-                node: processor + 1,
-                branch: None,
-            }],
-            artifact: None,
-            window: Some(WindowConfig {
-                spec: WindowSpec::Tumbling {
-                    size_ms: WINDOW_SIZE_MS,
-                    offset_ms: 0,
                 },
-                time_field: "ts".to_string(),
-                key_fields: vec!["sym".to_string()],
-                allowed_lateness_ms: WINDOW_LATENESS_MS,
-            }),
-            heal_recovered: None,
-        });
-        nodes.push(BuiltNode {
-            id: "out".to_string(),
-            name: None,
-            type_name: "ChannelSink".to_string(),
-            component: Some(TOTAL),
-            kind: BuiltNodeKind::Sink(Box::new(sink)),
-            downstream: Vec::new(),
-            artifact: None,
-            window: None,
-            heal_recovered: None,
-        });
-        (
-            BuiltService {
-                workflow_id: "flow".to_string(),
-                workflow_name: None,
-                nodes,
-                registry: Arc::new(Registry::new()),
-                inspector: None,
-                dlq: None,
-            },
-            rx,
-        )
+            )
+            .window(
+                "win",
+                WindowConfig {
+                    spec: WindowSpec::tumbling(WINDOW_SIZE_MS),
+                    time_field: "ts".to_string(),
+                    key_fields: vec!["sym".to_string()],
+                    allowed_lateness_ms: WINDOW_LATENESS_MS,
+                },
+            )
+            .sink("out", TOTAL, sink);
+        for id in &ids {
+            builder = builder.link(id, "win");
+        }
+        (builder.link("win", "out"), rx)
     }
 
     /// One emitted window row, comparable and orderable. `sum` is compared as
@@ -1345,20 +1204,19 @@ mod windowed {
         rows
     }
 
-    /// Drive `service` under `config` until the sink has been quiet for a beat
+    /// Drive `service` until the sink has been quiet for a beat
     /// (or the runner exited on its own, which is what stream mode does at
     /// EOF), then cancel and join. Returns the emitted window rows, sorted.
     ///
     /// The last drain happens after the runner has returned, so a batch the
     /// cancellation path flushed still counts.
     async fn emitted_rows(
-        service: BuiltService,
-        config: ServiceConfig,
+        service: BuiltWorkflow,
         mut rx: mpsc::Receiver<RecordBatch>,
     ) -> Vec<WindowRow> {
         let cancel = CancellationToken::new();
         let collector_cancel = cancel.clone();
-        let runner = run_standalone(service, &config, cancel, None, None);
+        let runner = service.run(cancel);
         let collect = async move {
             let mut chunks: Vec<RecordBatch> = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -1468,11 +1326,10 @@ mod windowed {
 
         let (whole, rx) = windowed_service(pair());
         let unchunked_rows =
-            emitted_rows(whole, config_with(RunMode::Continuous, unchunked()), rx).await;
+            emitted_rows(finish(whole, RunMode::Continuous, unchunked()), rx).await;
 
         let (split, rx) = windowed_service(pair());
-        let chunked_rows =
-            emitted_rows(split, config_with(RunMode::Continuous, chunked()), rx).await;
+        let chunked_rows = emitted_rows(finish(split, RunMode::Continuous, chunked()), rx).await;
 
         assert_invariant(&unchunked_rows, &chunked_rows, "continuous fan-in");
     }
@@ -1520,11 +1377,10 @@ mod windowed {
 
         let (whole, rx) = windowed_service(arrival());
         let unchunked_rows =
-            emitted_rows(whole, config_with(RunMode::Continuous, unchunked()), rx).await;
+            emitted_rows(finish(whole, RunMode::Continuous, unchunked()), rx).await;
 
         let (split, rx) = windowed_service(arrival());
-        let chunked_rows =
-            emitted_rows(split, config_with(RunMode::Continuous, chunked()), rx).await;
+        let chunked_rows = emitted_rows(finish(split, RunMode::Continuous, chunked()), rx).await;
 
         assert_invariant(
             &unchunked_rows,
@@ -1550,11 +1406,10 @@ mod windowed {
         };
 
         let (whole, rx) = windowed_service(arrival());
-        let unchunked_rows =
-            emitted_rows(whole, config_with(RunMode::Stream, unchunked()), rx).await;
+        let unchunked_rows = emitted_rows(finish(whole, RunMode::Stream, unchunked()), rx).await;
 
         let (split, rx) = windowed_service(arrival());
-        let chunked_rows = emitted_rows(split, config_with(RunMode::Stream, chunked()), rx).await;
+        let chunked_rows = emitted_rows(finish(split, RunMode::Stream, chunked()), rx).await;
 
         assert_invariant(
             &unchunked_rows,
@@ -1600,11 +1455,10 @@ mod windowed {
 
         let (whole, rx) = windowed_service(source());
         let unchunked_rows =
-            emitted_rows(whole, config_with(RunMode::Continuous, unchunked()), rx).await;
+            emitted_rows(finish(whole, RunMode::Continuous, unchunked()), rx).await;
 
         let (split, rx) = windowed_service(source());
-        let chunked_rows =
-            emitted_rows(split, config_with(RunMode::Continuous, chunked()), rx).await;
+        let chunked_rows = emitted_rows(finish(split, RunMode::Continuous, chunked()), rx).await;
 
         assert_invariant(
             &unchunked_rows,
@@ -1665,11 +1519,10 @@ mod windowed {
 
         let (whole, rx) = windowed_service(source());
         let unchunked_rows =
-            emitted_rows(whole, config_with(RunMode::Continuous, unchunked()), rx).await;
+            emitted_rows(finish(whole, RunMode::Continuous, unchunked()), rx).await;
 
         let (split, rx) = windowed_service(source());
-        let chunked_rows =
-            emitted_rows(split, config_with(RunMode::Continuous, chunked()), rx).await;
+        let chunked_rows = emitted_rows(finish(split, RunMode::Continuous, chunked()), rx).await;
 
         assert_ne!(
             unchunked_rows, chunked_rows,

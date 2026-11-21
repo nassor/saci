@@ -3,7 +3,7 @@
 //! Soft-skips without Docker; see `common::try_start`. Each test uses its own
 //! subject and stream name so the whole suite can share the one server.
 
-#![cfg(all(feature = "connector-nats", feature = "transformer-arrow-ipc"))]
+#![cfg(all(feature = "connector-nats", feature = "codec-arrow-ipc"))]
 
 #[path = "common/nats.rs"]
 mod common;
@@ -16,28 +16,28 @@ use arrow_array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::StreamExt;
 
+use saci::codec::Codec;
+use saci::codec::arrow_ipc::ArrowIpcCodec;
+use saci::codec::ndjson::NdjsonCodec;
 use saci::connector::nats::{
     ConnectionConfig, CoreSinkMode, CoreSourceMode, DeliverPolicyConfig, JetstreamSinkMode,
     JetstreamSourceMode, NatsSink, NatsSinkConfig, NatsSource, NatsSourceConfig, SinkMode,
     SourceMode, StreamProvision,
 };
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::{Source, drain_into_dataset};
-use saci::transformer::Transformer;
-use saci::transformer::arrow_ipc::ArrowIpcTransformer;
-use saci::transformer::ndjson::NdjsonTransformer;
+use saci::io::Sink;
+use saci::io::{Source, read_all};
 
 const COMPONENT: &str = "TestRow";
 
 /// The default payload format. The factories resolve it from the registry; a
 /// direct construction like these tests' hands it over explicitly.
-fn ndjson() -> Arc<dyn Transformer> {
-    Arc::new(NdjsonTransformer::default())
+fn ndjson() -> Arc<dyn Codec> {
+    Arc::new(NdjsonCodec::default())
 }
 
-fn arrow_ipc() -> Arc<dyn Transformer> {
-    Arc::new(ArrowIpcTransformer::new())
+fn arrow_ipc() -> Arc<dyn Codec> {
+    Arc::new(ArrowIpcCodec::new())
 }
 
 fn schema() -> Arc<Schema> {
@@ -71,7 +71,7 @@ fn connection(url: &str) -> ConnectionConfig {
     }
 }
 
-/// A bounded core source, so `drain_into_dataset` terminates.
+/// A bounded core source, so `read_all` terminates.
 fn core_source_cfg(url: &str, subject: &str) -> NatsSourceConfig {
     NatsSourceConfig {
         connection: connection(url),
@@ -79,10 +79,9 @@ fn core_source_cfg(url: &str, subject: &str) -> NatsSourceConfig {
             subject: subject.to_string(),
             queue_group: None,
         }),
-        batch_size: 1000,
+        batch_rows: 1000,
         poll_timeout_ms: 2_000,
         stop_at_end: true,
-        schema_fields: vec![],
     }
 }
 
@@ -93,7 +92,6 @@ fn core_sink_cfg(url: &str, subject: &str) -> NatsSinkConfig {
             subject: subject.to_string(),
             ..CoreSinkMode::default()
         }),
-        schema_fields: vec![],
     }
 }
 
@@ -107,10 +105,9 @@ fn js_source_cfg(url: &str, stream: &str, durable: &str) -> NatsSourceConfig {
             fetch_expires_ms: 2_000,
             ..JetstreamSourceMode::default()
         })),
-        batch_size: 1000,
+        batch_rows: 1000,
         poll_timeout_ms: 2_000,
         stop_at_end: true,
-        schema_fields: vec![],
     }
 }
 
@@ -125,7 +122,6 @@ fn js_sink_cfg(url: &str, stream: &str, subject: &str) -> NatsSinkConfig {
             subject: subject.to_string(),
             ..JetstreamSinkMode::default()
         })),
-        schema_fields: vec![],
     }
 }
 
@@ -198,12 +194,12 @@ async fn core_ndjson_round_trips_through_a_subject() {
     sink.finish().await.expect("finish");
 
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    assert_sample_values(dataset.batch_for(COMPONENT).expect("component present"));
+    assert_sample_values(dataset.batch_named(COMPONENT).expect("component present"));
 }
 
 #[tokio::test]
@@ -474,12 +470,12 @@ async fn jetstream_round_trips_through_a_provisioned_stream() {
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(rows, 3);
-    assert_sample_values(dataset.batch_for(COMPONENT).expect("component present"));
+    assert_sample_values(dataset.batch_named(COMPONENT).expect("component present"));
 }
 
 #[tokio::test]
@@ -776,12 +772,12 @@ async fn a_cancelled_window_keeps_the_messages_already_pulled() {
         ndjson(),
     )
     .expect("sink builds");
-    // Live rather than `stop_at_end`, and `batch_size` 2: a window this source
+    // Live rather than `stop_at_end`, and `batch_rows` 2: a window this source
     // cannot close on one message is a window that can be cancelled while it
     // holds that message.
     let mut source = NatsSource::new(
         NatsSourceConfig {
-            batch_size: 2,
+            batch_rows: 2,
             poll_timeout_ms: 5_000,
             stop_at_end: false,
             ..js_source_cfg(&nats.url(), &stream, "saci-cancel")
@@ -798,12 +794,12 @@ async fn a_cancelled_window_keeps_the_messages_already_pulled() {
         tokio::time::timeout(Duration::from_millis(1_500), source.next_batch())
             .await
             .is_err(),
-        "a window one message short of batch_size must still be open, \
+        "a window one message short of batch_rows must still be open, \
          or this test cancels nothing"
     );
 
     // Two more, so the resumed window has to ask for the one place it has
-    // left rather than for another whole `batch_size`.
+    // left rather than for another whole `batch_rows`.
     sink.write_batch(&batch_of(schema.clone(), &[2, 3], &["b", "c"], &[2.0, 3.0]))
         .await
         .expect("write_batch");
@@ -817,7 +813,7 @@ async fn a_cancelled_window_keeps_the_messages_already_pulled() {
         vec![1, 2],
         "message 1 was pulled by the cancelled call, so it must be handed over \
          by this one rather than acknowledged unseen, and the resumed window \
-         must still hold at most batch_size rows"
+         must still hold at most batch_rows rows"
     );
 }
 
@@ -944,7 +940,7 @@ async fn estimated_rows_reports_what_jetstream_still_owes() {
 
     let mut source = NatsSource::new(
         NatsSourceConfig {
-            batch_size: 1,
+            batch_rows: 1,
             ..js_source_cfg(&nats.url(), &stream, "saci-pending")
         },
         schema,
@@ -1183,8 +1179,8 @@ async fn a_zero_batch_rows_hint_still_advances_the_source() {
     source.request_batch_rows(0);
 
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
-    let rows = drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema.clone()).unwrap();
+    let rows = read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
     assert_eq!(
@@ -1202,13 +1198,13 @@ async fn rows_in_stream(nats: &common::NatsContainer, stream: &str, durable: &st
     )
     .expect("source builds");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema());
-    drain_into_dataset(&mut source, &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema()).unwrap();
+    read_all(&mut source, &mut dataset, COMPONENT)
         .await
         .expect("drain");
-    match dataset.batch_for(COMPONENT) {
-        Some(batch) => ids_of(batch),
-        None => Vec::new(),
+    match dataset.batch_named(COMPONENT) {
+        Ok(batch) => ids_of(batch),
+        Err(_) => Vec::new(),
     }
 }
 

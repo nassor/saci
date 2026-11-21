@@ -9,7 +9,7 @@ publish = false
 description = "Minimal plugin SDK consumer used as the native plugin load fixture and Arrow IPC round-trip fixture."
 
 # This crate exists to verify:
-#   1. `export_plugin!` expands cleanly and the resulting cdylib exports
+#   1. `#[plugin]` expands cleanly and the resulting cdylib exports
 #      `saci_abi_version` and `saci_plugin_v1`.
 #   2. The host can dlopen it, read its descriptor, and round-trip a batch.
 #   3. Config reaches a plugin, and a checkpoint survives a batch boundary.

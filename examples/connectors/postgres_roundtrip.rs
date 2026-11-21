@@ -19,8 +19,8 @@ use saci::connector::postgresql::{
     PostgresSink, PostgresSinkConfig, PostgresSource, PostgresSourceConfig,
 };
 use saci::dataset::Dataset;
-use saci::io::sink::Sink;
-use saci::io::source::{Source, drain_into_dataset};
+use saci::io::Sink;
+use saci::io::{Source, read_all};
 
 /// Rows inserted into the input table.
 const ROWS: i64 = 250;
@@ -105,9 +105,9 @@ connection dsn={dsn} sslmode="disable"
 
 mode kind="polling" table="saci_roundtrip_in" cursor_column="id" offset_table="saci_roundtrip_offsets"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "label" type="utf8"
-schema_fields "amount" type="decimal128" precision=18 scale=4
+field "id" type="int64" nullable=#false
+field "label" type="utf8"
+field "amount" type="decimal128" precision=18 scale=4
 "#,
         dsn = quoted(dsn)
     ))?;
@@ -115,8 +115,8 @@ schema_fields "amount" type="decimal128" precision=18 scale=4
     let mut source = PostgresSource::new(source_cfg)?;
     let schema = source.schema();
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema.clone());
-    let read = drain_into_dataset(&mut source, &mut dataset, COMPONENT).await?;
+    dataset.register_schema(COMPONENT, schema.clone())?;
+    let read = read_all(&mut source, &mut dataset, COMPONENT).await?;
     println!("source drained {read} row(s) into the dataset");
 
     // --- write -----------------------------------------------------------
@@ -130,17 +130,15 @@ chunk_rows 100
 
 connection dsn={dsn} sslmode="disable"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "label" type="utf8"
-schema_fields "amount" type="decimal128" precision=18 scale=4
+field "id" type="int64" nullable=#false
+field "label" type="utf8"
+field "amount" type="decimal128" precision=18 scale=4
 "#,
         dsn = quoted(dsn)
     ))?;
 
     let mut sink = PostgresSink::new(sink_cfg)?;
-    let batch = dataset
-        .batch_for(COMPONENT)
-        .ok_or("the dataset lost its component")?;
+    let batch = dataset.batch_named(COMPONENT)?;
     sink.write_batch(batch).await?;
     sink.finish().await?;
     println!(

@@ -1,15 +1,16 @@
-//! The HTTP source, sink and push source factories.
+//! The `http` and `http-listen` connectors.
 //!
-//! All three resolve their byte format through the transformer the host bound
-//! to this connector instance via a declared `transformer` key. The schema is
+//! Both resolve their byte format through the codec the host bound
+//! to this connector instance via a declared `codec` key. The schema is
 //! where they differ: a document mode source hands the format whatever
-//! `schema_fields` says, including nothing, and lets the format decide, while a
-//! sink and a push source always need one, because it is the schema the rows
+//! `field` entries say, including nothing, and lets the format decide, while a
+//! sink and a listen source always need one, because it is the schema the rows
 //! are written with and the one the graph is validated against before a request
 //! can arrive.
 //!
-//! No factory makes a request, so `saci-service validate` touches no network. A
-//! push source does bind its sockets, the way the `tcp` and `udp` sources do,
+//! Neither connector makes a request at build time, so `saci-service validate`
+//! touches no network. A
+//! listen source does bind its sockets, the way the `tcp` and `udp` sources do,
 //! so a port already in use is a load-time error rather than a listener that
 //! never accepts.
 
@@ -17,31 +18,90 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::connector::{
-    ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_optional_schema_fields,
-    parse_schema_fields,
+    ConfigValue, Connector, ConnectorContext, Rebuild, Role, parse_fields, parse_optional_fields,
+    schema_of,
 };
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
-use crate::connector::http::sink::{ContentEncoding, HttpSinkOptions};
+use crate::connector::SchemaFrom;
+use crate::connector::http::sink::{ContentEncoding, HttpSinkConfig};
 use crate::connector::http::source::{
-    HttpClientOptions, HttpSourceOptions, Pagination, ReadMode, Window,
+    BatchWindow, HttpClientConfig, HttpSourceConfig, Pagination, ReadMode,
 };
 use crate::connector::http::tls::TlsFiles;
 use crate::connector::http::{
-    HttpPushOptions, HttpPushSource, HttpSink, HttpSource, HttpVersion, SchemaFrom, ServerTls,
+    HttpListenConfig, HttpListenSource, HttpSink, HttpSource, HttpVersion, ServerTls,
 };
 
 /// Whole-request budget when `timeout_ms` is absent.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// Method the sink sends when `method` is absent.
 const DEFAULT_METHOD: &str = "POST";
-/// Largest request body a push source accepts when `max_body_bytes` is absent.
-const DEFAULT_PUSH_BODY_BYTES: i64 = 67_108_864;
-/// Documents a push source queues when `buffer` is absent.
-const DEFAULT_PUSH_BUFFER: i64 = 64;
+/// Largest request body a listening source accepts when `max_body_bytes` is absent.
+const DEFAULT_LISTEN_BODY_BYTES: i64 = 67_108_864;
+/// Documents a listening source queues when `buffer` is absent.
+const DEFAULT_LISTEN_BUFFER: i64 = 64;
 
-/// The `url` a factory needs, or a configuration error naming the key.
+/// The keys an `HttpSource` config may carry.
+const SOURCE_KEYS: &[&str] = &[
+    "url",
+    "timeout_ms",
+    "headers",
+    "http_version",
+    "tls",
+    "max_body_bytes",
+    "schema_from",
+    "field",
+    "pagination",
+    "conditional",
+    "mode",
+];
+/// The keys an `HttpSink` config may carry.
+const SINK_KEYS: &[&str] = &[
+    "url",
+    "timeout_ms",
+    "headers",
+    "http_version",
+    "tls",
+    "method",
+    "content_encoding",
+    "field",
+];
+/// The keys an `HttpListenSource` config may carry.
+const LISTEN_KEYS: &[&str] = &[
+    "bind",
+    "path",
+    "methods",
+    "max_body_bytes",
+    "buffer",
+    "tls",
+    "quic_bind",
+    "auth",
+    "schema_from",
+    "field",
+];
+
+/// Refuse the first key of `config` that `allowed` does not list.
+///
+/// # Errors
+///
+/// Returns [`SaciError::Configuration`] naming the key: a misspelled optional
+/// key read as absent would run the connector with a default the config author
+/// never chose.
+fn reject_unknown_keys(config: &ConfigValue, allowed: &[&str]) -> Result<(), SaciError> {
+    let Some(table) = config.as_object() else {
+        return Ok(());
+    };
+    match table.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(key) => Err(SaciError::configuration(format!(
+            "http: unknown key '{key}'"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The `url` a connector needs, or a configuration error naming the key.
 fn required_url<'a>(config: &'a ConfigValue, what: &str) -> Result<&'a str, SaciError> {
     config.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
         SaciError::configuration(format!("{what} config requires a 'url' string field"))
@@ -103,7 +163,7 @@ fn headers(config: &ConfigValue, what: &str) -> Result<Vec<(String, String)>, Sa
 /// # Errors
 ///
 /// Returns [`SaciError::Configuration`] when `schema_from` is present and is
-/// neither `"config"` nor `"body"`: a misspelling silently read as the default
+/// neither `"config"` nor `"payload"`: a misspelling silently read as the default
 /// would take the body's own schema as a projection target instead of checking
 /// it, in production rather than at load.
 fn schema_from(config: &ConfigValue, what: &str) -> Result<SchemaFrom, SaciError> {
@@ -112,9 +172,9 @@ fn schema_from(config: &ConfigValue, what: &str) -> Result<SchemaFrom, SaciError
     };
     match value.as_str() {
         Some("config") => Ok(SchemaFrom::Config),
-        Some("body") => Ok(SchemaFrom::Body),
+        Some("payload") => Ok(SchemaFrom::Payload),
         _ => Err(SaciError::configuration(format!(
-            "{what} config.schema_from must be \"config\" or \"body\""
+            "{what} config.schema_from must be \"config\" or \"payload\""
         ))),
     }
 }
@@ -221,7 +281,7 @@ fn mode_positive(
 ///
 /// Returns [`SaciError::Configuration`] for a `mode` that is not a table, a
 /// `kind` outside the three names, a non-string `event`, a non-positive
-/// `batch_size`/`poll_timeout_ms`/`reconnect_ms`, or a `pagination` or
+/// `batch_rows`/`poll_timeout_ms`/`reconnect_ms`, or a `pagination` or
 /// `conditional` key next to a streaming kind.
 fn read_mode(config: &ConfigValue) -> Result<ReadMode, SaciError> {
     let pagination = match config.get("pagination").map(ConfigValue::as_str) {
@@ -250,6 +310,16 @@ fn read_mode(config: &ConfigValue) -> Result<ReadMode, SaciError> {
     let table = value.as_object().ok_or_else(|| {
         SaciError::configuration("HttpSource config.mode must be a table with a 'kind' key")
     })?;
+    for key in table.keys() {
+        if !matches!(
+            key.as_str(),
+            "kind" | "event" | "batch_rows" | "poll_timeout_ms" | "reconnect_ms"
+        ) {
+            return Err(SaciError::configuration(format!(
+                "HttpSource config.mode: unknown key '{key}'"
+            )));
+        }
+    }
 
     let kind = match table.get("kind") {
         None => "document",
@@ -282,8 +352,8 @@ fn read_mode(config: &ConfigValue) -> Result<ReadMode, SaciError> {
         ));
     }
 
-    let window = Window {
-        batch_size: mode_positive(table, "batch_size", 1_000)? as usize,
+    let window = BatchWindow {
+        batch_rows: mode_positive(table, "batch_rows", 1_000)? as usize,
         poll_timeout: Duration::from_millis(mode_positive(table, "poll_timeout_ms", 1_000)?),
         reconnect: Duration::from_millis(mode_positive(table, "reconnect_ms", 1_000)?),
     };
@@ -334,8 +404,8 @@ fn client_options(
     config: &ConfigValue,
     ctx: &ConnectorContext,
     what: &'static str,
-) -> Result<HttpClientOptions, SaciError> {
-    Ok(HttpClientOptions {
+) -> Result<HttpClientConfig, SaciError> {
+    Ok(HttpClientConfig {
         http_version: http_version(config, what)?,
         tls: tls_files(config, what)?,
         headers: headers(config, what)?,
@@ -344,7 +414,9 @@ fn client_options(
     })
 }
 
-/// Factory for [`HttpSource`].
+/// The `http` connector: [`HttpSource`] and [`HttpSink`].
+///
+/// # Source config
 ///
 /// Config fields:
 /// - `url` (string, required): the resource to read.
@@ -367,9 +439,9 @@ fn client_options(
 ///   one finite document per read; `kind="lines"` reads a body that never ends
 ///   as newline-delimited records; `kind="events"` reads one as
 ///   `text/event-stream`, optionally filtered to one `event` name. The
-///   streaming kinds take `batch_size`, `poll_timeout_ms` and `reconnect_ms`.
+///   streaming kinds take `batch_rows`, `poll_timeout_ms` and `reconnect_ms`.
 ///   A window's frames are lost together when the decoder refuses one of
-///   them, so a smaller `batch_size` bounds that loss.
+///   them, so a smaller `batch_rows` bounds that loss.
 /// - `pagination` (`"none"` or `"link"`, optional, default `"none"`): follow
 ///   `Link: <...>; rel="next"` across pages before reporting EOF.
 ///   `kind="document"` only.
@@ -377,55 +449,23 @@ fn client_options(
 ///   `if-none-match`/`if-modified-since` from the last response's validators,
 ///   so an unchanged resource answers `304` and decodes nothing.
 ///   `kind="document"` only.
-/// - `schema_fields` (list, optional): the declared Arrow schema. Required by
-///   `csv`, by any `schema_from "body"` source, and by both streaming kinds;
+/// - `field` (one or more, optional): the declared Arrow schema. Required by
+///   `csv`, by any `schema_from "payload"` source, and by both streaming kinds;
 ///   under the default `schema_from "config"` it is a projection target for
 ///   `parquet`, `avro` and `arrow-ipc`; `ndjson` infers it when absent.
-/// - `schema_from` (`"config"` or `"body"`, optional, default `"config"`):
+/// - `schema_from` (`"config"` or `"payload"`, optional, default `"config"`):
 ///   where the schema handed to the format comes from. `"config"` hands
-///   `schema_fields` to the format, which a self-describing one projects onto;
-///   `"body"` withholds it and checks the body's own schema against it field
+///   the `field` entries to the format, which a self-describing one projects onto;
+///   `"payload"` withholds it and checks the body's own schema against it field
 ///   for field. `kind="document"` only.
 ///
-/// The byte format is whatever transformer the `source` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
-pub struct HttpSourceFactory;
-
-impl SourceFactory for HttpSourceFactory {
-    fn type_name(&self) -> &'static str {
-        "HttpSource"
-    }
-
-    fn build(
-        &self,
-        config: &ConfigValue,
-        ctx: &ConnectorContext,
-    ) -> Result<Box<dyn Source>, SaciError> {
-        let url = required_url(config, "HttpSource")?;
-        let transformer = ctx.transformer("HttpSource")?;
-        Ok(Box::new(HttpSource::new(
-            url,
-            transformer,
-            HttpSourceOptions {
-                client: client_options(config, ctx, "HttpSource")?,
-                declared: parse_optional_schema_fields(config, "HttpSource")?,
-                schema_from: schema_from(config, "HttpSource")?,
-                mode: read_mode(config)?,
-                max_body_bytes: positive(config, "HttpSource", "max_body_bytes")?,
-            },
-        )?))
-    }
-
-    /// The source holds no state a rebuild would lose: a document mode
-    /// instance re-issues the same GET, and a streaming one redials.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
-    }
-}
-
-/// Factory for [`HttpSink`].
+/// Any key outside this list is refused as `http: unknown key '{key}'`.
 ///
-/// Config fields:
+/// The byte format is whatever codec the `source` node's `codec`
+/// key names; see [`ConnectorContext::codec`].
+///
+/// # Sink config
+///
 /// - `url` (string, required): the endpoint each batch is sent to. A `307` or
 ///   `308` is followed, up to ten hops; every other 3xx is reported as the
 ///   status it is, because following it would drop the body. Over HTTP/3 no
@@ -442,26 +482,54 @@ impl SourceFactory for HttpSourceFactory {
 ///   source.
 /// - `content_encoding` (`"gzip"`, `"br"` or `"zstd"`, optional): compress
 ///   each body and declare it. Refused next to a `content-encoding` header.
-/// - `schema_fields` (list, required): the Arrow schema each body is written
+/// - `field` (one or more, required): the Arrow schema each body is written
 ///   with.
 ///
-/// The byte format is whatever transformer the `sink` node's `transformer` key
-/// names; see [`ConnectorContext::transformer`].
-pub struct HttpSinkFactory;
+/// Any key outside this list is refused as `http: unknown key '{key}'`.
+///
+/// The byte format is whatever codec the `sink` node's `codec` key
+/// names; see [`ConnectorContext::codec`].
+pub struct HttpConnector;
 
-impl SinkFactory for HttpSinkFactory {
-    fn type_name(&self) -> &'static str {
-        "HttpSink"
+impl Connector for HttpConnector {
+    fn name(&self) -> &'static str {
+        super::NAME
     }
 
-    fn build(
+    fn source(
+        &self,
+        config: &ConfigValue,
+        ctx: &ConnectorContext,
+    ) -> Result<Box<dyn Source>, SaciError> {
+        reject_unknown_keys(config, SOURCE_KEYS)?;
+        let url = required_url(config, "HttpSource")?;
+        let codec = ctx.codec("HttpSource")?;
+        let client = client_options(config, ctx, "HttpSource")?;
+        let schema = parse_optional_fields(config, "HttpSource")?
+            .map(|fields| schema_of(&fields))
+            .transpose()?;
+        Ok(Box::new(HttpSource::new(
+            HttpSourceConfig {
+                url: url.to_string(),
+                client,
+                schema_from: schema_from(config, "HttpSource")?,
+                mode: read_mode(config)?,
+                max_body_bytes: positive(config, "HttpSource", "max_body_bytes")?,
+            },
+            schema,
+            codec,
+        )?))
+    }
+
+    fn sink(
         &self,
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
+        reject_unknown_keys(config, SINK_KEYS)?;
         let url = required_url(config, "HttpSink")?;
-        let transformer = ctx.transformer("HttpSink")?;
-        let schema = parse_schema_fields(config, "HttpSink")?;
+        let codec = ctx.codec("HttpSink")?;
+        let schema = schema_of(&parse_fields(config, "HttpSink")?)?;
         let method = match config.get("method") {
             None => DEFAULT_METHOD,
             Some(value) => value.as_str().ok_or_else(|| {
@@ -469,25 +537,43 @@ impl SinkFactory for HttpSinkFactory {
             })?,
         };
         Ok(Box::new(HttpSink::new(
-            url,
-            schema,
-            transformer,
-            HttpSinkOptions {
+            HttpSinkConfig {
+                url: url.to_string(),
                 client: client_options(config, ctx, "HttpSink")?,
                 method: method.to_string(),
                 content_encoding: content_encoding(config)?,
             },
+            schema,
+            codec,
         )?))
     }
 
-    /// One self-contained request per batch, nothing buffered between them,
-    /// so a fresh instance is indistinguishable from the one it replaced.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
+    /// A source holds no state a rebuild would lose: a document mode instance
+    /// re-issues the same GET, and a streaming one redials. A sink sends one
+    /// self-contained request per batch and buffers nothing between them, so a
+    /// fresh instance is indistinguishable from the one it replaced.
+    fn rebuild(&self, _role: Role, _config: &ConfigValue) -> Rebuild {
+        Rebuild::Yes
+    }
+
+    /// A streaming `mode` (`lines`, `events`) reads a body that never ends; a
+    /// document read ends.
+    fn live(&self, config: &ConfigValue) -> bool {
+        matches!(
+            config
+                .get("mode")
+                .and_then(|mode| mode.get("kind"))
+                .and_then(ConfigValue::as_str),
+            Some("lines" | "events")
+        )
     }
 }
 
-/// Factory for [`HttpPushSource`].
+/// The `http-listen` connector: a source that serves [`HttpListenSource`].
+///
+/// It has no sink role.
+///
+/// # Config
 ///
 /// Config fields:
 /// - `bind` (string, required): the `host:port` to listen on.
@@ -508,31 +594,38 @@ impl SinkFactory for HttpSinkFactory {
 ///   advertised to TCP clients as `alt-svc`. Needs `tls`.
 /// - `auth` (table, optional): `bearer "token"` demands that token from every
 ///   request.
-/// - `schema_fields` (list, required): the Arrow schema every document is read
+/// - `field` (one or more, required): the Arrow schema every document is read
 ///   against.
-/// - `schema_from` (`"config"` or `"body"`, optional, default `"config"`): as
-///   on [`HttpSourceFactory`].
+/// - `schema_from` (`"config"` or `"payload"`, optional, default `"config"`): as
+///   on [`HttpConnector`].
 ///
-/// The byte format is whatever transformer the `source` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
-pub struct HttpPushSourceFactory;
+/// Any key outside this list is refused as `http: unknown key '{key}'`.
+///
+/// The byte format is whatever codec the `source` node's `codec`
+/// key names; see [`ConnectorContext::codec`].
+pub struct HttpListenConnector;
 
-impl SourceFactory for HttpPushSourceFactory {
-    fn type_name(&self) -> &'static str {
-        "HttpPushSource"
+impl Connector for HttpListenConnector {
+    fn name(&self) -> &'static str {
+        super::LISTEN_NAME
     }
 
-    fn build(
+    fn roles(&self) -> &'static [Role] {
+        &[Role::Source]
+    }
+
+    fn source(
         &self,
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let what = "HttpPushSource";
+        reject_unknown_keys(config, LISTEN_KEYS)?;
+        let what = "HttpListenSource";
         let bind = config.get("bind").and_then(|v| v.as_str()).ok_or_else(|| {
             SaciError::configuration(format!("{what} config requires a 'bind' string"))
         })?;
-        let transformer = ctx.transformer(what)?;
-        let declared = parse_schema_fields(config, what)?;
+        let codec = ctx.codec(what)?;
+        let declared = schema_of(&parse_fields(config, what)?)?;
 
         let path = match config.get("path") {
             None => "/".to_string(),
@@ -545,8 +638,8 @@ impl SourceFactory for HttpPushSourceFactory {
                 }
             },
         };
-        let methods = push_methods(config, what)?;
-        let tls = push_tls(config, what)?;
+        let methods = listen_methods(config, what)?;
+        let tls = listen_tls(config, what)?;
         let quic_bind = match config.get("quic_bind") {
             None => None,
             Some(value) => Some(
@@ -560,37 +653,49 @@ impl SourceFactory for HttpPushSourceFactory {
                     .to_string(),
             ),
         };
-        let bearer = push_bearer(config, what)?;
+        let bearer = listen_bearer(config, what)?;
 
-        Ok(Box::new(HttpPushSource::new(
-            bind,
-            transformer,
-            HttpPushOptions {
-                declared,
+        Ok(Box::new(HttpListenSource::new(
+            HttpListenConfig {
+                bind: bind.to_string(),
                 schema_from: schema_from(config, what)?,
                 path,
                 methods,
                 max_body_bytes: positive(config, what, "max_body_bytes")?
-                    .unwrap_or(DEFAULT_PUSH_BODY_BYTES as usize),
+                    .unwrap_or(DEFAULT_LISTEN_BODY_BYTES as usize),
                 // Lenient, like `tcp`'s and `udp`'s: a zero is a request for
                 // no queueing at all, which the channel cannot express.
                 buffer: config
                     .get("buffer")
                     .and_then(ConfigValue::as_i64)
-                    .unwrap_or(DEFAULT_PUSH_BUFFER)
+                    .unwrap_or(DEFAULT_LISTEN_BUFFER)
                     .max(1) as usize,
                 tls,
                 quic_bind,
                 bearer,
                 identity: ctx.identity(what).ok().cloned(),
             },
+            declared,
+            codec,
         )?))
     }
 
     /// The listener is dropped before a rebuild, so the replacement binds the
-    /// same address, exactly as `TcpIngestSourceFactory`'s does.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Ok(())
+    /// same address, exactly as the `tcp` source's does.
+    fn rebuild(&self, _role: Role, _config: &ConfigValue) -> Rebuild {
+        Rebuild::Yes
+    }
+
+    /// A listener never reaches the end of its input.
+    fn live(&self, _config: &ConfigValue) -> bool {
+        true
+    }
+
+    fn detail_keys(&self, role: Role) -> &'static [&'static str] {
+        match role {
+            Role::Source => &["bind", "path", "quic_bind"],
+            Role::Sink => &[],
+        }
     }
 }
 
@@ -598,7 +703,7 @@ impl SourceFactory for HttpPushSourceFactory {
 ///
 /// `crate::config`'s rule 3 means two or more arguments arrive as an array and
 /// exactly one arrives as a scalar, so both shapes are read here.
-fn push_methods(config: &ConfigValue, what: &str) -> Result<Vec<String>, SaciError> {
+fn listen_methods(config: &ConfigValue, what: &str) -> Result<Vec<String>, SaciError> {
     let Some(value) = config.get("methods") else {
         return Ok(vec![DEFAULT_METHOD.to_string()]);
     };
@@ -619,12 +724,12 @@ fn push_methods(config: &ConfigValue, what: &str) -> Result<Vec<String>, SaciErr
         .collect()
 }
 
-/// The push source's `tls` block: the pair, or neither.
-fn push_tls(config: &ConfigValue, what: &str) -> Result<Option<ServerTls>, SaciError> {
+/// The listening source's `tls` block: the pair, or neither.
+fn listen_tls(config: &ConfigValue, what: &str) -> Result<Option<ServerTls>, SaciError> {
     let files = tls_files(config, what)?;
     if files.ca_file.is_some() {
         return Err(SaciError::configuration(format!(
-            "{what} config.tls['ca_file'] is not a listener key: a push source authenticates \
+            "{what} config.tls['ca_file'] is not a listener key: a listening source authenticates \
              callers with auth {{ bearer }}, not with a client certificate"
         )));
     }
@@ -641,7 +746,7 @@ fn push_tls(config: &ConfigValue, what: &str) -> Result<Option<ServerTls>, SaciE
 }
 
 /// The `auth` block's bearer token.
-fn push_bearer(config: &ConfigValue, what: &str) -> Result<Option<String>, SaciError> {
+fn listen_bearer(config: &ConfigValue, what: &str) -> Result<Option<String>, SaciError> {
     let Some(value) = config.get("auth") else {
         return Ok(None);
     };
@@ -661,27 +766,27 @@ fn push_bearer(config: &ConfigValue, what: &str) -> Result<Option<String>, SaciE
     }
 }
 
-#[cfg(all(test, feature = "transformer-csv", feature = "transformer-ndjson"))]
+#[cfg(all(test, feature = "codec-csv", feature = "codec-ndjson"))]
 mod tests {
     use std::sync::Arc;
 
+    use crate::codec::csv::CsvCodecFactory;
+    use crate::codec::ndjson::NdjsonCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::csv::CsvTransformerFactory;
-    use crate::transformer::ndjson::NdjsonTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
 
     use super::*;
 
-    fn csv_transformer() -> Arc<dyn Transformer> {
-        CsvTransformerFactory
+    fn csv_codec() -> Arc<dyn Codec> {
+        CsvCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("csv transformer builds")
+            .expect("csv codec builds")
     }
 
-    fn ndjson_transformer() -> Arc<dyn Transformer> {
-        NdjsonTransformerFactory
+    fn ndjson_codec() -> Arc<dyn Codec> {
+        NdjsonCodecFactory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("ndjson transformer builds")
+            .expect("ndjson codec builds")
     }
 
     fn empty_config() -> ConfigValue {
@@ -692,13 +797,13 @@ mod tests {
         from_kdl_str(raw).expect("parse test config")
     }
 
-    const SCHEMA: &str = "schema_fields \"id\" type=\"Int64\" nullable=#false\n";
+    const SCHEMA: &str = "field \"id\" type=\"int64\" nullable=#false\n";
 
     /// Build a source from `raw` and expect a configuration error whose
     /// message contains `fragment`.
     fn source_refuses(raw: &str, fragment: &str) {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
-        let Err(err) = HttpSourceFactory.build(&config(raw), &ctx) else {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
+        let Err(err) = HttpConnector.source(&config(raw), &ctx) else {
             panic!("expected a refusal naming {fragment}");
         };
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -707,18 +812,18 @@ mod tests {
 
     /// The same for a sink.
     fn sink_refuses(raw: &str, fragment: &str) {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
-        let Err(err) = HttpSinkFactory.build(&config(raw), &ctx) else {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
+        let Err(err) = HttpConnector.sink(&config(raw), &ctx) else {
             panic!("expected a refusal naming {fragment}");
         };
         assert_eq!(err.category(), "configuration", "got: {err}");
         assert!(err.message().contains(fragment), "got: {err}");
     }
 
-    /// The same for a push source, which needs a message-capable format.
-    fn push_refuses(raw: &str, fragment: &str) {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let Err(err) = HttpPushSourceFactory.build(&config(raw), &ctx) else {
+    /// The same for a listen source, which needs a message-capable format.
+    fn listen_refuses(raw: &str, fragment: &str) {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpListenConnector.source(&config(raw), &ctx) else {
             panic!("expected a refusal naming {fragment}");
         };
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -726,17 +831,42 @@ mod tests {
     }
 
     #[test]
-    fn the_type_names_match_the_config_type_key() {
-        assert_eq!(HttpSourceFactory.type_name(), "HttpSource");
-        assert_eq!(HttpSinkFactory.type_name(), "HttpSink");
-        assert_eq!(HttpPushSourceFactory.type_name(), "HttpPushSource");
+    fn the_names_match_the_config_connector_key() {
+        assert_eq!(HttpConnector.name(), "http");
+        assert_eq!(HttpListenConnector.name(), "http-listen");
+    }
+
+    #[test]
+    fn http_serves_both_roles_and_http_listen_only_the_source() {
+        assert_eq!(HttpConnector.roles(), &[Role::Source, Role::Sink]);
+        assert_eq!(HttpListenConnector.roles(), &[Role::Source]);
+    }
+
+    #[test]
+    fn only_a_streaming_http_mode_is_live() {
+        assert!(!HttpConnector.live(&empty_config()));
+        assert!(!HttpConnector.live(&config("mode kind=\"document\"")));
+        assert!(HttpConnector.live(&config("mode kind=\"lines\"")));
+        assert!(HttpConnector.live(&config("mode kind=\"events\"")));
+        assert!(HttpListenConnector.live(&empty_config()));
+    }
+
+    #[test]
+    fn the_dashboard_detail_keys_are_the_listener_ones() {
+        assert_eq!(
+            HttpListenConnector.detail_keys(Role::Source),
+            &["bind", "path", "quic_bind"]
+        );
+        assert!(HttpListenConnector.detail_keys(Role::Sink).is_empty());
+        assert!(HttpConnector.detail_keys(Role::Source).is_empty());
+        assert!(HttpConnector.detail_keys(Role::Sink).is_empty());
     }
 
     #[test]
     fn a_missing_url_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
 
-        let Err(err) = HttpSourceFactory.build(&empty_config(), &ctx) else {
+        let Err(err) = HttpConnector.source(&empty_config(), &ctx) else {
             panic!("url is required");
         };
         assert_eq!(err.category(), "configuration");
@@ -745,7 +875,7 @@ mod tests {
             "HttpSource config requires a 'url' string field"
         );
 
-        let Err(err) = HttpSinkFactory.build(&empty_config(), &ctx) else {
+        let Err(err) = HttpConnector.sink(&empty_config(), &ctx) else {
             panic!("url is required");
         };
         assert_eq!(err.category(), "configuration");
@@ -757,14 +887,69 @@ mod tests {
 
     #[test]
     fn a_missing_bind_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let Err(err) = HttpPushSourceFactory.build(&empty_config(), &ctx) else {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpListenConnector.source(&empty_config(), &ctx) else {
             panic!("a listener needs an address");
         };
         assert_eq!(
             err.message(),
-            "HttpPushSource config requires a 'bind' string"
+            "HttpListenSource config requires a 'bind' string"
         );
+    }
+
+    /// A misspelled optional key read as absent would run the node with a
+    /// default the config author never chose, and a key that belongs to
+    /// another role is as foreign here as a misspelling.
+    #[test]
+    fn an_unknown_source_key_is_refused_by_name() {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
+        for key in ["timeut_ms 500", "method \"POST\""] {
+            let Err(err) = HttpConnector.source(
+                &config(&format!(
+                    "url \"http://127.0.0.1:1/data.csv\"\n{key}\n{SCHEMA}"
+                )),
+                &ctx,
+            ) else {
+                panic!("'{key}' is not a source key");
+            };
+            assert_eq!(err.category(), "configuration");
+            let name = key.split(' ').next().expect("a key name");
+            assert_eq!(err.message(), format!("http: unknown key '{name}'"));
+        }
+    }
+
+    #[test]
+    fn an_unknown_sink_key_is_refused_by_name() {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
+        for key in ["methd \"PUT\"", "pagination \"link\""] {
+            let Err(err) = HttpConnector.sink(
+                &config(&format!(
+                    "url \"http://127.0.0.1:1/ingest\"\n{key}\n{SCHEMA}"
+                )),
+                &ctx,
+            ) else {
+                panic!("'{key}' is not a sink key");
+            };
+            assert_eq!(err.category(), "configuration");
+            let name = key.split(' ').next().expect("a key name");
+            assert_eq!(err.message(), format!("http: unknown key '{name}'"));
+        }
+    }
+
+    #[test]
+    fn an_unknown_listen_key_is_refused_by_name() {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        for key in ["pth \"/orders\"", "url \"http://127.0.0.1:1/\""] {
+            let Err(err) = HttpListenConnector.source(
+                &config(&format!("bind \"127.0.0.1:0\"\n{key}\n{SCHEMA}")),
+                &ctx,
+            ) else {
+                panic!("'{key}' is not a listen key");
+            };
+            assert_eq!(err.category(), "configuration");
+            let name = key.split(' ').next().expect("a key name");
+            assert_eq!(err.message(), format!("http: unknown key '{name}'"));
+        }
     }
 
     /// A misspelling read as the default would project the body onto the
@@ -773,66 +958,64 @@ mod tests {
     #[test]
     fn an_unknown_schema_from_is_a_configuration_error() {
         source_refuses(
-            &format!(
-                "url \"https://example.invalid/orders.csv\"\nschema_from \"object\"\n{SCHEMA}"
-            ),
-            "HttpSource config.schema_from must be \"config\" or \"body\"",
+            &format!("url \"https://example.invalid/orders.csv\"\nschema_from \"body\"\n{SCHEMA}"),
+            "HttpSource config.schema_from must be \"config\" or \"payload\"",
         );
     }
 
-    /// Only a parsed `"body"` reaches the constructor's demand for a declared
+    /// Only a parsed `"payload"` reaches the constructor's demand for a declared
     /// schema, so this is what distinguishes it from the default.
     #[test]
-    fn schema_from_body_reaches_the_source() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+    fn schema_from_payload_reaches_the_source() {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         source_refuses(
-            "url \"https://example.invalid/orders.csv\"\nschema_from \"body\"",
-            "schema_fields",
+            "url \"https://example.invalid/orders.csv\"\nschema_from \"payload\"",
+            "'field'",
         );
 
-        HttpSourceFactory
-            .build(&config("url \"https://example.invalid/orders.csv\""), &ctx)
+        HttpConnector
+            .source(&config("url \"https://example.invalid/orders.csv\""), &ctx)
             .expect("the default takes no schema at all");
     }
 
     #[test]
-    fn a_source_with_no_bound_transformer_is_a_configuration_error() {
+    fn a_source_with_no_bound_codec_is_a_configuration_error() {
         let ctx = ConnectorContext::new(None);
         let raw = format!("url \"http://127.0.0.1:1/data.csv\"\n{SCHEMA}");
 
-        let Err(err) = HttpSourceFactory.build(&config(&raw), &ctx) else {
-            panic!("a source that moves bytes needs a bound transformer");
+        let Err(err) = HttpConnector.source(&config(&raw), &ctx) else {
+            panic!("a source that moves bytes needs a bound codec");
         };
         assert_eq!(
             err.message(),
-            "HttpSource moves bytes and needs a 'transformer' key naming a declared transformer"
+            "HttpSource moves bytes and needs a 'codec' key naming a declared codec"
         );
     }
 
     #[test]
-    fn a_sink_with_no_bound_transformer_is_a_configuration_error() {
+    fn a_sink_with_no_bound_codec_is_a_configuration_error() {
         let ctx = ConnectorContext::new(None);
         let raw = format!("url \"http://127.0.0.1:1/ingest\"\n{SCHEMA}");
 
-        let Err(err) = HttpSinkFactory.build(&config(&raw), &ctx) else {
-            panic!("a sink that moves bytes needs a bound transformer");
+        let Err(err) = HttpConnector.sink(&config(&raw), &ctx) else {
+            panic!("a sink that moves bytes needs a bound codec");
         };
         assert_eq!(
             err.message(),
-            "HttpSink moves bytes and needs a 'transformer' key naming a declared transformer"
+            "HttpSink moves bytes and needs a 'codec' key naming a declared codec"
         );
     }
 
     #[test]
-    fn a_sink_without_schema_fields_is_a_configuration_error() {
-        sink_refuses("url \"http://127.0.0.1:1/ingest\"\n", "schema_fields");
+    fn a_sink_without_fields_is_a_configuration_error() {
+        sink_refuses("url \"http://127.0.0.1:1/ingest\"\n", "'field'");
     }
 
     /// The whole point of building without a request: an endpoint that does not
     /// exist still builds, so `validate` never depends on the network.
     #[test]
     fn both_halves_build_against_an_endpoint_that_is_down() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         let raw = format!(
             r#"
 url "http://127.0.0.1:1/data.csv"
@@ -843,23 +1026,23 @@ headers {{
 {SCHEMA}"#
         );
 
-        let source = HttpSourceFactory
-            .build(&config(&raw), &ctx)
+        let source = HttpConnector
+            .source(&config(&raw), &ctx)
             .expect("source builds");
         assert_eq!(source.schema().fields().len(), 1);
         assert_eq!(source.schema().field(0).name(), "id");
 
-        let sink = HttpSinkFactory
-            .build(&config(&raw), &ctx)
+        let sink = HttpConnector
+            .sink(&config(&raw), &ctx)
             .expect("sink builds");
         assert_eq!(sink.schema().fields().len(), 1);
     }
 
     #[test]
-    fn a_source_without_schema_fields_reports_an_empty_schema() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
-        let source = HttpSourceFactory
-            .build(&config("url \"http://127.0.0.1:1/data.csv\"\n"), &ctx)
+    fn a_source_without_fields_reports_an_empty_schema() {
+        let ctx = ConnectorContext::new(Some(csv_codec()));
+        let source = HttpConnector
+            .source(&config("url \"http://127.0.0.1:1/data.csv\"\n"), &ctx)
             .expect("the format decides whether it needs a declared schema");
         assert_eq!(source.schema().fields().len(), 0);
         assert_eq!(source.estimated_rows(), None);
@@ -889,7 +1072,7 @@ headers {{
     }
 
     #[test]
-    fn an_invalid_method_is_rejected_by_the_sink_factory() {
+    fn an_invalid_method_is_rejected_by_the_sink() {
         sink_refuses(
             &format!("url \"http://127.0.0.1:1/ingest\"\nmethod \"PO ST\"\n{SCHEMA}"),
             "'PO ST'",
@@ -932,10 +1115,10 @@ headers {{
 
     #[test]
     fn every_http_version_spelling_is_accepted_and_nothing_else_is() {
-        let ctx = ConnectorContext::new(Some(csv_transformer()));
+        let ctx = ConnectorContext::new(Some(csv_codec()));
         for version in ["auto", "1.1", "2"] {
-            HttpSourceFactory
-                .build(
+            HttpConnector
+                .source(
                     &config(&format!(
                         "url \"http://127.0.0.1:1/data.csv\"\nhttp_version \"{version}\"\n{SCHEMA}"
                     )),
@@ -943,8 +1126,8 @@ headers {{
                 )
                 .unwrap_or_else(|e| panic!("'{version}' is a version, got: {e}"));
         }
-        HttpSourceFactory
-            .build(
+        HttpConnector
+            .source(
                 &config(&format!(
                     "url \"https://127.0.0.1:1/data.csv\"\nhttp_version \"3\"\n{SCHEMA}"
                 )),
@@ -1024,10 +1207,10 @@ headers {{
 
     #[test]
     fn a_non_positive_window_key_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let Err(err) = HttpSourceFactory.build(
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpConnector.source(
             &config(&format!(
-                "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\" batch_size=0\n{SCHEMA}"
+                "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\" batch_rows=0\n{SCHEMA}"
             )),
             &ctx,
         ) else {
@@ -1035,15 +1218,29 @@ headers {{
         };
         assert!(
             err.message()
-                .contains("config.mode['batch_size'] must be an integer of at least 1"),
+                .contains("config.mode['batch_rows'] must be an integer of at least 1"),
             "got: {err}"
         );
     }
 
     #[test]
+    fn the_old_batch_size_spelling_is_refused_by_name() {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpConnector.source(
+            &config(&format!(
+                "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\" batch_size=5\n{SCHEMA}"
+            )),
+            &ctx,
+        ) else {
+            panic!("`batch_size` was replaced by `batch_rows`");
+        };
+        assert!(err.message().contains("'batch_size'"), "got: {err}");
+    }
+
+    #[test]
     fn a_non_string_mode_event_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let Err(err) = HttpSourceFactory.build(
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpConnector.source(
             &config(&format!(
                 "url \"http://127.0.0.1:1/live\"\nmode kind=\"events\" event=7\n{SCHEMA}"
             )),
@@ -1059,8 +1256,8 @@ headers {{
 
     #[test]
     fn an_event_filter_on_the_lines_kind_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let Err(err) = HttpSourceFactory.build(
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpConnector.source(
             &config(&format!(
                 "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\" event=\"x\"\n{SCHEMA}"
             )),
@@ -1089,7 +1286,7 @@ headers {{
 
     #[test]
     fn pagination_and_conditional_are_refused_next_to_a_streaming_kind() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
         for (key, fragment) in [
             (
                 "pagination \"link\"",
@@ -1100,7 +1297,7 @@ headers {{
                 "HttpSource: conditional applies to mode kind=\"document\" only",
             ),
         ] {
-            let Err(err) = HttpSourceFactory.build(
+            let Err(err) = HttpConnector.source(
                 &config(&format!(
                     "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\"\n{key}\n{SCHEMA}"
                 )),
@@ -1113,26 +1310,26 @@ headers {{
     }
 
     #[test]
-    fn a_streaming_kind_without_schema_fields_is_a_configuration_error() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let Err(err) = HttpSourceFactory.build(
+    fn a_streaming_kind_without_fields_is_a_configuration_error() {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpConnector.source(
             &config("url \"http://127.0.0.1:1/live\"\nmode kind=\"events\""),
             &ctx,
         ) else {
             panic!("a message decoder is built before the first byte arrives");
         };
         assert!(
-            err.message().contains("needs a 'schema_fields' list"),
+            err.message().contains("needs a 'field' entry"),
             "got: {err}"
         );
     }
 
     #[test]
-    fn schema_from_body_is_refused_next_to_a_streaming_kind() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let Err(err) = HttpSourceFactory.build(
+    fn schema_from_payload_is_refused_next_to_a_streaming_kind() {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let Err(err) = HttpConnector.source(
             &config(&format!(
-                "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\"\nschema_from \"body\"\n{SCHEMA}"
+                "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\"\nschema_from \"payload\"\n{SCHEMA}"
             )),
             &ctx,
         ) else {
@@ -1140,7 +1337,7 @@ headers {{
         };
         assert_eq!(
             err.message(),
-            "HttpSource: schema_from \"body\" applies to mode kind=\"document\" only"
+            "HttpSource: schema_from \"payload\" applies to mode kind=\"document\" only"
         );
     }
 
@@ -1151,14 +1348,14 @@ headers {{
     fn a_format_with_no_message_decoder_is_refused_for_a_streaming_kind() {
         struct StreamOnly;
 
-        impl Transformer for StreamOnly {
+        impl Codec for StreamOnly {
             fn format(&self) -> &'static str {
                 "stream-only"
             }
         }
 
         let ctx = ConnectorContext::new(Some(Arc::new(StreamOnly)));
-        let Err(err) = HttpSourceFactory.build(
+        let Err(err) = HttpConnector.source(
             &config(&format!(
                 "url \"http://127.0.0.1:1/live\"\nmode kind=\"lines\"\n{SCHEMA}"
             )),
@@ -1199,13 +1396,13 @@ headers {{
         );
     }
 
-    // ── the push source's keys ──────────────────────────────────────────────
+    // ── the listen source's keys ────────────────────────────────────────────
 
     #[test]
-    fn a_push_source_binds_and_reports_the_declared_schema() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        let source = HttpPushSourceFactory
-            .build(
+    fn a_listen_source_binds_and_reports_the_declared_schema() {
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        let source = HttpListenConnector
+            .source(
                 &config(&format!(
                     "bind \"127.0.0.1:0\"\npath \"/orders\"\nmethods \"POST\" \"PUT\"\n{SCHEMA}"
                 )),
@@ -1217,7 +1414,7 @@ headers {{
 
     #[test]
     fn a_path_without_a_leading_slash_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\npath \"orders\"\n{SCHEMA}"),
             "config.path must be a string starting with '/'",
         );
@@ -1225,7 +1422,7 @@ headers {{
 
     #[test]
     fn a_non_string_method_in_the_list_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nmethods \"POST\" 7\n{SCHEMA}"),
             "config.methods must be one HTTP method name or a list of them",
         );
@@ -1233,7 +1430,7 @@ headers {{
 
     #[test]
     fn a_non_string_quic_bind_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nquic_bind 9700\n{SCHEMA}"),
             "config.quic_bind must be a string",
         );
@@ -1241,7 +1438,7 @@ headers {{
 
     #[test]
     fn quic_bind_without_tls_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nquic_bind \"127.0.0.1:0\"\n{SCHEMA}"),
             "quic_bind needs a 'tls' block",
         );
@@ -1249,7 +1446,7 @@ headers {{
 
     #[test]
     fn half_a_listener_tls_pair_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\ntls {{\n cert_file \"c.pem\"\n}}\n{SCHEMA}"),
             "config.tls needs both 'cert_file' and 'key_file'",
         );
@@ -1259,7 +1456,7 @@ headers {{
     /// would look like client authentication that is not happening.
     #[test]
     fn a_ca_file_on_the_listener_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\ntls {{\n ca_file \"ca.pem\"\n}}\n{SCHEMA}"),
             "is not a listener key",
         );
@@ -1267,7 +1464,7 @@ headers {{
 
     #[test]
     fn a_scalar_auth_block_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nauth \"token\"\n{SCHEMA}"),
             "config.auth must be a table",
         );
@@ -1277,15 +1474,15 @@ headers {{
     /// for, names that key rather than the shape it already has.
     #[test]
     fn an_auth_block_without_a_bearer_key_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nauth {{\n token \"x\"\n}}\n{SCHEMA}"),
-            "HttpPushSource config.auth needs a 'bearer' string",
+            "HttpListenSource config.auth needs a 'bearer' string",
         );
     }
 
     #[test]
     fn an_empty_bearer_token_is_a_configuration_error() {
-        push_refuses(
+        listen_refuses(
             &format!("bind \"127.0.0.1:0\"\nauth {{\n bearer \"\"\n}}\n{SCHEMA}"),
             "config.auth.bearer must be a non-empty string",
         );
@@ -1295,9 +1492,9 @@ headers {{
     /// refused, matching `tcp` and `udp`.
     #[test]
     fn a_zero_buffer_is_clamped_rather_than_refused() {
-        let ctx = ConnectorContext::new(Some(ndjson_transformer()));
-        HttpPushSourceFactory
-            .build(
+        let ctx = ConnectorContext::new(Some(ndjson_codec()));
+        HttpListenConnector
+            .source(
                 &config(&format!("bind \"127.0.0.1:0\"\nbuffer 0\n{SCHEMA}")),
                 &ctx,
             )
@@ -1305,9 +1502,18 @@ headers {{
     }
 
     #[test]
-    fn a_push_source_is_rebuildable() {
-        HttpPushSourceFactory
-            .rebuildable(&empty_config())
-            .expect("the listener is dropped before a rebuild");
+    fn both_connectors_are_rebuildable() {
+        assert_eq!(
+            HttpConnector.rebuild(Role::Source, &empty_config()),
+            Rebuild::Yes
+        );
+        assert_eq!(
+            HttpConnector.rebuild(Role::Sink, &empty_config()),
+            Rebuild::Yes
+        );
+        assert_eq!(
+            HttpListenConnector.rebuild(Role::Source, &empty_config()),
+            Rebuild::Yes
+        );
     }
 }

@@ -1,13 +1,13 @@
 //! One connection per connector instance, plus the SQL-identifier quoting every
 //! statement in this crate goes through.
 //!
-//! There is no pool. Both [`Source`](crate::io::source::Source) and
-//! [`Sink`](crate::io::sink::Sink) serialise all access through `&mut self`,
+//! There is no pool. Both [`Source`](crate::io::Source) and
+//! [`Sink`](crate::io::Sink) serialise all access through `&mut self`,
 //! so a second connection would sit idle. The one exception is the binlog
 //! stream, which consumes its connection and so opens a second one beside the
 //! catalog and offset connection.
 //!
-//! [`Connector`] is built synchronously, because `SourceFactory::build` is
+//! [`Connector`] is built synchronously, because the `Connector` trait's `source` is
 //! synchronous: it parses the DSN, reads the password file and the CA bundle,
 //! and builds the TLS options, but opens no socket. [`Connector::connect`] is
 //! the async half, called on the first `next_batch` or `write_batch` and again

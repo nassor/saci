@@ -33,7 +33,7 @@ services:
       - "5432:5432"
     volumes:
       # PostgreSQL runs every .sql in this directory once, on first
-      # initialisation of an empty data directory. `PostgresSink` never issues
+      # initialisation of an empty data directory. The `postgresql` sink never issues
       # CREATE TABLE, so the table has to exist before the sink's first write.
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:

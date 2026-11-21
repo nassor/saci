@@ -1,7 +1,7 @@
 //! The `turso::Value` ↔ Arrow coercion.
 //!
 //! `turso::Value` is a five-way union of `Null`, `Integer(i64)`, `Real(f64)`,
-//! `Text(String)` and `Blob(Vec<u8>)`, so a column's declared [`TursoFieldType`]
+//! `Text(String)` and `Blob(Vec<u8>)`, so a column's declared [`FieldType`]
 //! decides how each value is read, and a value that does not fit is a loud error
 //! naming the column, the row inside the batch, and the value's own kind.
 //! Nothing is widened silently on read.
@@ -16,7 +16,7 @@ use arrow_array::{
     StringArray,
 };
 
-use crate::connector::turso::config::{FieldSpec, TursoFieldType};
+use crate::connector::schema::{FieldSpec, FieldType};
 
 /// One decoded scalar, tagged by the declared type it satisfies.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,23 +66,23 @@ pub(crate) fn decode_value(
         )
     };
     match spec.ty {
-        TursoFieldType::Int64 => match value {
+        FieldType::Int64 => match value {
             Value::Null => Ok(None),
             Value::Integer(i) => Ok(Some(Scalar::Int64(i))),
             other => Err(mismatch(variant_name(&other))),
         },
-        TursoFieldType::Float64 => match value {
+        FieldType::Float64 => match value {
             Value::Null => Ok(None),
             Value::Real(f) => Ok(Some(Scalar::Float64(f))),
             Value::Integer(i) => Ok(Some(Scalar::Float64(i as f64))),
             other => Err(mismatch(variant_name(&other))),
         },
-        TursoFieldType::Utf8 => match value {
+        FieldType::Utf8 => match value {
             Value::Null => Ok(None),
             Value::Text(s) => Ok(Some(Scalar::Utf8(s))),
             other => Err(mismatch(variant_name(&other))),
         },
-        TursoFieldType::Bool => match value {
+        FieldType::Boolean => match value {
             Value::Null => Ok(None),
             Value::Integer(0) => Ok(Some(Scalar::Bool(false))),
             Value::Integer(1) => Ok(Some(Scalar::Bool(true))),
@@ -92,12 +92,12 @@ pub(crate) fn decode_value(
             )),
             other => Err(mismatch(variant_name(&other))),
         },
-        TursoFieldType::Binary => match value {
+        FieldType::Binary => match value {
             Value::Null => Ok(None),
             Value::Blob(b) => Ok(Some(Scalar::Binary(b))),
             other => Err(mismatch(variant_name(&other))),
         },
-        TursoFieldType::Decimal128 => {
+        FieldType::Decimal128 => {
             let (_, scale) = spec.decimal_params().map_err(|e| e.message())?;
             match value {
                 Value::Null => Ok(None),
@@ -108,7 +108,15 @@ pub(crate) fn decode_value(
                 other => Err(mismatch(variant_name(&other))),
             }
         }
+        other => Err(unmapped(spec, other)),
     }
+}
+
+/// The error for a declared type this connector does not map.
+///
+/// Field validation refuses such a type first, so this is a backstop.
+fn unmapped(spec: &FieldSpec, ty: FieldType) -> String {
+    format!("column '{}': type '{ty}' is not mapped by turso", spec.name)
 }
 
 /// Encode one row of an Arrow array as an engine value.
@@ -126,42 +134,42 @@ pub(crate) fn encode_value(
     }
     let wrong_type = |ty: &str| format!("column '{}': array is not {ty}", spec.name);
     Ok(match spec.ty {
-        TursoFieldType::Int64 => {
+        FieldType::Int64 => {
             let array = array
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| wrong_type("Int64"))?;
             turso::Value::Integer(array.value(row))
         }
-        TursoFieldType::Float64 => {
+        FieldType::Float64 => {
             let array = array
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| wrong_type("Float64"))?;
             turso::Value::Real(array.value(row))
         }
-        TursoFieldType::Utf8 => {
+        FieldType::Utf8 => {
             let array = array
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| wrong_type("Utf8"))?;
             turso::Value::Text(array.value(row).to_string())
         }
-        TursoFieldType::Bool => {
+        FieldType::Boolean => {
             let array = array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| wrong_type("Boolean"))?;
             turso::Value::Integer(i64::from(array.value(row)))
         }
-        TursoFieldType::Binary => {
+        FieldType::Binary => {
             let array = array
                 .as_any()
                 .downcast_ref::<BinaryArray>()
                 .ok_or_else(|| wrong_type("Binary"))?;
             turso::Value::Blob(array.value(row).to_vec())
         }
-        TursoFieldType::Decimal128 => {
+        FieldType::Decimal128 => {
             let array = array
                 .as_any()
                 .downcast_ref::<Decimal128Array>()
@@ -169,6 +177,7 @@ pub(crate) fn encode_value(
             let (_, scale) = spec.decimal_params().map_err(|e| e.message())?;
             turso::Value::Text(render_decimal(array.value(row), scale))
         }
+        other => return Err(unmapped(spec, other)),
     })
 }
 
@@ -271,12 +280,12 @@ impl ColBuilder {
     /// `decimal128` field's precision/scale are missing or illegal.
     pub(crate) fn new(spec: &FieldSpec) -> Result<Self, crate::error::SaciError> {
         Ok(match spec.ty {
-            TursoFieldType::Bool => ColBuilder::Bool(BooleanBuilder::new()),
-            TursoFieldType::Int64 => ColBuilder::Int64(Int64Builder::new()),
-            TursoFieldType::Float64 => ColBuilder::Float64(Float64Builder::new()),
-            TursoFieldType::Utf8 => ColBuilder::Utf8(StringBuilder::new()),
-            TursoFieldType::Binary => ColBuilder::Binary(BinaryBuilder::new()),
-            TursoFieldType::Decimal128 => {
+            FieldType::Boolean => ColBuilder::Bool(BooleanBuilder::new()),
+            FieldType::Int64 => ColBuilder::Int64(Int64Builder::new()),
+            FieldType::Float64 => ColBuilder::Float64(Float64Builder::new()),
+            FieldType::Utf8 => ColBuilder::Utf8(StringBuilder::new()),
+            FieldType::Binary => ColBuilder::Binary(BinaryBuilder::new()),
+            FieldType::Decimal128 => {
                 let (precision, scale) = spec.decimal_params()?;
                 ColBuilder::Decimal128(
                     Decimal128Builder::new()
@@ -288,6 +297,12 @@ impl ColBuilder {
                             ))
                         })?,
                 )
+            }
+            other => {
+                return Err(crate::error::SaciError::configuration(format!(
+                    "turso: field '{}' has type '{other}', which this connector does not map",
+                    spec.name
+                )));
             }
         })
     }

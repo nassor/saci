@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
+use crate::metrics::ProcessorMetrics;
 use crate::runtime::RuntimeOutput;
 use crate::{Dataset, SaciError, SaciResult};
 use async_trait::async_trait;
@@ -9,7 +11,7 @@ use wasmtime::Store;
 use crate::descriptor::template_dataset_from;
 
 use super::bindings::{PipelineDescriptor, RunError, SaciPipeline, SaciPipelinePre};
-use super::engine::WasmEngine;
+use super::engine::{EPOCH_TICK, WasmEngine};
 use super::host_impl::HostState;
 
 /// One instantiated processor a runtime keeps between calls.
@@ -23,7 +25,7 @@ fn idle(warm: &Mutex<Vec<Warm>>) -> std::sync::MutexGuard<'_, Vec<Warm>> {
 
 /// Host-side WASM pipeline runtime implementing [`crate::runtime::PipelineRuntime`].
 ///
-/// Each `run_on` call serialises the dataset to Arrow IPC bytes, calls the
+/// Each `run_batch` call serialises the dataset to Arrow IPC bytes, calls the
 /// processor's `run-batch` export via wasmtime, then reads the output IPC bytes
 /// back over the dataset contents. By default the call runs on a fresh `Store`;
 /// [`with_warm_instances`](Self::with_warm_instances) keeps instances between calls.
@@ -34,8 +36,8 @@ fn idle(warm: &Mutex<Vec<Warm>>) -> std::sync::MutexGuard<'_, Vec<Warm>> {
 /// processor linear memory never survives a batch, so the checkpoint blob is
 /// the only channel for processor state.
 ///
-/// Processor traps are mapped to `SaciError::SystemExecution`. The epoch deadline
-/// (100 ms ticks) limits runaway processor execution.
+/// Processor traps are mapped to `SaciError::SystemExecution`. The call timeout
+/// limits runaway processor execution, in 100 ms epoch ticks.
 pub struct WasmPipelineRuntime {
     name: String,
     engine: WasmEngine,
@@ -56,6 +58,10 @@ pub struct WasmPipelineRuntime {
     /// never given an identity.
     workflow_id: String,
     processor_id: String,
+    /// This node's metric writers, bound once by
+    /// [`with_identity`](Self::with_identity) and shared with every per-call
+    /// `HostState`.
+    metrics: ProcessorMetrics,
     /// Cached descriptor, populated on first `describe()` call.
     descriptor: Mutex<Option<PipelineDescriptor>>,
     /// Component names extracted from the descriptor, for `declared_components()`.
@@ -86,7 +92,7 @@ struct CallParts {
     name: String,
     config: Arc<HashMap<String, String>>,
     epoch_deadline: u64,
-    processor_id: String,
+    metrics: ProcessorMetrics,
 }
 
 impl WasmPipelineRuntime {
@@ -101,7 +107,7 @@ impl WasmPipelineRuntime {
         name: impl Into<String>,
         wasm_bytes: &[u8],
         config: HashMap<String, String>,
-        epoch_deadline_ticks: u64,
+        timeout: Duration,
     ) -> SaciResult<Self> {
         let pre = engine
             .program(wasm_bytes)
@@ -112,9 +118,13 @@ impl WasmPipelineRuntime {
             engine,
             pre,
             config: Arc::new(config),
-            epoch_deadline: epoch_deadline_ticks,
+            epoch_deadline: u64::try_from(
+                timeout.as_millis().div_ceil(EPOCH_TICK.as_millis()).max(1),
+            )
+            .unwrap_or(u64::MAX),
             workflow_id: String::new(),
             processor_id: String::new(),
+            metrics: crate::metrics::instruments().processor(""),
             descriptor: Mutex::new(None),
             component_names: OnceLock::new(),
             last_ipc_len: std::sync::atomic::AtomicUsize::new(0),
@@ -133,6 +143,7 @@ impl WasmPipelineRuntime {
     #[must_use]
     pub fn with_identity(mut self, workflow_id: String, processor_id: String) -> Self {
         self.workflow_id = workflow_id;
+        self.metrics = crate::metrics::instruments().processor(&processor_id);
         self.processor_id = processor_id;
         self
     }
@@ -168,10 +179,10 @@ impl WasmPipelineRuntime {
             name,
             config,
             epoch_deadline,
-            processor_id,
+            metrics,
         } = parts;
 
-        let host = HostState::new(name, config, processor_id);
+        let host = HostState::new(name, config, metrics);
         let mut store = Store::new(&engine.engine, host);
         store.set_epoch_deadline(epoch_deadline);
 
@@ -190,7 +201,7 @@ impl WasmPipelineRuntime {
             name: self.name.clone(),
             config: Arc::clone(&self.config),
             epoch_deadline: self.epoch_deadline,
-            processor_id: self.processor_id.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 
@@ -217,6 +228,13 @@ impl WasmPipelineRuntime {
         let mut guard = self.descriptor.lock().unwrap();
         *guard = Some(desc.clone());
         Ok(desc)
+    }
+}
+
+#[async_trait(?Send)]
+impl crate::runtime::PipelineRuntime for WasmPipelineRuntime {
+    fn name(&self) -> &str {
+        &self.name
     }
 
     /// Serialise, call the processor, and read the result back, carrying the
@@ -313,14 +331,8 @@ impl WasmPipelineRuntime {
         match joined? {
             Ok(result) => {
                 let m = &result.metrics;
-                crate::metrics::instruments().processor_batch(
-                    &self.processor_id,
-                    m.wall_ns,
-                    m.rows_in,
-                    m.rows_out,
-                    m.systems_run,
-                    m.retries,
-                );
+                self.metrics
+                    .batch(m.wall_ns, m.rows_in, m.rows_out, m.systems_run, m.retries);
                 #[cfg(feature = "tracing")]
                 {
                     batch_span.record("rows_out", m.rows_out);
@@ -347,33 +359,6 @@ impl WasmPipelineRuntime {
                 "processor schema-mismatch in run-batch (processor bug): {msg}"
             ))),
         }
-    }
-}
-
-#[async_trait(?Send)]
-impl crate::runtime::PipelineRuntime for WasmPipelineRuntime {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn run_on(&self, data: &mut Dataset) -> SaciResult<()> {
-        self.run_batch(data, None).await.map(|_| ())
-    }
-
-    async fn run_on_with_state(
-        &self,
-        data: &mut Dataset,
-        prior: Option<&[u8]>,
-    ) -> SaciResult<Option<Vec<u8>>> {
-        self.run_batch(data, prior).await.map(|out| out.state)
-    }
-
-    async fn run_on_with_state_and_routes(
-        &self,
-        data: &mut Dataset,
-        prior: Option<&[u8]>,
-    ) -> SaciResult<RuntimeOutput> {
-        self.run_batch(data, prior).await
     }
 
     fn declared_components(&self) -> Vec<&str> {
@@ -430,8 +415,13 @@ mod tests {
     #[tokio::test]
     async fn from_bytes_rejects_invalid_wasm() {
         let engine = WasmEngine::new().unwrap();
-        let result =
-            WasmPipelineRuntime::from_bytes(engine, "bad", b"not wasm at all", HashMap::new(), 10);
+        let result = WasmPipelineRuntime::from_bytes(
+            engine,
+            "bad",
+            b"not wasm at all",
+            HashMap::new(),
+            Duration::from_secs(1),
+        );
         let err = result.err().expect("expected error");
         let msg = err.to_string();
         assert!(msg.contains("wasm compile error"), "got: {msg}");

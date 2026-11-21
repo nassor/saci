@@ -50,7 +50,7 @@ fn make_arrow_pipeline(n_rows: usize) -> Dataset {
     use arrow_array::RecordBatch;
 
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<WideRow>().unwrap();
+    pipeline.register::<WideRow>().unwrap();
 
     let col: Vec<f64> = (0..n_rows).map(|i| i as f64).collect();
     let arrays: Vec<Arc<dyn arrow_array::Array>> = (0..10)

@@ -17,47 +17,16 @@
 use std::sync::Arc;
 
 use arrow_array::{BooleanArray, Float64Array};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
-
-use saci::SaciError;
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::system::{FieldRef, ParallelSystem, System, SystemMeta, WriteSet, system_fn};
+use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
 struct Transaction {
     id: u64,
     amount: f64,
     currency: String,
     valid: bool,
     usd_amount: f64,
-}
-
-impl Component for Transaction {
-    fn name() -> &'static str {
-        "Transaction"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::UInt64, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("currency", DataType::Utf8, false),
-            Field::new("valid", DataType::Boolean, false),
-            Field::new("usd_amount", DataType::Float64, false),
-        ]))
-    }
-}
-
-impl Transaction {
-    const ID: FieldRef<Transaction> = FieldRef::new("id");
-    const AMOUNT: FieldRef<Transaction> = FieldRef::new("amount");
-    const CURRENCY: FieldRef<Transaction> = FieldRef::new("currency");
-    const VALID: FieldRef<Transaction> = FieldRef::new("valid");
-    const USD_AMOUNT: FieldRef<Transaction> = FieldRef::new("usd_amount");
 }
 
 struct FxRates {
@@ -92,7 +61,7 @@ struct IngestSystem;
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("Transaction")
+        SystemMeta::new("ingest").writes_all::<Transaction>()
     }
 
     async fn run(&self, pipeline: &mut Dataset) -> Result<(), SaciError> {
@@ -193,7 +162,7 @@ impl ParallelSystem for ValidateSystem {
             n - valid_count
         );
 
-        Ok(WriteSet::new().put("Transaction", "valid", new_valid))
+        Ok(WriteSet::new().put(Transaction::VALID, new_valid))
     }
 }
 
@@ -206,13 +175,11 @@ impl ParallelSystem for EnrichSystem {
             .reads(Transaction::AMOUNT)
             .reads(Transaction::CURRENCY)
             .writes(Transaction::USD_AMOUNT)
-            .read_resource::<FxRates>()
+            .reads_resource::<FxRates>()
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let rates = pipeline
-            .get_resource::<FxRates>()
-            .ok_or_else(|| SaciError::generic("FxRates resource not found"))?;
+        let rates = pipeline.resource::<FxRates>()?;
 
         let txns = pipeline.view::<Transaction>()?;
         let amount_col = txns.f64(Transaction::AMOUNT)?;
@@ -229,7 +196,7 @@ impl ParallelSystem for EnrichSystem {
 
         println!("[enrich]    converted {} rows to USD (parallel)", n);
 
-        Ok(WriteSet::new().put("Transaction", "usd_amount", new_usd))
+        Ok(WriteSet::new().put(Transaction::USD_AMOUNT, new_usd))
     }
 }
 
@@ -241,7 +208,7 @@ fn make_report_system() -> impl System {
             .reads(Transaction::CURRENCY)
             .reads(Transaction::VALID)
             .reads(Transaction::USD_AMOUNT)
-            .write_resource::<Report>(),
+            .writes_resource::<Report>(),
         |data| {
             let n;
             let mut valid_count = 0usize;
@@ -332,26 +299,25 @@ fn make_report_system() -> impl System {
 
 #[tokio::main]
 async fn main() -> Result<(), SaciError> {
-    let mut pipeline = Pipeline::builder("etl-parallel")
-        .with::<Transaction>()
-        .with_resource(FxRates {
+    let mut pipeline = Pipeline::new("etl-parallel")
+        .component::<Transaction>()
+        .resource(FxRates {
             eur: 1.08,
             gbp: 1.27,
             jpy: 0.0067,
             cad: 0.74,
         })
-        .with_system(IngestSystem)
-        .with_parallel_system(ValidateSystem)
-        .with_parallel_system(EnrichSystem)
-        .with_system(make_report_system())
-        .build();
+        .system(IngestSystem)
+        .parallel_system(ValidateSystem)
+        .parallel_system(EnrichSystem)
+        .system(make_report_system());
 
     println!("Starting ETL parallel pipeline...");
     println!("(ValidateSystem and EnrichSystem run concurrently in stage 1)");
 
     pipeline.run().await?;
 
-    let stages = pipeline.stages().unwrap_or_default();
+    let stages = pipeline.plan()?.to_vec();
     println!();
     println!("Stage layout (field-level DAG):");
     for (i, stage) in stages.iter().enumerate() {
@@ -359,10 +325,7 @@ async fn main() -> Result<(), SaciError> {
     }
     println!("  (Stage 1 systems run concurrently — disjoint field writes)");
 
-    let report = pipeline
-        .data()
-        .get_resource::<Report>()
-        .ok_or_else(|| SaciError::generic("Report resource missing"))?;
+    let report = pipeline.data().resource::<Report>()?;
     println!();
     println!(
         "Pipeline complete: {}/{} valid, {} rejected, ${:.2} total USD",

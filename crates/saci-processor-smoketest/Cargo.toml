@@ -11,16 +11,16 @@ description = "Minimal processor SDK consumer used as a build fixture and Arrow 
 # This crate exists to verify:
 #   1. `cargo build -p saci-processor-smoketest --target wasm32-wasip3`
 #      produces a valid WebAssembly component against the saci-pipeline world.
-#   2. The `export_pipeline!` macro in `saci::processor` expands cleanly against
+#   2. `#[processor]` expands cleanly, including its
 #      `wit_bindgen::generate!`-generated `crate::bindings`.
 #   3. arrow-ipc stays pinned at the exact workspace version between host and
 #      processor. This crate is a workspace member, so the pin propagates through
 #      the dep graph.
 #
-# On the host target, the `export_pipeline!` invocation is gated behind
-# `#[cfg(target_arch = "wasm32")]` in src/lib.rs, so `cargo check --workspace`
-# compiles this as an empty cdylib: no reference to `crate::bindings` exists on
-# the host target and the crate stays green in the normal workspace build.
+# On the host target, `#[processor]` emits everything but `build` behind
+# `#[cfg(target_arch = "wasm32")]`, so `cargo check --workspace` compiles this
+# as an empty cdylib: no reference to `crate::bindings` exists on the host
+# target and the crate stays green in the normal workspace build.
 [lib]
 crate-type = ["cdylib"]
 

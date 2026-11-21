@@ -1,6 +1,6 @@
 +++
 title = "The config file"
-description = "One KDL document describes the whole process: nine top-level keys, the variables they can reference, and the command that proves the file."
+description = "One KDL document describes the whole process: eleven top-level keys, the variables they can reference, and the command that proves the file."
 template = "section.html"
 sort_by = "weight"
 weight = 3
@@ -13,7 +13,7 @@ accepts is the file `serve` runs.
     <div class="dgm-scroll"><svg viewBox="0 0 660 168" role="img" aria-labelledby="svc-cfg-t svc-cfg-d">
         <title id="svc-cfg-t">One config file feeds validate, and the same file feeds serve</title>
         <desc id="svc-cfg-d">
-            The file saci.kdl carries nine top-level keys. Running saci-service validate
+            The file saci.kdl carries eleven top-level keys. Running saci-service validate
             against it parses the document, substitutes the environment placeholders and
             checks the workflow graph end to end, then exits, printing OK lines. Running
             saci-service serve against the same file does the same checks and then starts
@@ -25,7 +25,7 @@ accepts is the file `serve` runs.
             <rect class="hd hd-ctl" x="0" y="40" width="150" height="22" rx="8"/>
             <rect class="hd hd-ctl" x="0" y="54" width="150" height="8"/>
             <text class="t-lbl t-ctl" x="12" y="55">saci.kdl</text>
-            <text class="t-sm" x="12" y="80">nine top-level keys</text>
+            <text class="t-sm" x="12" y="80">eleven top-level keys</text>
             <text class="t-sm" x="12" y="98">one or more workflows</text>
             <path class="arw arw-ctl" d="M150 74 H186" marker-end="url(#svc-cfg-c)"/>
         </g>
@@ -71,16 +71,16 @@ a working default, so this is a complete file:
 mode "standalone"
 
 // id is a u64 and stable across restarts. data_dir must be non-empty; only the
-// cluster runner writes there. id and bootstrap accept a quoted string that
-// parses as the value, so env substitution stays valid KDL.
+// cluster runner writes there. id accepts a quoted string that parses as the
+// value, so env substitution stays valid KDL.
 node id=1 name="saci-1" data_dir="/var/lib/saci/node-1"
 
-// continuous | one_shot | interval | stream
-run_mode kind="continuous"
+// "continuous" | "once" | "interval" every_ms=N | "stream"
+run "continuous"
 
 // The leading argument is the workflow id. Every node lives inside this block.
 workflow "orders" name="Orders" {
-    // transformer, source, wasm, plugin, sink and link nodes
+    // codec, schema, source, wasm, plugin, sink and link nodes
 }
 
 // Names the file can reference. Wins over a same-named env var.
@@ -88,7 +88,7 @@ variables {
     OUT_DIR "/data/out"
 }
 
-http bind="0.0.0.0:8080" disabled=#false control=#true
+http bind="0.0.0.0:8080" enabled=#true control=#true
 
 observability log_format="pretty" log_level="error"
 ```
@@ -97,21 +97,23 @@ observability log_format="pretty" log_level="error"
 exactly one. Fill one in with
 [Workflows and links](@/service/config/workflows.md).
 
-## 2. The nine top-level keys
+## 2. The eleven top-level keys
 
 | Key | Holds | Default |
 |---|---|---|
 | `mode` | which runner: `"standalone"` or `"cluster"`; see [Running a cluster](@/service/operate/cluster.md) | required |
-| `node` | `id`, optional `name`, `data_dir`, plus the cluster keys beside it; see [Running a cluster](@/service/operate/cluster.md) | required |
-| `run_mode` | how a standalone run paces itself; see [Run modes and persistence](@/service/config/run-modes.md) | `kind="continuous"` |
-| `workflow` | the graph: transformers, sources, processors, sinks, links; see [Workflows and links](@/service/config/workflows.md) | required |
+| `node` | `id`, optional `name`, `data_dir`; see [Running a cluster](@/service/operate/cluster.md) | required |
+| `run` | how a standalone run paces itself; see [Run modes and persistence](@/service/config/run-modes.md) | `"continuous"` |
+| `cluster` | the Raft settings and member list of a cluster node, required by `mode "cluster"`; see [Running a cluster](@/service/operate/cluster.md) | none |
+| `workflow` | the graph: `codec` nodes, `schema` nodes, sources, processors, sinks, links; see [Workflows and links](@/service/config/workflows.md) | required |
 | `store` | standalone persistence, a `store "redb"` block; see [Run modes and persistence](@/service/config/run-modes.md) | none |
-| `http` | the control-plane address, `disabled`, and `control`; see [Logs, metrics and traces](@/service/operate/observability.md) and [Workflow lifecycle](@/service/operate/workflows.md) | `bind="0.0.0.0:8080"`, control on |
+| `http` | the control-plane address, `enabled`, and `control`; see [Logs, metrics and traces](@/service/operate/observability.md) and [Workflow lifecycle](@/service/operate/workflows.md) | `bind="0.0.0.0:8080"`, control on |
 | `observability` | log format and level, sampling, OTLP export, the in-process capture behind the dashboard; see [Logs, metrics and traces](@/service/operate/observability.md) | pretty at `error`, capture on |
 | `flow_control` | adaptive admission pacing and chunk sizing for every source; see [Flow control](@/service/operate/flow-control.md) | on, at hard-coded defaults |
+| `heal` | connector self-healing for every source and sink; see [Self-healing](@/service/operate/self-healing.md) | on, at defaults |
 | `variables` | names usable as `${name}` anywhere in the file; step 3 below | none |
 
-Which `type` strings a source or a sink may name, and which formats each one
+Which `connector` names a source or a sink may use, and which codecs each one
 carries, is the matrix on
 [Sources and sinks](@/service/connectors/_index.md).
 
@@ -143,7 +145,7 @@ variables {
 node id=1 data_dir="${SACI_DATA_DIR:-/var/lib/saci}"
 
 workflow "orders" {
-    sink "orders_out" type="FileSink" component="Order" transformer="orders_csv" {
+    sink "orders_out" connector="file" component="Order" codec="orders_csv" {
         config path="${OUT_DIR}/orders.csv"
     }
 }
@@ -200,16 +202,16 @@ OK: all declared types resolved in built-in registry
 Runs the same on Linux, macOS and Windows (PowerShell). Two flags change what
 it accepts:
 
-- `--strict` promotes a warning into a failure. A `type` no build of this
+- `--strict` promotes a warning into a failure. A connector no build of this
   binary provides is a warning that still exits 0, because a config aimed at a
-  custom binary names factories this one does not know. A connector this
+  custom binary names connectors this one does not know. A connector this
   binary ships but was built without is an error instead, in every mode, and
   `--strict` does not reach it.
-- `--connectors-only` builds every source, sink and transformer and skips the
+- `--connectors-only` builds every source, sink and codec and skips the
   processor load and the graph check, so it validates a config whose processor
   artifact is not present yet.
 
-A `FileSink` opens its output file while its factory runs, `validate` included,
+A `file` sink opens its output file while its factory runs, `validate` included,
 so the parent directory must exist first. The file is created when it is
 missing and appended to when it is not. `truncate #true` in the sink's
 `config` replaces it instead.
@@ -220,6 +222,6 @@ What each refusal means, and what to change, is on
 ## Next
 
 - [Workflows and links](@/service/config/workflows.md) fills in the `workflow`
-  block: six node kinds and the links between them.
-- [Sources and sinks](@/service/connectors/_index.md) is the `type` string on
+  block: seven node kinds and the links between them.
+- [Sources and sinks](@/service/connectors/_index.md) is the `connector` name on
   every source and sink, one page per system.

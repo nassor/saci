@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow_schema::Schema;
 
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
 /// Resolves a named in-process channel shared across workflows: a
 /// `ChannelSink` in one workflow and a `ChannelSource` in another meet on one

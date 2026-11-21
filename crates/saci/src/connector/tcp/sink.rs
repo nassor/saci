@@ -1,26 +1,26 @@
-//! [`TcpSink`]: client-mode TCP [`Sink`], the mirror of [`TcpIngestSource`].
+//! [`TcpSink`]: client-mode TCP [`Sink`], the mirror of [`TcpSource`].
 //!
-//! [`TcpIngestSource`]: crate::connector::tcp::TcpIngestSource
+//! [`TcpSource`]: crate::connector::tcp::TcpSource
 //!
 //! The source listens and reads frames; this sink connects out and writes them.
 //! One frame per encoded message: a `u32` big-endian length prefix, then
 //! exactly that many payload bytes, the same convention the source's frame
 //! reader consumes. The two halves are wire compatible, so a `TcpSink` in one
-//! service feeds a `TcpIngestSource` in another when both name the same format.
+//! service feeds a `TcpSource` in another when both name the same format.
 //!
-//! Payload bytes come from the transformer's message surface
-//! ([`encode_messages`](Transformer::encode_messages)), the same surface the
+//! Payload bytes come from the codec's message surface
+//! ([`encode_messages`](Codec::encode_messages)), the same surface the
 //! Kafka and NATS sinks publish from. Framing is transport and belongs here;
 //! what a payload means does not.
 //!
 //! Whether the format has a message surface at all is not a write failure but
 //! a property of the config, and the answer is the same for every batch.
-//! [`connect`](TcpSink::connect) therefore settles it while building and hands
+//! [`new`](TcpSink::new) therefore settles it while building and hands
 //! the refusal back, the way the source opens a decoder while binding. The
 //! question is put differently only because the trait offers nothing else:
 //! there is no encoder to open, and `encode_messages` needs a batch, so what
 //! is answerable without one is
-//! [`message_shape`](Transformer::message_shape), whose contract is that
+//! [`message_shape`](Codec::message_shape), whose contract is that
 //! `None` means the format has no message surface. That is the same gate the
 //! Kafka and NATS sinks already stand on. A sink that deferred the answer
 //! would build, dial, and fail its first write with the pipeline already
@@ -32,17 +32,18 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
 
+use crate::codec::Codec;
+use crate::connector::tcp::TcpSinkConfig;
 use crate::error::SaciError;
-use crate::io::sink::Sink;
-use crate::transformer::Transformer;
+use crate::io::Sink;
 
 /// Client-mode TCP sink: one encoded message out, one length-prefixed frame on
 /// the wire.
 ///
-/// [`connect`](Self::connect) resolves the address and opens nothing, so
+/// [`new`](Self::new) resolves the address and opens nothing, so
 /// `saci-service validate` passes while the peer is down. The socket is dialled
 /// on the first [`write_batch`](Sink::write_batch), which is where an
 /// unreachable peer surfaces.
@@ -50,45 +51,50 @@ use crate::transformer::Transformer;
 /// One connection serves the sink's whole lifetime. There is no reconnect: once
 /// a dial has succeeded and the peer later goes away, every following write
 /// fails on that same socket and the error reaches the runner.
+///
+/// The socket is buffered, and every `write_batch` flushes it once after its
+/// last frame, so a batch's frames reach the kernel in as few writes as the
+/// buffer allows and nothing is left behind when the call returns.
 pub struct TcpSink {
     /// `None` until the first batch dials the peer.
-    stream: Option<TcpStream>,
-    /// Resolved in [`connect`](Self::connect), so a malformed address is a
+    stream: Option<BufWriter<TcpStream>>,
+    /// Resolved in [`new`](Self::new), so a malformed address is a
     /// config error rather than a first-batch one.
     peer: SocketAddr,
     schema: Arc<Schema>,
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
 }
 
 impl TcpSink {
-    /// Resolve `connect` and prepare the sink without opening a socket.
+    /// Resolve `config.connect` and prepare the sink without opening a socket.
     ///
-    /// `connect` is a `host:port` string. Its first resolved address is the
-    /// peer for the sink's lifetime. `transformer` encodes each batch into the
+    /// `config.connect` is a `host:port` string. Its first resolved address is
+    /// the peer for the sink's lifetime. `codec` encodes each batch into the
     /// payloads to frame, and a format that declares no message shape has no
     /// message surface to encode with: that is settled here rather than on the
     /// first batch, because no batch can change the answer.
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] if `transformer` declares no
-    /// [`message_shape`](Transformer::message_shape), if `connect` cannot be
+    /// Returns [`SaciError::Configuration`] if `codec` declares no
+    /// [`message_shape`](Codec::message_shape), if `connect` cannot be
     /// parsed or resolved, or if it resolves to no address at all.
-    pub fn connect(
-        connect: &str,
+    pub fn new(
+        config: TcpSinkConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
+        let TcpSinkConfig { connect } = config;
         // The declaration is the whole answer for every batch this sink will
         // ever encode, so asking once here is what makes a format with no
         // message surface a config error the caller is told about, rather than
         // a sink that builds, dials, and fails its first write. There is no
         // encoder to open the way the source opens a decoder: `encode_messages`
         // is the only encode entry point and it needs a batch.
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "TcpSink: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
 
@@ -110,7 +116,7 @@ impl TcpSink {
             stream: None,
             peer,
             schema,
-            transformer,
+            codec,
         })
     }
 
@@ -122,10 +128,11 @@ impl TcpSink {
 
 /// Write one frame per payload: a `u32` big-endian length, then the bytes.
 ///
-/// The header and the payload are two writes rather than one copied buffer, so
-/// a batch's payloads reach the socket without being staged again.
+/// The header and the payload are two writes into the buffered stream rather
+/// than one copied buffer, so a batch's payloads reach the socket without
+/// being staged again, and the stream is flushed once after the last frame.
 async fn write_frames(
-    stream: &mut TcpStream,
+    stream: &mut BufWriter<TcpStream>,
     payloads: &[Vec<u8>],
     peer: SocketAddr,
 ) -> Result<(), SaciError> {
@@ -147,7 +154,10 @@ async fn write_frames(
             ))
         })?;
     }
-    Ok(())
+    stream
+        .flush()
+        .await
+        .map_err(|e| SaciError::generic(format!("TcpSink: flushing frames to {peer} failed: {e}")))
 }
 
 #[async_trait]
@@ -155,23 +165,23 @@ impl Sink for TcpSink {
     /// Encode `batch` and write one frame per payload, dialling the peer first
     /// if this is the first batch.
     ///
-    /// A batch the transformer encodes to no payloads writes no frames.
+    /// A batch the codec encodes to no payloads writes no frames.
     ///
     /// # Errors
     ///
-    /// Returns the transformer's error when the batch cannot be encoded, and
+    /// Returns the codec's error when the batch cannot be encoded, and
     /// [`SaciError::Generic`] when the dial fails, a payload exceeds the `u32`
     /// length prefix, or a socket write fails.
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
-        let payloads = self.transformer.encode_messages(batch)?;
+        let payloads = self.codec.encode_messages(batch)?;
 
         // The connection moves out of `self` for the write and back in after,
         // so the frame loop owns it outright instead of reborrowing an option.
         let mut stream = match self.stream.take() {
             Some(stream) => stream,
-            None => TcpStream::connect(self.peer).await.map_err(|e| {
+            None => BufWriter::new(TcpStream::connect(self.peer).await.map_err(|e| {
                 SaciError::generic(format!("TcpSink: cannot connect to {}: {e}", self.peer))
-            })?,
+            })?),
         };
         let result = write_frames(&mut stream, &payloads, self.peer).await;
         self.stream = Some(stream);
@@ -212,8 +222,8 @@ impl Sink for TcpSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transformer::arrow_ipc::ArrowIpcTransformer;
-    use crate::transformer::{MessageDecoder, MessageShape};
+    use crate::codec::arrow_ipc::ArrowIpcCodec;
+    use crate::codec::{MessageDecoder, MessageShape};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
     use tokio::io::AsyncReadExt;
@@ -223,10 +233,10 @@ mod tests {
         Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]))
     }
 
-    /// Framing is what this crate owns; the payload codec is the transformer's,
+    /// Framing is what this crate owns; the payload encoding is the codec's,
     /// and its own tests cover the encode paths.
-    fn arrow_ipc() -> Arc<dyn Transformer> {
-        Arc::new(ArrowIpcTransformer::new())
+    fn arrow_ipc() -> Arc<dyn Codec> {
+        Arc::new(ArrowIpcCodec::new())
     }
 
     fn batch(values: &[i64]) -> RecordBatch {
@@ -241,10 +251,10 @@ mod tests {
     /// only way to observe "no payloads, no frames" without a real codec that
     /// does it. It declares a shape, so it must carry a whole message surface:
     /// the decoder half is `arrow-ipc`'s, unexercised here but real, because
-    /// [`Transformer::message_shape`] answers for both directions at once.
+    /// [`Codec::message_shape`] answers for both directions at once.
     struct NoMessages;
 
-    impl Transformer for NoMessages {
+    impl Codec for NoMessages {
         fn format(&self) -> &'static str {
             "no-messages"
         }
@@ -253,7 +263,7 @@ mod tests {
             &self,
             schema: Arc<Schema>,
         ) -> Result<Box<dyn MessageDecoder>, SaciError> {
-            ArrowIpcTransformer::new().open_message_decoder(schema)
+            ArrowIpcCodec::new().open_message_decoder(schema)
         }
 
         fn encode_messages(&self, _batch: &RecordBatch) -> Result<Vec<Vec<u8>>, SaciError> {
@@ -270,7 +280,7 @@ mod tests {
     /// surface, so the gate is exercised against a stand-in.
     struct NoMessageSurface;
 
-    impl Transformer for NoMessageSurface {
+    impl Codec for NoMessageSurface {
         fn format(&self) -> &'static str {
             "no-surface"
         }
@@ -289,15 +299,20 @@ mod tests {
         payload
     }
 
+    /// A sink dialling `connect` with `codec`.
+    fn sink_to(connect: &str, codec: Arc<dyn Codec>) -> Result<TcpSink, SaciError> {
+        TcpSink::new(TcpSinkConfig::new(connect), test_schema(), codec)
+    }
+
     #[test]
     fn connect_resolves_the_configured_address() {
-        let sink = TcpSink::connect("127.0.0.1:9500", test_schema(), arrow_ipc()).expect("resolve");
+        let sink = sink_to("127.0.0.1:9500", arrow_ipc()).expect("resolve");
         assert_eq!(sink.peer_addr().port(), 9500);
     }
 
     #[test]
     fn connect_rejects_an_address_with_no_port() {
-        let err = TcpSink::connect("127.0.0.1", test_schema(), arrow_ipc())
+        let err = sink_to("127.0.0.1", arrow_ipc())
             .err()
             .expect("resolution must fail");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -309,7 +324,7 @@ mod tests {
     /// misconfiguration on a `tcp` source is refused while building too.
     #[test]
     fn connect_refuses_a_format_with_no_message_codec() {
-        let err = TcpSink::connect("127.0.0.1:9501", test_schema(), Arc::new(NoMessageSurface))
+        let err = sink_to("127.0.0.1:9501", Arc::new(NoMessageSurface))
             .err()
             .expect("a format with no message surface must be refused");
         assert_eq!(err.category(), "configuration", "got: {err}");
@@ -321,7 +336,7 @@ mod tests {
     /// first batch so `saci-service validate` passes without the peer.
     #[test]
     fn connect_opens_no_socket() {
-        let sink = TcpSink::connect("127.0.0.1:1", test_schema(), arrow_ipc()).expect("resolve");
+        let sink = sink_to("127.0.0.1:1", arrow_ipc()).expect("resolve");
         assert_eq!(sink.schema().fields().len(), 1);
     }
 
@@ -340,8 +355,7 @@ mod tests {
             (payload.len(), rest.len())
         });
 
-        let mut sink =
-            TcpSink::connect(&addr.to_string(), test_schema(), arrow_ipc()).expect("resolve");
+        let mut sink = sink_to(&addr.to_string(), arrow_ipc()).expect("resolve");
         sink.write_batch(&batch(&[1, 2, 3])).await.expect("write");
         sink.finish().await.expect("finish");
 
@@ -360,8 +374,7 @@ mod tests {
             read_frame(&mut peer).await
         });
 
-        let mut sink =
-            TcpSink::connect(&addr.to_string(), test_schema(), arrow_ipc()).expect("resolve");
+        let mut sink = sink_to(&addr.to_string(), arrow_ipc()).expect("resolve");
         sink.write_batch(&batch(&[7, 8])).await.expect("write");
         sink.finish().await.expect("finish");
 
@@ -385,8 +398,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
 
-        let mut sink = TcpSink::connect(&addr.to_string(), test_schema(), Arc::new(NoMessages))
-            .expect("resolve");
+        let mut sink = sink_to(&addr.to_string(), Arc::new(NoMessages)).expect("resolve");
         sink.write_batch(&batch(&[1])).await.expect("write");
         sink.finish().await.expect("finish");
 
@@ -398,8 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_without_a_batch_is_ok() {
-        let mut sink =
-            TcpSink::connect("127.0.0.1:1", test_schema(), arrow_ipc()).expect("resolve");
+        let mut sink = sink_to("127.0.0.1:1", arrow_ipc()).expect("resolve");
         sink.finish().await.expect("finishing an unconnected sink");
     }
 
@@ -411,12 +422,69 @@ mod tests {
         let addr = listener.local_addr().expect("local_addr");
         drop(listener);
 
-        let mut sink =
-            TcpSink::connect(&addr.to_string(), test_schema(), arrow_ipc()).expect("resolve");
+        let mut sink = sink_to(&addr.to_string(), arrow_ipc()).expect("resolve");
         let err = sink
             .write_batch(&batch(&[1]))
             .await
             .expect_err("the dial must fail");
         assert!(err.to_string().contains("cannot connect"), "got: {err}");
+    }
+
+    /// The sink buffers its socket, so a batch's frames must be flushed before
+    /// `write_batch` returns: the peer reads the frame with the sink still
+    /// open, and `finish` is never called.
+    #[tokio::test]
+    async fn write_batch_flushes_its_frames_before_returning() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let mut sink = sink_to(&addr.to_string(), arrow_ipc()).expect("resolve");
+        sink.write_batch(&batch(&[4, 5, 6])).await.expect("write");
+
+        let (mut peer, _) = listener.accept().await.expect("accept");
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut peer))
+                .await
+                .expect("the frame was left in the sink's buffer");
+        assert!(!payload.is_empty());
+    }
+
+    /// A payload larger than the write buffer takes the direct-write path; it
+    /// must still arrive whole, in order, behind the next frame's header.
+    #[tokio::test]
+    async fn a_payload_larger_than_the_buffer_arrives_intact() {
+        let values: Vec<i64> = (0..50_000).collect();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let accept = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.expect("accept");
+            let big = read_frame(&mut peer).await;
+            let small = read_frame(&mut peer).await;
+            (big, small)
+        });
+
+        let mut sink = sink_to(&addr.to_string(), arrow_ipc()).expect("resolve");
+        sink.write_batch(&batch(&values)).await.expect("write big");
+        sink.write_batch(&batch(&[9])).await.expect("write small");
+        sink.finish().await.expect("finish");
+
+        let (big, small) = accept.await.expect("reader task");
+        let decode = |payload: &[u8]| {
+            let mut decoder = arrow_ipc()
+                .open_message_decoder(test_schema())
+                .expect("decoder");
+            decoder.push(payload).expect("push");
+            decoder.flush().expect("flush").expect("one batch")
+        };
+        let big = decode(&big);
+        assert_eq!(big.num_rows(), values.len());
+        let column = big
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("v is Int64");
+        assert_eq!(&column.values()[..], values.as_slice());
+        assert_eq!(decode(&small).num_rows(), 1);
     }
 }

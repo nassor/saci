@@ -41,8 +41,8 @@ use saci::distributed::RedbSharedStore;
 use saci::distributed::consensus::{ArrowRaftDriver, ArrowRaftDriverConfig};
 use saci::distributed::runner::{DistributedRunner, RunnerConfig};
 use saci::distributed::strategy::CheckpointStrategy;
-use saci::service::config::{LogFormat, ObservabilityConfig};
-use saci::service::logging::init_logging;
+use saci::service::init_logging;
+use saci::service::{LogFormat, ObservabilityConfig};
 
 use crate::store::FulfillmentStore;
 use crate::systems::build_pipeline;

@@ -2,7 +2,7 @@
 //!
 //! For each claimed batch the runner builds a fresh [`Dataset`] from `world_factory()`,
 //! loads the prior window accumulator plus the runtime's opaque state blob, calls
-//! `runtime.run_on_with_state`, saves a checkpoint, then acks the claim. The runtime is a
+//! `runtime.run_batch`, saves a checkpoint, then acks the claim. The runtime is a
 //! template reused across batches: it keeps no per-batch state, and its own data, sources,
 //! and sinks go unused because partition data arrives via [`PartitionSource`].
 //!
@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::PipelineRuntime;
+use crate::RuntimeOutput;
 
 use crate::SaciError;
 use crate::SaciResult;
@@ -34,6 +35,7 @@ use crate::dataset::Dataset;
 use crate::distributed::checkpoint::CheckpointStore;
 use crate::distributed::partition::{MAX_LOG_ENTRY_BYTES, PartitionSource};
 use crate::distributed::strategy::CheckpointStrategy;
+use crate::metrics::{SourceMetrics, WorkflowMetrics};
 #[cfg(test)]
 use crate::pipeline::Pipeline;
 
@@ -102,6 +104,8 @@ pub struct DistributedRunner<S> {
     store: S,
     runtime: Box<dyn PipelineRuntime>,
     config: RunnerConfig,
+    workflow_metrics: WorkflowMetrics,
+    source_metrics: SourceMetrics,
 }
 
 impl<S> DistributedRunner<S>
@@ -112,7 +116,10 @@ where
     ///
     /// Per-partition data comes from `world_factory` on each call to [`run`](Self::run).
     pub fn new(store: S, runtime: Box<dyn PipelineRuntime>, config: RunnerConfig) -> Self {
+        let instruments = crate::metrics::instruments();
         Self {
+            workflow_metrics: instruments.workflow(&config.workflow_id),
+            source_metrics: instruments.source(&config.processor_id),
             store,
             runtime,
             config,
@@ -231,7 +238,7 @@ where
 
                 use crate::component::Component as _;
                 use crate::distributed::accumulator_store::load_accumulator_state;
-                use crate::windows::accumulator::WindowAccumulator;
+                use crate::windows::WindowAccumulator;
 
                 // Load under the claim that last wrote an accumulator
                 // checkpoint, mirroring the processor-state chain; a fresh
@@ -241,8 +248,8 @@ where
                     Some(prior_id) => match load_accumulator_state(&self.store, prior_id).await {
                         Ok(Some(batch)) => {
                             if partition_data
-                                .batch_for(WindowAccumulator::name())
-                                .is_some()
+                                .batch_named(WindowAccumulator::name())
+                                .is_ok()
                             {
                                 let rows =
                                     WindowAccumulator::from_record_batch(&batch).map_err(|e| {
@@ -276,7 +283,7 @@ where
                 }
             }
 
-            // Opaque to the host: whatever `run_on_with_state` returned on this runner's
+            // Opaque to the host: whatever `run_batch` returned as its state on this runner's
             // previous batch, handed straight back.
             let prior_state = match state_claim_id {
                 None => None,
@@ -322,8 +329,8 @@ where
             }
 
             // Renewal is a sibling select branch, so tokio polls it concurrently with
-            // `run_on`. When renewal fails its branch resolves first, and dropping the
-            // select cancels `run_on` at its next `.await`.
+            // `run_batch`. When renewal fails its branch resolves first, and dropping the
+            // select cancels `run_batch` at its next `.await`.
             let renewal_interval = Duration::from_millis((claim.lease_ttl_millis / 3).max(1));
             let claim_id = claim.claim_id;
             let claim_instance_id = claim.instance_id;
@@ -342,7 +349,7 @@ where
                             workflow = %workflow_id_for_renewal,
                             %claim_id,
                             error = %e,
-                            "mid-execution lease renewal failed; cancelling run_on"
+                            "mid-execution lease renewal failed; cancelling run_batch"
                         );
                         #[cfg(not(feature = "tracing"))]
                         let _ = e;
@@ -351,15 +358,14 @@ where
                 }
             };
 
-            crate::metrics::instruments().source_batch(&self.config.processor_id);
-            crate::metrics::instruments()
-                .rows(&self.config.processor_id, partition_data.rows() as u64);
+            self.source_metrics.batch();
+            self.source_metrics.rows(partition_data.rows() as u64);
 
             #[cfg(feature = "tracing")]
             batch_span.record("rows", partition_data.rows() as u64);
 
             enum RunOutcome {
-                Ran(SaciResult<Option<Vec<u8>>>),
+                Ran(SaciResult<RuntimeOutput>),
                 RenewalFailed,
             }
             let runtime = &*self.runtime;
@@ -377,7 +383,7 @@ where
                     rows_out = tracing::field::Empty
                 )
             });
-            let run = runtime.run_on_with_state(&mut partition_data, prior_state.as_deref());
+            let run = runtime.run_batch(&mut partition_data, prior_state.as_deref());
             #[cfg(feature = "tracing")]
             let run = tracing::Instrument::instrument(run, run_span.clone());
             let outcome = tokio::select! {
@@ -395,17 +401,17 @@ where
             #[cfg(feature = "tracing")]
             drop(run_span);
 
-            let run_result: SaciResult<Option<Vec<u8>>> = match outcome {
+            let run_result: SaciResult<RuntimeOutput> = match outcome {
                 RunOutcome::Ran(r) => r,
                 RunOutcome::RenewalFailed => {
-                    crate::metrics::instruments().workflow_error(&self.config.workflow_id);
+                    self.workflow_metrics.pass_error();
                     Self::release_with_log(&self.store, &claim).await;
                     continue;
                 }
             };
 
             let (next_state, mut run_error) = match run_result {
-                Ok(blob) => (blob, None),
+                Ok(out) => (out.state, None),
                 Err(e) => (None, Some(e)),
             };
             let mut claim_released = false;
@@ -493,13 +499,13 @@ where
                         error = %e,
                         "skipping ack: claim was released on a post-run persist failure"
                     );
-                    crate::metrics::instruments().workflow_error(&self.config.workflow_id);
+                    self.workflow_metrics.pass_error();
                     let _ = e;
                     continue;
                 }
                 (Some(e), false) => {
                     Self::release_with_log(&self.store, &claim).await;
-                    crate::metrics::instruments().workflow_error(&self.config.workflow_id);
+                    self.workflow_metrics.pass_error();
                     return Err(e);
                 }
                 (None, _) => {
@@ -507,7 +513,7 @@ where
                         .ack_claim(claim.claim_id, claim.instance_id)
                         .await?;
                     processed += 1;
-                    crate::metrics::instruments().workflow_run(&self.config.workflow_id);
+                    self.workflow_metrics.pass();
                 }
             }
         }
@@ -814,7 +820,7 @@ mod tests {
         let counter_clone = Arc::clone(&counter);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("increment"), move |_data| {
+        pipeline = pipeline.system(system_fn(SystemMeta::new("increment"), move |_data| {
             counter_clone.fetch_add(1, AtomicOrdering::Relaxed);
             Ok(())
         }));
@@ -893,7 +899,7 @@ mod tests {
         };
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let config = RunnerConfig {
             max_batches: Some(1),
@@ -986,7 +992,7 @@ mod tests {
         };
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let config = RunnerConfig {
             max_batches: Some(1),
@@ -1022,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn test_accumulator_persists_across_two_runs() {
         use crate::component::Component as _;
-        use crate::windows::accumulator::WindowAccumulator;
+        use crate::windows::WindowAccumulator;
         use std::sync::atomic::AtomicU32;
 
         let store = MemoryStore::new();
@@ -1036,11 +1042,11 @@ mod tests {
         let run_count_clone = Arc::clone(&run_count);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(
+        pipeline = pipeline.system(system_fn(
             SystemMeta::new("append_accumulator"),
             move |data: &mut Dataset| {
                 let run = run_count_clone.fetch_add(1, AtomicOrdering::Relaxed);
-                if data.batch_for(WindowAccumulator::name()).is_some() {
+                if data.batch_named(WindowAccumulator::name()).is_ok() {
                     let row = WindowAccumulator {
                         version: Some(1),
                         source_component: "test".to_string(),
@@ -1062,7 +1068,7 @@ mod tests {
 
         let world_factory = || {
             let mut d = Dataset::new();
-            d.register_component::<WindowAccumulator>().unwrap();
+            d.register::<WindowAccumulator>().unwrap();
             d
         };
 
@@ -1084,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn test_accumulator_values_carry_across_claims() {
         use crate::component::Component as _;
-        use crate::windows::accumulator::WindowAccumulator;
+        use crate::windows::WindowAccumulator;
         use std::sync::atomic::AtomicU32;
 
         let store = MemoryStore::new();
@@ -1104,12 +1110,12 @@ mod tests {
         let entry_rows_clone = Arc::clone(&entry_rows);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(
+        pipeline = pipeline.system(system_fn(
             SystemMeta::new("append_accumulator"),
             move |data: &mut Dataset| {
                 entry_rows_clone.lock().unwrap().push(data.rows() as u64);
                 let run = run_count_clone.fetch_add(1, AtomicOrdering::Relaxed);
-                if data.batch_for(WindowAccumulator::name()).is_some() {
+                if data.batch_named(WindowAccumulator::name()).is_ok() {
                     let row = WindowAccumulator {
                         version: Some(1),
                         source_component: "test".to_string(),
@@ -1131,7 +1137,7 @@ mod tests {
 
         let world_factory = || {
             let mut d = Dataset::new();
-            d.register_component::<WindowAccumulator>().unwrap();
+            d.register::<WindowAccumulator>().unwrap();
             d
         };
 
@@ -1159,7 +1165,8 @@ mod tests {
                 let dataset = Dataset::read_ipc(&mut c.payload.as_slice())
                     .expect("checkpoint payload is single-component IPC");
                 dataset
-                    .batch_for(WindowAccumulator::name())
+                    .batch_named(WindowAccumulator::name())
+                    .ok()
                     .map(|b| b.num_rows() as u64)
             })
             .collect();
@@ -1176,7 +1183,7 @@ mod tests {
     #[cfg(feature = "windows")]
     #[tokio::test]
     async fn test_accumulator_save_failure_releases_not_acks() {
-        use crate::windows::accumulator::WindowAccumulator;
+        use crate::windows::WindowAccumulator;
 
         let inner = MemoryStore::new();
         inner.register(0, 10);
@@ -1242,11 +1249,11 @@ mod tests {
         };
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let world_factory = || {
             let mut d = Dataset::new();
-            d.register_component::<WindowAccumulator>().unwrap();
+            d.register::<WindowAccumulator>().unwrap();
             d
         };
 
@@ -1286,7 +1293,7 @@ mod tests {
         store.register(0, 10);
 
         let mut pipeline = Pipeline::new("test");
-        pipeline.add_system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
+        pipeline = pipeline.system(system_fn(SystemMeta::new("noop"), |_data| Ok(())));
 
         let config = RunnerConfig {
             max_batches: Some(1),

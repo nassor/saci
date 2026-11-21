@@ -20,7 +20,7 @@
     <dt>In one line</dt>
     <dd>A transform that <strong>declares its own reads and writes</strong>, per field, up front</dd>
     <dt>You need</dt>
-    <dd>Nothing beyond <code>saci</code>. Concurrent stages need its <code>runtime</code> feature, which the default <code>engine</code> feature enables</dd>
+    <dd>Nothing beyond <code>saci</code>. Concurrent stages need its <code>engine</code> feature, which is on by default</dd>
     <dt>Read this if</dt>
     <dd>You are writing your first transform, or two of your systems refuse to share a stage and you want to know which declaration is forcing them apart</dd>
 </dl>
@@ -43,9 +43,9 @@ pub trait System: Send + Sync {
         SystemMeta::new(std::any::type_name::&lt;Self&gt;())
     }
 
-    /// Defaults to exponential backoff, 3 retries.
-    fn config(&amp;self) -&gt; SystemConfig {
-        SystemConfig::default()
+    /// Defaults to no retry. Only errors with `is_retryable()` are retried.
+    fn retry(&amp;self) -&gt; RetryMode {
+        RetryMode::None
     }
 
     /// The only required method.
@@ -203,7 +203,7 @@ impl System for AddTotal {
         };
 
         data.apply_write_set(
-            WriteSet::new().put("Order", "total", Arc::new(Float64Array::from(totals))),
+            WriteSet::new().put(Order::TOTAL, Arc::new(Float64Array::from(totals))),
         )
     }
 }</code></pre>
@@ -231,15 +231,15 @@ SystemMeta::new("enrich")
     .reads(Order::AMOUNT)
     .writes(Order::TOTAL);
 
-// Stringly. Identical effect; useful when there are no FieldRef constants.
+// Stringly. Identical effect; useful for a schema known only at run time.
 SystemMeta::new("enrich")
-    .read("Order", "amount")
-    .write("Order", "total");
+    .reads_named("Order", "amount")
+    .writes_named("Order", "total");
 
 // Whole component. Expands to every field in the component's Arrow schema
-// when the plan is built.
+// when the plan is built. `writes_all_named("Order")` takes the name as a string.
 SystemMeta::new("ingest")
-    .write_component("Order");</code></pre>
+    .writes_all::&lt;Order&gt;();</code></pre>
 </div>
 
 <p>
@@ -388,7 +388,7 @@ SystemMeta::new("ingest")
     <figcaption class="dgm-cap">
         Neither system on the left knows the other exists. They
         share a stage purely because they <b>named different fields</b>. Widen either one
-        to <code>write_component("Order")</code> and the left half becomes the right half.
+        to <code>writes_all::&lt;Order&gt;()</code> and the left half becomes the right half.
     </figcaption>
 </div>
 
@@ -442,14 +442,14 @@ SystemMeta::new("ingest")
     <pre><code class="language-rust">use saci::prelude::*;
 
 let load = system_fn(
-    SystemMeta::new("load").write_component("Order"),
+    SystemMeta::new("load").writes_all::&lt;Order&gt;(),
     |data: &amp;mut Dataset| {
         data.append::&lt;Order&gt;(&amp;seed_rows())?;
         Ok(())
     },
 );
 
-pipeline.add_system(load);</code></pre>
+let pipeline = pipeline.system(load);</code></pre>
 </div>
 
 <p>
@@ -475,8 +475,8 @@ pipeline.add_system(load);</code></pre>
     <pre><code class="language-rust">SystemMeta::new("convert")
     .reads(Order::AMOUNT)          // field granularity
     .writes(Order::TOTAL)
-    .read_resource::&lt;FxRates&gt;()    // TypeId granularity
-    .write_resource::&lt;Report&gt;();</code></pre>
+    .reads_resource::&lt;FxRates&gt;()    // TypeId granularity
+    .writes_resource::&lt;Report&gt;();</code></pre>
 </div>
 
 <p>
@@ -488,7 +488,7 @@ pipeline.add_system(load);</code></pre>
 <p>
     A <code>ParallelSystem</code> only ever sees <code>&amp;Dataset</code> and so
     cannot mutate a resource in place. Express the mutation as a
-    <code>ResourceUpdate</code> attached to the returned <code>WriteSet</code>; the
+    resource value attached to the returned <code>WriteSet</code> with <code>with_resource</code>; the
     executor applies those on the main thread, after the stage's column writes have
     been committed.
 </p>
@@ -496,8 +496,8 @@ pipeline.add_system(load);</code></pre>
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>deferred resource write from a parallel system</em></div>
     <pre><code class="language-rust">Ok(WriteSet::new()
-    .put("Order", "score", Arc::new(Float64Array::from(scores)))
-    .with_resource(ResourceUpdate::new(Report { scored: n })))</code></pre>
+    .put(Order::SCORE, Arc::new(Float64Array::from(scores)))
+    .with_resource(Report { scored: n }))</code></pre>
 </div>
 
 <h2 id="parallel">ParallelSystem and row slices</h2>
@@ -506,24 +506,16 @@ pipeline.add_system(load);</code></pre>
     <code>ParallelSystem</code> is the same idea against an immutable dataset. It
     takes <code>&amp;Dataset</code> and returns a <code>WriteSet</code> instead of
     mutating in place, which is what lets several of them run at once inside one stage.
-    Its <code>meta()</code> has <b>no default</b>, so you must declare access.
+    Its <code>meta()</code> has <b>no default</b>, so you must declare access. Implement
+    <code>run</code>, or <code>sliced</code> and <code>run_slice</code>.
 </p>
 
 <div class="code">
-    <div class="code-cap"><span>Rust</span><em>one kernel, two entry points</em></div>
+    <div class="code-cap"><span>Rust</span><em>one kernel; run defaults to a single slice</em></div>
     <pre><code class="language-rust">use std::ops::Range;
 
 struct Score;
 
-impl Score {
-    fn compute(&amp;self, data: &amp;Dataset, rows: Range&lt;u32&gt;) -&gt; SaciResult&lt;Vec&lt;f64&gt;&gt; {
-        let o = data.view::&lt;Order&gt;()?;
-        let amount = o.f64(Order::AMOUNT)?;
-        Ok(rows.map(|i| amount.value(i as usize).log10()).collect())
-    }
-}
-
-#[async_trait]
 impl ParallelSystem for Score {
     fn meta(&amp;self) -&gt; SystemMeta {
         SystemMeta::new("score")
@@ -531,39 +523,29 @@ impl ParallelSystem for Score {
             .writes(Order::SCORE)
     }
 
-    // Whole-dataset path. Always required.
-    async fn run(&amp;self, data: &amp;Dataset) -&gt; SaciResult&lt;WriteSet&gt; {
-        let scores = self.compute(data, data.row_range())?;
-        Ok(WriteSet::new().put("Order", "score", Arc::new(Float64Array::from(scores))))
-    }
+    // Opt into slice parallelism. `run` defaults to one slice over every row.
+    fn sliced(&amp;self) -&gt; bool { true }
 
-    // Opt into slice parallelism. Default returns None.
-    fn run_slice(
-        &amp;self,
-        data: &amp;Dataset,
-        rows: Range&lt;u32&gt;,
-    ) -&gt; Option&lt;Result&lt;SliceWriteSet, SaciError&gt;&gt; {
-        let scores = match self.compute(data, rows.clone()) {
-            Ok(s) =&gt; s,
-            Err(e) =&gt; return Some(Err(e)),
-        };
-        Some(Ok(SliceWriteSet::new(rows).put(
-            "Order",
-            "score",
-            Arc::new(Float64Array::from(scores)),
-        )))
+    fn run_slice(&amp;self, data: &amp;Dataset, rows: Range&lt;u32&gt;) -&gt; SaciResult&lt;SliceWriteSet&gt; {
+        let o = data.view::&lt;Order&gt;()?;
+        let amount = o.f64(Order::AMOUNT)?;
+        let scores: Vec&lt;f64&gt; = rows
+            .clone()
+            .map(|i| amount.value(i as usize).log10())
+            .collect();
+        Ok(SliceWriteSet::new(rows).put(Order::SCORE, Arc::new(Float64Array::from(scores))))
     }
 }
 
-pipeline.add_parallel_system(Score);</code></pre>
+let pipeline = pipeline.parallel_system(Score);</code></pre>
 </div>
 
 <p>
     Slice parallelism is gated on two conditions, both checked before any thread is
     spawned. The dataset must hold at least
     <code>saci::system::SLICE_PARALLEL_THRESHOLD</code> rows, which is
-    <b>100_000</b>, and <code>run_slice</code> must return <code>Some</code>. When
-    either fails, the executor calls plain <code>run</code> over the whole dataset
+    <b>100_000</b>, and <code>sliced</code> must return <code>true</code>. When
+    either fails, the executor calls <code>run</code> over the whole dataset
     instead. Below the threshold, rayon's fan-out costs more than the work it
     distributes.
 </p>
@@ -579,12 +561,9 @@ pipeline.add_parallel_system(Score);</code></pre>
 </p>
 
 <p>
-    Two sharp edges here. The capability check calls
-    <code>run_slice(data, 0..0)</code> and throws the result away, so your
-    implementation must tolerate an <b>empty range</b> without panicking. And on
-    processor builds, where the <code>runtime</code> feature is off, registering a
-    <code>ParallelSystem</code> is an error at run time: that path accepts plain
-    <code>System</code> impls only.
+    One sharp edge: on processor builds, where the <code>engine</code> feature is off,
+    registering a <code>ParallelSystem</code> is an error at run time. That path accepts
+    plain <code>System</code> impls only.
 </p>
 
 <h2 id="wrong-meta">When meta() is wrong</h2>
@@ -598,7 +577,7 @@ pipeline.add_parallel_system(Score);</code></pre>
     every declared <code>(component, field)</code> pair is looked up in the
     dataset's <code>SchemaRegistry</code>. An unregistered component or an unknown
     field is a <code>SaciError::Configuration</code>, and
-    <code>read_component</code> / <code>write_component</code> fail the same way if
+    <code>reads_all</code> / <code>writes_all</code> fail the same way if
     the component is not registered. You get this from
     <code>Pipeline::validate()</code>, or from the first <code>run</code>, whichever
     comes first: both build the plan.
@@ -629,7 +608,7 @@ pipeline.add_parallel_system(Score);</code></pre>
     Over-declaring is the safe direction. Extra reads and writes only add edges,
     which costs stages and therefore wall-clock time, never correctness. If you are
     unsure whether a body touches a field, declare it, measure
-    <code>Pipeline::stage_count()</code>, and tighten afterwards.
+    <code>pipeline.plan()?.len()</code>, and tighten afterwards.
 </p>
 
 <h2 id="next">Next</h2>

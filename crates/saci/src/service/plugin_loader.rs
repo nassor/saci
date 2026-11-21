@@ -56,10 +56,10 @@ pub fn load_plugin_runtime(
     spec: &PluginSpec,
     base_dir: Option<&Path>,
 ) -> SaciResult<NativePluginRuntime> {
-    let library = spec.library.as_deref().ok_or_else(|| {
+    let library = spec.path.as_deref().ok_or_else(|| {
         SaciError::configuration(format!(
-            "plugin node '{}' declares no 'library'; supply a runtime through \
-             ServiceBuilder::with_runtime instead",
+            "plugin node '{}' declares no 'path'; supply a runtime through \
+             ServiceBuilder::runtime instead",
             spec.id
         ))
     })?;
@@ -97,7 +97,7 @@ mod tests {
         PluginSpec {
             id: "p".to_string(),
             name: None,
-            library: Some(library.to_string()),
+            path: Some(library.to_string()),
             sha3_256: sha3_256.map(str::to_string),
             config: HashMap::new(),
             window: None,
@@ -105,11 +105,11 @@ mod tests {
     }
 
     #[test]
-    fn test_no_library_declared_is_a_configuration_error() {
+    fn test_no_path_declared_is_a_configuration_error() {
         let missing = PluginSpec {
             id: "p".to_string(),
             name: None,
-            library: None,
+            path: None,
             sha3_256: None,
             config: HashMap::new(),
             window: None,
@@ -117,7 +117,7 @@ mod tests {
         let err = load_plugin_runtime(&missing, None).unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("'p'"), "{err}");
-        assert!(err.to_string().contains("with_runtime"), "{err}");
+        assert!(err.to_string().contains("ServiceBuilder::runtime"), "{err}");
     }
 
     #[test]

@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use rdkafka::ClientConfig;
 use serde::Deserialize;
 
-use crate::connector::ConfigValue;
 use crate::error::SaciError;
 
 /// How a topic is provisioned before the client uses it.
@@ -74,8 +73,8 @@ pub struct KafkaSourceConfig {
     /// source's `flow_control` block sets `enabled #false`, or the source is
     /// on a path to a windowed node, where the runner withholds the hint so
     /// this value alone decides how large an arrival is.
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
+    #[serde(default = "default_batch_rows")]
+    pub batch_rows: usize,
     /// How long one `next_batch` keeps collecting after its first message.
     #[serde(default = "default_poll_timeout_ms")]
     pub poll_timeout_ms: u64,
@@ -97,7 +96,7 @@ pub struct KafkaSourceConfig {
     #[serde(default)]
     pub key_field: Option<String>,
     /// Read the topic as a compacted keyed log: one point-in-time snapshot of
-    /// the latest value per key, chunked into `batch_size` batches, then EOF.
+    /// the latest value per key, chunked into `batch_rows` batches, then EOF.
     /// Committed group offsets are ignored, because a snapshot is always the
     /// whole state.
     #[serde(default)]
@@ -108,11 +107,6 @@ pub struct KafkaSourceConfig {
     /// librdkafka properties, applied after every default this crate sets.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
-    /// Declared Arrow schema. Parsed by `crate::connector::parse_schema_fields`
-    /// from the same table so the type vocabulary matches every other
-    /// connector; declared here only so `deny_unknown_fields` accepts the key.
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 /// Configuration for [`KafkaSink`](crate::connector::kafka::KafkaSink).
@@ -142,9 +136,6 @@ pub struct KafkaSinkConfig {
     /// librdkafka properties, applied after every default this crate sets.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
-    /// See [`KafkaSourceConfig::schema_fields`].
-    #[serde(default, deserialize_with = "crate::connector::one_or_many")]
-    pub schema_fields: Vec<ConfigValue>,
 }
 
 impl KafkaSourceConfig {
@@ -159,9 +150,9 @@ impl KafkaSourceConfig {
         validate_brokers(what, &self.brokers)?;
         validate_topic(what, &self.topic)?;
 
-        if self.batch_size == 0 {
+        if self.batch_rows == 0 {
             return Err(SaciError::configuration(format!(
-                "{what} config: 'batch_size' must be at least 1"
+                "{what} config: 'batch_rows' must be at least 1"
             )));
         }
         if !matches!(
@@ -219,7 +210,7 @@ impl KafkaSinkConfig {
         validate_topic(what, &self.topic)?;
 
         // Whether `key_field` is honourable depends on the format's message
-        // shape, which only the resolved transformer knows, so `KafkaSink::new`
+        // shape, which only the resolved codec knows, so `KafkaSink::new`
         // checks it rather than this method.
 
         if self.tombstones && self.key_field.is_none() {
@@ -309,7 +300,7 @@ fn default_provision_timeout_ms() -> u64 {
 fn default_group_id() -> String {
     "saci".to_string()
 }
-fn default_batch_size() -> usize {
+fn default_batch_rows() -> usize {
     1000
 }
 fn default_poll_timeout_ms() -> u64 {
@@ -341,7 +332,7 @@ mod tests {
     fn source_defaults_are_populated_when_omitted() {
         let cfg = source("");
         assert_eq!(cfg.group_id, "saci");
-        assert_eq!(cfg.batch_size, 1000);
+        assert_eq!(cfg.batch_rows, 1000);
         assert_eq!(cfg.poll_timeout_ms, 1000);
         assert_eq!(cfg.auto_offset_reset, "earliest");
         assert!(cfg.commit_on_drain);
@@ -403,11 +394,11 @@ mod tests {
     }
 
     #[test]
-    fn zero_batch_size_is_a_configuration_error() {
-        let cfg = source("batch_size 0\n");
-        let err = cfg.validate().expect_err("zero batch_size must fail");
+    fn zero_batch_rows_is_a_configuration_error() {
+        let cfg = source("batch_rows 0\n");
+        let err = cfg.validate().expect_err("zero batch_rows must fail");
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("'batch_size'"));
+        assert!(err.message().contains("'batch_rows'"));
     }
 
     #[test]

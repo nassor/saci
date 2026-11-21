@@ -73,9 +73,9 @@ A workflow drains one topic, processes the rows, and produces the result to anot
 
 ## What you need
 
-- A binary built with `--features server,connector-kafka`; Kafka is one of eight connectors that need a
-  specific service installed and running, so it sits outside the `server` feature, alongside NATS,
-  PostgreSQL, MariaDB, S3, Turso, ClickHouse and OpenTelemetry.
+- A binary built with `--features server,connector-kafka`; `kafka` is one of eight connectors that need a
+  specific service installed and running, so it sits outside the `server` feature, alongside `nats`,
+  `postgresql`, `mariadb`, `s3`, `turso`, `clickhouse` and `otlp-metrics`.
 - A reachable broker. One in a container is enough:
 
 Runs the same on Linux, macOS and Windows (PowerShell):
@@ -98,13 +98,13 @@ docker run --rm -p 9092:9092 -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,co
 
 ## 1. Declare the format
 
-A message is bytes, so both halves name a declared `transformer`.
+A message is bytes, so both halves name a declared `codec`.
 
 <div class="code">
 <div class="code-cap"><span>KDL</span><em>one JSON object per message</em></div>
 
 ```kdl
-transformer "orders_json" format="ndjson"
+codec "orders_json" format="ndjson"
 ```
 
 </div>
@@ -120,7 +120,7 @@ batch in one message, which rules out the keyed features below.
 <div class="code-cap"><span>KDL</span><em>named keys the connector interprets; everything else goes in properties</em></div>
 
 ```kdl
-source "orders_in" type="KafkaSource" component="Order" transformer="orders_json" {
+source "orders_in" connector="kafka" component="Order" codec="orders_json" {
     config {
         brokers "localhost:9092"
         topic "orders-raw"
@@ -131,7 +131,7 @@ source "orders_in" type="KafkaSource" component="Order" transformer="orders_json
 
         properties "session.timeout.ms"="45000"
 
-        schema_fields "id" type="int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
@@ -156,7 +156,7 @@ column the raw message key is written into.
 <div class="code-cap"><span>KDL</span><em>key_field renders one column into the message key</em></div>
 
 ```kdl
-sink "orders_out" type="KafkaSink" component="EnrichedOrder" transformer="orders_json" {
+sink "orders_out" connector="kafka" component="EnrichedOrder" codec="orders_json" {
     config {
         brokers "localhost:9092"
         topic "orders-enriched"
@@ -165,9 +165,9 @@ sink "orders_out" type="KafkaSink" component="EnrichedOrder" transformer="orders
 
         provision create=#true partitions=3 replication_factor=1
 
-        schema_fields "id" type="int64" nullable=#false
-        schema_fields "status" type="utf8" nullable=#true
-        schema_fields "total" type="float64" nullable=#true
+        field "id" type="int64" nullable=#false
+        field "status" type="utf8" nullable=#true
+        field "total" type="float64" nullable=#true
     }
 }
 ```
@@ -197,13 +197,13 @@ saci-service validate --config examples/configs/kafka.kdl --connectors-only
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
   workflow: customers (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
 
-Then run it. The config sets `run_mode kind="interval" interval_ms=2000`, so each topic is redrained
+Then run it. The config sets `run "interval" every_ms=2000`, so each topic is redrained
 every two seconds:
 
 Linux/macOS:
@@ -270,10 +270,10 @@ Source:
 | `compacted` | bool | `#false` | read the topic once as a keyed snapshot; needs `key_field` |
 | `key_field` | string | absent | the column the raw message key is written to, in compacted mode |
 | `commit_on_drain` | bool | `#true` | commit the previous poll's offsets at the start of the next one; `#false` commits none |
-| `batch_size` | integer | `1000` | rows per poll when the runner sends no admission hint |
+| `batch_rows` | integer | `1000` | rows per poll when the runner sends no admission hint |
 | `provision` | node | see below | topic creation |
 | `properties` | table | empty | any broker property, by its own name |
-| `schema_fields` | list of fields | required | the declared column list the messages decode against |
+| `field` | lines | required | the declared column list the messages decode against |
 
 Sink:
 
@@ -286,7 +286,7 @@ Sink:
 | `flush_timeout_ms` | integer | `30000` | how long a full producer queue may hold up one send, and the budget for the flush `finish` runs |
 | `provision` | node | see below | topic creation |
 | `properties` | table | empty | any broker property, by its own name |
-| `schema_fields` | list of fields | required | the schema the messages are written with |
+| `field` | lines | required | the schema the messages are written with |
 
 ### provision
 
@@ -314,9 +314,9 @@ A misspelled key anywhere in this `config` fails the parse and is named in the e
 |---|---|
 | `KafkaSource config: {e}` | fix the key the parse error names; unknown keys are rejected here |
 | `KafkaSource config: set the brokers with 'brokers', not properties.bootstrap.servers` | move the value to the `brokers` key |
-| `KafkaSource moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node |
-| `source type 'KafkaSource' never reaches EOF; it requires standalone mode with run_mode kind="stream"` | set `stop_at_end #true`, or `compacted #true`, or switch to `run_mode kind="stream"` |
-| `KafkaSink config: 'key_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro transformer, or drop `key_field` |
+| `KafkaSource moves bytes and needs a 'codec' key naming a declared codec` | add `codec="<id>"` to the node |
+| `source connector 'kafka' never reaches EOF; it requires standalone mode with run "stream"` | set `stop_at_end #true`, or `compacted #true`, or switch to `run "stream"` |
+| `KafkaSink config: 'key_field' needs a row-per-message format; '{format}' emits one message per batch` | name a csv, ndjson or avro codec, or drop `key_field` |
 | `KafkaSource config: 'compacted' needs a row-per-message format; '{format}' emits one message per batch, which carries no per-row key` | the same, for the source |
 | `KafkaSink: format '{format}' has no message codec` | name a format that encodes discrete messages |
 

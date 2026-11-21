@@ -1,0 +1,70 @@
+//! The peer connector: a service-to-service [`Source`] and [`Sink`] for
+//! SACI.
+//!
+//! [`Source`]: crate::io::Source
+//! [`Sink`]: crate::io::Sink
+//!
+//! [`PeerSink`] in one standalone service pushes `RecordBatch`es to
+//! [`PeerSource`] in another, the way a `ChannelSink` feeds a `ChannelSource`
+//! inside one process. The receiving side knows which service, workflow and
+//! sink node produced each batch, because a session opens with a hello that
+//! names all three, and it puts them in its own series labels and span
+//! fields.
+//!
+//! Arrow IPC is the wire format and there is no `codec` key: both ends
+//! are SACI services that already agree on `RecordBatch`es. [`wire`] owns the
+//! framing, and it is public so a foreign producer, or a harness standing in
+//! for one half, can speak it.
+//!
+//! The source is stream-only: it never reaches EOF, so `run "stream"` is the
+//! one mode that can drive it. The sink runs under every
+//! mode, and its `connect` key takes several addresses tried in order, so a
+//! set of downstream services acts as failover peers.
+//!
+//! ```kdl
+//! // Service A, pushing out.
+//! sink "forward" connector="peer" component="Tick" {
+//!     config {
+//!         connect "b.internal:9700" "b-standby.internal:9700"
+//!         handshake_timeout_ms 5000
+//!         field "v" type="int64" nullable=#false
+//!     }
+//! }
+//!
+//! // Service B, receiving.
+//! source "ingest" connector="peer" component="Tick" {
+//!     config {
+//!         bind "0.0.0.0:9700"
+//!         buffer 64
+//!         max_frame_bytes 8388608
+//!         field "v" type="int64" nullable=#false
+//!     }
+//! }
+//! ```
+//!
+//! ## Features
+//!
+//! - `tracing`: a `peer.send` span per written batch and a `peer.receive` span
+//!   per received one, both carrying the peer fields.
+//! - `trace-context`: carries the sender's span as a W3C `traceparent` and
+//!   adopts it on receipt, so the two spans join one trace under OTLP export.
+//! - `metrics`: the `saci_peer_source_*` series, labelled with the receiving
+//!   node and the peer that fed it.
+
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "peer";
+
+mod config;
+mod metrics;
+#[cfg(feature = "trace-context")]
+mod trace;
+
+pub mod factory;
+pub mod sink;
+pub mod source;
+pub mod wire;
+
+pub use config::{PeerSinkConfig, PeerSourceConfig};
+pub use factory::PeerConnector;
+pub use sink::PeerSink;
+pub use source::PeerSource;

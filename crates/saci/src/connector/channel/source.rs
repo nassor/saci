@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::SaciError;
-use crate::io::source::Source;
+use crate::io::Source;
 
 /// In-memory pull source backed by a tokio mpsc channel.
 ///
@@ -21,14 +21,14 @@ use crate::io::source::Source;
 /// use std::sync::Arc;
 /// use arrow_schema::{DataType, Field, Schema};
 /// use saci::connector::channel::ChannelSource;
-/// use saci::io::source::Source;
+/// use saci::io::Source;
 ///
 /// # #[tokio::main]
 /// # async fn main() {
 /// let schema = Arc::new(Schema::new(vec![
 ///     Field::new("x", DataType::Float32, false),
 /// ]));
-/// let (tx, mut src) = ChannelSource::new(schema.clone(), 4);
+/// let (mut src, tx) = ChannelSource::new(schema.clone(), 4);
 /// drop(tx); // signal EOF
 /// assert!(src.next_batch().await.unwrap().is_none());
 /// # }
@@ -43,15 +43,15 @@ impl ChannelSource {
     ///
     /// `buffer` is the mpsc channel capacity: batches that can queue without
     /// blocking the sender. Drop the sender to signal EOF.
-    pub fn new(schema: Arc<Schema>, buffer: usize) -> (mpsc::Sender<RecordBatch>, Self) {
+    pub fn new(schema: Arc<Schema>, buffer: usize) -> (Self, mpsc::Sender<RecordBatch>) {
         let (tx, rx) = mpsc::channel(buffer);
-        (tx, Self { rx, schema })
+        (Self { rx, schema }, tx)
     }
 
     /// Wrap an existing receiver half, paired with a sender resolved
     /// elsewhere — the [`ChannelRegistry`](crate::connector::channel::registry::ChannelRegistry)
     /// bridge's source-side constructor.
-    pub fn from_receiver(schema: Arc<Schema>, rx: mpsc::Receiver<RecordBatch>) -> Self {
+    pub fn with_receiver(schema: Arc<Schema>, rx: mpsc::Receiver<RecordBatch>) -> Self {
         Self { rx, schema }
     }
 }
@@ -66,7 +66,9 @@ impl Source for ChannelSource {
         match self.rx.recv().await {
             None => Ok(None),
             Some(batch) => {
-                if batch.schema_ref().fields() != self.schema.fields() {
+                if !Arc::ptr_eq(batch.schema_ref(), &self.schema)
+                    && batch.schema_ref().fields() != self.schema.fields()
+                {
                     return Err(SaciError::generic(format!(
                         "ChannelSource: received batch with schema {:?}, expected {:?}",
                         batch.schema_ref(),
@@ -96,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_source_eof_on_sender_drop() {
-        let (tx, mut src) = ChannelSource::new(make_schema(), 4);
+        let (mut src, tx) = ChannelSource::new(make_schema(), 4);
         drop(tx);
         assert!(src.next_batch().await.unwrap().is_none());
     }
@@ -104,7 +106,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_source_yields_batches_in_order() {
         let schema = make_schema();
-        let (tx, mut src) = ChannelSource::new(schema.clone(), 8);
+        let (mut src, tx) = ChannelSource::new(schema.clone(), 8);
 
         for i in 0i32..5 {
             tx.send(make_batch(schema.clone(), &[i])).await.unwrap();
@@ -128,7 +130,7 @@ mod tests {
     async fn test_channel_source_schema_mismatch_returns_error() {
         let schema = make_schema();
         let wrong_schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
-        let (tx, mut src) = ChannelSource::new(schema.clone(), 4);
+        let (mut src, tx) = ChannelSource::new(schema.clone(), 4);
 
         let arr: Arc<dyn arrow_array::Array> =
             Arc::new(arrow_array::Float64Array::from(vec![1.0f64]));
@@ -142,10 +144,26 @@ mod tests {
         assert!(msg.contains("ChannelSource"));
     }
 
+    /// The schema `Arc` is compared first as a shortcut, so a batch built on
+    /// its own equal copy of the schema must still pass the field comparison
+    /// rather than be refused for not being the same allocation.
+    #[tokio::test]
+    async fn test_channel_source_accepts_an_equal_schema_in_a_distinct_arc() {
+        let (mut src, tx) = ChannelSource::new(make_schema(), 4);
+        let copy = make_schema();
+        assert!(!Arc::ptr_eq(&copy, &src.schema()));
+
+        tx.send(make_batch(copy, &[7])).await.unwrap();
+        drop(tx);
+
+        let batch = src.next_batch().await.unwrap().expect("one batch");
+        assert_eq!(batch.num_rows(), 1);
+    }
+
     #[tokio::test]
     async fn test_channel_source_schema_accessor() {
         let schema = make_schema();
-        let (_tx, src) = ChannelSource::new(schema.clone(), 1);
+        let (src, _tx) = ChannelSource::new(schema.clone(), 1);
         assert_eq!(src.schema().fields().len(), 1);
         assert_eq!(src.schema().field(0).name(), "v");
     }

@@ -1,4 +1,4 @@
-//! [`Source`]: pull-based batch ingestion into a [`Dataset`].
+//! [`Source`]: pull-based batch ingestion into a [`Dataset`](crate::dataset::Dataset).
 //!
 //! A `Source` produces [`RecordBatch`]es on demand. The pipeline calls
 //! [`next_batch`](Source::next_batch) in a loop until `None` is returned
@@ -13,7 +13,6 @@ use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 
-use crate::dataset::Dataset;
 use crate::error::SaciError;
 
 /// Pull-based batch source for Arrow data.
@@ -85,31 +84,4 @@ impl<S: Source + ?Sized> Source for Box<S> {
     async fn finish(&mut self) -> Result<(), SaciError> {
         (**self).finish().await
     }
-}
-
-/// Drain all batches from `source` into `dataset` under `component_name`.
-///
-/// The component must already be registered (via
-/// [`register_component`](Dataset::register_component) or
-/// [`register_raw_component`](Dataset::register_raw_component)) before
-/// calling this function.
-///
-/// Returns the total number of rows appended.
-///
-/// # Errors
-///
-/// Returns the first error from `source.next_batch()` or from
-/// [`Dataset::append_record_batch`].
-pub async fn drain_into_dataset<S: Source + ?Sized>(
-    source: &mut S,
-    dataset: &mut Dataset,
-    component_name: &'static str,
-) -> Result<usize, SaciError> {
-    let mut total = 0usize;
-    while let Some(batch) = source.next_batch().await? {
-        let n = batch.num_rows();
-        dataset.append_record_batch(component_name, batch)?;
-        total += n;
-    }
-    Ok(total)
 }

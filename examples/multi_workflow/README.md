@@ -1,8 +1,8 @@
 # Multi-workflow: one stream routed across two workflows
 
-A service can declare several workflows in one config. Each has its own nodes, links, sources and sinks, and all of them run concurrently in one process. A `link` never leaves its workflow, so the only crossing is an in-process channel: a `ChannelSink` in one workflow and a `ChannelSource` in another that share a channel `name`. The workflow and channel keys are on the [workflows config page](../../docs/content/service/config/workflows.md) and the [channel connector page](../../docs/content/service/connectors/channel.md). This file is the commands.
+A service can declare several workflows in one config. Each has its own nodes, links, sources and sinks, and all of them run concurrently in one process. A `link` never leaves its workflow, so the only crossing is an in-process channel: a `channel` sink in one workflow and a `channel` source in another that share a channel `name`. The workflow and channel keys are on the [workflows config page](../../docs/content/service/config/workflows.md) and the [channel connector page](../../docs/content/service/connectors/channel.md). This file is the commands.
 
-<img src="../../docs/static/multi-workflow-topology.svg" alt="Two workflows in one service. The route workflow reads NATS multi.orders and a WASM router sends rush batches to the PostgreSQL sink rush_sales and standard batches to a ChannelSink named standard. That channel feeds a ChannelSource in the settle workflow, which also reads NATS multi.offsets. Both feed a WASM tumbling window processor that writes window_totals in PostgreSQL." width="660">
+<img src="../../docs/static/multi-workflow-topology.svg" alt="Two workflows in one service. The route workflow reads NATS multi.orders and a WASM router sends rush batches to the PostgreSQL sink rush_sales and standard batches to a channel sink named standard. That channel feeds a channel source in the settle workflow, which also reads NATS multi.offsets. Both feed a WASM tumbling window processor that writes window_totals in PostgreSQL." width="660">
 
 `multi_workflow.kdl` is a long-running `saci-service` stream:
 

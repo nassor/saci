@@ -1,9 +1,10 @@
-//! Factory registry for the SACI service layer.
+//! Connector and codec registry for the SACI service layer.
 //!
-//! The registry maps string type names (from the config file) to factory
-//! objects that construct concrete [`Source`](crate::io::source::Source)
-//! and [`Sink`](crate::io::sink::Sink) instances, and format names to the
-//! [`TransformerFactory`] that decodes the bytes those connectors move.
+//! The registry maps connector names (the `connector` property of a config's
+//! `source` and `sink` nodes) to the [`Connector`] objects that construct
+//! concrete [`Source`](crate::io::Source) and [`Sink`](crate::io::Sink)
+//! instances, and format names to the [`CodecFactory`] that decodes the bytes
+//! those connectors move.
 //!
 //! The runtime itself is supplied directly as a `Box<dyn PipelineRuntime>` or
 //! loaded from a WASM module via
@@ -14,25 +15,26 @@
 //! ```rust
 //! # #[cfg(feature = "service")]
 //! # {
-//! use saci::service::registry::Registry;
+//! use saci::service::Registry;
 //!
-//! let mut registry = Registry::new();
-//! // register_source / register_sink / register_transformer go here
-//! assert_eq!(registry.source_count(), 0);
-//! assert_eq!(registry.transformer_count(), 0);
+//! let registry = Registry::new();
+//! // `Registry::register` and `Registry::register_codec` go here
+//! assert_eq!(registry.len(), 0);
+//! assert_eq!(registry.codec_count(), 0);
 //! # }
 //! ```
 
 use std::collections::HashMap;
 
-pub use crate::connector::{SinkFactory, SourceFactory};
-pub use crate::transformer::{Transformer, TransformerFactory, TransformerRegistry};
+pub use crate::codec::{Codec, CodecFactory, CodecRegistry};
+pub use crate::connector::{Connector, Rebuild, Role};
 
-/// Central registry mapping type names to their IO factories.
+/// Central registry mapping connector names to their [`Connector`]s and
+/// format names to their codec factories.
 ///
-/// Factories are registered at startup, before any config is loaded, and
-/// looked up by the `type_name` string from the config. The runtime is
-/// supplied separately through [`ServiceBuilder::with_runtime`](super::ServiceBuilder::with_runtime) or loaded from
+/// Connectors are registered at startup, before any config is loaded, and
+/// looked up by the `connector` name from the config. The runtime is
+/// supplied separately through [`ServiceBuilder::runtime`](super::ServiceBuilder::runtime) or loaded from
 /// a WASM module.
 ///
 /// ## Example
@@ -40,19 +42,17 @@ pub use crate::transformer::{Transformer, TransformerFactory, TransformerRegistr
 /// ```rust
 /// # #[cfg(feature = "service")]
 /// # {
-/// use saci::service::registry::Registry;
+/// use saci::service::Registry;
 ///
 /// let registry = Registry::new();
-/// assert_eq!(registry.source_count(), 0);
-/// assert_eq!(registry.sink_count(), 0);
-/// assert_eq!(registry.transformer_count(), 0);
+/// assert_eq!(registry.len(), 0);
+/// assert_eq!(registry.codec_count(), 0);
 /// # }
 /// ```
 #[derive(Default)]
 pub struct Registry {
-    sources: HashMap<String, Box<dyn SourceFactory>>,
-    sinks: HashMap<String, Box<dyn SinkFactory>>,
-    transformers: TransformerRegistry,
+    connectors: HashMap<&'static str, Box<dyn Connector>>,
+    codecs: CodecRegistry,
 }
 
 impl Registry {
@@ -61,82 +61,77 @@ impl Registry {
         Self::default()
     }
 
-    /// Register a source factory.
+    /// Register a connector.
     ///
-    /// If a factory with the same `type_name` is already registered, it is
-    /// silently replaced.
-    pub fn register_source<F: SourceFactory>(&mut self, factory: F) -> &mut Self {
-        self.sources
-            .insert(factory.type_name().to_string(), Box::new(factory));
+    /// If a connector with the same [`name`](Connector::name) is already
+    /// registered, it is silently replaced.
+    pub fn register<C: Connector>(&mut self, connector: C) -> &mut Self {
+        self.connectors
+            .insert(connector.name(), Box::new(connector));
         self
     }
 
-    /// Register a sink factory.
-    ///
-    /// If a factory with the same `type_name` is already registered, it is
-    /// silently replaced.
-    pub fn register_sink<F: SinkFactory>(&mut self, factory: F) -> &mut Self {
-        self.sinks
-            .insert(factory.type_name().to_string(), Box::new(factory));
-        self
-    }
-
-    /// Register a transformer factory.
+    /// Register a codec factory.
     ///
     /// If a factory with the same `format_name` is already registered, it is
     /// silently replaced.
-    pub fn register_transformer<F: TransformerFactory>(&mut self, factory: F) -> &mut Self {
-        self.transformers.register(factory);
+    pub fn register_codec<F: CodecFactory>(&mut self, factory: F) -> &mut Self {
+        self.codecs.register(factory);
         self
     }
 
-    /// Look up a source factory by type name.
-    pub fn source(&self, type_name: &str) -> Option<&dyn SourceFactory> {
-        self.sources.get(type_name).map(|f| f.as_ref())
+    /// Look up a connector by name.
+    pub fn connector(&self, name: &str) -> Option<&dyn Connector> {
+        self.connectors.get(name).map(|c| c.as_ref())
     }
 
-    /// Look up a sink factory by type name.
-    pub fn sink(&self, type_name: &str) -> Option<&dyn SinkFactory> {
-        self.sinks.get(type_name).map(|f| f.as_ref())
-    }
-
-    /// Registered source type names, sorted.
+    /// Registered connector names, sorted.
     ///
-    /// The counterpart of [`TransformerRegistry::formats`], and what lets a
+    /// The counterpart of [`CodecRegistry::names`], and what lets a
     /// test compare the built-in table against what actually registered.
-    pub fn source_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.sources.keys().map(String::as_str).collect();
+    pub fn names(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = self.connectors.keys().copied().collect();
         names.sort_unstable();
         names
     }
 
-    /// Registered sink type names, sorted.
-    pub fn sink_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.sinks.keys().map(String::as_str).collect();
+    /// Names of the registered connectors that serve `role`, sorted like
+    /// [`names`](Self::names).
+    ///
+    /// A connector serves a role when its [`Connector::roles`] contains it, so
+    /// `names_for(Role::Source)` is what a config editor offers for a `source`
+    /// node's `connector` property.
+    pub fn names_for(&self, role: Role) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = self
+            .connectors
+            .iter()
+            .filter(|(_, connector)| connector.roles().contains(&role))
+            .map(|(name, _)| *name)
+            .collect();
         names.sort_unstable();
         names
     }
 
-    /// The transformer registry a [`ConnectorContext`] is built from.
+    /// The codec registry a [`ConnectorContext`] is built from.
     ///
     /// [`ConnectorContext`]: crate::connector::ConnectorContext
-    pub fn transformers(&self) -> &TransformerRegistry {
-        &self.transformers
+    pub fn codecs(&self) -> &CodecRegistry {
+        &self.codecs
     }
 
-    /// Returns the number of registered source factories.
-    pub fn source_count(&self) -> usize {
-        self.sources.len()
+    /// Returns the number of registered connectors.
+    pub fn len(&self) -> usize {
+        self.connectors.len()
     }
 
-    /// Returns the number of registered sink factories.
-    pub fn sink_count(&self) -> usize {
-        self.sinks.len()
+    /// True when no connector is registered.
+    pub fn is_empty(&self) -> bool {
+        self.connectors.is_empty()
     }
 
-    /// Returns the number of registered transformer factories.
-    pub fn transformer_count(&self) -> usize {
-        self.transformers.count()
+    /// Returns the number of registered codec factories.
+    pub fn codec_count(&self) -> usize {
+        self.codecs.len()
     }
 }
 
@@ -148,59 +143,35 @@ mod tests {
     use crate::connector::{ConfigMap, ConnectorContext};
     use crate::error::SaciError;
     #[cfg(feature = "connector-channel")]
-    use crate::io::{sink::Sink, source::Source};
+    use crate::error::SaciResult;
+    #[cfg(feature = "connector-channel")]
+    use crate::io::{Sink, Source};
     #[cfg(feature = "connector-channel")]
     use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
     #[cfg(feature = "connector-channel")]
-    struct TestSourceFactory;
+    struct TestConnector;
     #[cfg(feature = "connector-channel")]
-    impl SourceFactory for TestSourceFactory {
-        fn type_name(&self) -> &'static str {
-            "TestSource"
+    impl Connector for TestConnector {
+        fn name(&self) -> &'static str {
+            "test"
         }
-        fn build(
+        fn source(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
-        ) -> Result<Box<dyn Source>, SaciError> {
+        ) -> SaciResult<Box<dyn Source>> {
             use crate::connector::channel::ChannelSource;
             let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-            let (_tx, src) = ChannelSource::new(schema, 1);
+            let (src, _tx) = ChannelSource::new(schema, 1);
             Ok(Box::new(src))
         }
-    }
-
-    struct TestTransformer;
-    impl Transformer for TestTransformer {
-        fn format(&self) -> &'static str {
-            "test-format"
-        }
-    }
-
-    struct TestTransformerFactory;
-    impl TransformerFactory for TestTransformerFactory {
-        fn format_name(&self) -> &'static str {
-            "test-format"
-        }
-        fn build(&self, _options: &ConfigValue) -> Result<Arc<dyn Transformer>, SaciError> {
-            Ok(Arc::new(TestTransformer))
-        }
-    }
-
-    #[cfg(feature = "connector-channel")]
-    struct TestSinkFactory;
-    #[cfg(feature = "connector-channel")]
-    impl SinkFactory for TestSinkFactory {
-        fn type_name(&self) -> &'static str {
-            "TestSink"
-        }
-        fn build(
+        fn sink(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
-        ) -> Result<Box<dyn Sink>, SaciError> {
+        ) -> SaciResult<Box<dyn Sink>> {
             use crate::connector::channel::ChannelSink;
             let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
             let (sink, _rx) = ChannelSink::new(schema, 1);
@@ -208,61 +179,81 @@ mod tests {
         }
     }
 
+    /// Serves only sinks: the source half is the trait's default.
     #[cfg(feature = "connector-channel")]
-    #[test]
-    fn test_register_and_lookup_source_factory() {
-        let mut reg = Registry::new();
-        reg.register_source(TestSourceFactory);
-        assert!(reg.source("TestSource").is_some());
-        assert!(reg.source("Missing").is_none());
+    struct SinkOnlyConnector;
+    #[cfg(feature = "connector-channel")]
+    impl Connector for SinkOnlyConnector {
+        fn name(&self) -> &'static str {
+            "sink-only"
+        }
+        fn roles(&self) -> &'static [Role] {
+            &[Role::Sink]
+        }
+    }
+
+    struct TestCodec;
+    impl Codec for TestCodec {
+        fn format(&self) -> &'static str {
+            "test-format"
+        }
+    }
+
+    struct TestCodecFactory;
+    impl CodecFactory for TestCodecFactory {
+        fn format_name(&self) -> &'static str {
+            "test-format"
+        }
+        fn build(&self, _options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
+            Ok(Arc::new(TestCodec))
+        }
     }
 
     #[cfg(feature = "connector-channel")]
     #[test]
-    fn test_register_and_lookup_sink_factory() {
+    fn test_register_and_lookup_connector() {
         let mut reg = Registry::new();
-        reg.register_sink(TestSinkFactory);
-        assert!(reg.sink("TestSink").is_some());
-        assert!(reg.sink("Missing").is_none());
+        reg.register(TestConnector);
+        assert!(reg.connector("test").is_some());
+        assert!(reg.connector("Missing").is_none());
+        assert_eq!(reg.names(), vec!["test"]);
     }
 
     #[test]
-    fn test_register_and_lookup_transformer_factory() {
+    fn test_register_and_lookup_codec_factory() {
         let mut reg = Registry::new();
-        reg.register_transformer(TestTransformerFactory);
-        assert!(reg.transformers().get("test-format").is_some());
-        assert!(reg.transformers().get("missing").is_none());
+        reg.register_codec(TestCodecFactory);
+        assert!(reg.codecs().get("test-format").is_some());
+        assert!(reg.codecs().get("missing").is_none());
     }
 
     #[cfg(feature = "connector-channel")]
     #[test]
     fn test_registry_counts() {
         let mut reg = Registry::new();
-        assert_eq!(reg.source_count(), 0);
-        assert_eq!(reg.sink_count(), 0);
-        assert_eq!(reg.transformer_count(), 0);
-        reg.register_source(TestSourceFactory);
-        assert_eq!(reg.source_count(), 1);
-        reg.register_sink(TestSinkFactory);
-        assert_eq!(reg.sink_count(), 1);
-        reg.register_transformer(TestTransformerFactory);
-        assert_eq!(reg.transformer_count(), 1);
+        assert_eq!(reg.len(), 0);
+        assert!(reg.is_empty());
+        assert_eq!(reg.codec_count(), 0);
+        reg.register(TestConnector);
+        assert_eq!(reg.len(), 1);
+        reg.register_codec(TestCodecFactory);
+        assert_eq!(reg.codec_count(), 1);
     }
 
     #[cfg(feature = "connector-channel")]
     #[test]
     fn test_duplicate_registration_replaces() {
         let mut reg = Registry::new();
-        reg.register_source(TestSourceFactory);
-        reg.register_source(TestSourceFactory);
-        assert_eq!(reg.source_count(), 1);
+        reg.register(TestConnector);
+        reg.register(TestConnector);
+        assert_eq!(reg.len(), 1);
     }
 
     #[cfg(feature = "connector-channel")]
     #[test]
-    fn test_source_factory_builds_source() {
-        let src = TestSourceFactory
-            .build(
+    fn test_connector_builds_source() {
+        let src = TestConnector
+            .source(
                 &ConfigValue::Object(ConfigMap::new()),
                 &ConnectorContext::new(None),
             )
@@ -272,9 +263,9 @@ mod tests {
 
     #[cfg(feature = "connector-channel")]
     #[test]
-    fn test_sink_factory_builds_sink() {
-        let sink = TestSinkFactory
-            .build(
+    fn test_connector_builds_sink() {
+        let sink = TestConnector
+            .sink(
                 &ConfigValue::Object(ConfigMap::new()),
                 &ConnectorContext::new(None),
             )
@@ -282,11 +273,38 @@ mod tests {
         assert_eq!(sink.schema().fields().len(), 1);
     }
 
+    #[cfg(feature = "connector-channel")]
+    #[test]
+    fn test_a_missing_role_is_a_configuration_error() {
+        let err = SinkOnlyConnector
+            .source(
+                &ConfigValue::Object(ConfigMap::new()),
+                &ConnectorContext::new(None),
+            )
+            .err()
+            .expect("a sink-only connector has no source");
+        assert!(
+            err.to_string()
+                .contains("connector 'sink-only' has no source"),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "connector-channel")]
+    #[test]
+    fn test_names_for_filters_by_role_and_sorts() {
+        let mut reg = Registry::new();
+        reg.register(TestConnector);
+        reg.register(SinkOnlyConnector);
+        assert_eq!(reg.names_for(Role::Source), vec!["test"]);
+        assert_eq!(reg.names_for(Role::Sink), vec!["sink-only", "test"]);
+        assert!(Registry::new().names_for(Role::Source).is_empty());
+    }
+
     #[test]
     fn test_default_registry_is_empty() {
         let reg = Registry::default();
-        assert_eq!(reg.source_count(), 0);
-        assert_eq!(reg.sink_count(), 0);
-        assert_eq!(reg.transformer_count(), 0);
+        assert_eq!(reg.len(), 0);
+        assert_eq!(reg.codec_count(), 0);
     }
 }

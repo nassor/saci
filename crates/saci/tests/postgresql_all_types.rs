@@ -32,8 +32,8 @@ use saci::connector::from_kdl_str;
 use saci::connector::postgresql::{
     PostgresSink, PostgresSinkConfig, PostgresSource, PostgresSourceConfig,
 };
-use saci::io::sink::Sink;
-use saci::io::source::Source;
+use saci::io::Sink;
+use saci::io::Source;
 use serde::Deserialize as _;
 use tokio_postgres::Client;
 
@@ -419,13 +419,13 @@ INSERT INTO t_scalars_in VALUES
 "#;
 
 const SCALARS_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"flag\" type=\"boolean\"
-schema_fields \"small\" type=\"int16\"
-schema_fields \"medium\" type=\"int32\"
-schema_fields \"big\" type=\"int64\"
-schema_fields \"r\" type=\"float32\"
-schema_fields \"d\" type=\"float64\"
+field \"id\" type=\"int64\" nullable=#false
+field \"flag\" type=\"boolean\"
+field \"small\" type=\"int16\"
+field \"medium\" type=\"int32\"
+field \"big\" type=\"int64\"
+field \"r\" type=\"float32\"
+field \"d\" type=\"float64\"
 ";
 
 fn assert_scalars(batches: &[RecordBatch]) {
@@ -534,10 +534,10 @@ INSERT INTO t_numeric_in VALUES
 "#;
 
 const NUMERIC_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"unc\" type=\"utf8\"
-schema_fields \"fixed\" type=\"decimal128\" precision=12 scale=2
-schema_fields \"price\" type=\"decimal128\" precision=19 scale=2
+field \"id\" type=\"int64\" nullable=#false
+field \"unc\" type=\"utf8\"
+field \"fixed\" type=\"decimal128\" precision=12 scale=2
+field \"price\" type=\"decimal128\" precision=19 scale=2
 ";
 
 #[tokio::test]
@@ -594,11 +594,11 @@ INSERT INTO t_temporal_in VALUES
 "#;
 
 const TEMPORAL_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"d\" type=\"date32\"
-schema_fields \"t\" type=\"time64_micros\"
-schema_fields \"ts\" type=\"timestamp_micros\"
-schema_fields \"tstz\" type=\"timestamp_micros_utc\"
+field \"id\" type=\"int64\" nullable=#false
+field \"d\" type=\"date32\"
+field \"t\" type=\"time64_micros\"
+field \"ts\" type=\"timestamp_micros\"
+field \"tstz\" type=\"timestamp_micros_utc\"
 ";
 
 fn assert_temporal(batches: &[RecordBatch]) {
@@ -667,7 +667,7 @@ async fn temporal_types_round_trip_and_cdc_logical_agree() {
         .expect("bc ddl");
     let mut bc_src = source(
         &pg.dsn(),
-        "name \"temporal_bc\"\nbatch_rows 100\n\nmode kind=\"cdc_logical\" slot=\"temporal_bc_slot\" publication=\"temporal_bc_pub\" table=\"t_temporal_bc\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"d\" type=\"date32\"",
+        "name \"temporal_bc\"\nbatch_rows 100\n\nmode kind=\"cdc_logical\" slot=\"temporal_bc_slot\" publication=\"temporal_bc_pub\" table=\"t_temporal_bc\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"d\" type=\"date32\"",
     );
     assert!(drain(&mut bc_src).await.is_empty(), "slot creation cycle");
     client
@@ -718,8 +718,8 @@ INSERT INTO t_interval_in VALUES
 "#;
 
 const INTERVAL_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"iv\" type=\"interval_month_day_nano\"
+field \"id\" type=\"int64\" nullable=#false
+field \"iv\" type=\"interval_month_day_nano\"
 ";
 
 fn assert_interval(batches: &[RecordBatch]) {
@@ -803,13 +803,13 @@ INSERT INTO t_text_in VALUES
 "#;
 
 const TEXT_FAMILY_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"t\" type=\"utf8\"
-schema_fields \"vc\" type=\"utf8\"
-schema_fields \"bp\" type=\"utf8\"
-schema_fields \"nm\" type=\"utf8\"
-schema_fields \"ch\" type=\"utf8\" pg_type=\"\\\"char\\\"\"
-schema_fields \"ci\" type=\"utf8\" pg_type=\"citext\"
+field \"id\" type=\"int64\" nullable=#false
+field \"t\" type=\"utf8\"
+field \"vc\" type=\"utf8\"
+field \"bp\" type=\"utf8\"
+field \"nm\" type=\"utf8\"
+field \"ch\" type=\"utf8\" native_type=\"\\\"char\\\"\"
+field \"ci\" type=\"utf8\" native_type=\"citext\"
 ";
 
 #[tokio::test]
@@ -886,7 +886,7 @@ async fn a_high_bit_char_value_survives_the_sink_cast() {
         .await
         .expect("ddl");
 
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"ch\" type=\"utf8\" pg_type=\"\\\"char\\\"\"";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\nfield \"ch\" type=\"utf8\" native_type=\"\\\"char\\\"\"";
     let mut src = source(
         &pg.dsn(),
         &format!(
@@ -923,11 +923,11 @@ INSERT INTO t_json_in VALUES
 "#;
 
 const JSON_FAMILY_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"j\" type=\"json\"
-schema_fields \"jb\" type=\"json\"
-schema_fields \"jp\" type=\"utf8\"
-schema_fields \"x\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"j\" type=\"json\"
+field \"jb\" type=\"json\"
+field \"jp\" type=\"utf8\"
+field \"x\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -995,11 +995,11 @@ INSERT INTO t_network_in VALUES
 "#;
 
 const NETWORK_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"ip\" type=\"utf8\"
-schema_fields \"net\" type=\"utf8\"
-schema_fields \"mac\" type=\"utf8\"
-schema_fields \"m8\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"ip\" type=\"utf8\"
+field \"net\" type=\"utf8\"
+field \"mac\" type=\"utf8\"
+field \"m8\" type=\"utf8\"
 ";
 
 fn assert_network(batches: &[RecordBatch], expected_ip: &[Option<String>]) {
@@ -1093,14 +1093,14 @@ INSERT INTO t_geometric_in VALUES
 "#;
 
 const GEOMETRIC_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"pt\" type=\"utf8\"
-schema_fields \"ln\" type=\"utf8\"
-schema_fields \"seg\" type=\"utf8\"
-schema_fields \"bx\" type=\"utf8\"
-schema_fields \"p_c\" type=\"utf8\"
-schema_fields \"poly\" type=\"utf8\"
-schema_fields \"c\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"pt\" type=\"utf8\"
+field \"ln\" type=\"utf8\"
+field \"seg\" type=\"utf8\"
+field \"bx\" type=\"utf8\"
+field \"p_c\" type=\"utf8\"
+field \"poly\" type=\"utf8\"
+field \"c\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -1157,9 +1157,9 @@ INSERT INTO t_bit_in VALUES
 "#;
 
 const BIT_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"b\" type=\"utf8\"
-schema_fields \"vb\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"b\" type=\"utf8\"
+field \"vb\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -1211,12 +1211,12 @@ INSERT INTO t_ranges_in VALUES
 "#;
 
 const RANGES_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"ir\" type=\"utf8\"
-schema_fields \"nr\" type=\"utf8\"
-schema_fields \"dr\" type=\"utf8\"
-schema_fields \"tsr\" type=\"utf8\"
-schema_fields \"tstzr\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"ir\" type=\"utf8\"
+field \"nr\" type=\"utf8\"
+field \"dr\" type=\"utf8\"
+field \"tsr\" type=\"utf8\"
+field \"tstzr\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -1276,9 +1276,9 @@ INSERT INTO t_multiranges_in VALUES
 "#;
 
 const MULTIRANGES_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"im\" type=\"utf8\"
-schema_fields \"nm\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"im\" type=\"utf8\"
+field \"nm\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -1339,9 +1339,9 @@ INSERT INTO t_tsvector_in VALUES
 "#;
 
 const TSVECTOR_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"tv\" type=\"utf8\"
-schema_fields \"tq\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"tv\" type=\"utf8\"
+field \"tq\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -1402,11 +1402,11 @@ INSERT INTO t_lsn_oid_in VALUES
 "#;
 
 const LSN_OID_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"lsn\" type=\"utf8\"
-schema_fields \"o\" type=\"int64\"
-schema_fields \"rc\" type=\"utf8\"
-schema_fields \"rt\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"lsn\" type=\"utf8\"
+field \"o\" type=\"int64\"
+field \"rc\" type=\"utf8\"
+field \"rt\" type=\"utf8\"
 ";
 
 #[tokio::test]
@@ -1475,9 +1475,9 @@ INSERT INTO t_uuidbytea_in VALUES
 "#;
 
 const UUID_BYTEA_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"u\" type=\"uuid\"
-schema_fields \"b\" type=\"binary\"
+field \"id\" type=\"int64\" nullable=#false
+field \"u\" type=\"uuid\"
+field \"b\" type=\"binary\"
 ";
 
 #[tokio::test]
@@ -1558,8 +1558,8 @@ INSERT INTO t_hstore_in VALUES
 "#;
 
 const HSTORE_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"h\" type=\"utf8\" pg_type=\"hstore\"
+field \"id\" type=\"int64\" nullable=#false
+field \"h\" type=\"utf8\" native_type=\"hstore\"
 ";
 
 #[tokio::test]
@@ -1609,10 +1609,10 @@ INSERT INTO t_enumdom_in VALUES
 "#;
 
 const ENUM_DOMAIN_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"m\" type=\"utf8\" pg_type=\"public.mood\"
-schema_fields \"p\" type=\"int32\" pg_type=\"public.posint\"
-schema_fields \"fn\" type=\"utf8\" pg_type=\"public.full_name\"
+field \"id\" type=\"int64\" nullable=#false
+field \"m\" type=\"utf8\" native_type=\"public.mood\"
+field \"p\" type=\"int32\" native_type=\"public.posint\"
+field \"fn\" type=\"utf8\" native_type=\"public.full_name\"
 ";
 
 #[tokio::test]
@@ -1670,10 +1670,10 @@ INSERT INTO t_arrays_in VALUES
 "#;
 
 const ARRAYS_FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"nums\" type=\"list\" item=\"int32\"
-schema_fields \"tags\" type=\"list\" item=\"utf8\"
-schema_fields \"nums2\" type=\"list\" item=\"utf8\" pg_type=\"int4[]\"
+field \"id\" type=\"int64\" nullable=#false
+field \"nums\" type=\"list\" item=\"int32\"
+field \"tags\" type=\"list\" item=\"utf8\"
+field \"nums2\" type=\"list\" item=\"utf8\" native_type=\"int4[]\"
 ";
 
 #[tokio::test]
@@ -1722,7 +1722,7 @@ async fn arrays_round_trip_native_and_forced_text_element() {
             None,
             Some(vec![]),
         ],
-        "item = \"utf8\" over a non-text element (int4[]) needs pg_type naming the array"
+        "item = \"utf8\" over a non-text element (int4[]) needs native_type naming the array"
     );
 
     let mut snk = sink(
@@ -1741,7 +1741,7 @@ async fn arrays_round_trip_native_and_forced_text_element() {
 
 // ============================================================= forced cases
 
-/// Matrix case: `type = "utf8" pg_type = "jsonb"`, on both halves.
+/// Matrix case: `type = "utf8" native_type = "jsonb"`, on both halves.
 #[tokio::test]
 async fn forced_utf8_pg_type_jsonb_both_halves() {
     let Some(pg) = common::try_start().await else {
@@ -1757,7 +1757,7 @@ async fn forced_utf8_pg_type_jsonb_both_halves() {
         .await
         .expect("ddl");
 
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"payload\" type=\"utf8\" pg_type=\"jsonb\"";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\nfield \"payload\" type=\"utf8\" native_type=\"jsonb\"";
     let mut src = source(
         &pg.dsn(),
         &format!(
@@ -1784,8 +1784,8 @@ async fn forced_utf8_pg_type_jsonb_both_halves() {
     .await;
 }
 
-/// Matrix case: `type = "utf8" pg_type = "int8"` reads a bigint as text, and
-/// the same declaration with no `pg_type` is refused once the connection
+/// Matrix case: `type = "utf8" native_type = "int8"` reads a bigint as text, and
+/// the same declaration with no `native_type` is refused once the connection
 /// opens and discovers the column is not `utf8`-default.
 #[tokio::test]
 async fn forced_utf8_pg_type_int8_and_bare_utf8_is_refused_at_first_connect() {
@@ -1803,7 +1803,7 @@ async fn forced_utf8_pg_type_int8_and_bare_utf8_is_refused_at_first_connect() {
 
     let mut ok_src = source(
         &pg.dsn(),
-        "name \"forced_int8\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_int8\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"big\" type=\"utf8\" pg_type=\"int8\"",
+        "name \"forced_int8\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_int8\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"big\" type=\"utf8\" native_type=\"int8\"",
     );
     let batches = drain(&mut ok_src).await;
     assert_eq!(
@@ -1813,16 +1813,16 @@ async fn forced_utf8_pg_type_int8_and_bare_utf8_is_refused_at_first_connect() {
 
     let mut bad_src = source(
         &pg.dsn(),
-        "name \"forced_int8_bad\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_int8\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"big\" type=\"utf8\"",
+        "name \"forced_int8_bad\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_int8\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"big\" type=\"utf8\"",
     );
     let err = bad_src
         .next_batch()
         .await
-        .expect_err("utf8 with no pg_type over a non-utf8-default column is refused");
+        .expect_err("utf8 with no native_type over a non-utf8-default column is refused");
     assert!(err.message().contains("big"), "{}", err.message());
 }
 
-/// Matrix case: `type = "int64" pg_type = "int2"` on the sink, with an
+/// Matrix case: `type = "int64" native_type = "int2"` on the sink, with an
 /// overflowing row. Refused naming the column and the row; the target table
 /// is left empty because the whole flush is one transaction.
 #[tokio::test]
@@ -1838,7 +1838,7 @@ async fn forced_int2_narrowing_sink_overflow_is_refused_and_writes_nothing() {
 
     let mut snk = sink(
         &pg.dsn(),
-        "name \"forced_int2\"\ntable \"t_forced_int2\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"amount\" type=\"int64\" pg_type=\"int2\"",
+        "name \"forced_int2\"\ntable \"t_forced_int2\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"amount\" type=\"int64\" native_type=\"int2\"",
     );
     let batch = RecordBatch::try_new(
         snk.schema(),
@@ -1870,7 +1870,7 @@ async fn forced_int2_narrowing_sink_overflow_is_refused_and_writes_nothing() {
     );
 }
 
-/// Matrix case: `type = "decimal128" precision=12 scale=2 pg_type =
+/// Matrix case: `type = "decimal128" precision=12 scale=2 native_type =
 /// "numeric(12,2)"`, plus the connect-time refusal when the target's own
 /// typmod keeps fewer fractional digits than declared.
 #[tokio::test]
@@ -1890,13 +1890,13 @@ async fn forced_decimal128_numeric_typmod_matches_and_narrower_target_is_refused
 
     let mut src = source(
         &pg.dsn(),
-        "name \"forced_numeric\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_numeric\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numeric(12,2)\"",
+        "name \"forced_numeric\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_numeric\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"total\" type=\"decimal128\" precision=12 scale=2 native_type=\"numeric(12,2)\"",
     );
     let batches = drain(&mut src).await;
     assert_eq!(decimal_values(&batches, "total"), vec![Some(12340), None]);
 
     let text = format!(
-        "name \"forced_numeric_narrow\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_numeric_narrow\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"total\" type=\"decimal128\" precision=12 scale=2 pg_type=\"numeric(12,1)\"\n\nconnection dsn={} sslmode=\"disable\"\n",
+        "name \"forced_numeric_narrow\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_numeric_narrow\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"total\" type=\"decimal128\" precision=12 scale=2 native_type=\"numeric(12,1)\"\n\nconnection dsn={} sslmode=\"disable\"\n",
         common::quoted(&pg.dsn())
     );
     let cfg = PostgresSourceConfig::deserialize(from_kdl_str(&text).expect("parse kdl"))
@@ -1911,7 +1911,7 @@ async fn forced_decimal128_numeric_typmod_matches_and_narrower_target_is_refused
     assert!(err.message().contains("numeric(12,1)"), "{}", err.message());
 }
 
-/// Matrix case: `type = "utf8" pg_type = "public.mood"` for the enum, and the
+/// Matrix case: `type = "utf8" native_type = "public.mood"` for the enum, and the
 /// identity assertion refusing a schema that does not match the server's.
 #[tokio::test]
 async fn forced_enum_matches_and_wrong_schema_is_refused_at_first_connect() {
@@ -1930,7 +1930,7 @@ async fn forced_enum_matches_and_wrong_schema_is_refused_at_first_connect() {
 
     let mut ok_src = source(
         &pg.dsn(),
-        "name \"forced_enum\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_enum\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"m\" type=\"utf8\" pg_type=\"public.mood\"",
+        "name \"forced_enum\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_enum\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"m\" type=\"utf8\" native_type=\"public.mood\"",
     );
     assert_eq!(
         utf8_values(&drain(&mut ok_src).await, "m"),
@@ -1939,7 +1939,7 @@ async fn forced_enum_matches_and_wrong_schema_is_refused_at_first_connect() {
 
     let mut wrong_schema_src = source(
         &pg.dsn(),
-        "name \"forced_enum_wrong\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_enum\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"m\" type=\"utf8\" pg_type=\"other.mood\"",
+        "name \"forced_enum_wrong\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_enum\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"m\" type=\"utf8\" native_type=\"other.mood\"",
     );
     let err = wrong_schema_src
         .next_batch()
@@ -1948,7 +1948,7 @@ async fn forced_enum_matches_and_wrong_schema_is_refused_at_first_connect() {
     assert!(err.message().contains("other.mood"), "{}", err.message());
 }
 
-/// Matrix case: a mixed-case enum, `type = "utf8" pg_type = "public.\"Mood\""`
+/// Matrix case: a mixed-case enum, `type = "utf8" native_type = "public.\"Mood\""`
 /// on both ends, and the unquoted spelling refused because PostgreSQL folds
 /// it to a name the catalog does not carry.
 #[tokio::test]
@@ -1967,7 +1967,7 @@ async fn forced_quoted_enum_round_trips_and_the_folded_spelling_is_refused() {
         .await
         .expect("ddl");
 
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"m\" type=\"utf8\" pg_type=\"public.\\\"Mood\\\"\"";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\nfield \"m\" type=\"utf8\" native_type=\"public.\\\"Mood\\\"\"";
     let mut src = source(
         &pg.dsn(),
         &format!(
@@ -1997,7 +1997,7 @@ async fn forced_quoted_enum_round_trips_and_the_folded_spelling_is_refused() {
     // type this server does not have.
     let mut folded_src = source(
         &pg.dsn(),
-        "name \"quoted_enum_folded\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_quoted_enum_in\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"m\" type=\"utf8\" pg_type=\"public.mood\"",
+        "name \"quoted_enum_folded\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_quoted_enum_in\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"m\" type=\"utf8\" native_type=\"public.mood\"",
     );
     let err = folded_src
         .next_batch()
@@ -2026,7 +2026,7 @@ async fn forced_timestamptz_modifier_before_the_trailing_words_round_trips() {
         .await
         .expect("ddl");
 
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"tstz\" type=\"timestamp_micros_utc\" pg_type=\"timestamp(3) with time zone\"";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\nfield \"tstz\" type=\"timestamp_micros_utc\" native_type=\"timestamp(3) with time zone\"";
     let mut src = source(
         &pg.dsn(),
         &format!(
@@ -2070,7 +2070,7 @@ async fn forced_domain_reads_as_int32_and_check_violation_is_refused_on_write() 
         .await
         .expect("ddl");
 
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"p\" type=\"int32\" pg_type=\"public.posint\"";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\nfield \"p\" type=\"int32\" native_type=\"public.posint\"";
     let mut snk = sink(
         &pg.dsn(),
         &format!("name \"forced_domain\"\ntable \"t_forced_domain\"\n{fields}"),
@@ -2137,7 +2137,7 @@ async fn a_domain_over_a_character_type_refuses_an_overlong_value_instead_of_tru
         .await
         .expect("ddl");
 
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"v\" type=\"utf8\" pg_type=\"public.short\"";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\nfield \"v\" type=\"utf8\" native_type=\"public.short\"";
     // A fresh sink per case: a refused flush keeps its batch buffered for a
     // retry, so reusing one would replay the previous refusal.
     for (case, value, fragment) in [
@@ -2218,7 +2218,7 @@ async fn a_bit_string_modifier_is_enforced_by_the_insert_rather_than_the_cast() 
         .await
         .expect("ddl");
 
-    let fields = "schema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"vb\" type=\"utf8\" pg_type=\"bit varying(4)\"\nschema_fields \"b\" type=\"utf8\" pg_type=\"bit(4)\"";
+    let fields = "field \"id\" type=\"int64\" nullable=#false\nfield \"vb\" type=\"utf8\" native_type=\"bit varying(4)\"\nfield \"b\" type=\"utf8\" native_type=\"bit(4)\"";
     for (case, vb, b, fragment) in [
         ("too long", "11111111", "1111", "too long"),
         ("too short", "1111", "11", "does not match"),
@@ -2303,7 +2303,7 @@ async fn forced_list_utf8_over_text_array_with_null_and_quoted_element() {
 
     let mut src = source(
         &pg.dsn(),
-        "name \"forced_list\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_list\" cursor_column=\"id\"\nschema_fields \"id\" type=\"int64\" nullable=#false\nschema_fields \"tags\" type=\"list\" item=\"utf8\"",
+        "name \"forced_list\"\nbatch_rows 100\n\nmode kind=\"polling\" table=\"t_forced_list\" cursor_column=\"id\"\nfield \"id\" type=\"int64\" nullable=#false\nfield \"tags\" type=\"list\" item=\"utf8\"",
     );
     let batches = drain(&mut src).await;
     assert_eq!(

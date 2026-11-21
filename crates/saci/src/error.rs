@@ -7,8 +7,8 @@
 //! | Error type | When it occurs | Remedy |
 //! |------------|----------------|--------|
 //! | `SystemExecution` | System processing fails | Check the system logic |
-//! | `ComponentNotFound` | Entity missing a component | Add the component first |
-//! | `EntityNotFound` | Entity does not exist or is dead | Verify entity IDs |
+//! | `ComponentNotRegistered` | A dataset holds no component of that name | Register the component first |
+//! | `FieldNotFound` | A component has no field of that name | Check the field name |
 //! | `ResourceNotFound` | A global resource is missing | Register the resource |
 //! | `Store` | Store operations fail | Check store state and keys |
 //! | `Scheduler` | Scheduler orchestration fails | Verify system registration |
@@ -29,11 +29,16 @@ pub enum SaciError {
     /// Failure inside a system's own processing logic.
     SystemExecution(String),
 
-    /// A system accessed a component the entity does not have.
-    ComponentNotFound { entity_id: u32, type_name: String },
+    /// The dataset holds no component of this name.
+    ComponentNotRegistered(String),
 
-    /// The referenced entity does not exist or has been despawned.
-    EntityNotFound(u32),
+    /// The component holds no field of this name.
+    FieldNotFound {
+        /// The component looked in.
+        component: String,
+        /// The field that is absent.
+        field: String,
+    },
 
     /// A required global resource was never registered.
     ResourceNotFound(String),
@@ -77,17 +82,17 @@ impl SaciError {
         SaciError::SystemExecution(msg.into())
     }
 
-    /// Create a new component not found error
-    pub fn component_not_found(entity_id: u32, type_name: &str) -> Self {
-        SaciError::ComponentNotFound {
-            entity_id,
-            type_name: type_name.to_string(),
-        }
+    /// Create a new component not registered error
+    pub fn component_not_registered<S: Into<String>>(name: S) -> Self {
+        SaciError::ComponentNotRegistered(name.into())
     }
 
-    /// Create a new entity not found error
-    pub fn entity_not_found(entity_id: u32) -> Self {
-        SaciError::EntityNotFound(entity_id)
+    /// Create a new field not found error
+    pub fn field_not_found<C: Into<String>, F: Into<String>>(component: C, field: F) -> Self {
+        SaciError::FieldNotFound {
+            component: component.into(),
+            field: field.into(),
+        }
     }
 
     /// Create a new resource not found error
@@ -135,12 +140,27 @@ impl SaciError {
         SaciError::LeaseExpired { batch_id }
     }
 
+    /// True when the failure may clear on its own, so running the same work
+    /// again is worth it: `SystemExecution`, `Store`, `RetryExhausted` and,
+    /// under `distributed`, `Distributed` and `LeaseExpired`. A missing
+    /// component, field or resource, a configuration error and a generic
+    /// error fail the same way every time.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            SaciError::SystemExecution(_) | SaciError::Store(_) => true,
+            SaciError::RetryExhausted { .. } => true,
+            #[cfg(feature = "distributed")]
+            SaciError::Distributed(_) | SaciError::LeaseExpired { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Get the error message as a string
     pub fn message(&self) -> String {
         match self {
             SaciError::SystemExecution(msg) => msg.clone(),
-            SaciError::ComponentNotFound { type_name, .. } => type_name.clone(),
-            SaciError::EntityNotFound(id) => id.to_string(),
+            SaciError::ComponentNotRegistered(name) => name.clone(),
+            SaciError::FieldNotFound { component, field } => format!("{component}.{field}"),
             SaciError::ResourceNotFound(name) => name.clone(),
             SaciError::Store(msg) => msg.clone(),
             SaciError::Scheduler(msg) => msg.clone(),
@@ -162,8 +182,8 @@ impl SaciError {
     pub fn category(&self) -> &'static str {
         match self {
             SaciError::SystemExecution(_) => "system_execution",
-            SaciError::ComponentNotFound { .. } => "component_not_found",
-            SaciError::EntityNotFound(_) => "entity_not_found",
+            SaciError::ComponentNotRegistered(_) => "component_not_registered",
+            SaciError::FieldNotFound { .. } => "field_not_found",
             SaciError::ResourceNotFound(_) => "resource_not_found",
             SaciError::Store(_) => "store",
             SaciError::Scheduler(_) => "scheduler",
@@ -182,14 +202,12 @@ impl std::fmt::Display for SaciError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SaciError::SystemExecution(msg) => write!(f, "System execution error: {msg}"),
-            SaciError::ComponentNotFound {
-                entity_id,
-                type_name,
-            } => write!(
-                f,
-                "Component not found: entity {entity_id} missing {type_name}"
-            ),
-            SaciError::EntityNotFound(id) => write!(f, "Entity not found: {id}"),
+            SaciError::ComponentNotRegistered(name) => {
+                write!(f, "Component not registered: {name}")
+            }
+            SaciError::FieldNotFound { component, field } => {
+                write!(f, "Field not found: {component}.{field}")
+            }
             SaciError::ResourceNotFound(name) => write!(f, "Resource not found: {name}"),
             SaciError::Store(msg) => write!(f, "Store error: {msg}"),
             SaciError::Scheduler(msg) => write!(f, "Scheduler error: {msg}"),
@@ -208,7 +226,14 @@ impl std::fmt::Display for SaciError {
     }
 }
 
-impl std::error::Error for SaciError {}
+impl std::error::Error for SaciError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SaciError::RetryExhausted { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<Box<dyn std::error::Error + Send + Sync>> for SaciError {
     fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
@@ -248,7 +273,7 @@ impl From<arrow_schema::ArrowError> for SaciError {
 }
 
 /// `Result` alias with [`SaciError`] as the error type.
-pub type SaciResult<TState> = Result<TState, SaciError>;
+pub type SaciResult<T> = Result<T, SaciError>;
 
 #[cfg(test)]
 mod tests {
@@ -268,32 +293,37 @@ mod tests {
     }
 
     #[test]
-    fn test_component_not_found_error_creation() {
-        let error = SaciError::component_not_found(42, "Health");
-        assert_eq!(error.category(), "component_not_found");
+    fn test_component_not_registered_error_creation() {
+        let error = SaciError::component_not_registered("Health");
+        assert_eq!(error.category(), "component_not_registered");
+        assert_eq!(format!("{error}"), "Component not registered: Health");
+    }
+
+    #[test]
+    fn test_field_not_found_error_creation() {
+        let error = SaciError::field_not_found("Health", "hp");
+        assert_eq!(error.category(), "field_not_found");
+        assert_eq!(format!("{error}"), "Field not found: Health.hp");
+    }
+
+    #[test]
+    fn retryable_kinds_are_the_transient_ones() {
+        assert!(SaciError::system_execution("x").is_retryable());
+        assert!(SaciError::store("x").is_retryable());
+        assert!(SaciError::retry_exhausted(SaciError::system_execution("x"), 3).is_retryable());
+        assert!(!SaciError::configuration("x").is_retryable());
+        assert!(!SaciError::generic("x").is_retryable());
+        assert!(!SaciError::component_not_registered("x").is_retryable());
+    }
+
+    #[test]
+    fn retry_exhausted_exposes_its_source() {
+        use std::error::Error as _;
+        let error = SaciError::retry_exhausted(SaciError::system_execution("root"), 2);
         assert_eq!(
-            format!("{error}"),
-            "Component not found: entity 42 missing Health"
+            error.source().map(ToString::to_string).as_deref(),
+            Some("System execution error: root")
         );
-    }
-
-    #[test]
-    fn test_component_not_found_message_contains_type_name() {
-        let error = SaciError::component_not_found(1, "Transform");
-        assert!(error.message().contains("Transform"));
-    }
-
-    #[test]
-    fn test_entity_not_found_error_creation() {
-        let error = SaciError::entity_not_found(99);
-        assert_eq!(error.category(), "entity_not_found");
-        assert_eq!(format!("{error}"), "Entity not found: 99");
-    }
-
-    #[test]
-    fn test_entity_not_found_message_contains_id() {
-        let error = SaciError::entity_not_found(7);
-        assert!(error.message().contains("7"));
     }
 
     #[test]
@@ -336,14 +366,13 @@ mod tests {
             "system_execution"
         );
         assert_eq!(
-            SaciError::ComponentNotFound {
-                entity_id: 0,
-                type_name: "".to_string()
-            }
-            .category(),
-            "component_not_found"
+            SaciError::component_not_registered("").category(),
+            "component_not_registered"
         );
-        assert_eq!(SaciError::EntityNotFound(0).category(), "entity_not_found");
+        assert_eq!(
+            SaciError::field_not_found("", "").category(),
+            "field_not_found"
+        );
         assert_eq!(
             SaciError::ResourceNotFound("".to_string()).category(),
             "resource_not_found"
@@ -382,28 +411,10 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_eq_component_not_found() {
-        let a = SaciError::ComponentNotFound {
-            entity_id: 1,
-            type_name: "Health".to_string(),
-        };
-        let b = SaciError::ComponentNotFound {
-            entity_id: 1,
-            type_name: "Health".to_string(),
-        };
-        let c = SaciError::ComponentNotFound {
-            entity_id: 2,
-            type_name: "Health".to_string(),
-        };
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn test_partial_eq_entity_not_found() {
-        let a = SaciError::EntityNotFound(5);
-        let b = SaciError::EntityNotFound(5);
-        let c = SaciError::EntityNotFound(6);
+    fn test_partial_eq_component_not_registered() {
+        let a = SaciError::component_not_registered("Health");
+        let b = SaciError::component_not_registered("Health");
+        let c = SaciError::component_not_registered("Mana");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

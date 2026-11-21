@@ -22,25 +22,11 @@
 
 #![deny(missing_docs)]
 
-// The bindings are generated in place from `crates/saci/wit`. The
-// module and the `export_pipeline!` invocation below are gated on
-// `target_arch = "wasm32"`: the expansion emits canonical ABI intrinsics and the
-// `component-type` custom section, neither of which the host target can link.
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../../../crates/saci/wit",
-        world: "saci-pipeline",
-        generate_all,
-    });
-}
-
 use std::sync::Arc;
 
-use saci::processor::arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
-use saci::processor::arrow_schema::{DataType, Field, Schema};
-use saci::processor::prelude::*;
+use saci::arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
+use saci::arrow_schema::{DataType, Field, Schema};
+use saci::prelude::*;
 
 /// The statuses an audit row may legitimately carry, in workflow order.
 pub const VALID_STATUSES: [&str; 4] = ["placed", "picked", "shipped", "settled"];
@@ -142,16 +128,6 @@ impl Component for AuditVerdict {
     }
 }
 
-/// Report a metric through `host-io::metric`; a no-op outside wasm, where the
-/// host bindings do not exist.
-#[cfg(target_arch = "wasm32")]
-fn report_metric(name: &str, value: f64) {
-    crate::bindings::saci::pipeline::host_io::metric(name, value);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn report_metric(_name: &str, _value: f64) {}
-
 /// Whether a change is well formed: a known status, a positive revision, and
 /// an operation that writes a row.
 pub fn verdict_ok(op: &str, status: &str, revision: i32) -> bool {
@@ -184,10 +160,7 @@ fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T, S
 
 /// Turn every audit change in the batch into a verdict.
 pub fn verify_impl(data: &mut Dataset) -> Result<(), SaciError> {
-    let rows = data
-        .columns::<AuditRow>()
-        .ok_or_else(|| SaciError::generic("audit: AuditRow component missing"))?
-        .clone();
+    let rows = data.batch::<AuditRow>()?.clone();
     let n = rows.num_rows();
     if n == 0 {
         return Ok(());
@@ -222,40 +195,31 @@ pub fn verify_impl(data: &mut Dataset) -> Result<(), SaciError> {
     }
 
     data.append::<AuditVerdict>(&verdicts)?;
-    report_metric("audit.rejected", rejected as f64);
+    sdk::host::metric("audit.rejected", rejected as f64);
     Ok(())
 }
 
 /// Build the audit verification pipeline.
 ///
-/// Called lazily by the `export_pipeline!` macro on the first call to any WIT
+/// Called lazily by the `#[processor]` glue on the first call to any WIT
 /// export, and constructed exactly once per component instance.
+#[processor]
 pub fn build() -> Pipeline {
-    let mut pipeline = Pipeline::new("integrity-audit");
-    pipeline
-        .data
-        .register_component::<AuditRow>()
-        .expect("register AuditRow");
-    pipeline
-        .data
-        .register_component::<AuditVerdict>()
-        .expect("register AuditVerdict");
-    pipeline.add_system(system_fn(
-        SystemMeta::new("verify_audit")
-            .read_component("AuditRow")
-            .write_component("AuditVerdict"),
-        verify_impl,
-    ));
-    pipeline
+    Pipeline::new("integrity-audit")
+        .component::<AuditRow>()
+        .component::<AuditVerdict>()
+        .system(system_fn(
+            SystemMeta::new("verify_audit")
+                .reads_all::<AuditRow>()
+                .writes_all::<AuditVerdict>(),
+            verify_impl,
+        ))
 }
-
-#[cfg(target_arch = "wasm32")]
-saci::export_pipeline!(build);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saci::processor::arrow_array::BooleanArray;
+    use saci::arrow_array::BooleanArray;
 
     fn row(op: &str, audit_id: i64, status: &str, revision: i32) -> AuditRow {
         AuditRow {
@@ -273,11 +237,13 @@ mod tests {
 
     fn run(rows: &[AuditRow]) -> Vec<Verdict> {
         let mut data = Dataset::new();
-        data.register_component::<AuditRow>().unwrap();
-        data.register_component::<AuditVerdict>().unwrap();
+        data.register::<AuditRow>().unwrap();
+        data.register::<AuditVerdict>().unwrap();
         data.append::<AuditRow>(rows).unwrap();
         verify_impl(&mut data).unwrap();
-        let batch = data.batch_for("AuditVerdict").expect("AuditVerdict batch");
+        let batch = data
+            .batch_named("AuditVerdict")
+            .expect("AuditVerdict batch");
         let audit_id = column::<Int64Array>(batch, "audit_id").unwrap();
         let op = column::<StringArray>(batch, "op").unwrap();
         let ok = column::<BooleanArray>(batch, "ok").unwrap();

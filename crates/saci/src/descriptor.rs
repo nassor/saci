@@ -30,10 +30,10 @@ pub(crate) fn parse_ipc_schema(ipc_bytes: &[u8]) -> SaciResult<Arc<Schema>> {
 /// can still serve the rest, and the load-time IO coverage check reports the
 /// missing name with far better context than a parse error here would.
 ///
-/// Callers pass a freshly built list: registration asserts the dataset holds no
-/// rows, and this always starts from [`Dataset::new`].
+/// Callers pass a freshly built list: registration refuses a dataset that
+/// holds rows, and this always starts from [`Dataset::new`].
 ///
-/// Names are interned by [`Dataset::register_named_component`], so reloading a
+/// Names are interned by [`Dataset::register_schema`], so reloading a
 /// runtime reuses one allocation per distinct component name rather than
 /// growing memory per load.
 pub(crate) fn template_dataset_from<'a>(
@@ -54,7 +54,9 @@ pub(crate) fn template_dataset_from<'a>(
                 continue;
             }
         };
-        dataset.register_named_component(name, schema);
+        dataset
+            .register_schema(name, schema)
+            .expect("a fresh dataset holds no rows");
     }
 
     dataset
@@ -63,7 +65,7 @@ pub(crate) fn template_dataset_from<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdk::schema_to_ipc_bytes;
+    use crate::sdk::glue::schema_to_ipc_bytes;
     use arrow_schema::{DataType, Field};
 
     fn ipc_for(fields: Vec<Field>) -> Vec<u8> {

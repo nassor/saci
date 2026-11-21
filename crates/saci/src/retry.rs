@@ -1,21 +1,20 @@
 //! Retry strategies and the drivers that apply them.
 //!
-//! [`RetryMode`] picks the strategy: `None` fails on the first error, `Fixed`
-//! retries a set number of times with a constant delay, and
-//! `ExponentialBackoff` grows the delay and can add jitter. [`SystemConfig`]
-//! wraps a mode and adds builder methods. `Pipeline`'s stage executor runs
-//! every system through [`run_with_retries`] or
-//! [`run_with_retries_blocking`].
+//! [`RetryMode`] picks the strategy: `None` (the default) fails on the first
+//! error, `Fixed` retries a set number of times with a constant delay, and
+//! `ExponentialBackoff` grows the delay and can add jitter. A system asks for
+//! one through [`System::retry`](crate::System::retry). `Pipeline`'s stage
+//! executor runs every system through [`run_with_retries`] or
+//! [`run_with_retries_blocking`], which retry only an error whose
+//! [`SaciError::is_retryable`] is true.
 //!
 //! ## Example
 //!
 //! ```rust
-//! use saci::retry::{RetryMode, SystemConfig};
-//! use std::time::Duration;
+//! use saci::RetryMode;
 //!
-//! let config = SystemConfig::new()
-//!     .with_exponential_retry(3);
-//! assert_eq!(config.retry_mode.max_attempts(), 4);
+//! assert_eq!(RetryMode::default().max_attempts(), 1);
+//! assert_eq!(RetryMode::exponential(3).max_attempts(), 4);
 //! ```
 
 use crate::error::SaciError;
@@ -24,10 +23,11 @@ use std::time::Duration;
 #[cfg(feature = "tracing")]
 use tracing::{Instrument, error, info_span, warn};
 
-/// Retry strategy for task execution.
-#[derive(Debug, Clone, Copy)]
+/// Retry strategy for a system.
+#[derive(Debug, Clone, Copy, Default)]
 pub enum RetryMode {
-    /// Fail immediately on the first error.
+    /// Fail immediately on the first error. The default.
+    #[default]
     None,
 
     /// Fixed number of retries with constant delay
@@ -145,98 +145,24 @@ impl RetryMode {
     }
 }
 
-impl Default for RetryMode {
-    fn default() -> Self {
-        Self::ExponentialBackoff {
-            max_retries: 3,
-            base_delay: Duration::from_millis(100),
-            multiplier: 2.0,
-            max_delay: Duration::from_secs(30),
-            jitter: 0.1,
-        }
-    }
-}
-
-/// System configuration for retry behavior
-///
-/// Wraps a [`RetryMode`] and exposes builder methods for common configurations.
-///
-/// # Example
-///
-/// ```rust
-/// use saci::retry::{RetryMode, SystemConfig};
-/// use std::time::Duration;
-///
-/// // Default: exponential backoff with 3 retries
-/// let config = SystemConfig::new();
-/// assert_eq!(config.retry_mode.max_attempts(), 4);
-///
-/// // No retries
-/// let minimal = SystemConfig::minimal();
-/// assert_eq!(minimal.retry_mode.max_attempts(), 1);
-///
-/// // Fixed retry
-/// let fixed = SystemConfig::new()
-///     .with_fixed_retry(2, Duration::from_millis(50));
-/// assert_eq!(fixed.retry_mode.max_attempts(), 3);
-/// ```
-#[must_use]
-#[derive(Clone, Copy, Default)]
-pub struct SystemConfig {
-    /// Retry strategy for failed executions
-    pub retry_mode: RetryMode,
-}
-
-impl SystemConfig {
-    /// Create a new `SystemConfig` with default configuration
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a minimal configuration with no retries
-    ///
-    /// Useful for tasks that should fail fast without any retry attempts.
-    pub fn minimal() -> Self {
-        Self {
-            retry_mode: RetryMode::None,
-        }
-    }
-
-    /// Set the retry mode for this configuration
-    pub fn with_retry(mut self, retry_mode: RetryMode) -> Self {
-        self.retry_mode = retry_mode;
-        self
-    }
-
-    /// Convenience method for fixed retry configuration
-    pub fn with_fixed_retry(self, retries: usize, delay: Duration) -> Self {
-        self.with_retry(RetryMode::fixed(retries, delay))
-    }
-
-    /// Convenience method for exponential backoff retry configuration
-    pub fn with_exponential_retry(self, max_retries: usize) -> Self {
-        self.with_retry(RetryMode::exponential(max_retries))
-    }
-}
-
 /// Attempt bookkeeping shared by [`run_with_retries`] and
 /// [`run_with_retries_blocking`].
 ///
 /// The two drivers differ only in how they wait, so the attempt counter, the
-/// exhaustion check, the
+/// retryable check, the
 /// [`SaciError::RetryExhausted`](crate::SaciError::RetryExhausted) construction
 /// and the delay lookup all live here once.
 struct Attempts<'a> {
-    config: &'a SystemConfig,
+    mode: &'a RetryMode,
     max_attempts: usize,
     attempt: usize,
 }
 
 impl<'a> Attempts<'a> {
-    fn new(config: &'a SystemConfig) -> Self {
+    fn new(mode: &'a RetryMode) -> Self {
         Self {
-            config,
-            max_attempts: config.retry_mode.max_attempts(),
+            mode,
+            max_attempts: mode.max_attempts(),
             attempt: 0,
         }
     }
@@ -271,9 +197,14 @@ impl<'a> Attempts<'a> {
     ///
     /// `Ok(Some(delay))`: wait that long, then retry.
     /// `Ok(None)`: retry immediately, the mode declares no delay.
-    /// `Err(_)`: attempts exhausted, `e` is wrapped in `RetryExhausted`.
+    /// `Err(_)`: stop. An error that is not retryable comes back as it is, and
+    /// so does any error when the mode allows a single attempt. Once at least
+    /// one retry ran, the last error comes back wrapped in `RetryExhausted`.
     fn failed(&mut self, e: SaciError) -> Result<Option<Duration>, SaciError> {
         self.attempt += 1;
+        if !e.is_retryable() || self.max_attempts == 1 {
+            return Err(e);
+        }
         if self.attempt >= self.max_attempts {
             #[cfg(feature = "tracing")]
             error!(
@@ -283,7 +214,7 @@ impl<'a> Attempts<'a> {
             );
             return Err(SaciError::retry_exhausted(e, self.attempt));
         }
-        let delay = self.config.retry_mode.delay_for_attempt(self.attempt - 1);
+        let delay = self.mode.delay_for_attempt(self.attempt - 1);
         #[cfg(feature = "tracing")]
         warn!(
             error = %e,
@@ -296,15 +227,15 @@ impl<'a> Attempts<'a> {
     }
 }
 
-/// Execute a fallible async operation with retry logic from [`SystemConfig`].
+/// Execute a fallible async operation under a [`RetryMode`].
 ///
-/// Runs `run_fn` up to `config.retry_mode.max_attempts()` times. Returns
-/// `(value, retries)` on the first success, where `retries` is `0` if the first
-/// attempt succeeded, or
-/// [`SaciError::RetryExhausted`] once every
-/// attempt is consumed.
+/// Runs `run_fn` up to `mode.max_attempts()` times, retrying only an error
+/// whose [`SaciError::is_retryable`] is true. Returns `(value, retries)` on
+/// the first success, where `retries` is `0` if the first attempt succeeded.
+/// A non-retryable error, or any error under a single-attempt mode, comes
+/// back unwrapped; [`SaciError::RetryExhausted`] means at least one retry ran.
 ///
-/// Waits with `tokio::time::sleep` under the `runtime` feature. Processor builds
+/// Waits with `tokio::time::sleep` under the `engine` feature. Processor builds
 /// have no async timer, so delays are skipped and retries are immediate; use
 /// [`run_with_retries_blocking`] from a blocking thread.
 ///
@@ -316,13 +247,12 @@ impl<'a> Attempts<'a> {
 ///
 /// ```rust,no_run,ignore
 /// use saci::error::SaciError;
-/// use saci::retry::{SystemConfig, run_with_retries};
+/// use saci::retry::{RetryMode, run_with_retries};
 ///
 /// # #[tokio::main]
 /// # async fn main() {
-/// let config = SystemConfig::minimal();
 /// let (value, retries) =
-///     run_with_retries(&config, async || Ok::<&str, SaciError>("done"))
+///     run_with_retries(&RetryMode::None, async || Ok::<&str, SaciError>("done"))
 ///         .await
 ///         .unwrap();
 /// assert_eq!(value, "done");
@@ -330,10 +260,10 @@ impl<'a> Attempts<'a> {
 /// # }
 /// ```
 pub async fn run_with_retries<T>(
-    config: &SystemConfig,
+    mode: &RetryMode,
     mut run_fn: impl AsyncFnMut() -> Result<T, SaciError>,
 ) -> Result<(T, u32), SaciError> {
-    let mut attempts = Attempts::new(config);
+    let mut attempts = Attempts::new(mode);
     loop {
         // The span must wrap the future rather than be `enter`ed around an
         // await: a guard held across a yield attributes another task's work to
@@ -347,10 +277,10 @@ pub async fn run_with_retries<T>(
             Ok(value) => return Ok((value, attempts.retries())),
             Err(e) => {
                 if let Some(delay) = attempts.failed(e)? {
-                    #[cfg(feature = "runtime")]
+                    #[cfg(feature = "engine")]
                     tokio::time::sleep(delay).await;
                     // Processor builds have no timer; retry immediately.
-                    #[cfg(not(feature = "runtime"))]
+                    #[cfg(not(feature = "engine"))]
                     let _ = delay;
                 }
             }
@@ -364,10 +294,10 @@ pub async fn run_with_retries<T>(
 /// Waits with `std::thread::sleep`, which is correct there and would stall the
 /// async executor anywhere else.
 pub fn run_with_retries_blocking<T>(
-    config: &SystemConfig,
+    mode: &RetryMode,
     mut run_fn: impl FnMut() -> Result<T, SaciError>,
 ) -> Result<(T, u32), SaciError> {
-    let mut attempts = Attempts::new(config);
+    let mut attempts = Attempts::new(mode);
     loop {
         // No await here, so a plain guard is correct.
         #[cfg(feature = "tracing")]
@@ -394,12 +324,17 @@ pub fn run_with_retries_blocking<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     use std::sync::Arc;
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ── RetryMode tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_mode_default_is_none() {
+        assert!(matches!(RetryMode::default(), RetryMode::None));
+    }
 
     #[test]
     fn test_retry_mode_none_max_attempts_is_one() {
@@ -475,60 +410,27 @@ mod tests {
         }
     }
 
-    // ── SystemConfig tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_system_config_minimal_has_no_retries() {
-        let cfg = SystemConfig::minimal();
-        assert_eq!(cfg.retry_mode.max_attempts(), 1);
-    }
-
-    #[test]
-    fn test_system_config_default_has_exponential_backoff() {
-        let cfg = SystemConfig::new();
-        // Default is ExponentialBackoff with max_retries=3 → 4 attempts
-        assert_eq!(cfg.retry_mode.max_attempts(), 4);
-    }
-
-    #[test]
-    fn test_system_config_with_fixed_retry() {
-        let cfg = SystemConfig::new().with_fixed_retry(2, Duration::from_millis(10));
-        assert_eq!(cfg.retry_mode.max_attempts(), 3);
-    }
-
-    #[test]
-    fn test_system_config_with_exponential_retry() {
-        let cfg = SystemConfig::new().with_exponential_retry(5);
-        assert_eq!(cfg.retry_mode.max_attempts(), 6);
-    }
-
-    #[test]
-    fn test_system_config_with_retry_builder() {
-        let cfg = SystemConfig::new().with_retry(RetryMode::None);
-        assert_eq!(cfg.retry_mode.max_attempts(), 1);
-    }
-
     // ── retry driver tests ───────────────────────────────────────────────────
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     #[tokio::test]
     async fn test_run_with_retries_succeeds_on_first_try() {
-        let config = SystemConfig::minimal();
-        let result = run_with_retries(&config, async || Ok::<&str, SaciError>("success")).await;
+        let result =
+            run_with_retries(&RetryMode::None, async || Ok::<&str, SaciError>("success")).await;
         assert_eq!(result.unwrap(), ("success", 0));
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     #[tokio::test]
     async fn test_run_with_retries_retries_on_failure() {
         let call_count = Arc::new(AtomicUsize::new(0));
-        let config = SystemConfig::new().with_fixed_retry(2, Duration::ZERO);
+        let mode = RetryMode::fixed(2, Duration::ZERO);
 
         let cc = Arc::clone(&call_count);
-        let result = run_with_retries(&config, async || {
+        let result = run_with_retries(&mode, async || {
             let n = cc.fetch_add(1, Ordering::SeqCst);
             if n < 2 {
-                Err(SaciError::generic("transient"))
+                Err(SaciError::system_execution("transient"))
             } else {
                 Ok("recovered")
             }
@@ -543,13 +445,13 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     #[tokio::test]
     async fn test_run_with_retries_returns_retry_exhausted_after_max_attempts() {
-        let config = SystemConfig::new().with_fixed_retry(2, Duration::ZERO);
+        let mode = RetryMode::fixed(2, Duration::ZERO);
 
-        let result = run_with_retries(&config, async || {
-            Err::<(), SaciError>(SaciError::generic("always fails"))
+        let result = run_with_retries(&mode, async || {
+            Err::<(), SaciError>(SaciError::system_execution("always fails"))
         })
         .await;
 
@@ -560,33 +462,33 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     #[tokio::test]
     async fn test_run_with_retries_no_retry_on_first_failure() {
         let call_count = Arc::new(AtomicUsize::new(0));
-        let config = SystemConfig::minimal();
 
         let cc = Arc::clone(&call_count);
-        let result = run_with_retries(&config, async || {
+        let result = run_with_retries(&RetryMode::None, async || {
             cc.fetch_add(1, Ordering::SeqCst);
-            Err::<(), SaciError>(SaciError::generic("fail"))
+            Err::<(), SaciError>(SaciError::system_execution("fail"))
         })
         .await;
 
-        assert!(matches!(
+        assert_eq!(
             result.unwrap_err(),
-            SaciError::RetryExhausted { .. }
-        ));
+            SaciError::system_execution("fail"),
+            "a single-attempt mode returns the error unwrapped"
+        );
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "engine")]
     #[tokio::test]
     async fn test_retry_exhausted_preserves_source_error_and_attempt_count() {
         // 2 retries → 3 total attempts
-        let config = SystemConfig::new().with_fixed_retry(2, Duration::ZERO);
+        let mode = RetryMode::fixed(2, Duration::ZERO);
 
-        let result = run_with_retries(&config, async || {
+        let result = run_with_retries(&mode, async || {
             Err::<(), SaciError>(SaciError::system_execution("root cause"))
         })
         .await;
@@ -604,17 +506,46 @@ mod tests {
         }
     }
 
+    /// A configuration error fails the same way on every attempt, so a
+    /// retrying mode still runs it once and returns it as it is; a transient
+    /// error under the same mode spends the whole budget.
+    #[test]
+    fn only_a_retryable_error_is_retried() {
+        let mode = RetryMode::exponential_custom(3, Duration::ZERO, 1.0, Duration::ZERO, 0.0);
+
+        let mut calls = 0usize;
+        let err = run_with_retries_blocking(&mode, || {
+            calls += 1;
+            Err::<(), SaciError>(SaciError::configuration("bad key"))
+        })
+        .unwrap_err();
+        assert_eq!(err, SaciError::configuration("bad key"));
+        assert_eq!(calls, 1);
+
+        let mut calls = 0usize;
+        let err = run_with_retries_blocking(&mode, || {
+            calls += 1;
+            Err::<(), SaciError>(SaciError::system_execution("flaky"))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, SaciError::RetryExhausted { attempts: 4, .. }),
+            "got {err:?}"
+        );
+        assert_eq!(calls, 4);
+    }
+
     /// The blocking driver counts attempts and builds the exhaustion error
     /// exactly like the async one; both share `Attempts`.
     #[test]
     fn test_run_with_retries_blocking_matches_the_async_driver() {
-        let config = SystemConfig::new().with_fixed_retry(2, Duration::ZERO);
+        let mode = RetryMode::fixed(2, Duration::ZERO);
 
         let mut calls = 0usize;
-        let ok = run_with_retries_blocking(&config, || {
+        let ok = run_with_retries_blocking(&mode, || {
             calls += 1;
             if calls < 3 {
-                Err(SaciError::generic("transient"))
+                Err(SaciError::system_execution("transient"))
             } else {
                 Ok("recovered")
             }
@@ -622,7 +553,7 @@ mod tests {
         assert_eq!(ok.unwrap(), ("recovered", 2));
         assert_eq!(calls, 3);
 
-        let err = run_with_retries_blocking(&config, || {
+        let err = run_with_retries_blocking(&mode, || {
             Err::<(), SaciError>(SaciError::system_execution("root cause"))
         })
         .unwrap_err();

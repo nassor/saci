@@ -6,7 +6,8 @@
 
 A columnar batch processing engine for Rust, built on Apache Arrow. Each transform declares the
 Arrow fields it reads and writes; SACI derives the execution order from those declarations, runs
-transforms that write different fields in the same stage, and retries what fails.
+transforms that write different fields in the same stage, and retries a transient failure when a
+transform asks for it.
 
 The crate is used in two ways:
 
@@ -26,7 +27,6 @@ the engine alone.
 saci = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-async-trait = "0.1"
 ```
 
 Rust 1.100 or newer. One component and one system: `ToUsd` reads `amount` and writes `usd_amount`,
@@ -35,38 +35,14 @@ and that declaration is the only scheduling input the pipeline needs.
 ```rust
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use saci::SaciError;
 use saci::arrow_array::Float64Array;
-use saci::arrow_schema::{DataType, Field, Schema};
-use saci::component::Component;
-use saci::dataset::Dataset;
-use saci::pipeline::Pipeline;
-use saci::system::{FieldRef, ParallelSystem, SystemMeta, WriteSet};
+use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Component, Serialize, Deserialize)]
 struct Order {
     amount: f64,
     usd_amount: f64,
-}
-
-impl Component for Order {
-    fn name() -> &'static str {
-        "Order"
-    }
-
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("amount", DataType::Float64, false),
-            Field::new("usd_amount", DataType::Float64, false),
-        ]))
-    }
-}
-
-impl Order {
-    const AMOUNT: FieldRef<Order> = FieldRef::new("amount");
-    const USD_AMOUNT: FieldRef<Order> = FieldRef::new("usd_amount");
 }
 
 struct ToUsd;
@@ -79,27 +55,26 @@ impl ParallelSystem for ToUsd {
             .writes(Order::USD_AMOUNT)
     }
 
-    async fn run(&self, data: &Dataset) -> Result<WriteSet, SaciError> {
+    async fn run(&self, data: &Dataset) -> SaciResult<WriteSet> {
         let orders = data.view::<Order>()?;
         let amount = orders.f64(Order::AMOUNT)?;
         let usd: Vec<f64> = (0..orders.len()).map(|i| amount.value(i) * 1.08).collect();
-        Ok(WriteSet::new().put("Order", "usd_amount", Arc::new(Float64Array::from(usd))))
+        Ok(WriteSet::new().put(Order::USD_AMOUNT, Arc::new(Float64Array::from(usd))))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), SaciError> {
-    let mut pipeline = Pipeline::builder("orders")
-        .with::<Order>()
-        .with_parallel_system(ToUsd)
-        .build();
-    pipeline.data_mut().append::<Order>(&[
+async fn main() -> SaciResult<()> {
+    let mut pipeline = Pipeline::new("orders")
+        .component::<Order>()
+        .parallel_system(ToUsd);
+    pipeline.data_mut().append(&[
         Order { amount: 120.0, usd_amount: 0.0 },
         Order { amount: 12.0, usd_amount: 0.0 },
     ])?;
     pipeline.run().await?;
 
-    let usd = pipeline.data().column::<Order>("usd_amount");
+    let usd = pipeline.data().column(Order::USD_AMOUNT)?;
     println!("{usd:?}");
     Ok(())
 }
@@ -135,9 +110,10 @@ processor and runs them end to end.
 | Feature | What it adds |
 |---|---|
 | `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source` and `Sink` traits |
+| `derive` | `#[derive(Component)]`; included in `engine`, `processor` and `plugin` |
 | `windows` | Tumbling, sliding and session windows with watermarks |
 | `connector-<name>` | One transport in `saci::connector`; `connectors` enables the seven that need no external service |
-| `transformer-<format>` | One byte format in `saci::transformer`; `transformers` enables all five |
+| `codec-<format>` | One byte format in `saci::codec`; `codecs` enables all five |
 | `processor` | The wasm32-wasip3 processor SDK and the `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |
 | `service`, `wasm-host`, `plugin-host` | The host: KDL config, runners, HTTP control plane, the two processor hosts |

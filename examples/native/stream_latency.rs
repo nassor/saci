@@ -1,9 +1,9 @@
 //! Per-item latency for stream mode, timed end-to-end from the producer.
 //!
 //! The native half drives a one-system `Pipeline` through
-//! [`service::stream::run_stream`] over a `ChannelSource`/`ChannelSink` pair,
+//! [`BuiltWorkflow::run`] in stream mode over a `ChannelSource`/`ChannelSink` pair,
 //! timing each single-row batch out and back. The WASM half (`--features
-//! wasm`) times `WasmPipelineRuntime::run_on_with_state` on a one-row dataset,
+//! wasm`) times `WasmPipelineRuntime::run_batch` on a one-row dataset,
 //! which isolates the host/processor boundary: store creation, instantiation from
 //! the pre-linked `InstancePre`, IPC in, IPC out.
 //!
@@ -26,10 +26,8 @@ use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 
 use saci::connector::channel::{ChannelSink, ChannelSource};
-use saci::service::builder::{BuiltEdge, BuiltNode, BuiltNodeKind, BuiltService};
-use saci::service::flow::FlowPlan;
-use saci::service::registry::Registry;
-use saci::service::stream::run_stream;
+use saci::service::BuiltWorkflow;
+use saci::service::RunMode;
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use saci::{Pipeline, SaciError};
 
@@ -68,24 +66,23 @@ fn report(label: &str, mut samples: Vec<u64>) {
 
 /// One system: double the `v` column in place.
 fn doubling_pipeline(schema: Arc<Schema>) -> Pipeline {
-    let mut pipeline = Pipeline::new("stream_latency");
-    pipeline.data_mut().register_raw_component(COMP, schema);
-    pipeline.add_system(system_fn(
-        SystemMeta::new("double").read(COMP, "v").write(COMP, "v"),
-        |data| {
-            let batch = data
-                .batch_for(COMP)
-                .ok_or_else(|| SaciError::generic("Tick component missing"))?;
-            let col = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| SaciError::generic("Tick.v is not Int64"))?;
-            let doubled: Int64Array = col.iter().map(|v| v.map(|x| x * 2)).collect();
-            data.apply_write_set(WriteSet::new().put(COMP, "v", Arc::new(doubled)))
-        },
-    ));
-    pipeline
+    Pipeline::new("stream_latency")
+        .schema(COMP, schema)
+        .system(system_fn(
+            SystemMeta::new("double")
+                .reads_named(COMP, "v")
+                .writes_named(COMP, "v"),
+            |data| {
+                let batch = data.batch_named(COMP)?;
+                let col = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| SaciError::generic("Tick.v is not Int64"))?;
+                let doubled: Int64Array = col.iter().map(|v| v.map(|x| x * 2)).collect();
+                data.apply_write_set(WriteSet::new().put_named(COMP, "v", Arc::new(doubled)))
+            },
+        ))
 }
 
 async fn native_latency() -> Vec<u64> {
@@ -93,77 +90,25 @@ async fn native_latency() -> Vec<u64> {
 
     // Buffer 1 on both ends keeps the producer from running ahead, so each
     // sample is one full source to sink traversal.
-    let (tx, source) = ChannelSource::new(Arc::clone(&schema), 1);
+    let (source, tx) = ChannelSource::new(Arc::clone(&schema), 1);
     let (sink, mut rx) = ChannelSink::new(Arc::clone(&schema), 1);
 
-    let service = BuiltService {
-        workflow_id: "stream-latency".to_string(),
-        workflow_name: None,
-        nodes: vec![
-            BuiltNode {
-                id: "in".to_string(),
-                name: None,
-                type_name: "ChannelSource".to_string(),
-                component: Some(COMP),
-                kind: BuiltNodeKind::Source(Box::new(source)),
-                downstream: vec![BuiltEdge {
-                    node: 1,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "double".to_string(),
-                name: None,
-                type_name: "native".to_string(),
-                component: None,
-                kind: BuiltNodeKind::Processor {
-                    runtime: Box::new(doubling_pipeline(Arc::clone(&schema))),
-                    kind: "native",
-                },
-                downstream: vec![BuiltEdge {
-                    node: 2,
-                    branch: None,
-                }],
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-            BuiltNode {
-                id: "out".to_string(),
-                name: None,
-                type_name: "ChannelSink".to_string(),
-                component: Some(COMP),
-                kind: BuiltNodeKind::Sink(Box::new(sink)),
-                downstream: Vec::new(),
-                artifact: None,
-                #[cfg(feature = "windows")]
-                window: None,
-                heal_recovered: None,
-            },
-        ],
-        registry: Arc::new(Registry::new()),
-        inspector: None,
-        dlq: None,
-    };
+    let mut service = BuiltWorkflow::builder("stream-latency")
+        .source("in", COMP, source)
+        .processor("double", doubling_pipeline(Arc::clone(&schema)))
+        .sink("out", COMP, sink)
+        .link("in", "double")
+        .link("double", "out")
+        .run_mode(RunMode::Stream)
+        .build()
+        .expect("build workflow");
+    service.nodes[0].connector = "channel".to_string();
+    service.nodes[2].connector = "channel".to_string();
 
     let cancel = CancellationToken::new();
     let cancel_runner = cancel.clone();
     let local = LocalSet::new();
-    let handle = local.spawn_local(async move {
-        run_stream(
-            service,
-            cancel_runner,
-            None,
-            None,
-            &FlowPlan::stream_default(),
-        )
-        .await
-    });
+    let handle = local.spawn_local(async move { service.run(cancel_runner).await });
 
     let samples = local
         .run_until(async move {
@@ -267,9 +212,14 @@ mod wasm_probe {
 
         let bytes = std::fs::read(&path).expect("read smoketest wasm");
         let engine = WasmEngine::new().expect("WasmEngine init");
-        let runtime =
-            WasmPipelineRuntime::from_bytes(engine, "smoketest", &bytes, HashMap::new(), 60)
-                .expect("load smoketest component");
+        let runtime = WasmPipelineRuntime::from_bytes(
+            engine,
+            "smoketest",
+            &bytes,
+            HashMap::new(),
+            Duration::from_secs(6),
+        )
+        .expect("load smoketest component");
 
         let mut dataset = runtime.template_dataset();
         dataset
@@ -280,18 +230,20 @@ mod wasm_probe {
         let mut prior = None;
         for _ in 0..32 {
             prior = runtime
-                .run_on_with_state(&mut dataset, prior.as_deref())
+                .run_batch(&mut dataset, prior.as_deref())
                 .await
-                .expect("warm-up processor call");
+                .expect("warm-up processor call")
+                .state;
         }
 
         let mut samples = Vec::with_capacity(WASM_CALLS);
         for _ in 0..WASM_CALLS {
             let started = Instant::now();
             prior = runtime
-                .run_on_with_state(&mut dataset, prior.as_deref())
+                .run_batch(&mut dataset, prior.as_deref())
                 .await
-                .expect("processor call");
+                .expect("processor call")
+                .state;
             samples.push(started.elapsed().as_micros() as u64);
         }
 
@@ -308,7 +260,7 @@ async fn main() {
 
     #[cfg(feature = "wasm-host")]
     if let Some(samples) = wasm_probe::processor_call_latency().await {
-        report("wasm run_on_with_state", samples);
+        report("wasm run_batch", samples);
     }
 
     #[cfg(not(feature = "wasm-host"))]

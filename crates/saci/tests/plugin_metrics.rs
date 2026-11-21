@@ -116,45 +116,36 @@ async fn plugin_run_metrics_reach_prometheus() {
     let mut dataset = seeded_dataset(&runtime, &[10, 20, 30]);
 
     runtime
-        .run_on(&mut dataset)
+        .run_batch(&mut dataset, None)
         .await
-        .expect("plugin run_on success");
+        .expect("plugin run_batch success");
 
     let text = TextEncoder::new()
         .encode_to_string(&registry.gather())
         .expect("encode prometheus text");
 
-    // The unattributed values, which every /metrics consumer reads.
-    for (series, expected) in [
-        ("saci_processor_rows_in_total", 3.0),
-        ("saci_processor_rows_out_total", 3.0),
-        ("saci_processor_systems_run_total", 1.0),
+    // Every sample names its processor: no series has an unattributed copy.
+    for series in [
+        "saci_processor_rows_in_total",
+        "saci_processor_rows_out_total",
+        "saci_processor_systems_run_total",
+        "saci_processor_retries_total",
+        "saci_processor_batch_duration_seconds_count",
     ] {
-        let value = sample(&text, series)
-            .unwrap_or_else(|| panic!("{series} missing from /metrics text:\n{text}"));
         assert_eq!(
-            value, expected,
-            "{series} should be {expected} after one batch, text was:\n{text}"
+            unattributed(&text, series),
+            Vec::<&str>::new(),
+            "{series} must have no sample without a processor label, text was:\n{text}"
         );
     }
 
-    assert_eq!(
-        sample(&text, "saci_processor_batch_duration_seconds_count"),
-        Some(1.0),
-        "the batch histogram should hold exactly one sample, text was:\n{text}"
-    );
-    assert_eq!(
-        sample(&text, "saci_processor_retries_total"),
-        Some(0.0),
-        "the identity pipeline retries nothing, text was:\n{text}"
-    );
-
-    // The same values under processor="proc-1", what the dashboard's latency
-    // card and processor edge rates read.
+    // The values under processor="proc-1", what the dashboard's latency card
+    // and processor edge rates read.
     for (series, expected) in [
         ("saci_processor_rows_in_total", 3.0),
         ("saci_processor_rows_out_total", 3.0),
         ("saci_processor_systems_run_total", 1.0),
+        ("saci_processor_retries_total", 0.0),
     ] {
         let value = attributed(&text, series, "proc-1").unwrap_or_else(|| {
             panic!("{series} attributed to proc-1 missing from /metrics text:\n{text}")
@@ -176,16 +167,14 @@ async fn plugin_run_metrics_reach_prometheus() {
     );
 }
 
-/// Read the value of the single Prometheus sample whose series is `name`.
+/// The samples of series `name` that carry no `processor` label.
 ///
 /// The exporter attaches an `otel_scope_name` label to everything, so the
 /// series name is followed by `{...}` rather than a space.
-fn sample(text: &str, name: &str) -> Option<f64> {
+fn unattributed<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
     text.lines()
-        .filter(|l| !l.starts_with('#'))
-        .find_map(|l| l.strip_prefix(name))
-        .and_then(|rest| rest.rsplit(' ').next())
-        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|l| l.starts_with(&format!("{name}{{")) && !l.contains("processor="))
+        .collect()
 }
 
 /// Read the value of the single sample of series `name` that also carries

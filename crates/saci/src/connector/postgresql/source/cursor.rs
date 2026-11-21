@@ -43,8 +43,8 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::{Row, Statement};
 
 use crate::connector::postgresql::config::{
-    CursorMode, FieldSpec, NotifyConfig, PostgresSourceConfig, Retention, Role, SourceMode,
-    find_field, split_qualified,
+    CursorMode, NotifyConfig, PostgresSourceConfig, Retention, Role, SourceMode, find_field,
+    split_qualified, sql_cast,
 };
 use crate::connector::postgresql::connection::{
     Connector, PgConnection, column_types, pg_detail, quote, quote_qualified,
@@ -53,6 +53,7 @@ use crate::connector::postgresql::metrics::Instruments;
 use crate::connector::postgresql::offsets::{Offset, OffsetStore};
 use crate::connector::postgresql::types::{ColumnType, Wire, validate_columns};
 use crate::connector::postgresql::values::{ColumnBuilder, RawValue};
+use crate::connector::schema::FieldSpec;
 
 /// Alias for the cursor text column, which cannot collide with a declared field
 /// because `__`-prefixed names are rejected outside `cdc_logical`.
@@ -83,13 +84,13 @@ impl CursorColumn {
     fn resolve(what: &str, fields: &[FieldSpec], name: &str) -> Result<Self, SaciError> {
         let field = find_field(fields, name).ok_or_else(|| {
             SaciError::configuration(format!(
-                "{what}: '{name}' does not name a declared schema_fields entry"
+                "{what}: '{name}' does not name a declared 'field' entry"
             ))
         })?;
         Ok(Self {
             quoted: quote(name),
             name: name.to_string(),
-            cast: field.ty.sql_cast(),
+            cast: sql_cast(field.ty),
         })
     }
 }
@@ -157,7 +158,7 @@ impl CursorReader {
         let what = "PostgresSource";
 
         let tiebreak_column = match &mode.tiebreak_column {
-            Some(name) => Some(CursorColumn::resolve(what, &cfg.schema_fields, name)?),
+            Some(name) => Some(CursorColumn::resolve(what, &cfg.fields, name)?),
             None => None,
         };
 
@@ -172,8 +173,8 @@ impl CursorReader {
             )?,
             table: quote_qualified(what, &mode.table)?,
             table_display: mode.table.clone(),
-            fields: cfg.schema_fields.clone(),
-            cursor_column: CursorColumn::resolve(what, &cfg.schema_fields, &mode.cursor_column)?,
+            fields: cfg.fields.clone(),
+            cursor_column: CursorColumn::resolve(what, &cfg.fields, &mode.cursor_column)?,
             tiebreak_column,
             where_clause: mode.where_clause.clone(),
             initial: mode.initial.clone(),
@@ -204,7 +205,7 @@ impl CursorReader {
     }
 
     /// The current effective fetch size, for tests that observe
-    /// [`Source::request_batch_rows`](crate::io::source::Source::request_batch_rows)
+    /// [`Source::request_batch_rows`](crate::io::Source::request_batch_rows)
     /// through [`PostgresSource`](crate::connector::postgresql::source::PostgresSource) rather than
     /// through this reader directly.
     #[cfg(test)]
@@ -526,7 +527,7 @@ impl CursorReader {
     ///
     /// From the catalog, not from the prepared statement's result columns:
     /// the statement casts every text-wire column to `text` and would report
-    /// `text` as its type, leaving a forced `pg_type` nothing to assert
+    /// `text` as its type, leaving a forced `native_type` nothing to assert
     /// against.
     async fn resolve_columns(&mut self) -> Result<(), SaciError> {
         if !self.columns.is_empty() {
@@ -786,7 +787,7 @@ pub(crate) enum Shape {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::from_kdl_str;
+    use crate::config::from_kdl_str;
     use serde::Deserialize as _;
 
     fn config(extra_mode: &str, fields: &str) -> PostgresSourceConfig {
@@ -800,8 +801,8 @@ mod tests {
     }
 
     const FIELDS: &str = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"updated_at\" type=\"timestamp_micros_utc\" nullable=#false
+field \"id\" type=\"int64\" nullable=#false
+field \"updated_at\" type=\"timestamp_micros_utc\" nullable=#false
 ";
 
     /// A reader with its column types already resolved, as they are after the
@@ -858,10 +859,10 @@ schema_fields \"updated_at\" type=\"timestamp_micros_utc\" nullable=#false
     #[test]
     fn a_text_wire_column_is_rendered_by_its_output_function() {
         let fields = "
-schema_fields \"id\" type=\"int64\" nullable=#false
-schema_fields \"ip\" type=\"utf8\" pg_type=\"inet\"
-schema_fields \"tags\" type=\"list\" item=\"utf8\" pg_type=\"_inet\"
-schema_fields \"label\" type=\"utf8\"
+field \"id\" type=\"int64\" nullable=#false
+field \"ip\" type=\"utf8\" native_type=\"inet\"
+field \"tags\" type=\"list\" item=\"utf8\" native_type=\"_inet\"
+field \"label\" type=\"utf8\"
 ";
         let text = format!(
             "name \"src\"\nbatch_rows 100\n\n\
@@ -1011,7 +1012,7 @@ schema_fields \"label\" type=\"utf8\"
             from_kdl_str(
                 "name \"s\"\n\nconnection dsn=\"postgres://h/d\" sslmode=\"disable\"\n\n\
                  mode kind=\"cdc_logical\" slot=\"s\" publication=\"p\" \
-                 table=\"t\"\n\nschema_fields \"id\" type=\"int64\"\n",
+                 table=\"t\"\n\nfield \"id\" type=\"int64\"\n",
             )
             .unwrap(),
         )

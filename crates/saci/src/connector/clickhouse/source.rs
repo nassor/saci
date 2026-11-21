@@ -4,8 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::error::SaciError;
-use crate::io::cast_batch;
-use crate::io::source::Source;
+use crate::io::{Source, cast_batch};
 use arrow_array::temporal_conversions::{
     date32_to_datetime, date64_to_datetime, timestamp_ms_to_datetime, timestamp_us_to_datetime,
 };
@@ -61,9 +60,9 @@ impl ClickhouseSource {
         config.validate()?;
 
         let fields = config
-            .schema_fields
+            .fields
             .iter()
-            .map(|f| f.to_arrow_field())
+            .map(|f| f.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
 
@@ -113,7 +112,7 @@ impl ClickhouseSource {
 
                 let cols = self
                     .config
-                    .schema_fields
+                    .fields
                     .iter()
                     .map(|f| quote_identifier(&f.name))
                     .collect::<Vec<_>>()
@@ -124,7 +123,7 @@ impl ClickhouseSource {
                 if let Some(cursor) = current_cursor.as_deref() {
                     let cursor_ty = self
                         .config
-                        .schema_fields
+                        .fields
                         .iter()
                         .find(|f| f.name == poll.cursor_column)
                         .map(|f| f.ty)
@@ -145,7 +144,7 @@ impl ClickhouseSource {
                         (Some(tie), Some(tie_val)) => {
                             let tie_ty = self
                                 .config
-                                .schema_fields
+                                .fields
                                 .iter()
                                 .find(|f| f.name == *tie)
                                 .map(|f| f.ty)
@@ -233,7 +232,7 @@ impl ClickhouseSource {
 
                 let cols = self
                     .config
-                    .schema_fields
+                    .fields
                     .iter()
                     .map(|f| quote_identifier(&f.name))
                     .collect::<Vec<_>>()
@@ -719,14 +718,13 @@ mod tests {
 
     #[test]
     fn source_request_batch_rows_updates_batch_rows() {
-        use crate::connector::clickhouse::config::{
-            ClickhouseConnectionConfig, ClickhouseFieldType, DumpMode, FieldSpec,
-        };
+        use crate::connector::clickhouse::config::{ConnectionConfig, DumpMode};
+        use crate::connector::schema::{FieldSpec, FieldType};
         use std::collections::HashMap;
 
         let config = ClickhouseSourceConfig {
             name: "src".to_string(),
-            connection: ClickhouseConnectionConfig {
+            connection: ConnectionConfig {
                 url: "http://localhost:8123".to_string(),
                 user: None,
                 password: None,
@@ -738,12 +736,14 @@ mod tests {
             mode: SourceMode::Dump(DumpMode {
                 table: "events".to_string(),
             }),
-            schema_fields: vec![FieldSpec {
+            fields: vec![FieldSpec {
                 name: "id".to_string(),
-                ty: ClickhouseFieldType::Int64,
+                ty: FieldType::Int64,
                 nullable: false,
                 precision: None,
                 scale: None,
+                item: None,
+                native_type: None,
             }],
             batch_rows: 100,
             max_batches_per_cycle: 0,

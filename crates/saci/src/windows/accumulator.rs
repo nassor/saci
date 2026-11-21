@@ -188,7 +188,7 @@ impl super::system::WindowedSystem {
         }
 
         // Mark superseded accumulator rows as dead.
-        if let Some(acc_batch) = pipeline.batch_for(WindowAccumulator::name()) {
+        if let Ok(acc_batch) = pipeline.batch_named(WindowAccumulator::name()) {
             let acc_batch = acc_batch.clone();
             let src_idx = acc_batch.schema().index_of("source_component").ok();
             let wid_idx = acc_batch.schema().index_of("window_id").ok();

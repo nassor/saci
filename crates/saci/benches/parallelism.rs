@@ -51,7 +51,7 @@ impl Component for Record {
 
 fn world_with_records(n: usize) -> Dataset {
     let mut pipeline = Dataset::new();
-    pipeline.register_component::<Record>().unwrap();
+    pipeline.register::<Record>().unwrap();
     let records: Vec<Record> = (0..n)
         .map(|i| Record {
             a: 0.0,
@@ -85,15 +85,15 @@ macro_rules! impl_field_writer {
         impl ParallelSystem for $type {
             fn meta(&self) -> SystemMeta {
                 SystemMeta::new($method)
-                    .read("Record", "base")
-                    .write("Record", $field)
+                    .reads_named("Record", "base")
+                    .writes_named("Record", $field)
             }
             async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-                let col = pipeline.column::<Record>("base").unwrap().clone();
+                let col = pipeline.column_named("Record", "base").unwrap().clone();
                 let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
                 let result: Vec<f64> = arr.values().iter().map(|&v| (v * v).sqrt()).collect();
                 let new_arr: Arc<dyn arrow_array::Array> = Arc::new(Float64Array::from(result));
-                Ok(WriteSet::new().put("Record", $field, new_arr))
+                Ok(WriteSet::new().put_named("Record", $field, new_arr))
             }
         }
     };
@@ -123,12 +123,12 @@ fn bench_cross_system_parallelism(c: &mut Criterion) {
 
     group.bench_function("parallel_4_systems", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("bench");
-            wl.data = world_with_records(rows);
-            wl.add_parallel_system(WriteFieldA);
-            wl.add_parallel_system(WriteFieldB);
-            wl.add_parallel_system(WriteFieldC);
-            wl.add_parallel_system(WriteFieldD);
+            let mut wl = Pipeline::new("bench")
+                .parallel_system(WriteFieldA)
+                .parallel_system(WriteFieldB)
+                .parallel_system(WriteFieldC)
+                .parallel_system(WriteFieldD);
+            *wl.data_mut() = world_with_records(rows);
             rt.block_on(wl.run()).unwrap();
         })
     });
@@ -137,21 +137,21 @@ fn bench_cross_system_parallelism(c: &mut Criterion) {
         use saci::system::system_fn;
         b.iter(|| {
             let mut wl = Pipeline::new("bench");
-            wl.data = world_with_records(rows);
+            *wl.data_mut() = world_with_records(rows);
             // Sequential path: each system takes &mut dataset.
             for field in ["a", "b", "c", "d"] {
-                wl.add_system(system_fn(
+                wl = wl.system(system_fn(
                     SystemMeta::new(field)
-                        .read("Record", "base")
-                        .write("Record", field),
+                        .reads_named("Record", "base")
+                        .writes_named("Record", field),
                     move |w| {
-                        let col = w.column::<Record>("base").unwrap().clone();
+                        let col = w.column_named("Record", "base").unwrap().clone();
                         let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
                         let result: Vec<f64> =
                             arr.values().iter().map(|&v| (v * v).sqrt()).collect();
                         let new_arr: Arc<dyn arrow_array::Array> =
                             Arc::new(Float64Array::from(result));
-                        let batch = w.columns::<Record>().unwrap().clone();
+                        let batch = w.batch::<Record>().unwrap().clone();
                         let schema = batch.schema();
                         let idx = schema.index_of(field).unwrap();
                         let mut columns: Vec<Arc<dyn arrow_array::Array>> =
@@ -179,33 +179,40 @@ struct SliceSystem;
 impl ParallelSystem for SliceSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("slice_system")
-            .read("Record", "base")
-            .write("Record", "a")
+            .reads_named("Record", "base")
+            .writes_named("Record", "a")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
         // Single-threaded fallback (used when below threshold or slice opt-out).
-        let col = pipeline.column::<Record>("base").unwrap().clone();
+        let col = pipeline.column_named("Record", "base").unwrap().clone();
         let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
         let result = compute_transform(arr);
         let new_arr: Arc<dyn arrow_array::Array> = Arc::new(Float64Array::from(result));
-        Ok(WriteSet::new().put("Record", "a", new_arr))
+        Ok(WriteSet::new().put_named("Record", "a", new_arr))
+    }
+
+    fn sliced(&self) -> bool {
+        true
     }
 
     fn run_slice(
         &self,
         pipeline: &Dataset,
         rows: std::ops::Range<u32>,
-    ) -> Option<Result<SliceWriteSet, SaciError>> {
-        let col = pipeline.column::<Record>("base")?;
-        let arr = col.as_any().downcast_ref::<Float64Array>()?;
+    ) -> Result<SliceWriteSet, SaciError> {
+        let col = pipeline.column_named("Record", "base")?;
+        let arr = col
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SaciError::generic("base is not Float64"))?;
         let start = rows.start as usize;
         let len = (rows.end - rows.start) as usize;
         let slice = arr.slice(start, len);
         let slice_arr = slice.as_any().downcast_ref::<Float64Array>().unwrap();
         let result = compute_transform(slice_arr);
         let new_arr: Arc<dyn arrow_array::Array> = Arc::new(Float64Array::from(result));
-        Some(Ok(SliceWriteSet::new(rows).put("Record", "a", new_arr)))
+        Ok(SliceWriteSet::new(rows).put_named("Record", "a", new_arr))
     }
 }
 
@@ -216,16 +223,16 @@ struct NoSliceSystem;
 impl ParallelSystem for NoSliceSystem {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("no_slice_system")
-            .read("Record", "base")
-            .write("Record", "a")
+            .reads_named("Record", "base")
+            .writes_named("Record", "a")
     }
 
     async fn run(&self, pipeline: &Dataset) -> Result<WriteSet, SaciError> {
-        let col = pipeline.column::<Record>("base").unwrap().clone();
+        let col = pipeline.column_named("Record", "base").unwrap().clone();
         let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
         let result = compute_transform(arr);
         let new_arr: Arc<dyn arrow_array::Array> = Arc::new(Float64Array::from(result));
-        Ok(WriteSet::new().put("Record", "a", new_arr))
+        Ok(WriteSet::new().put_named("Record", "a", new_arr))
     }
     // No `run_slice` override, so the default `None` disables slice parallelism.
 }
@@ -249,18 +256,16 @@ fn bench_slice_parallelism(c: &mut Criterion) {
 
     group.bench_function("with_slices_10M", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("bench");
-            wl.data = world_with_records(rows);
-            wl.add_parallel_system(SliceSystem);
+            let mut wl = Pipeline::new("bench").parallel_system(SliceSystem);
+            *wl.data_mut() = world_with_records(rows);
             rt.block_on(wl.run()).unwrap();
         })
     });
 
     group.bench_function("no_slices_10M", |b| {
         b.iter(|| {
-            let mut wl = Pipeline::new("bench");
-            wl.data = world_with_records(rows);
-            wl.add_parallel_system(NoSliceSystem);
+            let mut wl = Pipeline::new("bench").parallel_system(NoSliceSystem);
+            *wl.data_mut() = world_with_records(rows);
             rt.block_on(wl.run()).unwrap();
         })
     });
@@ -291,9 +296,8 @@ fn bench_threshold_behaviour(c: &mut Criterion) {
         let label = format!("{}_rows", rows);
         group.bench_function(&label, |b| {
             b.iter(|| {
-                let mut wl = Pipeline::new("bench");
-                wl.data = world_with_records(rows);
-                wl.add_parallel_system(SliceSystem);
+                let mut wl = Pipeline::new("bench").parallel_system(SliceSystem);
+                *wl.data_mut() = world_with_records(rows);
                 rt.block_on(wl.run()).unwrap();
             })
         });

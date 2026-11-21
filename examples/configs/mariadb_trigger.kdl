@@ -42,7 +42,7 @@ node id=1 name="saci-mariadb-trigger" data_dir="${SACI_DATA_DIR:-/tmp/saci-maria
 
 // Re-drain every 2 s. Each MariaDB mode returns EOF once it is caught up, so
 // the interval runner drives it without the stream runner.
-run_mode kind="interval" interval_ms=2000
+run "interval" every_ms=2000
 
 // Adaptive flow control: how many rows the runner admits from a source per
 // pass, and how large the Arrow chunk handed downstream is. On by default
@@ -69,7 +69,7 @@ workflow "orders" {
 
     // The processor's `describe()` supplies the component list, so `component`
     // on this source and the sink below must name components it declares.
-    source "maria_orders" type="MariadbSource" component="OrderChange" {
+    source "maria_orders" connector="mariadb" component="OrderChange" {
         // Every source retries a failed operation with exponential backoff
         // before the error reaches the runner. The `retry` child sits beside
         // `config`; the connector's own `connection.reconnect` inside config
@@ -149,30 +149,30 @@ workflow "orders" {
             // changelog fills: __op (utf8), __seq (uint64), __commit_ts
             // (timestamp_micros_utc) and __table (utf8). Declare only the ones
             // the pipeline needs.
-            schema_fields "__op" type="utf8" nullable=#false
-            schema_fields "__seq" type="uint64" nullable=#false
-            schema_fields "__commit_ts" type="timestamp_micros_utc" nullable=#true
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
+            field "__op" type="utf8" nullable=#false
+            field "__seq" type="uint64" nullable=#false
+            field "__commit_ts" type="timestamp_micros_utc" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "status" type="utf8" nullable=#true
             // DECIMAL maps to decimal128 and needs the column's own precision and
             // scale; a mismatch is refused at the first connect.
-            schema_fields "amount" type="decimal128" precision=18 scale=4 nullable=#true
+            field "amount" type="decimal128" precision=18 scale=4 nullable=#true
         }
     }
 
     // ------------------------------------------------------------ processor
 
-    wasm "process_orders" module="pipelines/orders.wasm"
+    wasm "process_orders" path="pipelines/orders.wasm"
 
     // ------------------------------------------------------------------ sink
     //
     // A different component than the source's: the processor declares both,
-    // reads OrderChange and writes EnrichedOrder. A sink's schema_fields must
+    // reads OrderChange and writes EnrichedOrder. A sink's `field` lines must
     // match the component's RecordBatch field for field, in order, so pointing
     // a sink at the source's component would mean repeating the source's
     // schema verbatim.
 
-    sink "maria_enriched" type="MariadbSink" component="EnrichedOrder" {
+    sink "maria_enriched" connector="mariadb" component="EnrichedOrder" {
         // A failed write or finish retries the same way, so a dropped session
         // mid-write re-queues the rows instead of failing the cycle.
         retry max_attempts=8 base_delay_ms=500 multiplier=2.0 max_delay_ms=30000 jitter=0.1
@@ -201,12 +201,12 @@ workflow "orders" {
 
             connection dsn="${SACI_MARIADB_SINK_DSN}" ssl_mode="required"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "source_seq" type="uint64" nullable=#false
-            schema_fields "status" type="utf8" nullable=#true
+            field "id" type="int64" nullable=#false
+            field "source_seq" type="uint64" nullable=#false
+            field "status" type="utf8" nullable=#true
             // The declared precision and scale must be no wider than the
             // target column's.
-            schema_fields "total" type="decimal128" precision=18 scale=4 nullable=#true
+            field "total" type="decimal128" precision=18 scale=4 nullable=#true
         }
     }
 
@@ -217,7 +217,7 @@ workflow "orders" {
 // HTTP control plane. /metrics carries the connector's counters:
 // saci_mariadb_source_rows_total, saci_mariadb_source_batches_total,
 // saci_mariadb_sink_flushes_total and the rest.
-http bind="127.0.0.1:0" disabled=#false
+http bind="127.0.0.1:0" enabled=#true
 
 // Use log_format="json" in production log aggregators. Kept at a 30%
 // grade: a changelog source redraining every 2 s produces a steady

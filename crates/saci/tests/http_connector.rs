@@ -2,11 +2,11 @@
 //!
 //! `rows_served_over_http_come_back_out_of_the_http_sink` drives an
 //! `HttpSource` GET into a workflow whose `HttpSink` posts the result, under
-//! `one_shot`. The source reaches EOF after its one GET, which is what lets
-//! `one_shot` drive it, and the sink's captured body decodes back to the rows
+//! `run "once"`. The source reaches EOF after its one GET, which is what lets
+//! `run "once"` drive it, and the sink's captured body decodes back to the rows
 //! that were served.
 //!
-//! The `push` module drives an `HttpPushSource` under `stream`: three POSTed
+//! The `listen` module drives an `HttpListenSource` under `stream`: three POSTed
 //! ndjson documents become three sink requests, and the connector's own
 //! `saci_http_*` series are read back out of a Prometheus registry.
 //!
@@ -17,8 +17,8 @@
 #![cfg(all(
     feature = "connector-http",
     feature = "service",
-    feature = "transformer-csv",
-    feature = "transformer-ndjson",
+    feature = "codec-csv",
+    feature = "codec-ndjson",
     feature = "wasm-host"
 ))]
 
@@ -31,13 +31,11 @@ use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use tokio_util::sync::CancellationToken;
 
+use saci::codec::Codec;
+use saci::codec::csv::CsvCodec;
 use saci::pipeline::Pipeline;
-use saci::service::builder::ServiceBuilder;
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
-use saci::transformer::Transformer;
-use saci::transformer::csv::CsvTransformer;
+use saci::service::ServiceBuilder;
+use saci::service::ServiceConfig;
 
 const COMPONENT: &str = "Order";
 const CSV_BODY: &[u8] = b"id,total\n1,10\n2,20\n3,30\n4,40\n";
@@ -51,7 +49,10 @@ fn schema() -> Arc<Schema> {
 
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("http_connector");
-    pipeline.data.register_raw_component(COMPONENT, schema());
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
     pipeline
 }
 
@@ -124,12 +125,8 @@ fn exchange(stream: &mut std::net::TcpStream, body: &[u8]) -> Vec<u8> {
 /// Decode a captured request body through the same format the sink wrote it
 /// with, which is what makes the assertion a round trip.
 fn decode_body(body: &[u8]) -> Vec<RecordBatch> {
-    let mut spool = tempfile::tempfile().expect("temp file");
-    spool.write_all(body).expect("write body");
-    std::io::Seek::rewind(&mut spool).expect("rewind");
-
-    let mut reader = CsvTransformer::new(true)
-        .open_reader(spool, Some(schema()))
+    let mut reader = CsvCodec::new()
+        .open_reader(body.to_vec().into(), Some(schema()))
         .expect("the body is a whole csv document");
     let mut batches = Vec::new();
     while let Some(batch) = reader.next_batch().expect("decode") {
@@ -162,34 +159,34 @@ mode "standalone"
 
 node id=1 name="saci-http-connector" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "http-connector-test" {{
-    transformer "csv_fmt" format="csv" {{
-        options has_headers=#true
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
     }}
 
-    source "orders_in" type="HttpSource" component="{COMPONENT}" transformer="csv_fmt" {{
+    source "orders_in" connector="http" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             url "{source_url}"
             timeout_ms 5000
             headers {{
                 accept "text/csv"
             }}
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="csv_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="csv_fmt" {{
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -197,7 +194,7 @@ workflow "http-connector-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -210,21 +207,20 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
     let (sink_url, sink_server) = serve(1, Vec::new());
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("service.kdl");
-    std::fs::write(
-        &config_path,
-        config_kdl(&source_url, &sink_url, &config_path_text(dir.path())),
-    )
-    .expect("write config");
-
-    let config = ServiceConfig::load(&config_path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let config = ServiceConfig::from_kdl(&config_kdl(
+        &source_url,
+        &sink_url,
+        &config_path_text(dir.path()),
+    ))
+    .expect("config loads");
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("both http halves resolve through the registry")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -243,15 +239,14 @@ async fn rows_served_over_http_come_back_out_of_the_http_sink() {
     assert_eq!(column(&batches[0], "total"), vec![10, 20, 30, 40]);
 }
 
-/// The listening half under `run_mode kind="stream"`.
+/// The listening half under `run "stream"`.
 ///
-/// `HttpPushSource` never reaches EOF, so the stream runner is the only one
+/// `HttpListenSource` never reaches EOF, so the stream runner is the only one
 /// that may drive it, and one POSTed document is one item. The format is
 /// `ndjson`, so one request body is a batch of json lines and the sink writes
 /// the same shape back out.
-#[cfg(feature = "transformer-ndjson")]
-mod push {
-    use std::io::Write;
+#[cfg(feature = "codec-ndjson")]
+mod listen {
     use std::time::Duration;
 
     use arrow_array::RecordBatch;
@@ -259,14 +254,12 @@ mod push {
     use tokio::task::LocalSet;
     use tokio_util::sync::CancellationToken;
 
-    use saci::service::builder::ServiceBuilder;
-    use saci::service::config::ServiceConfig;
-    use saci::service::factories::register_builtin_factories;
+    use saci::codec::Codec;
+    use saci::codec::ndjson::NdjsonCodec;
+    use saci::service::ServiceBuilder;
+    use saci::service::ServiceConfig;
+    use saci::service::WorkflowStats;
     use saci::service::install_ring_provider;
-    use saci::service::run_standalone;
-    use saci::service::standalone::StandaloneStats;
-    use saci::transformer::Transformer;
-    use saci::transformer::ndjson::NdjsonTransformer;
 
     use super::{COMPONENT, build_pipeline, column, config_path_text, schema, serve};
 
@@ -296,31 +289,31 @@ mode "standalone"
 
 node id=1 name="saci-http-push" data_dir="{data_dir}"
 
-run_mode kind="stream"
+run "stream"
 
 workflow "http-push-test" {{
-    transformer "json_fmt" format="ndjson"
+    codec "json_fmt" format="ndjson"
 
-    source "orders_in" type="HttpPushSource" component="{COMPONENT}" transformer="json_fmt" {{
+    source "orders_in" connector="http-listen" component="{COMPONENT}" codec="json_fmt" {{
         config {{
             bind "{bind}"
             path "/orders"
             methods "POST"
             buffer 8
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "relay" name="Relay"
 
-    sink "orders_out" type="HttpSink" component="{COMPONENT}" transformer="json_fmt" {{
+    sink "orders_out" connector="http" component="{COMPONENT}" codec="json_fmt" {{
         config {{
             url "{sink_url}"
             method "POST"
             timeout_ms 5000
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -328,7 +321,7 @@ workflow "http-push-test" {{
     link from="relay" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -338,12 +331,8 @@ observability log_level="warn"
     /// Decode a captured request body through the same format the sink wrote
     /// it with, which is what makes the assertion a round trip.
     fn decode_body(body: &[u8]) -> Vec<RecordBatch> {
-        let mut spool = tempfile::tempfile().expect("temp file");
-        spool.write_all(body).expect("write body");
-        std::io::Seek::rewind(&mut spool).expect("rewind");
-
-        let mut reader = NdjsonTransformer::default()
-            .open_reader(spool, Some(schema()))
+        let mut reader = NdjsonCodec::default()
+            .open_reader(body.to_vec().into(), Some(schema()))
             .expect("the body is a whole ndjson document");
         let mut batches = Vec::new();
         while let Some(batch) = reader.next_batch().expect("decode") {
@@ -352,36 +341,28 @@ observability log_level="warn"
         batches
     }
 
-    /// POST every document into the push source and collect what the sink
+    /// POST every document into the listen source and collect what the sink
     /// sent on.
     ///
     /// The listener is already bound by the factory, so a POST issued before
     /// the accept loop starts waits in the backlog instead of being refused.
-    async fn drive(dir: &std::path::Path) -> (StandaloneStats, Vec<Vec<u8>>) {
+    async fn drive(dir: &std::path::Path) -> (WorkflowStats, Vec<Vec<u8>>) {
         let bind_addr = format!("127.0.0.1:{}", reserved_port());
         let (sink_url, sink_server) = serve(documents().len(), Vec::new());
 
-        let config_path = dir.join("service.kdl");
-        std::fs::write(
-            &config_path,
-            config_kdl(&bind_addr, &sink_url, &config_path_text(dir)),
-        )
-        .expect("write config");
-
-        let config = ServiceConfig::load(&config_path).expect("config loads");
-        let built = register_builtin_factories(ServiceBuilder::new())
-            .with_runtime("relay", Box::new(build_pipeline()))
-            .build_all(&config)
-            .expect("the push source and the sink resolve through the registry")
+        let config =
+            ServiceConfig::from_kdl(&config_kdl(&bind_addr, &sink_url, &config_path_text(dir)))
+                .expect("config loads");
+        let built = ServiceBuilder::new()
+            .runtime("relay", build_pipeline())
+            .build(&config)
+            .expect("the listen source and the sink resolve through the registry")
             .remove(0);
 
         let cancel = CancellationToken::new();
         let runner_cancel = cancel.clone();
-        let runner_config = config.clone();
         let local = LocalSet::new();
-        let handle = local.spawn_local(async move {
-            run_standalone(built, &runner_config, runner_cancel, None, None).await
-        });
+        let handle = local.spawn_local(async move { built.run(runner_cancel).await });
 
         local
             .run_until(async move {
@@ -422,7 +403,7 @@ observability log_level="warn"
     }
 
     #[tokio::test]
-    async fn documents_posted_to_the_push_source_come_back_out_of_the_http_sink() {
+    async fn documents_posted_to_the_listen_source_come_back_out_of_the_http_sink() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (stats, posted) = drive(dir.path()).await;
 
@@ -483,7 +464,7 @@ observability log_level="warn"
                 r#"status="202""#,
             ],
         )
-        .unwrap_or_else(|| panic!("the push source's 202s are missing from:\n{text}"));
+        .unwrap_or_else(|| panic!("the listen source's 202s are missing from:\n{text}"));
         assert!(
             accepted >= 3.0,
             "three documents were accepted, got {accepted} in:\n{text}"

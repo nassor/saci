@@ -1,27 +1,33 @@
 ---
 name: saci-processors
-description: Use when writing, building, hosting, testing or documenting a SACI wasm processor: the saci::processor SDK and saci-macros, the saci:pipeline WIT package and its vendored copy, the wasmtime host under crates/saci/src/wasm_host/, the Arrow IPC wire format and conformance corpus under packages/arrow-ipc-conformance/, or the wasm, quickstart and conformance examples.
+description: Use when writing, building, hosting, testing or documenting a SACI wasm processor: the saci::sdk module and saci-macros, the saci:pipeline WIT package and its vendored copy, the wasmtime host under crates/saci/src/wasm_host/, the Arrow IPC wire format and conformance corpus under packages/arrow-ipc-conformance/, or the wasm, quickstart and conformance examples.
 ---
 
 # SACI processors
 
 ## SDK and WIT
 
-- `saci::processor` (feature `processor` of the `saci` crate): the processor SDK. Re-exports the
-  core types, the `saci::export_pipeline!` macro, the prelude `saci::processor::prelude`, and
-  `saci_macros::{Component, transform, fold, processor}` plus `Config`/`Error`/`Result`, so a
-  processor crate depends only on `saci = { workspace = true, features = ["processor"] }` (add
-  `"windows"` for window specs). The workspace dependency is `default-features = false`; outside
-  this repository it is `saci = { version = "0.1", default-features = false, features =
-  ["processor"] }`. The macro expansions name `::saci::processor::__rt`. The crate also owns the
-  canonical WIT package at `crates/saci/wit/pipeline.wit`; `saci-macros` vendors a byte-identical
-  copy at `crates/saci-macros/wit/pipeline.wit`, because `cargo package` cannot reach outside a
-  crate's own directory.
+- `saci::sdk` (`crates/saci/src/sdk.rs` and `sdk/{config,error,host,glue,state}.rs`, plus
+  `sdk/plugin_rt.rs` for native plugins): the authoring module both SDKs share. `sdk::State<C>`,
+  `sdk::RouteDecision`, `sdk::Config`, `sdk::Error`, `sdk::Result` and `sdk::host`
+  (`trace`/`debug`/`info`/`warn`/`error`, `metric`, `config`, `config_parse`, `with_config` for unit
+  tests). `sdk/glue.rs` holds the hidden `HostIo` trait, `describe` and `run_batch`, reachable as
+  `saci::__private::*`, which is the only path the macro expansions name. `saci::prelude` carries
+  the macros (`Component`, `transform`, `fold`, `processor` with feature `processor`, `plugin` with
+  feature `plugin`) and `sdk`, so a processor crate depends only on
+  `saci = { workspace = true, features = ["processor"] }` (`saci::window` is always compiled, so
+  window specs need no extra feature). The
+  workspace dependency is
+  `default-features = false`; outside this repository it is `saci = { version = "0.1",
+  default-features = false, features = ["processor"] }`. The crate also owns the canonical WIT
+  package at `crates/saci/wit/pipeline.wit`; `saci-macros` vendors a byte-identical copy at
+  `crates/saci-macros/wit/pipeline.wit`, because `cargo package` cannot reach outside a crate's own
+  directory.
 - `saci-processor-smoketest`: a minimal processor component used as a CI fixture: the arrow-ipc
   drift gate, config delivery, and cross-batch state.
-- `saci-macros`: the proc-macro crate, `#[derive(Component)]`, `#[transform]`, `#[fold]`,
-  `#[processor]`, re-exported through `saci::processor`, so a processor crate never depends on it
-  directly.
+- `saci-macros`: the proc-macro crate, `#[derive(Component)]` (`component.rs`), `#[transform]` and
+  `#[fold]` (`system.rs`), `#[processor]` (`processor.rs`) and `#[plugin]` (`plugin.rs`),
+  re-exported at the `saci` root, so an authoring crate never depends on it directly.
 
 `crates/saci/wit/pipeline.wit` is the canonical `saci:pipeline@0.4.0` WIT package. The processor
 exports two functions:
@@ -31,18 +37,19 @@ exports two functions:
 - `run-batch(input, prior)`: `async func` (Component Model Async) taking Arrow IPC input and optional
   prior checkpoint bytes, returning Arrow IPC output plus metrics and an updated state blob.
 
-The `#[processor]` attribute macro (`saci-macros`, re-exported through `saci::processor`) is the
-zero-ceremony path: it embeds the WIT, auto-cfgs the wasm32 target, and emits the log/metric/config
-helpers, and is what `examples/wasm/settle` and `examples/quickstart/stages/{validate,settle}` use.
-`export_pipeline!` is the explicit wiring macro, used by `examples/wasm/order_processing`,
-`examples/branching`, `examples/windowing`, `examples/multi_workflow` and the smoketest fixture.
-`export_pipeline!(build)` wires a `fn() -> Pipeline` to those exports and emits `saci_config_get` and
-`saci_config_parse` into the caller's crate. The WIT bindings are caller-side, so the accessors must
-be too. `export_pipeline!(build, state = C)` also installs a `ProcessorState<C>` resource on the
-batch dataset before the systems run and serializes it back into `run-result.checkpoint` afterwards.
-State is a resource rather than a registered component because resources do not round-trip through
-Arrow IPC, so processor state never leaks into the output. A `RouteDecision` resource is the routing
-channel: the macro reads it after the systems run and reports its branch names in
+`#[processor]` takes no arguments. It embeds the WIT, gates the bindings and exports on wasm32,
+and installs the host backend (`install_host`) that `sdk::host` calls through. It is what every
+guest crate uses: `examples/wasm/{order_processing,settle}`, `examples/quickstart/stages/{validate,settle}`,
+`examples/branching`, `examples/windowing`, `examples/multi_workflow`, `examples/integrity` and the
+smoketest fixture. A guest crate writes no `mod bindings` and no export macro. The attribute goes on
+a `fn build() -> Pipeline`, and the pipeline's name (`Pipeline::new("name")`) is the descriptor name
+the host checks. State is declared on the pipeline: `.state::<C>()` makes `run_batch` restore a
+`sdk::State<C>` resource on the batch dataset before the systems run (`Pipeline::restore_state`) and
+serialize it back into `run-result.checkpoint` afterwards (`Pipeline::capture_state`). State is a
+resource rather than a registered component because resources do not round-trip through Arrow IPC,
+so processor state never leaks into the output; registering the same type with `.component::<C>()`
+is a configuration error. A `sdk::RouteDecision` resource (`RouteDecision::to([..])`, or `none()`) is
+the routing channel: `run_batch` takes it after the systems run and reports its branch names in
 `run-result.routes`, which the host uses to deliver the output only to the links whose `branch`
 names one of them (absent = legacy multicast).
 
@@ -62,7 +69,7 @@ programs. Compiling, linking (`wasmtime_wasi::p3::add_to_linker` + `SaciPipeline
 pre-instantiating a component is synchronous and costs about 1.7 s of one fast core for the 4 MB
 smoketest, so `WasmEngine::program` does it once per distinct set of bytes and every later load of
 the same module is a `memcmp` plus an `Arc` clone, about 0.1 ms. The engine is shareable:
-`ServiceBuilder::with_wasm_engine` hands one engine to several builders, and the ticker stops with
+`ServiceBuilder::wasm_engine` hands one engine to several builders, and the ticker stops with
 the last clone rather than outliving it. Its `Config` uses wasmtime's pooling instance allocator,
 because the WIT contract puts a fresh `Store` and a fresh instantiation on every batch by default: the pool
 recycles pre-reserved slots instead of asking the OS for a linear memory per call, and
@@ -70,14 +77,14 @@ recycles pre-reserved slots instead of asking the OS for a linear memory per cal
 The `POOL_*` constants in `engine.rs` size it for 128 concurrent processor calls; exceeding that
 is a `PoolConcurrencyLimitError` at instantiate, not a queue, and each engine reserves 1 TiB of
 address space, which bounds how many engines one process can hold. `WasmPipelineRuntime` implements
-`saci::runtime::PipelineRuntime`: it drives `instantiate_async` and `describe` through
+`saci::runtime::PipelineRuntime` through its `run_batch(data, prior) -> RuntimeOutput`: it drives `instantiate_async` and `describe` through
 `pollster::block_on`, serializes the dataset to Arrow IPC, drives Component Model Async
 `call_run_batch` inside `store.run_concurrent` via `pollster::block_on` on `spawn_blocking` (keeping
 CPU-bound guest compute off Tokio's worker pool so the epoch ticker cannot starve), and reads the
 result back. `bindings.rs` is a `wasmtime::component::bindgen!` pointed at `crates/saci/wit` with
 `exports: { default: async }`, so host bindings cannot drift.
 `host_impl.rs` implements the `host-io` imports (`log`, `metric`, `get-config`); `metric` records
-the `saci_processor_metric` histogram, and `runner.rs` records the five `run-metrics` numbers off
+the `saci_processor_custom` histogram, and `runner.rs` records the five `run-metrics` numbers off
 every `run-result`.
 
 `wasm-host` is the feature: the wasmtime host, `WasmEngine`, `WasmPipelineRuntime`, the `bindgen!`
@@ -99,13 +106,20 @@ processor's `host-io::log` lines in the trace. Processor code reaches `tracing` 
 `host-io::log` import, so field content is untrusted: values are truncated at `MAX_FIELD_BYTES`
 (512), records capped at `MAX_FIELDS` (32), and `("truncated","true")` appended when either bites.
 
-A `wasm` node with no `module` takes its runtime from `with_runtime(id, ..)`, and
+A `wasm` node with no `path` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
 `build_processor_node` **removes** that injected runtime from the builder, so `rebuild_blocker`
 reports such a workflow as `restartable: false`.
 
+A host that loads a component from code calls `WasmEngine::new()` (`SaciResult`, needs a tokio
+runtime for the epoch ticker) and
+`WasmPipelineRuntime::from_bytes(engine, name, bytes, config, timeout: Duration)`; the call limit
+is `timeout.as_millis().div_ceil(100).max(1)` epoch ticks of 100 ms. `PipelineRuntimeLoader` holds
+one engine and a resolver, defaults to 10 s and takes `with_timeout(Duration)`.
+
 ## Building a processor
 
-Each Rust processor generates its WIT bindings in-macro via `wit_bindgen::generate!`, so nothing
+Each Rust processor generates its WIT bindings in-macro through `#[processor]`'s
+`wit_bindgen::generate!` expansion, so nothing
 has to be produced on disk before `cargo fmt --all -- --check`. The one build `cargo test` needs
 is the smoketest component: `crates/saci/tests/{wasm_roundtrip,processor_metrics,
 workflow_branching,workflow_metrics,workflow_dag}.rs` all reach it through the shared
@@ -126,13 +140,14 @@ adapter step. `.cargo/config.toml` adds `-C target-feature=+simd128` for that ta
 every processor's core module ships the SIMD proposal; wasmtime enables it by default.
 
 `saci`'s Arrow crates, serde_arrow, serde, futures, async-trait, fnv and rand are unconditional;
-the default `engine` feature adds `runtime` (tokio, rayon, num_cpus), so a `wasm32-wasip3` processor
+the default `engine` feature adds tokio, rayon and num_cpus, and implies `derive` (the
+`#[derive(Component)]`, `#[transform]` and `#[fold]` macros), so a `wasm32-wasip3` processor
 build takes `default-features = false, features = ["processor"]`. The `processor` feature targets
 WASI 0.3 Component Model Async (requiring `wit-bindgen = { workspace = true }` with
-`features = ["async"]`) and exposes `Pipeline`, `System`, `Component` (the trait), `Config`,
-`Error`, `Result`, `export_pipeline!` and the four macros without pulling tokio or `pollster`. The
-macro expansions name `::saci::processor::...`, which resolves through the one direct `saci`
-dependency.
+`features = ["async"]`, gated on `cfg(target_arch = "wasm32")`) and exposes `Pipeline`, `System`,
+`Component` (the trait), `sdk` and the macros through `saci::prelude` without pulling tokio or
+`pollster`. The macro expansions name `::saci::__private::...`, which resolves through the one
+direct `saci` dependency.
 
 ## Bindings convention
 
@@ -141,9 +156,10 @@ and then names `saci::` at that same scope (`crates/saci/src/wasm_host/bindings.
 this) must not have an extern crate named `saci` in scope: the macro generates a `mod saci` from
 the WIT namespace, and an extern crate of the same name makes every unqualified `saci::`
 reference there ambiguous (E0659), not a silent shadow. `wasm_host` sits inside the `saci` crate,
-which has no extern crate of its own name. A processor crate does depend on `saci`, so it wraps
-`wit_bindgen::generate!` one level down in its own `mod bindings { ... }`: the generated
-`mod saci` nests inside `bindings` and never shares a scope with a bare `use saci::...`.
+which has no extern crate of its own name. A processor crate does depend on `saci`, so the
+`#[processor]` expansion wraps `wit_bindgen::generate!` one level down in its own `mod bindings
+{ ... }`: the generated `mod saci` nests inside `bindings` and never shares a scope with a bare
+`use saci::...`. The author never writes that module.
 
 ## Wire format and conformance
 
@@ -167,7 +183,7 @@ must match arrow-rs's buffer lengths slot for slot.
 
 The wasm host/processor boundary's instrument is `cargo xtask bench wasm_roundtrip`
 (`crates/saci/benches/wasm_roundtrip.rs`), which reports store lifecycle, host IPC encode,
-host IPC decode and the full `run_on_with_state` round trip as separate groups, since a change
+host IPC decode and the full `run_batch` round trip as separate groups, since a change
 there routinely moves cost between phases while leaving the total flat.
 
 ## Quick Start and xtask commands
@@ -224,11 +240,11 @@ in-memory store fixture and needs no daemon.
 ## Keep this skill current
 
 Update this file in the same change that: changes the WIT package or its exports; changes
-`export_pipeline!`, `#[processor]`, `#[derive(Component)]`, `#[transform]` or `#[fold]`; changes
-`WasmEngine`, `WasmPipelineRuntime`, `HostState`, the pooling constants or the `host-io` imports;
+`#[processor]`, `#[plugin]`, `#[derive(Component)]`, `#[transform]`, `#[fold]` or `saci::sdk`; changes
+`WasmEngine`, `WasmPipelineRuntime`, `PipelineRuntimeLoader`, `PipelineRuntime::run_batch`, `HostState`, the pooling constants or the `host-io` imports;
 changes the smoketest fixture or its build; changes the conformance corpus generator or
 `packages/arrow-ipc-conformance/`; adds or removes a processor example; changes
-`rebuild_blocker`'s `restartable` rule for a `wasm` node with no `module` (also check skill
+`rebuild_blocker`'s `restartable` rule for a `wasm` node with no `path` (also check skill
 `saci-service`'s Service layer section, the canonical copy); changes
 `WasmPipelineRuntime::with_warm_instances` or the smoketest's `count` config key; changes
 `WasmPipelineRuntime::with_identity` or how a processor's metrics or spans are attributed (also

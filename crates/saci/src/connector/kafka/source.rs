@@ -31,9 +31,9 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
 use tokio::time::{Instant, timeout_at};
 
+use crate::codec::{Codec, MessageShape};
 use crate::error::SaciError;
-use crate::io::source::Source;
-use crate::transformer::{MessageShape, Transformer};
+use crate::io::Source;
 
 use crate::connector::kafka::admin::ensure_topics;
 use crate::connector::kafka::config::{KafkaSourceConfig, client_config};
@@ -195,9 +195,9 @@ pub struct KafkaSource {
     /// the source's life: `Source` is `Send + Sync`, and a decoder need only be
     /// `Send`, which `arrow_json`'s is and no more. Opening one costs an
     /// allocation per schema, not per row.
-    transformer: Arc<dyn Transformer>,
+    codec: Arc<dyn Codec>,
     /// Effective fetch size for the next collection window or
-    /// compacted-snapshot chunk. `batch_size` from config seeds this, but a
+    /// compacted-snapshot chunk. `batch_rows` from config seeds this, but a
     /// host that sends [`Source::request_batch_rows`] overwrites it before the
     /// first poll, not after some initial one: under the service's flow
     /// control the configured value never reaches the broker. It stays
@@ -253,20 +253,20 @@ impl KafkaSource {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] when `cfg` fails validation,
-    /// `transformer` has no message codec, `compacted` is set against a
+    /// `codec` has no message codec, `compacted` is set against a
     /// format that emits one message per batch or a `key_field` the declared
     /// schema cannot hold a raw key in, or librdkafka rejects a property in
     /// `cfg.properties`.
     pub fn new(
         cfg: KafkaSourceConfig,
         schema: Arc<Schema>,
-        transformer: Arc<dyn Transformer>,
+        codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
         cfg.validate()?;
-        if transformer.message_shape().is_none() {
+        if codec.message_shape().is_none() {
             return Err(SaciError::configuration(format!(
                 "KafkaSource: format '{}' has no message codec",
-                transformer.format()
+                codec.format()
             )));
         }
         let topics = cfg.topics();
@@ -277,8 +277,7 @@ impl KafkaSource {
                     "KafkaSource config: 'compacted' needs 'key_field'",
                 ));
             };
-            let (index, decode_schema) =
-                compacted_key_column(key_field, &schema, transformer.as_ref())?;
+            let (index, decode_schema) = compacted_key_column(key_field, &schema, codec.as_ref())?;
             (Some(index), decode_schema)
         } else {
             (None, Arc::clone(&schema))
@@ -302,7 +301,7 @@ impl KafkaSource {
             client_config,
             topics,
             schema,
-            transformer,
+            codec,
             cfg,
             started: false,
             buffer: Vec::new(),
@@ -407,7 +406,7 @@ impl KafkaSource {
 
     /// Collect into [`self.buffer`](Self::buffer) for a live
     /// (non-`stop_at_end`) source: the first message blocks indefinitely,
-    /// exactly like `TcpIngestSource` idling for a connection; the rest are
+    /// exactly like `TcpSource` idling for a connection; the rest are
     /// bounded by one `poll_timeout_ms` window. Messages a cancelled call
     /// left behind already satisfy the blocking phase.
     async fn collect_live(&mut self) -> Result<(), SaciError> {
@@ -429,7 +428,7 @@ impl KafkaSource {
         }
 
         let deadline = Instant::now() + Duration::from_millis(self.cfg.poll_timeout_ms);
-        while self.buffer.len() < self.cfg.batch_size {
+        while self.buffer.len() < self.cfg.batch_rows {
             match timeout_at(deadline, self.consumer.recv()).await {
                 Ok(Ok(message)) => self.buffer.push(Self::take_message(&message)),
                 Ok(Err(KafkaError::PartitionEOF(_))) => {}
@@ -466,7 +465,7 @@ impl KafkaSource {
         }
         let mut saw_unknown_topic = false;
         let deadline = Instant::now() + Duration::from_millis(self.cfg.poll_timeout_ms);
-        while self.buffer.len() < self.cfg.batch_size {
+        while self.buffer.len() < self.cfg.batch_rows {
             match timeout_at(deadline, self.consumer.recv()).await {
                 Ok(Ok(message)) => self.buffer.push(Self::take_message(&message)),
                 Ok(Err(KafkaError::PartitionEOF(partition))) => {
@@ -494,11 +493,9 @@ impl KafkaSource {
     /// Feed a whole window through one decoder and take the batch out.
     ///
     /// Each push names the message it failed on, keeping per-message
-    /// attribution; the transformer names the format that rejected it.
+    /// attribution; the codec names the format that rejected it.
     fn decode_window(&self, messages: &[ReceivedMessage]) -> Result<RecordBatch, SaciError> {
-        let mut decoder = self
-            .transformer
-            .open_message_decoder(Arc::clone(&self.schema))?;
+        let mut decoder = self.codec.open_message_decoder(Arc::clone(&self.schema))?;
         for message in messages {
             let Some(payload) = &message.payload else {
                 continue; // tombstone, already excluded from the buffer
@@ -515,7 +512,7 @@ impl KafkaSource {
             .ok_or_else(|| SaciError::generic("KafkaSource: window decoded no rows"))
     }
 
-    /// Hand out the next `batch_size` chunk of the compacted snapshot,
+    /// Hand out the next `batch_rows` chunk of the compacted snapshot,
     /// reading the whole snapshot on the first call.
     ///
     /// `Ok(None)` once every survivor has been emitted, and on every call
@@ -528,7 +525,7 @@ impl KafkaSource {
         }
 
         let start = self.snapshot_cursor;
-        let end = self.snapshot.len().min(start + self.cfg.batch_size);
+        let end = self.snapshot.len().min(start + self.cfg.batch_rows);
         if start >= end {
             // Release the state as soon as the last chunk is out; every later
             // call takes this same branch and reports EOF again.
@@ -695,7 +692,7 @@ impl KafkaSource {
 
     /// Decode one chunk of survivors and attach their keys.
     ///
-    /// The transformer sees the values alone, exactly as it does for a live
+    /// The codec sees the values alone, exactly as it does for a live
     /// window, and the raw keys are written over the key column afterwards:
     /// the key is not in the payload, which is why `decode_schema` makes that
     /// column nullable and why the format has to emit one message per row.
@@ -706,7 +703,7 @@ impl KafkaSource {
             ));
         };
         let mut decoder = self
-            .transformer
+            .codec
             .open_message_decoder(Arc::clone(&self.decode_schema))?;
         for entry in entries {
             decoder.push(&entry.value).map_err(|e| {
@@ -785,19 +782,19 @@ fn is_unknown_topic(err: &KafkaError) -> bool {
 fn compacted_key_column(
     key_field: &str,
     schema: &Arc<Schema>,
-    transformer: &dyn Transformer,
+    codec: &dyn Codec,
 ) -> Result<(usize, Arc<Schema>), SaciError> {
-    if transformer.message_shape() != Some(MessageShape::PerRow) {
+    if codec.message_shape() != Some(MessageShape::PerRow) {
         return Err(SaciError::configuration(format!(
             "KafkaSource config: 'compacted' needs a row-per-message format; '{}' emits one \
              message per batch, which carries no per-row key",
-            transformer.format()
+            codec.format()
         )));
     }
     let Ok(index) = schema.index_of(key_field) else {
         return Err(SaciError::configuration(format!(
             "KafkaSource config: 'key_field' names '{key_field}', which is not one of the \
-             declared schema_fields {:?}",
+             declared fields {:?}",
             schema
                 .fields()
                 .iter()
@@ -915,15 +912,15 @@ impl Source for KafkaSource {
         Ok(Some(batch))
     }
 
-    /// A plain field write: sets `cfg.batch_size`, which every collection
+    /// A plain field write: sets `cfg.batch_rows`, which every collection
     /// window and compacted-snapshot chunk already reads by reference, so it
     /// takes effect on the very next call. No reconnect, no re-subscription.
-    /// The service sends the hint ahead of the first poll, so `batch_size`
+    /// The service sends the hint ahead of the first poll, so `batch_rows`
     /// in config is not a starting size; it is authoritative only where the
     /// host sends no hint, meaning flow control disabled for this source or a
     /// source feeding a windowed node.
     fn request_batch_rows(&mut self, rows: usize) {
-        self.cfg.batch_size = rows.max(1);
+        self.cfg.batch_rows = rows.max(1);
     }
 }
 
@@ -931,8 +928,8 @@ impl Source for KafkaSource {
 mod tests {
     use super::*;
 
+    use crate::codec::CodecFactory;
     use crate::connector::{ConfigMap, ConfigValue};
-    use crate::transformer::TransformerFactory;
     use arrow_array::{Array, Int64Array};
     use arrow_schema::Fields;
 
@@ -1149,10 +1146,10 @@ mod tests {
         assert!(err.message().contains("'id'"), "got: {err}");
     }
 
-    fn transformer(factory: impl TransformerFactory) -> Arc<dyn Transformer> {
+    fn codec(factory: impl CodecFactory) -> Arc<dyn Codec> {
         factory
             .build(&ConfigValue::Object(ConfigMap::new()))
-            .expect("a transformer factory must build from empty options")
+            .expect("a codec factory must build from empty options")
     }
 
     fn declared(key_type: DataType) -> Arc<Schema> {
@@ -1168,7 +1165,7 @@ mod tests {
         let (index, decode_schema) = compacted_key_column(
             "id",
             &schema,
-            transformer(crate::transformer::ndjson::NdjsonTransformerFactory).as_ref(),
+            codec(crate::codec::ndjson::NdjsonCodecFactory).as_ref(),
         )
         .expect("a declared key column");
 
@@ -1186,7 +1183,7 @@ mod tests {
         let err = compacted_key_column(
             "missing",
             &declared(DataType::Int64),
-            transformer(crate::transformer::ndjson::NdjsonTransformerFactory).as_ref(),
+            codec(crate::codec::ndjson::NdjsonCodecFactory).as_ref(),
         )
         .expect_err("an undeclared key column");
 
@@ -1194,13 +1191,13 @@ mod tests {
         assert!(err.message().contains("\"id\""), "got: {err}");
     }
 
-    #[cfg(feature = "transformer-arrow-ipc")]
+    #[cfg(feature = "codec-arrow-ipc")]
     #[test]
     fn a_batch_per_message_format_cannot_be_compacted() {
         let err = compacted_key_column(
             "id",
             &declared(DataType::Int64),
-            transformer(crate::transformer::arrow_ipc::ArrowIpcTransformerFactory).as_ref(),
+            codec(crate::codec::arrow_ipc::ArrowIpcCodecFactory).as_ref(),
         )
         .expect_err("arrow-ipc carries one message per batch");
 
@@ -1213,7 +1210,7 @@ mod tests {
         let err = compacted_key_column(
             "id",
             &declared(DataType::Struct(Fields::empty())),
-            transformer(crate::transformer::ndjson::NdjsonTransformerFactory).as_ref(),
+            codec(crate::codec::ndjson::NdjsonCodecFactory).as_ref(),
         )
         .expect_err("a struct column cannot hold a message key");
 

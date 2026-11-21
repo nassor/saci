@@ -1,118 +1,111 @@
-//! The S3 source and sink factories.
+//! The S3 connector.
 //!
-//! Both resolve their byte format through the transformer the host bound to
-//! this connector instance via a declared `transformer` key. Both need the
-//! declared `schema_fields`: a source's schema is read at load time by
+//! Both roles resolve their byte format through the codec the host bound to
+//! this connector instance via a declared `codec` key. Both need the
+//! declared `field` entries: a source's schema is read at load time by
 //! `validate_workflow_graph`, before any request is made, so it cannot be
 //! discovered from the bucket, and a sink writes with it.
 
 use serde::Deserialize;
 
+use crate::connector::schema::without_fields;
 use crate::connector::{
-    ConfigValue, ConnectorContext, SinkFactory, SourceFactory, parse_schema_fields,
+    ConfigValue, Connector, ConnectorContext, Rebuild, Role, parse_fields, schema_of,
 };
 use crate::error::SaciError;
-use crate::io::{sink::Sink, source::Source};
+use crate::io::{Sink, Source};
 
 use crate::connector::s3::config::{S3SinkConfig, S3SourceConfig};
 use crate::connector::s3::{S3Sink, S3Source};
 
-/// Factory for [`S3Source`].
+/// The `s3` connector: an object-store source and sink over any S3-compatible
+/// endpoint.
 ///
-/// Config fields:
+/// Source config fields:
 /// - `connection` (node, required): endpoint, credentials and client options;
-///   see [`S3ConnectionConfig`](crate::connector::s3::S3ConnectionConfig).
+///   see [`ConnectionConfig`](crate::connector::s3::ConnectionConfig).
 /// - `prefix` (string, optional): the path prefix listed. Empty lists the
 ///   whole bucket.
-/// - `schema_from` (`"config"` or `"object"`, optional): where the Arrow
+/// - `schema_from` (`"config"` or `"payload"`, optional): where the Arrow
 ///   schema handed to the format comes from.
-/// - `schema_fields` (list, required): the declared Arrow schema.
+/// - `field` (one or more, required): the declared Arrow schema.
 ///
-/// The byte format is whatever transformer the `source` node's `transformer`
-/// key names; see [`ConnectorContext::transformer`].
-pub struct S3SourceFactory;
-
-impl SourceFactory for S3SourceFactory {
-    fn type_name(&self) -> &'static str {
-        "S3Source"
-    }
-
-    fn build(
-        &self,
-        config: &ConfigValue,
-        ctx: &ConnectorContext,
-    ) -> Result<Box<dyn Source>, SaciError> {
-        let cfg = S3SourceConfig::deserialize(config.clone())
-            .map_err(|e| SaciError::configuration(format!("S3Source config: {e}")))?;
-        let transformer = ctx.transformer("S3Source")?;
-        let schema = parse_schema_fields(config, "S3Source")?;
-        Ok(Box::new(S3Source::new(cfg, schema, transformer)?))
-    }
-
-    /// The prefix is listed once per instance, so a fresh one re-delivers
-    /// every object already read, and every request opens its own connection
-    /// anyway, so there is no handle a rebuild would replace.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Err(
-            "the prefix is listed once, so a second build re-delivers every object \
-             already read; every request already opens its own connection, so there \
-             is no handle to replace",
-        )
-    }
-}
-
-/// Factory for [`S3Sink`].
-///
-/// Config fields:
+/// Sink config fields:
 /// - `connection` (node, required): endpoint, credentials and client options;
-///   see [`S3ConnectionConfig`](crate::connector::s3::S3ConnectionConfig).
+///   see [`ConnectionConfig`](crate::connector::s3::ConnectionConfig).
 /// - `prefix` (string, optional): the path prefix every written object lands
 ///   under.
 /// - `suffix` (string, optional): appended to the generated object key.
 /// - `flush` (node, optional): the row/byte/age thresholds that close the open
 ///   object; see [`Flush`](crate::connector::s3::Flush).
-/// - `schema_fields` (list, required): the Arrow schema the rows are written
+/// - `field` (one or more, required): the Arrow schema the rows are written
 ///   with.
 ///
-/// The byte format is whatever transformer the `sink` node's `transformer` key
-/// names; see [`ConnectorContext::transformer`].
-pub struct S3SinkFactory;
+/// The byte format is whatever codec the node's `codec` key names; see
+/// [`ConnectorContext::codec`].
+pub struct S3Connector;
 
-impl SinkFactory for S3SinkFactory {
-    fn type_name(&self) -> &'static str {
-        "S3Sink"
+impl Connector for S3Connector {
+    fn name(&self) -> &'static str {
+        super::NAME
     }
 
-    fn build(
+    fn source(
+        &self,
+        config: &ConfigValue,
+        ctx: &ConnectorContext,
+    ) -> Result<Box<dyn Source>, SaciError> {
+        let cfg = S3SourceConfig::deserialize(without_fields(config))
+            .map_err(|e| SaciError::configuration(format!("S3Source config: {e}")))?;
+        let codec = ctx.codec("S3Source")?;
+        let schema = schema_of(&parse_fields(config, "S3Source")?)?;
+        Ok(Box::new(S3Source::new(cfg, schema, codec)?))
+    }
+
+    fn sink(
         &self,
         config: &ConfigValue,
         ctx: &ConnectorContext,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let cfg = S3SinkConfig::deserialize(config.clone())
+        let cfg = S3SinkConfig::deserialize(without_fields(config))
             .map_err(|e| SaciError::configuration(format!("S3Sink config: {e}")))?;
-        let transformer = ctx.transformer("S3Sink")?;
-        let schema = parse_schema_fields(config, "S3Sink")?;
-        Ok(Box::new(S3Sink::new(cfg, schema, transformer)?))
+        let codec = ctx.codec("S3Sink")?;
+        let schema = schema_of(&parse_fields(config, "S3Sink")?)?;
+        Ok(Box::new(S3Sink::new(cfg, schema, codec)?))
     }
 
-    /// Rows accepted but not yet uploaded live in the open object and survive
-    /// a failed upload, and every upload opens its own connection anyway.
-    fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-        Err(
-            "rows accepted but not yet uploaded live in the open object and survive a \
-             failed upload; a second build would discard them, and every upload already \
-             opens its own connection",
-        )
+    /// Neither role is rebuilt. The prefix is listed once per source
+    /// instance, so a fresh one re-delivers every object already read; rows a
+    /// sink accepted but has not yet uploaded live in the open object and
+    /// survive a failed upload. Every request opens its own connection, so
+    /// there is no handle a rebuild would replace.
+    fn rebuild(&self, role: Role, _config: &ConfigValue) -> Rebuild {
+        match role {
+            Role::Source => Rebuild::No(
+                "the prefix is listed once, so a second build re-delivers every object \
+                 already read; every request already opens its own connection, so there \
+                 is no handle to replace",
+            ),
+            Role::Sink => Rebuild::No(
+                "rows accepted but not yet uploaded live in the open object and survive a \
+                 failed upload; a second build would discard them, and every upload already \
+                 opens its own connection",
+            ),
+        }
+    }
+
+    fn detail_keys(&self, _role: Role) -> &'static [&'static str] {
+        &["connection.bucket", "prefix"]
     }
 }
 
-#[cfg(all(test, feature = "transformer-csv"))]
+#[cfg(all(test, feature = "codec-csv"))]
 mod tests {
     use std::sync::Arc;
 
+    use crate::codec::csv::CsvCodecFactory;
+    use crate::codec::{Codec, CodecFactory};
     use crate::connector::{ConfigMap, from_kdl_str};
-    use crate::transformer::csv::CsvTransformerFactory;
-    use crate::transformer::{Transformer, TransformerFactory};
 
     use super::*;
 
@@ -124,10 +117,10 @@ mod tests {
         from_kdl_str(raw).expect("parse test config")
     }
 
-    fn csv_transformer() -> Arc<dyn Transformer> {
-        CsvTransformerFactory
+    fn csv_codec() -> Arc<dyn Codec> {
+        CsvCodecFactory
             .build(&empty_config())
-            .expect("csv transformer builds")
+            .expect("csv codec builds")
     }
 
     const CONNECTION: &str = r#"
@@ -141,20 +134,30 @@ connection {
 "#;
 
     const SCHEMA: &str = r#"
-schema_fields "id" type="Int64" nullable=#false
+field "id" type="int64" nullable=#false
 "#;
 
     #[test]
-    fn the_type_names_match_the_config_type_key() {
-        assert_eq!(S3SourceFactory.type_name(), "S3Source");
-        assert_eq!(S3SinkFactory.type_name(), "S3Sink");
+    fn the_connector_declares_its_name_roles_and_detail_keys() {
+        assert_eq!(S3Connector.name(), "s3");
+        assert_eq!(S3Connector.roles(), &[Role::Source, Role::Sink]);
+        let keys: &[&str] = &["connection.bucket", "prefix"];
+        assert_eq!(S3Connector.detail_keys(Role::Source), keys);
+        assert_eq!(S3Connector.detail_keys(Role::Sink), keys);
+        assert!(!S3Connector.live(&empty_config()));
+        for role in [Role::Source, Role::Sink] {
+            assert!(matches!(
+                S3Connector.rebuild(role, &empty_config()),
+                Rebuild::No(why) if why.contains("every request already opens")
+                    || why.contains("every upload already opens")
+            ));
+        }
     }
 
     #[test]
     fn a_missing_connection_bucket_is_a_configuration_error() {
         let config = config(r#"connection { endpoint "http://127.0.0.1:1" }"#);
-        let Err(err) =
-            S3SourceFactory.build(&config, &ConnectorContext::new(Some(csv_transformer())))
+        let Err(err) = S3Connector.source(&config, &ConnectorContext::new(Some(csv_codec())))
         else {
             panic!("missing bucket must fail");
         };
@@ -163,38 +166,36 @@ schema_fields "id" type="Int64" nullable=#false
     }
 
     #[test]
-    fn a_missing_transformer_names_the_connector() {
+    fn a_missing_codec_names_the_connector() {
         let config = config(&format!("{CONNECTION}{SCHEMA}"));
-        let Err(err) = S3SourceFactory.build(&config, &ConnectorContext::new(None)) else {
-            panic!("no transformer bound must fail");
+        let Err(err) = S3Connector.source(&config, &ConnectorContext::new(None)) else {
+            panic!("no codec bound must fail");
         };
         assert_eq!(err.category(), "configuration");
         assert_eq!(
             err.message(),
-            "S3Source moves bytes and needs a 'transformer' key naming a declared transformer"
+            "S3Source moves bytes and needs a 'codec' key naming a declared codec"
         );
     }
 
     #[test]
-    fn a_missing_schema_fields_is_a_configuration_error() {
+    fn a_missing_field_is_a_configuration_error() {
         let config = config(CONNECTION);
-        let Err(err) =
-            S3SinkFactory.build(&config, &ConnectorContext::new(Some(csv_transformer())))
-        else {
+        let Err(err) = S3Connector.sink(&config, &ConnectorContext::new(Some(csv_codec()))) else {
             panic!("missing schema must fail");
         };
         assert_eq!(err.category(), "configuration");
-        assert!(err.message().contains("schema_fields"));
+        assert!(err.message().contains("'field'"), "got: {err}");
     }
 
     #[test]
     fn a_full_config_builds_without_reaching_the_endpoint() {
         let config = config(&format!("{CONNECTION}{SCHEMA}"));
-        S3SourceFactory
-            .build(&config, &ConnectorContext::new(Some(csv_transformer())))
+        S3Connector
+            .source(&config, &ConnectorContext::new(Some(csv_codec())))
             .expect("source builds without a request");
-        S3SinkFactory
-            .build(&config, &ConnectorContext::new(Some(csv_transformer())))
+        S3Connector
+            .sink(&config, &ConnectorContext::new(Some(csv_codec())))
             .expect("sink builds without a request");
     }
 }

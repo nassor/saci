@@ -1,6 +1,6 @@
 +++
 title = "Formats"
-description = "A connector moves bytes, a transformer gives them meaning. A declared transformer node picks csv, ndjson, parquet, avro or arrow-ipc."
+description = "A connector moves bytes, a codec gives them meaning. A declared codec node picks csv, ndjson, parquet, avro or arrow-ipc."
 template = "section.html"
 sort_by = "weight"
 weight = 5
@@ -8,15 +8,15 @@ aliases = ["/transformers/"]
 +++
 
 A connector owns a transport: a path, a socket, a topic, a bucket. Giving those bytes meaning is a
-`transformer` node's job, and five formats ship with `saci-service`: `csv`, `ndjson`, `parquet`,
-`avro` and `arrow-ipc`.
+codec's job, declared with a `codec` node, and five formats ship with `saci-service`: `csv`,
+`ndjson`, `parquet`, `avro` and `arrow-ipc`.
 
 <div class="dgm animate-in">
     <div class="dgm-scroll"><svg viewBox="0 0 660 196" role="img" aria-labelledby="tf-a-title tf-a-desc">
-        <title id="tf-a-title">Bytes entering a file source, decoded by a transformer, arriving at the workflow as rows</title>
-        <desc id="tf-a-desc">A CSV file of bytes enters a FileSource node, which reads it in batches rather than whole. Inside that node the declared transformer, format csv, decodes the bytes one batch at a time. The node forwards each batch to the workflow, whose columns are typed Int64 and Float64. Naming a different transformer replaces the inner box and nothing else.</desc>
+        <title id="tf-a-title">Bytes entering a file source, decoded by a codec, arriving at the workflow as rows</title>
+        <desc id="tf-a-desc">A CSV file of bytes enters a file source node, which reads it in batches rather than whole. Inside that node the declared codec, format csv, decodes the bytes one batch at a time. The node forwards each batch to the workflow, whose columns are typed int64 and float64. Naming a different codec replaces the inner box and nothing else.</desc>
         <text class="t-title" x="0" y="14">One file, one format</text>
-        <text class="t-sm" x="0" y="30">path = "orders.csv", transformer = "orders_csv"</text>
+        <text class="t-sm" x="0" y="30">path = "orders.csv", codec = "orders_csv"</text>
         <g class="anim anim-1">
             <rect class="blk blk-data" x="0" y="52" width="112" height="88" rx="8"/>
             <rect class="hd hd-data" x="0" y="52" width="112" height="22" rx="8"/>
@@ -30,7 +30,7 @@ A connector owns a transport: a path, a socket, a topic, a bucket. Giving those 
             <rect class="blk blk-data" x="158" y="44" width="316" height="132" rx="8"/>
             <rect class="hd hd-data" x="158" y="44" width="316" height="22" rx="8"/>
             <rect class="hd hd-data" x="158" y="56" width="316" height="10"/>
-            <text class="t-lbl t-data" x="168" y="59">FileSource</text>
+            <text class="t-lbl t-data" x="168" y="59">file source</text>
             <text class="t-sm" x="168" y="82">reads in batches, never whole</text>
             <text class="t-sm" x="168" y="168">the transport: open, read, send</text>
         </g>
@@ -38,7 +38,7 @@ A connector owns a transport: a path, a socket, a topic, a bucket. Giving those 
             <rect class="blk blk-bnd" x="178" y="90" width="276" height="66" rx="8"/>
             <rect class="hd hd-bnd" x="178" y="90" width="276" height="22" rx="8"/>
             <rect class="hd hd-bnd" x="178" y="102" width="276" height="10"/>
-            <text class="t-lbl t-bnd" x="188" y="105">transformer format="csv"</text>
+            <text class="t-lbl t-bnd" x="188" y="105">codec format="csv"</text>
             <text class="t-sm" x="188" y="126">decodes the bytes</text>
             <text class="t-sm" x="188" y="146">one batch at a time</text>
         </g>
@@ -50,9 +50,9 @@ A connector owns a transport: a path, a socket, a topic, a bucket. Giving those 
             <rect class="hd hd-data" x="548" y="56" width="106" height="10"/>
             <text class="t-lbl t-data" x="558" y="59">the workflow</text>
             <rect class="row" x="556" y="78" width="90" height="18" rx="3"/>
-            <text class="t-sm" x="562" y="91">id    Int64</text>
+            <text class="t-sm" x="562" y="91">id    int64</text>
             <rect class="row" x="556" y="100" width="90" height="18" rx="3"/>
-            <text class="t-sm" x="562" y="113">price Float64</text>
+            <text class="t-sm" x="562" y="113">price float64</text>
             <path class="ln" d="M556 128 H646"/>
             <text class="t-sm t-data" x="562" y="144">2 rows</text>
             <text class="t-sm" x="562" y="166">appended whole</text>
@@ -69,41 +69,42 @@ A connector owns a transport: a path, a socket, a topic, a bucket. Giving those 
         <span class="k-boundary"><i></i> the format boundary</span>
     </div>
     <figcaption class="dgm-cap">
-        Point <code>transformer</code> at a <code>parquet</code> node instead and only the inner
+        Point <code>codec</code> at a <code>parquet</code> node instead and only the inner
         box changes. The path, the node and the rows the workflow receives stay exactly as they
         are.
     </figcaption>
 </div>
 
-## Declare a transformer
+## Declare a codec
 
-A workflow declares each byte format it needs as its own `transformer` node. The node's leading
-argument is its id, `format` names the format, and an `options` child holds that format's own
-settings. Every source or sink that moves bytes names one declared transformer through its own
-`transformer` key.
+A workflow declares each byte format it needs as its own `codec` node. The node's leading
+argument is its id, `format` names the format, and a `config` child holds that format's own
+settings. Every source or sink that moves bytes names one declared codec through its own
+`codec` key.
 
 There is no default and no sniffing. A file connector does not read the extension, and Kafka,
-NATS and TCP each name a transformer like everything else.
+NATS and TCP each name a codec like everything else.
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>options belongs to the format, the transformer key to the node; both nodes sit inside one workflow</em></div>
+<div class="code-cap"><span>KDL</span><em>config belongs to the format, the codec key to the node; both nodes sit inside one workflow</em></div>
 
 ```kdl
-transformer "orders_csv" format="csv" {
-    options has_headers=#true
+codec "orders_csv" format="csv" {
+    config has_headers=#true
 }
 
-source "orders_in" type="FileSource" component="Order" transformer="orders_csv" {
+source "orders_in" connector="file" component="Order" codec="orders_csv" {
     config path="/data/orders.csv" {
-        schema_fields "id" type="Int64" nullable=#false
+        field "id" type="int64" nullable=#false
     }
 }
 ```
 
 </div>
 
-Each format defines its own `options` keys, and its page lists them with their defaults. Omit the
-`options` child and every option keeps its default. Two `transformer` nodes may name the same
+Each format defines its own `config` keys, and its page lists them with their defaults. Omit the
+`config` child and every key keeps its default. A key the format does not define is an error,
+`{format}: unknown option '{key}'`. Two `codec` nodes may name the same
 `format` with different options, so one workflow reads Confluent framed Avro on one topic and
 single-object Avro on another.
 
@@ -117,10 +118,31 @@ single-object Avro on another.
 | [`avro`](@/service/formats/avro.md) | yes | yes | one per row | optional reading a file, required writing and on messages |
 | [`arrow-ipc`](@/service/formats/arrow-ipc.md) | yes | yes | one per batch | optional reading a stream, required writing and on messages |
 
-All five are in the `server` feature, so no format needs a build of its own.
+All five are in the `server` feature. A build with its own feature list picks them with
+`codec-csv`, `codec-ndjson`, `codec-parquet`, `codec-avro` and `codec-arrow-ipc`, or all five with
+`codecs`.
 
-The `Declared schema` column is about a source. A sink requires `schema_fields` whatever the format,
+The `Declared schema` column is about a source. A sink requires `field` lines whatever the format,
 because that is the schema the rows are written with.
+
+A `schema` block inside the workflow declares `field` lines once. A source or sink whose
+`component` equals the schema's id and declares no `field` lines of its own takes them; a node
+with its own `field` lines keeps them.
+
+```kdl
+workflow "orders" {
+    codec "orders_csv" format="csv"
+
+    schema "Order" {
+        field "id" type="int64" nullable=#false
+        field "total" type="float64" nullable=#false
+    }
+
+    source "orders_in" connector="file" component="Order" codec="orders_csv" {
+        config path="/data/orders.csv"
+    }
+}
+```
 
 A self-describing format reads the source's own schema when a source declares none, so every column
 arrives. Declare one and it becomes a projection: the columns it names are delivered, a column it
@@ -136,21 +158,21 @@ Every connector that moves bytes accepts all five formats. Which surface it uses
 
 | Connector | Surface | Formats | What to watch |
 |---|---|---|---|
-| [File](@/service/connectors/file.md), [HTTP](@/service/connectors/http.md), [S3](@/service/connectors/s3.md) | one whole stream | all five | a self-describing format reads the stream's own schema or projects onto `schema_fields`; `schema_from "body"` on HTTP and `schema_from "object"` on S3 read the stream's own and check it |
+| [File](@/service/connectors/file.md), [HTTP](@/service/connectors/http.md), [S3](@/service/connectors/s3.md) | one whole stream | all five | a self-describing format reads the stream's own schema or projects onto the `field` lines; `schema_from "payload"` on HTTP and on S3 reads the stream's own and checks it |
 | [Kafka](@/service/connectors/kafka.md), [NATS](@/service/connectors/nats.md) | discrete messages | all five | the per-row keys need csv, ndjson or avro; parquet and arrow-ipc emit one message per batch |
 | [TCP](@/service/connectors/tcp.md) | discrete messages, one per frame | all five | arrow-ipc is the natural pairing, one frame per batch |
 | [UDP](@/service/connectors/udp.md) | discrete messages, one per datagram | all five | ndjson is the natural pairing, one row per datagram; a whole-batch format has to fit `max_datagram_bytes` |
 
 [PostgreSQL](@/service/connectors/postgresql.md) and
-[Channel](@/service/connectors/channel.md) carry rows rather than bytes and name no transformer at
+[Channel](@/service/connectors/channel.md) carry rows rather than bytes and name no codec at
 all.
 
 The same bytes work on either surface, so a file written with `arrow-ipc` or `parquet` decodes
 through the message path and one Kafka payload in those formats opens as a stream.
 
-Teaching `saci-service` a format it does not ship means writing a transformer in Rust and
-registering it in your own binary, with `builder.register_transformer(..)` inside
-`saci::service::cli::main_with`. [Writing a transformer](@/library/service/transformers.md)
+Teaching `saci-service` a format it does not ship means writing a codec in Rust and
+registering it in your own binary, with `builder.codec(..)` inside
+`saci::service::cli::main_with`. [Writing a codec](@/library/service/codecs.md)
 shows how.
 
 ## Next

@@ -1,10 +1,9 @@
 //! Cross-pipeline DAG scheduling with priorities and backpressure.
 //!
-//! Four demos over the scheduler API. `DependencyKind::Order` makes `enrich`
-//! wait for `ingest`. `DependencyKind::Data` skips `report` when `enrich`
-//! produces no rows. Priority orders two pipelines within one stage.
-//! `BackpressureSpec::Predicate` skips a pipeline until a flag clears.
-//! `RunStats` reports rows produced and systems run per pipeline per tick.
+//! Four demos over the scheduler API. `PipelineConfig::after` makes `enrich`
+//! wait for `ingest`. `after_data` skips `report` when `enrich` produces no
+//! rows. Priority orders two pipelines within one stage. `pause_when` skips a
+//! pipeline until a flag clears.
 //!
 //! ```bash
 //! cargo run --example scheduler_dag
@@ -13,29 +12,14 @@
 use std::sync::{Arc, Mutex};
 
 use arrow_array::{Float64Array, StringArray};
-use arrow_schema::{DataType, Field, Schema};
-use async_trait::async_trait;
 use saci::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Debug)]
 struct Transaction {
     id: u64,
     amount: f64,
     currency: String,
-}
-
-impl Component for Transaction {
-    fn name() -> &'static str {
-        "Transaction"
-    }
-    fn schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::UInt64, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("currency", DataType::Utf8, false),
-        ]))
-    }
 }
 
 struct IngestSystem {
@@ -45,11 +29,11 @@ struct IngestSystem {
 #[async_trait]
 impl System for IngestSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("ingest").write_component("Transaction")
+        SystemMeta::new("ingest").writes_all::<Transaction>()
     }
     async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
         if !data.schemas().contains("Transaction") {
-            data.register_component::<Transaction>()?;
+            data.register::<Transaction>()?;
         }
         data.append::<Transaction>(&self.rows)?;
         Ok(())
@@ -61,11 +45,11 @@ struct EnrichSystem;
 #[async_trait]
 impl System for EnrichSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("enrich").read_component("Transaction")
+        SystemMeta::new("enrich").reads_all::<Transaction>()
     }
     async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
         let batch = data
-            .columns::<Transaction>()
+            .batch::<Transaction>()
             .expect("Transaction missing")
             .clone();
         let currency_col = batch
@@ -92,23 +76,24 @@ impl System for EnrichSystem {
             })
             .collect();
 
-        let ws = WriteSet::new().put("Transaction", "amount", Arc::new(usd));
+        let ws = WriteSet::new().put(Transaction::AMOUNT, Arc::new(usd));
         data.apply_write_set(ws)
     }
 }
 
 struct ReportSystem {
     total: Arc<Mutex<f64>>,
+    runs: Arc<Mutex<usize>>,
 }
 
 #[async_trait]
 impl System for ReportSystem {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("report").read("Transaction", "amount")
+        SystemMeta::new("report").reads(Transaction::AMOUNT)
     }
     async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
         let batch = data
-            .columns::<Transaction>()
+            .batch::<Transaction>()
             .expect("Transaction missing")
             .clone();
         let amount_col = batch
@@ -118,6 +103,7 @@ impl System for ReportSystem {
             .expect("amount column is Float64Array");
         let sum: f64 = amount_col.iter().flatten().sum();
         *self.total.lock().unwrap() += sum;
+        *self.runs.lock().unwrap() += 1;
         println!("  [report] total USD amount this tick: {sum:.2}");
         Ok(())
     }
@@ -159,41 +145,28 @@ async fn demo_order_chain() -> SaciResult<()> {
         },
     ];
 
-    let mut ingest = Pipeline::new("ingest");
-    ingest.data.register_component::<Transaction>()?;
-    ingest.add_system(IngestSystem { rows: txns });
+    let ingest = Pipeline::new("ingest")
+        .component::<Transaction>()
+        .system(IngestSystem { rows: txns });
 
-    let mut enrich = Pipeline::new("enrich");
-    enrich.data.register_component::<Transaction>()?;
-    enrich.add_system(EnrichSystem);
+    let enrich = Pipeline::new("enrich")
+        .component::<Transaction>()
+        .system(EnrichSystem);
 
-    let mut report = Pipeline::new("report");
-    report.data.register_component::<Transaction>()?;
-    report.add_system(ReportSystem {
-        total: Arc::clone(&total),
-    });
+    let report = Pipeline::new("report")
+        .component::<Transaction>()
+        .system(ReportSystem {
+            total: Arc::clone(&total),
+            runs: Arc::new(Mutex::new(0)),
+        });
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline(ingest);
-    sched.add_pipeline_with_config(
-        enrich,
-        PipelineConfig::new().after("ingest", DependencyKind::Order),
-    );
-    sched.add_pipeline_with_config(
-        report,
-        PipelineConfig::new().after("enrich", DependencyKind::Order),
-    );
+    let mut sched = Scheduler::new()
+        .pipeline(ingest)
+        .pipeline_with(enrich, PipelineConfig::new().after("ingest"))
+        .pipeline_with(report, PipelineConfig::new().after("enrich"));
 
     sched.tick().await?;
 
-    println!(
-        "  ingest stats: {:?}",
-        sched.get("ingest").unwrap().last_stats()
-    );
-    println!(
-        "  enrich stats: {:?}",
-        sched.get("enrich").unwrap().last_stats()
-    );
     println!("  Accumulated total: {:.2}", *total.lock().unwrap());
     Ok(())
 }
@@ -206,30 +179,23 @@ async fn demo_data_skip() -> SaciResult<()> {
     // No systems and no rows, so rows_produced is 0.
     let empty_enrich = Pipeline::new("empty_enrich");
 
-    let mut report = Pipeline::new("report_data");
-    report.data.register_component::<Transaction>()?;
-    report.add_system(ReportSystem {
-        total: Arc::clone(&total),
-    });
+    let runs = Arc::new(Mutex::new(0usize));
+    let report = Pipeline::new("report_data")
+        .component::<Transaction>()
+        .system(ReportSystem {
+            total: Arc::clone(&total),
+            runs: Arc::clone(&runs),
+        });
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline(empty_enrich);
-    sched.add_pipeline_with_config(
-        report,
-        PipelineConfig::new().after("empty_enrich", DependencyKind::Data),
-    );
+    let mut sched = Scheduler::new()
+        .pipeline(empty_enrich)
+        .pipeline_with(report, PipelineConfig::new().after_data("empty_enrich"));
 
     sched.tick().await?;
 
-    let report_stats = sched.get("report_data").unwrap().last_stats();
-    println!(
-        "  report systems_run: {} (expected 0 — skipped)",
-        report_stats.systems_run
-    );
-    assert_eq!(
-        report_stats.systems_run, 0,
-        "report should have been skipped"
-    );
+    let report_runs = *runs.lock().unwrap();
+    println!("  report runs: {report_runs} (expected 0 — skipped)");
+    assert_eq!(report_runs, 0, "report should have been skipped");
     Ok(())
 }
 
@@ -239,29 +205,21 @@ async fn demo_priority() -> SaciResult<()> {
     let count_high = Arc::new(Mutex::new(0usize));
     let count_low = Arc::new(Mutex::new(0usize));
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline_with_config(
-        {
-            let mut p = Pipeline::new("prio_high_num");
-            p.add_system(BumpSystem {
+    let mut sched = Scheduler::new()
+        .pipeline_with(
+            Pipeline::new("prio_high_num").system(BumpSystem {
                 name: "prio_high_num",
                 count: Arc::clone(&count_high),
-            });
-            p
-        },
-        PipelineConfig::new().priority(100),
-    );
-    sched.add_pipeline_with_config(
-        {
-            let mut p = Pipeline::new("prio_low_num");
-            p.add_system(BumpSystem {
+            }),
+            PipelineConfig::new().priority(100),
+        )
+        .pipeline_with(
+            Pipeline::new("prio_low_num").system(BumpSystem {
                 name: "prio_low_num",
                 count: Arc::clone(&count_low),
-            });
-            p
-        },
-        PipelineConfig::new().priority(-10),
-    );
+            }),
+            PipelineConfig::new().priority(-10),
+        );
 
     sched.tick().await?;
     println!("  Both pipelines ran (prio_low_num first due to lower priority number).");
@@ -277,19 +235,12 @@ async fn demo_backpressure() -> SaciResult<()> {
     let paused = Arc::new(Mutex::new(true));
     let paused_clone = Arc::clone(&paused);
 
-    let mut sched = Scheduler::new();
-    sched.add_pipeline_with_config(
-        {
-            let mut p = Pipeline::new("throttled");
-            p.add_system(BumpSystem {
-                name: "throttled",
-                count: Arc::clone(&count),
-            });
-            p
-        },
-        PipelineConfig::new().backpressure(BackpressureSpec::Predicate(Box::new(move |_p| {
-            *paused_clone.lock().unwrap()
-        }))),
+    let mut sched = Scheduler::new().pipeline_with(
+        Pipeline::new("throttled").system(BumpSystem {
+            name: "throttled",
+            count: Arc::clone(&count),
+        }),
+        PipelineConfig::new().pause_when(move |_p| *paused_clone.lock().unwrap()),
     );
 
     sched.tick().await?;

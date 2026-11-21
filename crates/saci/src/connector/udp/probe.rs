@@ -18,45 +18,83 @@
 //! reports both as up.
 //!
 //! Both kinds need a socket connected to exactly one peer, which is why
-//! [`UdpSink::connect`](crate::connector::udp::UdpSink::connect) refuses a probe next to
+//! [`UdpSink::new`](crate::connector::udp::UdpSink::new) refuses a probe next to
 //! `broadcast` or a multicast address.
 
 use std::time::Duration;
 
+use serde::Deserialize;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
+/// Default gap between probe rounds.
+const DEFAULT_PROBE_INTERVAL_MS: u64 = 5000;
+/// Default wait for one probe round's answer.
+const DEFAULT_PROBE_TIMEOUT_MS: u64 = 1000;
+
 /// How the sink decides whether a peer is up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProbeKind {
     /// Wait for the peer to send a datagram back. A `udp` source does.
+    #[default]
     Echo,
     /// Wait only for the OS to report the peer unreachable. Silence is up.
     Icmp,
 }
 
 /// What a failed probe does to the writes that follow it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OnFailure {
     /// Stop sending to a peer that failed its last probe. A batch no peer
     /// accepted is a write error, which is what the host's `retry`, `heal` and
     /// `dlq` blocks act on.
+    #[default]
     Refuse,
     /// Log the failure and keep sending.
     Warn,
 }
 
-/// The sink's `probe` block: kind, timing, and what a failure does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProbeSettings {
-    /// How the peer's liveness is decided.
+/// The sink's `probe` node: kind, timing, and what a failure does.
+///
+/// A bare `probe` node with no properties is every default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProbeConfig {
+    /// How the peer's liveness is decided. Default `echo`.
     pub kind: ProbeKind,
-    /// How long the probe task waits between rounds.
-    pub interval: Duration,
-    /// How long one round waits for an answer.
-    pub timeout: Duration,
-    /// What a failed round does to the writes that follow.
+    /// Milliseconds the probe task waits between rounds. At least 1; default
+    /// `5000`.
+    pub interval_ms: u64,
+    /// Milliseconds one round waits for an answer. At least 1; default
+    /// `1000`.
+    pub timeout_ms: u64,
+    /// What a failed round does to the writes that follow. Default `refuse`.
     pub on_failure: OnFailure,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            kind: ProbeKind::default(),
+            interval_ms: DEFAULT_PROBE_INTERVAL_MS,
+            timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
+            on_failure: OnFailure::default(),
+        }
+    }
+}
+
+impl ProbeConfig {
+    /// The gap between probe rounds.
+    pub fn interval(&self) -> Duration {
+        Duration::from_millis(self.interval_ms)
+    }
+
+    /// The wait for one round's answer.
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms)
+    }
 }
 
 /// One peer's state after a probe round.

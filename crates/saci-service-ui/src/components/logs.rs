@@ -38,7 +38,7 @@ use crate::ui::{
 };
 
 /// How many records one window holds. `MAX_LIMIT` in the service's
-/// `inspector_api` caps a request at 1000.
+/// `service/http/inspector.rs` caps a request at 1000.
 const LOG_LIMIT: usize = 1000;
 
 /// How many matching records are drawn at once.

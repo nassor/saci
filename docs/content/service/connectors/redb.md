@@ -1,6 +1,6 @@
 +++
 title = "redb"
-description = "An embedded key/value file as a transport. One entry per batch, in the byte format a declared transformer names."
+description = "An embedded key/value file as a transport. One entry per batch, in the byte format a declared codec names."
 template = "subpage.html"
 weight = 11
 aliases = ["/connectors/redb/"]
@@ -24,7 +24,7 @@ entries back in key order.
 ## What one entry is
 
 One entry per non-empty batch. The value is a self-contained document in whatever format the node's
-`transformer` names: a csv with its header row, a block of ndjson lines, one whole parquet or avro
+codec names: a csv with its header row, a block of ndjson lines, one whole parquet or avro
 container. A batch with no rows writes nothing.
 
 The key is `{key_prefix}{seq:020}{key_suffix}`, where `seq` counts batches from zero and is padded
@@ -37,7 +37,7 @@ of replacing them. A key that already exists is refused rather than overwritten.
 
 The source reads every entry whose key starts with `key_prefix` and ends with `key_suffix`. It does
 not parse the middle, so an entry another writer put in the same table under a matching name reaches
-the transformer and fails there by name.
+the codec and fails there by name.
 
 ## What you need
 
@@ -47,14 +47,14 @@ the transformer and fails there by name.
 
 ## 1. Declare the format
 
-A redb entry carries bytes, so the node names a declared `transformer`.
+A redb entry carries bytes, so the node names a declared `codec`.
 
 <div class="code">
-<div class="code-cap"><span>KDL</span><em>one declared transformer serves both halves</em></div>
+<div class="code-cap"><span>KDL</span><em>one declared codec serves both halves</em></div>
 
 ```kdl
-transformer "orders_csv" format="csv" {
-    options has_headers=#true
+codec "orders_csv" format="csv" {
+    config has_headers=#true
 }
 ```
 
@@ -70,23 +70,23 @@ Pick from [csv](@/service/formats/csv.md), [ndjson](@/service/formats/ndjson.md)
 <div class="code-cap"><span>KDL</span><em>directory is the only key the transport itself needs</em></div>
 
 ```kdl
-sink "orders_out" type="RedbSink" component="Order" transformer="orders_csv" {
+sink "orders_out" connector="redb" component="Order" codec="orders_csv" {
     config {
         directory "/data/orders"
         file "orders.redb"
         key_prefix "orders/"
         key_suffix ".csv"
 
-        schema_fields "id" type="Int64" nullable=#false
-        schema_fields "amount" type="Float64"
-        schema_fields "status" type="Utf8"
+        field "id" type="int64" nullable=#false
+        field "amount" type="float64"
+        field "status" type="utf8"
     }
 }
 ```
 
 </div>
 
-`schema_fields` is required: it is the schema the rows are written with. The file and the table are
+`field` lines are required: they are the schema the rows are written with. The file and the table are
 created on the first write.
 
 ## 3. Read rows back: the source node
@@ -95,23 +95,23 @@ created on the first write.
 <div class="code-cap"><span>KDL</span><em>the same four keys the sink used, so the keys line up</em></div>
 
 ```kdl
-source "orders_in" type="RedbSource" component="Order" transformer="orders_csv" {
+source "orders_in" connector="redb" component="Order" codec="orders_csv" {
     config {
         directory "/data/orders"
         file "orders.redb"
         key_prefix "orders/"
         key_suffix ".csv"
 
-        schema_fields "id" type="Int64" nullable=#false
-        schema_fields "amount" type="Float64"
-        schema_fields "status" type="Utf8"
+        field "id" type="int64" nullable=#false
+        field "amount" type="float64"
+        field "status" type="utf8"
     }
 }
 ```
 
 </div>
 
-`schema_fields` is required here too. The service reads `Source::schema()` at load time, before the
+`field` lines are required here too. The service reads `Source::schema()` at load time, before the
 file is opened, so the schema cannot come from the table. The source hands that schema to the format
 as a projection target, so a self-describing format is cast back to the declared column types.
 
@@ -123,7 +123,7 @@ as a projection target, so a self-describing format is cast back to the declared
 Runs the same on Linux, macOS and Windows (PowerShell):
 
 <div class="code">
-<div class="code-cap"><span>Shell</span><em>the source, the sink and the transformer, all built for real</em></div>
+<div class="code-cap"><span>Shell</span><em>the source, the sink and the codec, all built for real</em></div>
 
 ```text
 saci-service validate --config examples/configs/redb_connector.kdl --connectors-only
@@ -133,12 +133,12 @@ saci-service validate --config examples/configs/redb_connector.kdl --connectors-
 
 ```text
 OK: config is structurally valid
-OK: every source, sink and transformer built
+OK: every source, sink and codec built
   workflow: orders (sources: 1, sinks: 1)
 OK: all declared types resolved in built-in registry
 ```
 
-Then run it. The config sets `run_mode kind="one_shot"`, so the process reads the file once and
+Then run it. The config sets `run "once"`, so the process reads the file once and
 exits:
 
 Runs the same on Linux, macOS and Windows (PowerShell):
@@ -228,7 +228,7 @@ Source:
 | `check_integrity` | bool | `#false` | walk the whole file at open and refuse a corrupted one |
 | `cache_size_bytes` | integer | redb's own default | page cache budget |
 | `consume` | bool | `#false` | delete the entries this instance yielded when the run finishes |
-| `schema_fields` | list of fields | required | the declared column list handed to the format |
+| `field` | lines | required | the declared column list handed to the format |
 
 Sink:
 
@@ -245,7 +245,7 @@ Sink:
 | `durability` | `immediate` or `none` | `immediate` | how hard each commit tries before it reports success |
 | `two_phase_commit` | bool | `#true` | one extra fsync per commit |
 | `quick_repair` | bool | `#true` | page checksums, for instant crash recovery |
-| `schema_fields` | list of fields | required | the schema the rows are written with |
+| `field` | lines | required | the schema the rows are written with |
 
 An unrecognised key inside `config` is rejected by name on both halves.
 
@@ -257,7 +257,7 @@ An unrecognised key inside `config` is rejected by name on both halves.
 | `RedbSink: 'file' must not be empty` | give `file` a name, or drop the key and take `saci.redb` |
 | `RedbSink: 'table' must not be empty` | give `table` a name, or drop the key and take `records` |
 | `RedbSink: 'cache_size_bytes' must be greater than zero` | raise the budget, or drop the key |
-| `RedbSource moves bytes and needs a 'transformer' key naming a declared transformer` | add `transformer="<id>"` to the node, naming a declared `transformer` |
+| `RedbSource moves bytes and needs a 'codec' key naming a declared codec` | add `codec="<id>"` to the node, naming a declared `codec` |
 | `RedbSink: cannot create directory {dir}: {e}` | fix the permissions on the parent path |
 | `RedbSink: cannot open {path}: {e}` | another handle holds the file, or the path is not writable |
 | `RedbSource: cannot open {path}: {e}` | the file is absent, or a sink in this process still holds it |

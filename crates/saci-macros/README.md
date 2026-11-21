@@ -4,10 +4,11 @@
 [![docs.rs](https://img.shields.io/docsrs/saci-macros)](https://docs.rs/saci-macros)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](https://github.com/nassor/saci/blob/main/LICENSE)
 
-The derive and attribute macros of the [SACI](https://crates.io/crates/saci) processor SDK.
+The derive and attribute macros of the [SACI](https://crates.io/crates/saci) authoring SDK.
 
-Do not depend on this crate directly. `saci::processor` re-exports every macro, and the expansions
-name `::saci::processor::...`, so a processor crate depends on `saci` alone:
+Do not depend on this crate directly. `saci` re-exports every macro at its root and in
+`saci::prelude`, and the expansions name `::saci::__private::...`, so a processor crate depends
+on `saci` alone:
 
 ```toml
 [lib]
@@ -25,15 +26,16 @@ wit-bindgen = { version = "0.63.0", features = ["async"] }
 
 | Macro | Applies to | Generates |
 |---|---|---|
-| `#[derive(Component)]` | a row struct | `Component::name` and the Arrow schema |
-| `#[transform(...)]` | `fn(&mut Row)` or `fn(&mut Row, &Config)` | a `System` that decodes each row, mutates it in place and re-encodes it |
-| `#[fold(...)]` | `fn(&[Row], &mut State)` | a `System` that receives the whole batch once |
-| `#[processor(...)]` | `fn() -> Pipeline` | the WIT world, the guest exports and the host-io bridges |
+| `#[derive(Component)]` | a row struct | `Component::name`, the Arrow schema and one `FieldRef` const per field |
+| `#[transform]` | `fn(&mut Row)` or `fn(&mut Row, &sdk::Config)` | a `System` that decodes each row, mutates it in place and re-encodes it |
+| `#[fold]` | `fn(&[Row], &mut State)` | a `System` that receives the whole batch once |
+| `#[processor]` | `fn() -> Pipeline` | the WIT world, the guest exports and the host-io bridges of a wasm32-wasip3 component |
+| `#[plugin]` | `fn() -> Pipeline` | the C ABI exports of a native plugin cdylib |
 
 Each macro leaves the item it annotates as written, so the function stays callable in a unit test.
 
 ```rust,ignore
-use saci::processor::prelude::*;
+use saci::prelude::*;
 
 #[derive(Component, serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Order {
@@ -41,23 +43,23 @@ pub struct Order {
     pub usd_amount: f64,
 }
 
-#[transform(component = Order)]
-pub fn to_usd(row: &mut Order) -> Result<()> {
+#[transform]
+pub fn to_usd(row: &mut Order) -> sdk::Result<()> {
     row.usd_amount = row.amount * 1.08;
     Ok(())
 }
 
-#[processor(name = "orders")]
+#[processor]
 pub fn build() -> Pipeline {
-    Pipeline::builder("orders")
-        .with::<Order>()
-        .with_system(to_usd_system())
-        .build()
+    Pipeline::new("orders")
+        .component::<Order>()
+        .system(to_usd_system())
 }
 ```
 
 `cargo build --release --target wasm32-wasip3` turns that crate into a component `saci-service`
-loads. [Build a Rust processor](https://nassor.github.io/saci/service/processors/build/rust/) walks
+loads. The pipeline's name, `orders`, is the descriptor name the host checks.
+[Build a Rust processor](https://nassor.github.io/saci/service/processors/build/rust/) walks
 through a complete one.
 
 ## License

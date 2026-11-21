@@ -47,8 +47,8 @@ struct Scale;
 impl System for Scale {
     fn meta(&self) -> SystemMeta {
         SystemMeta::new("scale")
-            .read("Reading", "raw")
-            .write("Reading", "scaled")
+            .reads_named("Reading", "raw")
+            .writes_named("Reading", "scaled")
     }
 
     async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
@@ -63,7 +63,7 @@ struct Publish;
 #[async_trait]
 impl System for Publish {
     fn meta(&self) -> SystemMeta {
-        SystemMeta::new("publish").read("Reading", "scaled")
+        SystemMeta::new("publish").reads_named("Reading", "scaled")
     }
 
     async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
@@ -91,16 +91,13 @@ async fn stage_spans_feed_the_stage_duration_histogram() {
     opentelemetry::global::set_meter_provider(provider);
     saci::metrics::init();
 
-    let pipeline = Pipeline::builder("metrics-series")
-        .with::<Reading>()
-        .with_system(Scale)
-        .with_system(Publish)
-        .build();
+    let pipeline = Pipeline::new("metrics-series")
+        .component::<Reading>()
+        .system(Scale)
+        .system(Publish);
 
     let mut dataset = Dataset::new();
-    dataset
-        .register_component::<Reading>()
-        .expect("register Reading");
+    dataset.register::<Reading>().expect("register Reading");
     dataset
         .append::<Reading>(&[Reading {
             raw: 1.0,
@@ -110,12 +107,12 @@ async fn stage_spans_feed_the_stage_duration_histogram() {
 
     let subscriber = tracing_subscriber::registry().with(SpanMetricsLayer);
     let run = tracing::subscriber::with_default(subscriber, || {
-        futures::executor::block_on(pipeline.run_on_with_stats(&mut dataset))
+        futures::executor::block_on(pipeline.run_on(&mut dataset))
     });
     let stats = run.expect("pipeline run");
     assert_eq!(stats.systems_run, 2, "both systems should have run");
     assert_eq!(
-        pipeline.stage_count(),
+        pipeline.plan().map(<[_]>::len).ok(),
         Some(2),
         "read-after-write on Reading.scaled must produce two stages"
     );

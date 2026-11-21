@@ -77,7 +77,7 @@
             <text class="t-lbl t-ctl" x="180" y="45">2 &middot; run</text>
             <text class="t-sm t-data" x="180" y="64">world_factory() &rarr;</text>
             <text class="t-sm t-data" x="180" y="78">your Dataset</text>
-            <text class="t-sm" x="180" y="92">run_on_with_state()</text>
+            <text class="t-sm" x="180" y="92">run_batch()</text>
             <text class="t-sm" x="180" y="106">renews at TTL/3</text>
         </g>
 
@@ -192,7 +192,7 @@
     Two lease mechanisms keep the window narrow. Before the run,
     <code>should_renew</code> checks whether less than 30&nbsp;% of the TTL (or ten seconds,
     whichever is smaller) remains, and renews if so. During the run a renewal task sits
-    beside <code>run_on_with_state</code> in the same <code>tokio::select!</code>, renewing
+    beside <code>run_batch</code> in the same <code>tokio::select!</code>, renewing
     at <code>TTL/3</code>. If a renewal fails the select resolves on the renewal branch, the
     run is cancelled at its next await point, and the claim is released rather than acked.
     A runner never keeps working on a lease it has lost.
@@ -208,7 +208,7 @@
     Those two rules add up to at-least-once delivery. A claim, its holder and its
     expiry are one raft log entry, so every node reads the same claim state.
     <code>RedbSharedStore</code> grants each claim a 90&nbsp;s lease of its own. A
-    <code>saci-service</code> cluster config overrides that with
+    <code>saci-service</code> <code>cluster</code> block overrides that with
     <code>lease_ttl_ms</code>, which defaults to 30&nbsp;s.
     A running node proposes an expiry sweep every 30&nbsp;s, which returns an
     expired range to pending for another node to claim.
@@ -367,11 +367,10 @@ async fn main() -&gt; SaciResult&lt;()&gt; {
 
     // A template. Its own dataset, sources and sinks are never used: each
     // claim runs against whatever `world_factory` hands back.
-    let template = Pipeline::builder("order-processor")
-        .with::&lt;Order&gt;()
-        .with_system(ValidateOrder)
-        .with_system(PriceOrder)
-        .build();
+    let template = Pipeline::new("order-processor")
+        .component::&lt;Order&gt;()
+        .system(ValidateOrder)
+        .system(PriceOrder);
 
     let runner = DistributedRunner::new(
         store,
@@ -556,7 +555,7 @@ cargo run -p saci --example distributed_windowed --features distributed,windows<
         <tr>
             <td><code>PROCESSOR_STATE_STAGE_SENTINEL</code></td>
             <td><code>u32::MAX - 1</code></td>
-            <td>Whatever <code>run_on_with_state</code> returned. Opaque to the host.</td>
+            <td>The <code>state</code> that <code>run_batch</code> returned. Opaque to the host.</td>
         </tr>
         <tr>
             <td><code>ACCUMULATOR_STAGE_SENTINEL</code></td>
@@ -570,7 +569,7 @@ cargo run -p saci --example distributed_windowed --features distributed,windows<
 <div class="note note-warn">
     <span class="note-label">The stage checkpoint is write-only, and there is one of it</span>
     <p>
-        The runner calls <code>run_on_with_state</code> <b>once</b> per claim, since the
+        The runner calls <code>run_batch</code> <b>once</b> per claim, since the
         runtime runs its own stages internally, then writes a single checkpoint at
         <code>stage_idx = 0</code>. Nothing reads it back, because recovery re-runs the batch from
         the top rather than resuming mid-pipeline. Two consequences.
@@ -633,11 +632,11 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
 </p>
 
 <p>
-    Membership is explicit. <code>bootstrap #true</code> on one node calls
+    Membership is explicit. <code>cluster { bootstrap #true }</code> on one node calls
     <code>initialize</code> with the configured <code>peer</code> set and then writes
     <code>bootstrap.lock</code>. The file records that this cluster was deliberately
     created, and stops a later start from doing it twice. Every other node starts with
-    <code>bootstrap #false</code> and is caught up by the leader.
+    <code>cluster { bootstrap #false }</code> and is caught up by the leader.
 </p>
 
 <p>
@@ -674,7 +673,7 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
             <td><code>SNAPSHOT_CHUNK_BYTES</code></td>
             <td>4&nbsp;MiB</td>
             <td>One chunk of a state-machine snapshot. In
-                <code>src/distributed/consensus/transport/mod.rs</code>.</td>
+                <code>src/distributed/consensus/transport.rs</code>.</td>
         </tr>
         <tr>
             <td><code>MAX_FRAME_BYTES</code></td>
@@ -727,24 +726,27 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
 <h2 id="processor-state">State that outlives a batch</h2>
 
 <p>
-    A native <code>Pipeline</code> keeps everything it knows in the <code>Dataset</code>, so
-    the default <code>run_on_with_state</code> ignores <code>prior</code>, delegates to
-    <code>run_on</code>, and returns <code>Ok(None)</code>. Nothing extra is persisted.
+    A native <code>Pipeline</code> that declares no state keeps everything it knows in the
+    <code>Dataset</code>: its <code>run_batch</code> ignores <code>prior</code> and returns no
+    state, so nothing extra is persisted. A pipeline that declares <code>.state::&lt;C&gt;()</code>
+    has <code>run_batch</code> restore <code>C</code> from <code>prior</code> and capture it
+    into the returned blob.
 </p>
 
 <p>
-    A WASM processor cannot do that. Every call gets a fresh wasmtime <code>Store</code>, so
+    A WASM processor cannot keep anything in the <code>Dataset</code> between batches. Every call
+    gets a fresh wasmtime <code>Store</code>, so
     processor linear memory does not survive a batch. That is deliberate, because a trapped
     instance cannot corrupt anything that outlives it. The one channel left is the return value:
 </p>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>the host seam, from saci</em></div>
-    <pre><code class="language-rust">async fn run_on_with_state(
+    <pre><code class="language-rust">async fn run_batch(
     &amp;self,
     data: &amp;mut Dataset,
     prior: Option&lt;&amp;[u8]&gt;,
-) -&gt; SaciResult&lt;Option&lt;Vec&lt;u8&gt;&gt;&gt;;</code></pre>
+) -&gt; SaciResult&lt;RuntimeOutput&gt;; // RuntimeOutput { state, routes }</code></pre>
 </div>
 
 <p>
@@ -752,17 +754,26 @@ let store = RedbSharedStore::multi_node(Arc::clone(handle.app_db()), handle.clon
     <code>run-batch</code> export and returns the <code>checkpoint</code> field of the
     result. The runner stores that blob under
     <code>PROCESSOR_STATE_STAGE_SENTINEL</code> and hands it back as the next call's
-    <code>prior</code>. On the processor side, one macro form opts in:
+    <code>prior</code>. On the processor side, one builder call opts in:
 </p>
 
 <div class="code">
     <div class="code-cap"><span>Rust</span><em>in the processor crate</em></div>
     <pre><code class="language-rust">// Stateless: `prior` is ignored, `checkpoint` is always None.
-saci::export_pipeline!(build);
+#[processor]
+fn build() -&gt; Pipeline {
+    Pipeline::new("counter").component::&lt;Event&gt;().system(count_system())
+}
 
-// Stateful: systems read and write a `ProcessorState&lt;Counter&gt;` resource, and
+// Stateful: systems read and write an `sdk::State&lt;Counter&gt;` resource, and
 // whatever they leave in it becomes the next batch's `prior`.
-saci::export_pipeline!(build, state = Counter);</code></pre>
+#[processor]
+fn build() -&gt; Pipeline {
+    Pipeline::new("counter")
+        .component::&lt;Event&gt;()
+        .state::&lt;Counter&gt;()
+        .system(count_system())
+}</code></pre>
 </div>
 
 <p>

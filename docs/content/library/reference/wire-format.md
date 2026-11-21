@@ -224,7 +224,7 @@ One frame is a `u32` big-endian length prefix followed by exactly that many payl
 `tcp` sink writes the framing the `tcp` source reads, so the two halves are wire compatible: a
 sink in one service feeds a source in another when both name the same format.
 
-Decoding and encoding those bytes belongs to the transformer. On the source the decoder is opened
+Decoding and encoding those bytes belongs to the codec. On the source the decoder is opened
 once per connection, so a frame carrying several batches yields their concatenation. On the sink
 one batch becomes one frame per encoded message, which for `arrow-ipc` is one frame per batch.
 
@@ -233,10 +233,10 @@ that way. On the source a failed frame-header read, an oversized frame, a trunca
 frame that decodes to no batch, and a frame that cannot be projected onto the declared schema each
 close that one connection and leave the listener and every other producer running. Each one warns
 only when the `tracing` feature is on, which `service` turns on:
-`TcpIngestSource: frame header read failed`,
-`TcpIngestSource: oversized frame, closing connection`,
-`TcpIngestSource: truncated frame payload, closing connection`, `TcpIngestSource: frame decoded no
-batch` and `TcpIngestSource: bad frame, closing connection`. A declared schema projects rather than
+`TcpSource: frame header read failed`,
+`TcpSource: oversized frame, closing connection`,
+`TcpSource: truncated frame payload, closing connection`, `TcpSource: frame decoded no
+batch` and `TcpSource: bad frame, closing connection`. A declared schema projects rather than
 checks, so a payload carrying extra columns decodes, and only a payload missing a declared column
 or carrying a value that does not fit its declared type arrives inside the last of those, as
 `arrow-ipc: casting to the declared schema: ...`.
@@ -266,7 +266,7 @@ unspecified. Both warn only when the `tracing` feature is on, which `service` tu
 
 A `saci` frame is a `u32` big-endian body length followed by that many body bytes, whose first
 byte is the frame kind. A `str` below is a `u16` big-endian byte length followed by UTF-8 bytes.
-`saci::connector::saci::wire` is public, so a foreign producer speaks this without linking the
+`saci::connector::peer::wire` is public, so a foreign producer speaks this without linking the
 host.
 
 | Kind | Body |
@@ -309,7 +309,7 @@ a root and costs the batch nothing.
 
 Single-object encoding, `0xC3 0x01` followed by an 8-byte Rabin fingerprint, is always accepted.
 The Confluent prefix, `0x00` followed by a 4-byte big-endian registry id, is accepted only when
-the `avro` transformer's `schema_id` option is set. Otherwise the payload is
+the `avro` codec's `schema_id` option is set. Otherwise the payload is
 `avro: payload carries the Confluent prefix; set option 'schema_id' to its registry id`, and
 a payload with neither prefix is
 `avro: payload is not framed; expected single-object encoding (0xC3 0x01) or the Confluent prefix

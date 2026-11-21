@@ -73,7 +73,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::SaciError;
-use crate::io::sink::Sink;
+use crate::io::Sink;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
     Int8Array, Int16Array, Int32Array, Int64Array, RecordBatch, StringArray,
@@ -85,7 +85,7 @@ use async_trait::async_trait;
 use mysql_async::prelude::*;
 use mysql_async::{Statement, Transaction, TxOpts, Value};
 
-use crate::connector::mariadb::config::{FieldSpec, MariadbSinkConfig, Role, WriteMode};
+use crate::connector::mariadb::config::{MariadbSinkConfig, Role, WriteMode};
 use crate::connector::mariadb::connection::{
     Connector, Flavor, Session, TableRef, columns_of, ignore_tail, mysql_detail, quote_columns,
     quote_ident, unique_keys_of, upsert_tail,
@@ -93,6 +93,7 @@ use crate::connector::mariadb::connection::{
 use crate::connector::mariadb::encode::{ColumnReader, resolve_columns, row_values};
 use crate::connector::mariadb::metrics::Instruments;
 use crate::connector::mariadb::types::{Access, Family, ResolvedColumn, validate_columns};
+use crate::connector::schema::FieldSpec;
 
 const WHAT: &str = "MariadbSink";
 
@@ -211,9 +212,9 @@ impl MariadbSink {
         cfg.validate()?;
 
         let fields = cfg
-            .schema_fields
+            .fields
             .iter()
-            .map(|spec| spec.to_arrow_field())
+            .map(|spec| spec.to_arrow())
             .collect::<Result<Vec<_>, _>>()?;
         let schema = Arc::new(Schema::new(fields));
         let connector = Connector::new(Role::Sink, &cfg.connection)?;
@@ -230,7 +231,7 @@ impl MariadbSink {
             sink = %cfg.name,
             table = %table,
             write_mode = cfg.write_mode.as_str(),
-            columns = cfg.schema_fields.len(),
+            columns = cfg.fields.len(),
             "mariadb sink configured"
         );
 
@@ -241,7 +242,7 @@ impl MariadbSink {
             table,
             schema,
             written,
-            fields: cfg.schema_fields.clone(),
+            fields: cfg.fields.clone(),
             write_mode: cfg.write_mode,
             conflict_columns: cfg.conflict_columns.clone(),
             update_columns,
@@ -274,7 +275,7 @@ impl MariadbSink {
             if want.name() != got.name() {
                 return Err(SaciError::generic(format!(
                     "{WHAT}: batch column '{}' does not match the declared column '{}'; \
-                     schema_fields order is the batch order",
+                     field order is the batch order",
                     got.name(),
                     want.name()
                 )));
@@ -1192,8 +1193,8 @@ conflict_columns "id"
 
 connection dsn="mysql://user:pw@db:3306/shop" ssl_mode="disabled"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "total" type="float64"
+field "id" type="int64" nullable=#false
+field "total" type="float64"
 "#;
 
     const CHANGES: &str = r#"
@@ -1204,9 +1205,9 @@ conflict_columns "id"
 
 connection dsn="mysql://user:pw@db:3306/shop" ssl_mode="disabled"
 
-schema_fields "__op" type="utf8" nullable=#false
-schema_fields "id" type="int64" nullable=#false
-schema_fields "total" type="float64"
+field "__op" type="utf8" nullable=#false
+field "id" type="int64" nullable=#false
+field "total" type="float64"
 "#;
 
     const DEDUPE: &str = r#"
@@ -1218,9 +1219,9 @@ dedupe_order_column "seq"
 
 connection dsn="mysql://user:pw@db:3306/shop" ssl_mode="disabled"
 
-schema_fields "id" type="int64" nullable=#false
-schema_fields "seq" type="int64" nullable=#true
-schema_fields "total" type="float64"
+field "id" type="int64" nullable=#false
+field "seq" type="int64" nullable=#true
+field "total" type="float64"
 "#;
 
     fn config(kdl: &str) -> MariadbSinkConfig {
@@ -1681,9 +1682,9 @@ schema_fields "total" type="float64"
         let spec = |ty: &str| {
             let text = format!(
                 "name \"s\"\ntable \"d.t\"\nconnection dsn=\"mysql://u@h/d\" ssl_mode=\"disabled\"\n\
-                 schema_fields \"c\" type=\"{ty}\"\n"
+                 field \"c\" type=\"{ty}\"\n"
             );
-            config(&text).schema_fields.remove(0)
+            config(&text).fields.remove(0)
         };
         let mut narrow = ResolvedColumn::synthetic(&spec("timestamp_micros"));
         narrow.family = Family::DateTime;
@@ -1698,7 +1699,7 @@ schema_fields "total" type="float64"
 
     #[test]
     fn a_value_with_a_finer_fraction_than_the_column_is_refused() {
-        let spec = config(SINK).schema_fields.remove(0);
+        let spec = config(SINK).fields.remove(0);
         let written = [&spec];
         let prepared = Prepared {
             table: String::new(),

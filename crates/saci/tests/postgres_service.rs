@@ -1,7 +1,7 @@
 //! The whole standalone service path over PostgreSQL: config file, factories,
 //! source drain, pipeline run, sink drain.
 //!
-//! `run_standalone` is what the `saci-service serve` subcommand calls, so this is
+//! `BuiltWorkflow::run` is what the `saci-service serve` subcommand calls, so this is
 //! the end to end proof that a `connector-postgresql` build moves rows from one
 //! table through a pipeline and into another. The runtime is a native
 //! [`Pipeline`] rather than a WASM processor, because `impl PipelineRuntime for
@@ -17,10 +17,8 @@ use arrow_array::Int64Array;
 use arrow_schema::{DataType, Field, Schema};
 use saci::dataset::Dataset;
 use saci::pipeline::Pipeline;
-use saci::service::builder::{BuiltNodeKind, ServiceBuilder};
-use saci::service::config::ServiceConfig;
-use saci::service::factories::register_builtin_factories;
-use saci::service::run_standalone;
+use saci::service::ServiceConfig;
+use saci::service::{BuiltNodeKind, ServiceBuilder};
 use saci::system::{SystemMeta, WriteSet, system_fn};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -90,13 +88,16 @@ fn schema() -> Arc<Schema> {
 /// source's and the run is observable in the output table.
 fn build_pipeline() -> Pipeline {
     let mut pipeline = Pipeline::new("postgres_service");
-    pipeline.data.register_raw_component(COMPONENT, schema());
-    pipeline.add_system(system_fn(
+    pipeline
+        .data_mut()
+        .register_schema(COMPONENT, schema())
+        .unwrap();
+    pipeline = pipeline.system(system_fn(
         SystemMeta::new("double_total")
-            .read(COMPONENT, "total")
-            .write(COMPONENT, "total"),
+            .reads_named(COMPONENT, "total")
+            .writes_named(COMPONENT, "total"),
         |data: &mut Dataset| {
-            let Some(batch) = data.batch_for(COMPONENT) else {
+            let Ok(batch) = data.batch_named(COMPONENT) else {
                 return Ok(());
             };
             if batch.num_rows() == 0 {
@@ -109,7 +110,7 @@ fn build_pipeline() -> Pipeline {
                 .downcast_ref::<Int64Array>()
                 .expect("int64 total");
             let doubled: Int64Array = totals.iter().map(|v| v.map(|v| v * 2)).collect();
-            data.apply_write_set(WriteSet::new().put(COMPONENT, "total", Arc::new(doubled)))
+            data.apply_write_set(WriteSet::new().put_named(COMPONENT, "total", Arc::new(doubled)))
         },
     ));
     pipeline
@@ -123,10 +124,10 @@ mode "standalone"
 
 node id=1 name="saci-postgres-service" data_dir="{data_dir}"
 
-run_mode kind="one_shot"
+run "once"
 
 workflow "postgres-service-test" {{
-    source "orders_in" type="PostgresSource" component="{COMPONENT}" {{
+    source "orders_in" connector="postgresql" component="{COMPONENT}" {{
         config {{
             name "orders_in"
             batch_rows 40
@@ -138,15 +139,15 @@ workflow "postgres-service-test" {{
 
             mode kind="polling" table="orders_in" cursor_column="id"
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
     wasm "transform" name="Transform"
 
-    sink "orders_out" type="PostgresSink" component="{COMPONENT}" {{
+    sink "orders_out" connector="postgresql" component="{COMPONENT}" {{
         config {{
             name "orders_out"
             table "orders_out"
@@ -158,9 +159,9 @@ workflow "postgres-service-test" {{
                 sslmode "disable"
             }}
 
-            schema_fields "id" type="int64" nullable=#false
-            schema_fields "label" type="utf8"
-            schema_fields "total" type="int64" nullable=#false
+            field "id" type="int64" nullable=#false
+            field "label" type="utf8"
+            field "total" type="int64" nullable=#false
         }}
     }}
 
@@ -168,7 +169,7 @@ workflow "postgres-service-test" {{
     link from="transform" to="orders_out"
 }}
 
-http disabled=#true
+http enabled=#false
 
 observability log_level="warn"
 "#
@@ -205,13 +206,14 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
     std::fs::write(&path, config_kdl(&dsn, &data_dir)).expect("write config");
 
     let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
 
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("one-shot run");
     assert_eq!(stats.iterations, 1);
@@ -240,12 +242,13 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
     // the documented at-least-once contract, and `write_mode = "upsert"` is
     // what makes the replay harmless.
     let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("second run");
     assert_eq!(
@@ -271,9 +274,9 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
     source_only.workflows[0]
         .links
         .retain(|l| l.from != "orders_out" && l.to != "orders_out");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&source_only)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&source_only)
         .expect("service builds")
         .remove(0);
     let mut source = built
@@ -285,24 +288,25 @@ async fn a_postgres_source_and_sink_move_rows_through_the_standalone_runner() {
         })
         .expect("source node present");
     let mut dataset = Dataset::new();
-    dataset.register_raw_component(COMPONENT, schema());
-    let first = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    dataset.register_schema(COMPONENT, schema()).unwrap();
+    let first = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("first cycle");
     dataset.clear();
-    let second = saci::io::source::drain_into_dataset(source.as_mut(), &mut dataset, COMPONENT)
+    let second = saci::io::read_all(source.as_mut(), &mut dataset, COMPONENT)
         .await
         .expect("second cycle");
     assert_eq!(first, 100);
     assert_eq!(second, 0, "the second cycle is caught up");
 
     let config = ServiceConfig::load(&path).expect("config loads");
-    let built = register_builtin_factories(ServiceBuilder::new())
-        .with_runtime("transform", Box::new(build_pipeline()))
-        .build_all(&config)
+    let built = ServiceBuilder::new()
+        .runtime("transform", build_pipeline())
+        .build(&config)
         .expect("service builds")
         .remove(0);
-    let stats = run_standalone(built, &config, CancellationToken::new(), None, None)
+    let stats = built
+        .run(CancellationToken::new())
         .await
         .expect("third run");
     assert_eq!(

@@ -17,7 +17,7 @@
 SACI is a columnar batch processing engine for Rust, built on Apache Arrow. Each transform declares
 the Arrow fields it reads and writes, and SACI derives the execution order from those declarations:
 transforms that write different fields share a stage, the rest wait for their inputs, and a
-transform that fails is retried.
+transform that declares a retry mode is retried when it fails with a transient error.
 
 The `saci` crate is used in two ways:
 
@@ -174,13 +174,14 @@ Two crates are on crates.io:
 
 - [`saci`](./crates/saci/): the engine, the connectors, the byte formats, both authoring SDKs and
   the `saci-service` host.
-- [`saci-macros`](./crates/saci-macros/): the processor SDK's derive and attribute macros, which
-  `saci::processor` re-exports.
+- [`saci-macros`](./crates/saci-macros/): the derive and attribute macros of both authoring SDKs,
+  which `saci` re-exports at its root and in `saci::prelude`.
 
 | Feature | What it adds |
 |---|---|
-| `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits |
-| `connector-<name>`, `transformer-<format>` | One transport or one byte format each, in `saci::connector` and `saci::transformer` |
+| `engine` (default) | `Dataset`, `Component`, `System`, `Pipeline`, `Scheduler`, the `Source`/`Sink` traits, tokio and rayon stage parallelism |
+| `derive` | `#[derive(Component)]`; included in `engine`, `processor` and `plugin` |
+| `connector-<name>`, `codec-<format>` | One transport or one byte format each, in `saci::connector` and `saci::codec` |
 | `processor` | The processor SDK and the canonical `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |
 | `server` | The `saci-service` binary: wasmtime, KDL config, HTTP control plane, distributed runner |

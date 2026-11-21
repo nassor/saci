@@ -14,7 +14,7 @@ and read its counters.
     <div class="dgm-scroll"><svg viewBox="0 0 660 226" role="img" aria-labelledby="pn-title pn-desc">
         <title id="pn-title">A processor node between a source and a sink, with its config and its checkpoint</title>
         <desc id="pn-desc">
-            The source orders_in hands a batch to the wasm node enrich, which names a module
+            The source orders_in hands a batch to the wasm node enrich, which names a wasm
             file. The config block above enrich supplies key-value strings the processor reads
             for itself. The node's output goes on to the sink orders_out. Below enrich, a
             checkpoint arrow leaves the node and comes back into it as the next batch's prior,
@@ -34,7 +34,7 @@ and read its counters.
             <rect class="hd hd-bnd" x="200" y="74" width="200" height="8"/>
             <text class="t-lbl t-bnd" x="212" y="77">enrich</text>
             <text class="t-sm" x="212" y="100">wasm node</text>
-            <text class="t-sm" x="212" y="120">module=&quot;enrich.wasm&quot;</text>
+            <text class="t-sm" x="212" y="120">path=&quot;enrich.wasm&quot;</text>
         </g>
         <g class="anim anim-3">
             <rect class="blk blk-ctl" x="230" y="0" width="150" height="36" rx="8"/>
@@ -74,13 +74,13 @@ and read its counters.
 
 ## 1. Declare a wasm node
 
-A `wasm` node takes an id as its leading argument and a `module` naming the `.wasm` file. A
-relative `module` resolves against the directory `saci-service` runs in, and an absolute path is
+A `wasm` node takes an id as its leading argument and a `path` naming the `.wasm` file. A
+relative `path` resolves against the directory `saci-service` runs in, and an absolute path is
 used as it stands.
 
 ```kdl,name=A processor between a source and a sink
 workflow "orders" {
-    wasm "enrich" module="pipelines/enrich.wasm"
+    wasm "enrich" path="pipelines/enrich.wasm"
 
     link from="orders_in" to="enrich"
     link from="enrich" to="orders_out"
@@ -92,7 +92,7 @@ with an optional `sha3-256:` prefix, and a mismatch refuses the load instead of 
 unexpected build.
 
 ```kdl,name=The same node with its digest pinned
-wasm "enrich" module="pipelines/enrich.wasm" sha3_256="sha3-256:9f2c...c4"
+wasm "enrich" path="pipelines/enrich.wasm" sha3_256="sha3-256:9f2c...c4"
 ```
 
 `saci-service validate --config saci.kdl` reads the module, runs its self description, and checks
@@ -110,7 +110,7 @@ string, and the processor parses it: an FX rate is `"1.10"`, a threshold is `"25
 whatever spelling the processor documents.
 
 ```kdl,name=Configuration the processor parses itself
-wasm "settle" module="examples/quickstart/build/settle.wasm" {
+wasm "settle" path="examples/quickstart/build/settle.wasm" {
     config fee_bps="290" fee_fixed="0.30" hold_above="1000"
 }
 ```
@@ -126,7 +126,7 @@ deliver every one of them: the upstream source's `component`, or the upstream pr
 declared list. Its downstream reads the same names, so a sink linked to it declares a
 `component` the processor produces.
 
-Columns are the other half of the agreement. The `schema_fields` a source or sink declares must
+Columns are the other half of the agreement. The `field` lines a source or sink declares must
 match the fields the processor declares for that component, name for name, type for type and
 nullable for nullable, or the load fails naming the link.
 
@@ -153,12 +153,12 @@ gone by the following batch.
 
 Where the blob lives depends on the run mode. Stream mode writes each node's prior into the
 `store "redb"` file as items flow, so a restart resumes from it, and no extra key asks for that.
-An `interval` or `one_shot` run carries the prior forward only with `batch_resume #true` in that
+An `interval` or `once` run carries the prior forward only with `batch_resume #true` in that
 block. A node with a `window` block is the exception: its accumulator is threaded from pass to
 pass in memory whatever the store says, and `batch_resume #true` is what also persists it.
 
 ```kdl,name=Persisting processor state in stream mode
-run_mode kind="stream"
+run "stream"
 
 store "redb" {
     path "/var/lib/saci/state.redb"
@@ -180,7 +180,7 @@ throughput and latency are one selector away:
 | `saci_processor_batch_duration_seconds` | histogram | how long one batch took |
 | `saci_processor_systems_run_total` | counter | steps the processor ran |
 | `saci_processor_retries_total` | counter | retries it reported |
-| `saci_processor_metric` | histogram | a metric the processor named itself, labelled `metric` |
+| `saci_processor_custom` | histogram | a metric the processor named itself, labelled `metric` |
 
 [The live dashboard](@/service/operate/dashboard.md) draws the same numbers per node and
 prints what the processor says about itself: its name, its version, whether it is stateful,
@@ -194,7 +194,7 @@ you built. The host applies a sandbox and a deadline around each call, both desc
 |---|---|---|---|
 | `id` | string | required | the node's leading argument, unique across the workflow |
 | `name` | string | the id | display name the dashboard shows instead of the id |
-| `module` | path | required | the `.wasm` component this node runs |
+| `path` | path | required | the `.wasm` component this node runs |
 | `sha3_256` | string | none | expected SHA3-256 of the module bytes, with an optional `sha3-256:` prefix |
 | `config` | block | empty | key-value strings the processor reads for itself |
 | `window` | block | none | event-time geometry, covered in [Windowing](@/service/processors/windowing/_index.md) |
@@ -212,10 +212,10 @@ key is never unknown: the processor decides which ones it reads.
 
 | Message | What to change |
 |---|---|
-| `reading wasm module 'pipelines/enrich.wasm': The system cannot find the path specified.` | Build the component, or correct `module`. A relative path is read from the directory the service runs in. |
+| `reading wasm module 'pipelines/enrich.wasm': The system cannot find the path specified.` | Build the component, or correct `path`. A relative path is read from the directory the service runs in. |
 | `wasm module SHA3-256 mismatch: expected 9f2c..., got 41ab...` | The artifact is not the one the digest pins. Rebuild it, or update `sha3_256`. |
 | `workflow 'orders': link 'enrich' -> 'settle': processor 'settle' declares component 'Order', which upstream processor 'enrich' does not; a processor-to-processor link must deliver every component the downstream processor declares` | Give the upstream processor that component, or link the downstream to a node that produces it. |
-| `workflow 'orders': link 'enrich' -> 'orders_out': component 'Order' schema differs between processor 'enrich' and sink 'orders_out'` | Align the sink's `schema_fields` with the fields the processor declares for that component. |
+| `workflow 'orders': link 'enrich' -> 'orders_out': component 'Order' schema differs between processor 'enrich' and sink 'orders_out'` | Align the sink's `field` lines with the fields the processor declares for that component. |
 | `schema fingerprint mismatch: the pipeline declares 4c1f8a20 but this node's persisted checkpoints were written with 90bb1e77. The deployed pipeline's component schemas changed. Either restore the previous pipeline or clear node.data_dir before starting with the new schema.` | Cluster mode only, where the runner opens `node.data_dir`. The stored state describes a different row shape: restore the previous artifact, or clear the node's data directory. |
 
 ## Next

@@ -15,8 +15,8 @@
 //!
 //! ## What a rebuild is allowed to cost
 //!
-//! Only a connector that answers `Ok(())` from
-//! [`SourceFactory::rebuildable`](crate::connector::SourceFactory::rebuildable)
+//! Only a connector that answers `Rebuild::Yes` from
+//! [`Connector::rebuild`](crate::connector::Connector::rebuild)
 //! is ever healed, so the loss a rebuild can cause is bounded by what that
 //! connector already documents. The builder is what consults it; by the time
 //! a [`HealingSource`] or [`HealingSink`] exists, the answer was `Ok`.
@@ -47,16 +47,18 @@ use std::time::Duration;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity};
+use crate::codec::Codec;
+use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity, Role};
 use crate::error::SaciError;
-use crate::io::retry::{RetryingSink, RetryingSource};
-use crate::io::{sink::Sink, source::Source};
-use crate::retry::{RetryMode, SystemConfig};
-use crate::transformer::Transformer;
+use crate::io::{RetryingSink, RetryingSource, Sink, Source};
+use crate::metrics::{SinkMetrics, SourceMetrics};
+use crate::retry::RetryMode;
 
-use super::factories::missing_factory_error;
+use super::config::flexible::{de_opt_bool_flexible, de_opt_f64_flexible, de_opt_u64_flexible};
+use super::factories::lookup_connector;
 use super::registry::Registry;
 use super::sampling::HEAL_TARGET;
 
@@ -66,7 +68,7 @@ const MAX_BACKOFF_EXPONENT: usize = 30;
 
 /// Resolved self-healing policy for one node.
 ///
-/// Built from [`HealConfig`](super::config::HealConfig) by layering a node's
+/// Built from [`HealConfig`] by layering a node's
 /// block over the top-level one and both over [`Default`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HealSettings {
@@ -124,34 +126,34 @@ impl HealSettings {
     }
 }
 
-/// Whether a wrapper drives a source or a sink, for the metric attribute key
-/// and the log field name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Source,
-    Sink,
+/// The heal counters of the node a [`Healer`] watches, bound to its role.
+enum HealMetrics {
+    Source(SourceMetrics),
+    Sink(SinkMetrics),
 }
 
-impl Role {
-    fn healed(self, id: &str) {
-        match self {
-            Self::Source => crate::metrics::instruments().source_heal(id),
-            Self::Sink => crate::metrics::instruments().sink_heal(id),
+impl HealMetrics {
+    fn bind(role: Role, id: &str) -> Self {
+        let instruments = crate::metrics::instruments();
+        match role {
+            Role::Source => Self::Source(instruments.source(id)),
+            Role::Sink => Self::Sink(instruments.sink(id)),
         }
     }
 
-    fn heal_failed(self, id: &str) {
+    /// Record a successful heal.
+    fn healed(&self) {
         match self {
-            Self::Source => crate::metrics::instruments().source_heal_failure(id),
-            Self::Sink => crate::metrics::instruments().sink_heal_failure(id),
+            Self::Source(metrics) => metrics.heal(),
+            Self::Sink(metrics) => metrics.heal(),
         }
     }
 
-    /// `"source"` or `"sink"`, the log field naming the node.
-    const fn label(self) -> &'static str {
+    /// Record a failed heal attempt.
+    fn heal_failed(&self) {
         match self {
-            Self::Source => "source",
-            Self::Sink => "sink",
+            Self::Source(metrics) => metrics.heal_failure(),
+            Self::Sink(metrics) => metrics.heal_failure(),
         }
     }
 }
@@ -160,24 +162,23 @@ impl Role {
 /// heal so the two can never drift.
 ///
 /// `Send + Sync` because every part is: [`Registry`] holds
-/// `Box<dyn SourceFactory>` and both factory traits are `Send + Sync +
-/// 'static`, [`Transformer`] and [`ChannelBridge`] likewise, and
-/// [`ConfigValue`] is a `serde_json::Value`.
+/// `Box<dyn Connector>` and the trait is `Send + Sync + 'static`, [`Codec`]
+/// and [`ChannelBridge`] likewise, and [`ConfigValue`] is a
+/// `serde_json::Value`.
 pub(crate) struct Rebuilder {
     registry: Arc<Registry>,
-    type_name: String,
+    connector: String,
     node_id: String,
     config: ConfigValue,
-    transformer: Option<Arc<dyn Transformer>>,
+    codec: Option<Arc<dyn Codec>>,
     channels: Option<Arc<dyn ChannelBridge>>,
     /// Where this node sits, for a connector that names itself to a peer.
     /// `None` for a node built outside a workflow, such as a dead-letter
     /// store's own source and sink.
     identity: Option<NodeIdentity>,
     /// The retry policy the built instance is wrapped in. `None` for a source
-    /// in `run_mode kind="stream"`, where the runner's own re-poll is the
-    /// retry loop.
-    retry: Option<SystemConfig>,
+    /// in `run "stream"`, where the runner's own re-poll is the retry loop.
+    retry: Option<RetryMode>,
 }
 
 impl Rebuilder {
@@ -186,19 +187,19 @@ impl Rebuilder {
     /// [`with_identity`](Self::with_identity).
     pub(crate) fn new(
         registry: Arc<Registry>,
-        type_name: &str,
+        connector: &str,
         node_id: &str,
         config: ConfigValue,
-        transformer: Option<Arc<dyn Transformer>>,
+        codec: Option<Arc<dyn Codec>>,
         channels: Option<Arc<dyn ChannelBridge>>,
-        retry: Option<SystemConfig>,
+        retry: Option<RetryMode>,
     ) -> Self {
         Self {
             registry,
-            type_name: type_name.to_string(),
+            connector: connector.to_string(),
             node_id: node_id.to_string(),
             config,
-            transformer,
+            codec,
             channels,
             identity: None,
             retry,
@@ -216,7 +217,7 @@ impl Rebuilder {
     }
 
     fn context(&self) -> ConnectorContext {
-        let mut ctx = ConnectorContext::new(self.transformer.clone());
+        let mut ctx = ConnectorContext::new(self.codec.clone());
         if let Some(channels) = &self.channels {
             ctx = ctx.with_channels(channels.clone());
         }
@@ -230,14 +231,13 @@ impl Rebuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] when no factory is registered for
-    /// the declared type, or whatever the factory itself refused with.
+    /// Returns [`SaciError::Configuration`] when no connector is registered
+    /// under the declared name or it serves no source, or whatever the
+    /// connector itself refused with.
     pub(crate) fn build_source(&self) -> Result<Box<dyn Source>, SaciError> {
-        let factory = self
-            .registry
-            .source(&self.type_name)
-            .ok_or_else(|| missing_factory_error("source", &self.type_name, &self.node_id))?;
-        let built = factory.build(&self.config, &self.context())?;
+        let connector =
+            lookup_connector(&self.registry, Role::Source, &self.connector, &self.node_id)?;
+        let built = connector.source(&self.config, &self.context())?;
         Ok(match self.retry {
             Some(retry) => Box::new(RetryingSource::new(built, retry, &self.node_id)),
             None => built,
@@ -248,14 +248,13 @@ impl Rebuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`SaciError::Configuration`] when no factory is registered for
-    /// the declared type, or whatever the factory itself refused with.
+    /// Returns [`SaciError::Configuration`] when no connector is registered
+    /// under the declared name or it serves no sink, or whatever the
+    /// connector itself refused with.
     pub(crate) fn build_sink(&self) -> Result<Box<dyn Sink>, SaciError> {
-        let factory = self
-            .registry
-            .sink(&self.type_name)
-            .ok_or_else(|| missing_factory_error("sink", &self.type_name, &self.node_id))?;
-        let built = factory.build(&self.config, &self.context())?;
+        let connector =
+            lookup_connector(&self.registry, Role::Sink, &self.connector, &self.node_id)?;
+        let built = connector.sink(&self.config, &self.context())?;
         Ok(match self.retry {
             Some(retry) => Box::new(RetryingSink::new(built, retry, &self.node_id)),
             None => built,
@@ -292,6 +291,7 @@ struct Healer {
     role: Role,
     workflow_id: String,
     node_id: String,
+    metrics: HealMetrics,
     /// Why the connector has no instance, set when a rebuild's build failed.
     down: Option<String>,
     /// Latched `true` the moment a rebuilt instance's first operation
@@ -317,6 +317,7 @@ impl Healer {
             role,
             workflow_id: workflow_id.to_string(),
             node_id: node_id.to_string(),
+            metrics: HealMetrics::bind(role, node_id),
             down: None,
             recovered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -345,13 +346,13 @@ impl Healer {
     fn built(&mut self, attempt: u32) {
         self.down = None;
         self.state = HealState::Probing { attempt };
-        self.role.healed(&self.node_id);
+        self.metrics.healed();
         #[cfg(feature = "tracing")]
         tracing::warn!(
             target: HEAL_TARGET,
             workflow = %self.workflow_id,
             node = %self.node_id,
-            role = self.role.label(),
+            role = self.role.as_str(),
             attempt,
             "connector healed"
         );
@@ -360,13 +361,13 @@ impl Healer {
     /// Record that attempt `attempt` produced nothing usable, and schedule
     /// the next one.
     fn build_failed(&mut self, attempt: u32, error: String) {
-        self.role.heal_failed(&self.node_id);
+        self.metrics.heal_failed();
         #[cfg(feature = "tracing")]
         tracing::warn!(
             target: HEAL_TARGET,
             workflow = %self.workflow_id,
             node = %self.node_id,
-            role = self.role.label(),
+            role = self.role.as_str(),
             attempt,
             error = %error,
             "connector heal failed"
@@ -385,7 +386,7 @@ impl Healer {
                 target: HEAL_TARGET,
                 workflow = %self.workflow_id,
                 node = %self.node_id,
-                role = self.role.label(),
+                role = self.role.as_str(),
                 attempts = self.settings.max_attempts,
                 "connector heal exhausted"
             );
@@ -401,7 +402,7 @@ impl Healer {
             target: HEAL_TARGET,
             workflow = %self.workflow_id,
             node = %self.node_id,
-            role = self.role.label(),
+            role = self.role.as_str(),
             attempt,
             delay_ms = delay.as_millis() as u64,
             consecutive = consecutive.unwrap_or(0),
@@ -424,7 +425,7 @@ impl Healer {
                     target: HEAL_TARGET,
                     workflow = %self.workflow_id,
                     node = %self.node_id,
-                    role = self.role.label(),
+                    role = self.role.as_str(),
                     "connector recovered"
                 );
             }
@@ -461,8 +462,10 @@ impl Healer {
 /// A [`Source`] that is replaced with a fresh instance from its factory when
 /// its polls keep failing.
 ///
-/// See the [module docs](self) for the state machine and what a rebuild is
-/// allowed to cost.
+/// After [`HealSettings::after_failures`] consecutive failures the wrapper
+/// drops the instance and builds another from the same config. Only a
+/// connector that reports itself rebuildable is wrapped, so the loss a
+/// rebuild can cause is bounded by what that connector already documents.
 pub struct HealingSource {
     inner: Option<Box<dyn Source>>,
     healer: Healer,
@@ -585,7 +588,7 @@ impl Source for HealingSource {
 /// The old instance is dropped without `finish`: it was unwritable, so
 /// `finish` would fail too. Whatever it had accepted and not yet written is
 /// gone, which is why a sink that buffers across an outage refuses
-/// [`SinkFactory::rebuildable`](crate::connector::SinkFactory::rebuildable) and
+/// [`Connector::rebuild`](crate::connector::Connector::rebuild) and
 /// is never wrapped in this.
 pub struct HealingSink {
     inner: Option<Box<dyn Sink>>,
@@ -707,15 +710,157 @@ fn schema_mismatch(pinned: &Schema, fresh: &Schema) -> Option<String> {
     ))
 }
 
+/// Self-healing policy for a source or sink node: when the host stops
+/// re-driving a failing connector and replaces it with a fresh one built
+/// from the same factory and the same `config`.
+///
+/// On by default. Declared once at the top level, and overridden field by
+/// field per node:
+///
+/// ```kdl
+/// heal {
+///     enabled #true
+///     after_failures 3
+///     base_delay_ms 1000
+///     multiplier 2.0
+///     max_delay_ms 60000
+///     jitter 0.1
+///     max_attempts 0
+/// }
+///
+/// workflow "w" {
+///     sink "collector" connector="tcp" component="Order" {
+///         heal { after_failures 1 }
+///     }
+/// }
+/// ```
+///
+/// | Key | Unit | Default | Trade-off |
+/// |---|---|---|---|
+/// | `enabled` | flag | `#true` | `#false` keeps re-driving the same instance forever |
+/// | `after_failures` | failures | 3 | consecutive failures before the first rebuild; higher rides out a longer blip |
+/// | `base_delay_ms` | ms | 1000 | delay before the first rebuild |
+/// | `multiplier` | ratio | 2.0 | growth per further attempt; must be at least 1.0 |
+/// | `max_delay_ms` | ms | 60000 | ceiling on the computed delay |
+/// | `jitter` | ratio | 0.1 | fraction of the delay randomised, in `0.0..=1.0` |
+/// | `max_attempts` | attempts | 0 | rebuilds before the node gives up; `0` never gives up |
+///
+/// A connector answers [`Connector::rebuild`](crate::connector::Connector::rebuild)
+/// for its own config, and one that cannot be rebuilt is never healed. A
+/// node declaring its own `heal` block on such a connector is a load-time
+/// error rather than a block that quietly does nothing.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealConfig {
+    /// Whether a failing connector is replaced at all. Default `true`.
+    #[serde(deserialize_with = "de_opt_bool_flexible")]
+    pub enabled: Option<bool>,
+    /// Consecutive failed operations before the first rebuild.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub after_failures: Option<u64>,
+    /// Delay before the first rebuild.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub base_delay_ms: Option<u64>,
+    /// Growth factor applied per further attempt.
+    #[serde(deserialize_with = "de_opt_f64_flexible")]
+    pub multiplier: Option<f64>,
+    /// Ceiling on the computed delay.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub max_delay_ms: Option<u64>,
+    /// Fraction of the delay randomised, in `0.0..=1.0`.
+    #[serde(deserialize_with = "de_opt_f64_flexible")]
+    pub jitter: Option<f64>,
+    /// Rebuild attempts before the node gives up; `0` never gives up.
+    #[serde(deserialize_with = "de_opt_u64_flexible")]
+    pub max_attempts: Option<u64>,
+}
+
+impl HealConfig {
+    /// Layer this block over `global` and both over `defaults`.
+    pub fn resolve(&self, global: &Self, defaults: HealSettings) -> HealSettings {
+        HealSettings {
+            enabled: self.enabled.or(global.enabled).unwrap_or(defaults.enabled),
+            after_failures: saturating_u32(
+                self.after_failures.or(global.after_failures),
+                defaults.after_failures,
+            ),
+            base_delay_ms: self
+                .base_delay_ms
+                .or(global.base_delay_ms)
+                .unwrap_or(defaults.base_delay_ms),
+            multiplier: self
+                .multiplier
+                .or(global.multiplier)
+                .unwrap_or(defaults.multiplier),
+            max_delay_ms: self
+                .max_delay_ms
+                .or(global.max_delay_ms)
+                .unwrap_or(defaults.max_delay_ms),
+            jitter: self.jitter.or(global.jitter).unwrap_or(defaults.jitter),
+            max_attempts: saturating_u32(
+                self.max_attempts.or(global.max_attempts),
+                defaults.max_attempts,
+            ),
+        }
+    }
+
+    /// Reject an out-of-range key rather than clamping it, naming `what`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Configuration`] for a key outside its range, or
+    /// for a `max_delay_ms` below the resolved `base_delay_ms`.
+    pub fn validate(&self, global: &Self, what: &str) -> Result<(), SaciError> {
+        let resolved = self.resolve(global, HealSettings::default());
+        if resolved.after_failures < 1 {
+            return Err(SaciError::configuration(format!(
+                "{what}: after_failures must be at least 1; it counts the failures \
+                 that precede a rebuild"
+            )));
+        }
+        if resolved.base_delay_ms < 1 {
+            return Err(SaciError::configuration(format!(
+                "{what}: base_delay_ms must be at least 1; a zero delay rebuilds in a hot loop"
+            )));
+        }
+        if resolved.multiplier < 1.0 || resolved.multiplier.is_nan() {
+            return Err(SaciError::configuration(format!(
+                "{what}: multiplier must be at least 1.0, got {}",
+                resolved.multiplier
+            )));
+        }
+        if !(0.0..=1.0).contains(&resolved.jitter) {
+            return Err(SaciError::configuration(format!(
+                "{what}: jitter must be within 0.0..=1.0, got {}",
+                resolved.jitter
+            )));
+        }
+        if resolved.max_delay_ms < resolved.base_delay_ms {
+            return Err(SaciError::configuration(format!(
+                "{what}: max_delay_ms ({}) must be at least base_delay_ms ({})",
+                resolved.max_delay_ms, resolved.base_delay_ms
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A declared `u64` count narrowed to the `u32` the settings carry, or the
+/// default when the key was omitted. A value beyond `u32::MAX` saturates
+/// rather than wrapping into a small count.
+fn saturating_u32(declared: Option<u64>, default: u32) -> u32 {
+    declared.map_or(default, |v| u32::try_from(v).unwrap_or(u32::MAX))
+}
+
 #[cfg(all(test, feature = "service"))]
 mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     use crate::connector::from_kdl_str;
-    use crate::connector::{ConfigMap, ConfigValue, SinkFactory, SourceFactory};
+    use crate::connector::{ConfigMap, ConfigValue, Connector, Rebuild};
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field};
 
@@ -846,12 +991,12 @@ mod tests {
         }
     }
 
-    impl SourceFactory for ScriptedFactory {
-        fn type_name(&self) -> &'static str {
+    impl Connector for ScriptedFactory {
+        fn name(&self) -> &'static str {
             "scripted"
         }
 
-        fn build(
+        fn source(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
@@ -869,17 +1014,7 @@ mod tests {
             }))
         }
 
-        fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-            Ok(())
-        }
-    }
-
-    impl SinkFactory for ScriptedFactory {
-        fn type_name(&self) -> &'static str {
-            "scripted"
-        }
-
-        fn build(
+        fn sink(
             &self,
             _config: &ConfigValue,
             _ctx: &ConnectorContext,
@@ -891,15 +1026,14 @@ mod tests {
             }))
         }
 
-        fn rebuildable(&self, _config: &ConfigValue) -> Result<(), &'static str> {
-            Ok(())
+        fn rebuild(&self, _role: Role, _config: &ConfigValue) -> Rebuild {
+            Rebuild::Yes
         }
     }
 
     fn rebuilder(script: &Arc<Script>) -> Rebuilder {
         let mut registry = Registry::new();
-        registry.register_source(ScriptedFactory(Arc::clone(script)));
-        registry.register_sink(ScriptedFactory(Arc::clone(script)));
+        registry.register(ScriptedFactory(Arc::clone(script)));
         Rebuilder::new(
             Arc::new(registry),
             "scripted",
@@ -1263,7 +1397,7 @@ mod tests {
 
     #[cfg(feature = "metrics")]
     #[tokio::test(start_paused = true)]
-    async fn a_heal_writes_both_the_unattributed_and_the_attributed_counters() {
+    async fn a_heal_writes_only_the_attributed_counters() {
         use prometheus::TextEncoder;
 
         let script = Script::new(0);
@@ -1302,8 +1436,10 @@ mod tests {
                 "{series} must carry the source attribute:\n{text}"
             );
             assert!(
-                lines.iter().any(|line| !line.contains("source=")),
-                "{series} must keep its unattributed form:\n{text}"
+                lines
+                    .iter()
+                    .all(|line| line.contains("source=") || line.contains("sink=")),
+                "{series} must have no unattributed sample:\n{text}"
             );
         }
     }
@@ -1329,24 +1465,23 @@ mod tests {
     /// The `Rebuilder` carries the node identity into every heal, so a
     /// `saci` source rebuilds on a fresh ephemeral port without losing the
     /// identity its factory requires.
-    #[cfg(feature = "connector-saci")]
+    #[cfg(feature = "connector-peer")]
     #[test]
-    fn a_rebuilt_saci_source_binds_a_fresh_port_and_keeps_its_identity() {
+    fn a_rebuilt_peer_source_binds_a_fresh_port_and_keeps_its_identity() {
         let mut registry = Registry::new();
-        registry.register_source(crate::connector::saci::SaciSourceFactory);
-        registry.register_sink(crate::connector::saci::SaciSinkFactory);
+        registry.register(crate::connector::peer::PeerConnector);
 
         let config = from_kdl_str(
             r#"
 bind "127.0.0.1:0"
-schema_fields "v" type="Int64" nullable=#false
+field "v" type="int64" nullable=#false
 "#,
         )
         .expect("parse saci source config");
 
         let rebuilder = Rebuilder::new(
             Arc::new(registry),
-            "saci",
+            "peer",
             "node-1",
             config,
             None,
@@ -1365,5 +1500,161 @@ schema_fields "v" type="Int64" nullable=#false
         rebuilder
             .build_source()
             .expect("a heal rebuild binds a fresh ephemeral port and keeps the identity");
+    }
+}
+
+#[cfg(all(test, feature = "service"))]
+mod config_tests {
+    use super::*;
+    use crate::service::config::ServiceConfig;
+    use crate::service::config::test_support::{minimal_standalone_kdl, parse};
+
+    // ── heal block ───────────────────────────────────────────────────────────
+
+    /// The trivial workflow with `global` at the top level and `local` inside
+    /// the sink node.
+    fn heal_kdl(global: &str, local: &str) -> String {
+        format!(
+            r#"
+mode "standalone"
+
+node id=1 data_dir="/tmp/saci-test"
+
+{global}
+
+workflow "w" {{
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X" {{
+        {local}
+    }}
+    link from="in" to="out"
+}}
+"#
+        )
+    }
+
+    /// The settings a config resolves for sink `out`.
+    fn resolved_heal(cfg: &ServiceConfig) -> HealSettings {
+        cfg.workflows[0].sinks[0]
+            .heal
+            .clone()
+            .unwrap_or_default()
+            .resolve(&cfg.heal, HealSettings::default())
+    }
+
+    #[test]
+    fn heal_is_on_by_default_when_no_block_is_declared() {
+        let cfg = parse(&minimal_standalone_kdl()).expect("parse should succeed");
+        cfg.validate().expect("the default policy is valid");
+        assert_eq!(cfg.heal, HealConfig::default());
+
+        let defaults = HealSettings::default();
+        assert!(defaults.enabled, "a connector heals with no config at all");
+        assert_eq!(defaults.after_failures, 3);
+        assert_eq!(defaults.base_delay_ms, 1_000);
+        assert_eq!(defaults.max_delay_ms, 60_000);
+        assert_eq!(defaults.max_attempts, 0, "0 never gives up");
+    }
+
+    #[test]
+    fn a_node_heal_block_layers_over_the_top_level_one() {
+        let cfg = parse(&heal_kdl(
+            "heal { after_failures 5; base_delay_ms 250; max_attempts 9 }",
+            "heal { after_failures 1 }",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+
+        let settings = resolved_heal(&cfg);
+        assert_eq!(settings.after_failures, 1, "the node's own key wins");
+        assert_eq!(settings.base_delay_ms, 250, "the top level fills the rest");
+        assert_eq!(settings.max_attempts, 9);
+        assert!(settings.enabled, "neither block turned it off");
+    }
+
+    #[test]
+    fn a_top_level_heal_block_parses_every_key() {
+        let cfg = parse(&heal_kdl(
+            r#"heal {
+    enabled #true
+    after_failures 2
+    base_delay_ms 500
+    multiplier 1.5
+    max_delay_ms 20000
+    jitter 0.25
+    max_attempts 7
+}"#,
+            "",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+
+        let settings = resolved_heal(&cfg);
+        assert!(settings.enabled);
+        assert_eq!(settings.after_failures, 2);
+        assert_eq!(settings.base_delay_ms, 500);
+        assert!((settings.multiplier - 1.5).abs() < f64::EPSILON);
+        assert_eq!(settings.max_delay_ms, 20_000);
+        assert!((settings.jitter - 0.25).abs() < f64::EPSILON);
+        assert_eq!(settings.max_attempts, 7);
+    }
+
+    #[test]
+    fn string_valued_heal_keys_parse_so_env_substitution_works() {
+        let cfg = parse(&heal_kdl(
+            r#"heal { enabled "false"; after_failures "6"; multiplier "1.25" }"#,
+            "",
+        ))
+        .expect("parse should succeed");
+        cfg.validate().expect("valid");
+
+        let settings = resolved_heal(&cfg);
+        assert!(!settings.enabled);
+        assert_eq!(settings.after_failures, 6);
+        assert!((settings.multiplier - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn an_out_of_range_heal_key_is_rejected_rather_than_clamped() {
+        for (block, fragment) in [
+            (
+                "heal { after_failures 0 }",
+                "after_failures must be at least 1",
+            ),
+            (
+                "heal { base_delay_ms 0 }",
+                "base_delay_ms must be at least 1",
+            ),
+            ("heal { multiplier 0.5 }", "multiplier must be at least 1.0"),
+            ("heal { jitter 2.0 }", "jitter must be within 0.0..=1.0"),
+            (
+                "heal { base_delay_ms 100; max_delay_ms 10 }",
+                "max_delay_ms (10) must be at least base_delay_ms (100)",
+            ),
+        ] {
+            let cfg = parse(&heal_kdl(block, "")).expect("parse should succeed");
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains(fragment) && err.contains("heal:"),
+                "{block} must be refused naming its key, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_node_heal_error_names_the_workflow_and_the_node() {
+        let cfg = parse(&heal_kdl("", "heal { jitter 3.0 }")).expect("parse should succeed");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("workflow 'w' sink 'out': heal"),
+            "the error must name where the key is, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_heal_key_is_rejected() {
+        let err = parse(&heal_kdl("heal { retries 3 }", ""))
+            .expect_err("an unknown key must be rejected");
+        assert!(err.contains("retries"), "got: {err}");
     }
 }
