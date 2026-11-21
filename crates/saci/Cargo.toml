@@ -59,9 +59,6 @@ all = [
     "connector-clickhouse", "connector-kafka", "connector-mariadb",
     "connector-nats", "connector-otlp", "connector-postgresql",
     "connector-s3", "connector-turso",
-    "runtime", "io", "transformers", "transformer-contract", "transformer-arrow-ipc",
-    "transformer-avro", "transformer-csv", "transformer-ndjson", "transformer-parquet",
-    "connector-contract", "connector-saci", "connector-opentelemetry",
 ]
 
 # Engine
@@ -189,35 +186,6 @@ service = [
 ]
 service-cluster = ["service", "distributed-raft"]
 mimalloc = ["dep:mimalloc"]
-
-# Deprecated aliases for the features 0.2 spelled differently. Each forwards to
-# its replacement and is removed in the next release. `all` lists them so
-# `tests/feature_bundles.rs` keeps every key reachable.
-
-# Deprecated alias of `engine`; removed in the next release.
-runtime = ["engine"]
-# Deprecated alias of `engine`; removed in the next release.
-io = ["engine"]
-# Deprecated alias of `codecs`; removed in the next release.
-transformers = ["codecs"]
-# Deprecated alias of `codec-api`; removed in the next release.
-transformer-contract = ["codec-api"]
-# Deprecated alias of `codec-arrow-ipc`; removed in the next release.
-transformer-arrow-ipc = ["codec-arrow-ipc"]
-# Deprecated alias of `codec-avro`; removed in the next release.
-transformer-avro = ["codec-avro"]
-# Deprecated alias of `codec-csv`; removed in the next release.
-transformer-csv = ["codec-csv"]
-# Deprecated alias of `codec-ndjson`; removed in the next release.
-transformer-ndjson = ["codec-ndjson"]
-# Deprecated alias of `codec-parquet`; removed in the next release.
-transformer-parquet = ["codec-parquet"]
-# Deprecated alias of `connector-api`; removed in the next release.
-connector-contract = ["connector-api"]
-# Deprecated alias of `connector-peer`; removed in the next release.
-connector-saci = ["connector-peer"]
-# Deprecated alias of `connector-otlp`; removed in the next release.
-connector-opentelemetry = ["connector-otlp"]
 
 [dependencies]
 arrow-array   = { workspace = true }

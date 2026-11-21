@@ -164,14 +164,3 @@ pub use topology::build_topology;
 pub use validation::{
     validate_build_capabilities, validate_schema_fingerprint, validate_workflow_graph,
 };
-
-/// The name 0.2 gave [`WorkflowFactory`].
-#[cfg(feature = "service")]
-#[deprecated(since = "0.3.0", note = "use `WorkflowFactory`")]
-pub type ServiceFactory = WorkflowFactory;
-
-/// The name 0.2 gave [`WorkflowStats`].
-#[cfg(feature = "service")]
-#[deprecated(since = "0.3.0", note = "use `WorkflowStats`")]
-pub type StandaloneStats = WorkflowStats;
-

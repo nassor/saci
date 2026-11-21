@@ -97,7 +97,3 @@ pub(crate) mod state;
 pub use config::Config;
 pub use error::{Error, Result};
 pub use state::{RouteDecision, State};
-
-/// The name 0.2 gave [`State`].
-#[deprecated(since = "0.3.0", note = "use `sdk::State`")]
-pub type ProcessorState<C> = State<C>;

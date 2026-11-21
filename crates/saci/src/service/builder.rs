@@ -968,45 +968,6 @@ impl ServiceBuilder {
         Ok(out)
     }
 
-    /// Build one [`BuiltWorkflow`] per declared workflow; see
-    /// [`build`](Self::build).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SaciError::Configuration`] if any workflow fails to build.
-    #[deprecated(since = "0.3.0", note = "use `build`")]
-    pub fn build_all(self, config: &ServiceConfig) -> Result<Vec<BuiltWorkflow>, SaciError> {
-        self.build(config)
-    }
-
-    /// Share every declared dead letter queue with `registry`; see
-    /// [`dlq_registry`](Self::dlq_registry).
-    #[deprecated(since = "0.3.0", note = "use `dlq_registry`")]
-    pub fn with_dlq_registry(self, registry: Arc<DlqRegistry>) -> Self {
-        self.dlq_registry(registry)
-    }
-
-    /// Publish the built topology into `inspector`; see
-    /// [`inspector`](Self::inspector).
-    #[deprecated(since = "0.3.0", note = "use `inspector`")]
-    pub fn with_inspector(self, inspector: Inspector) -> Self {
-        self.inspector(inspector)
-    }
-
-    /// Register the shared channel bridge; see [`channels`](Self::channels).
-    #[deprecated(since = "0.3.0", note = "use `channels`")]
-    pub fn with_channel_bridge(self, channels: Arc<dyn ChannelBridge>) -> Self {
-        self.channels(channels)
-    }
-
-    /// Set the [`WasmEngine`] every `wasm` node loads through; see
-    /// [`wasm_engine`](Self::wasm_engine).
-    #[cfg(feature = "wasm-host")]
-    #[deprecated(since = "0.3.0", note = "use `wasm_engine`")]
-    pub fn with_wasm_engine(self, engine: WasmEngine) -> Self {
-        self.wasm_engine(engine)
-    }
-
     /// Freeze the registry and keep the builder, so any declared workflow can
     /// be built again later.
     ///

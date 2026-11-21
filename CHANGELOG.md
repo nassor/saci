@@ -8,80 +8,74 @@
 ### Migrating from 0.2
 
 What changed and why is in [Breaking](#breaking); this section is the lookup from the 0.2
-spelling to the new one. A row marked **alias** still compiles through a `#[deprecated(since =
-"0.3.0")]` item or a deprecated Cargo feature, and is removed in the next release. Every other
-row is a break with no alias, because the new item returns a different type or needs more than
-a rename.
+spelling to the new one. No 0.2 name compiles any more: every row is a break.
 
 #### Rust
 
-| 0.2 | Now | |
-| --- | --- | --- |
-| `Dataset::register_component::<C>()` | `register::<C>()` | alias |
-| `register_raw_component`, `register_raw_component_versioned`, `register_named_component` | `register_schema`, `register_schema_versioned`; return `Result` | |
-| `Dataset::columns::<C>()` → `Option` | `batch::<C>()` → `SaciResult` | |
-| `Dataset::batch_for(name)` → `Option` | `batch_named(name)` → `SaciResult` | |
-| `Dataset::column::<C>("f")` → `Option` | `column(C::F)` or `column_named("C", "f")` → `SaciResult` | |
-| `DatasetBuilder`, `PipelineBuilder`, `Pipeline::add_*`, `run_with_io`, `run_on_with_stats` | `Pipeline::new().component().schema().system().source().sink()` | |
-| `Scheduler::add_pipeline*`, `PipelineConfig::after(name, kind)`, `BackpressureSpec` | `Scheduler::pipeline`, `pipeline_with`; `after`, `after_data`, `pause_when` | |
-| `SystemMeta::read(c, f)`, `write(c, f)` | `reads_named`, `writes_named` | alias |
-| `SystemMeta::read_component(c)`, `write_component(c)` | `reads_all_named(c)`, `writes_all_named(c)` (or `reads_all::<C>()`) | alias |
-| `SystemMeta::read_resource::<R>()`, `write_resource::<R>()` | `reads_resource::<R>()`, `writes_resource::<R>()` | alias |
-| `FieldRef::field` (public field) | `FieldRef::name()` | |
-| `SystemConfig`, `System::retry() -> SystemConfig` | `RetryMode` | |
-| `saci::window_spec::WindowSpec` | `saci::window::WindowSpec` | alias (the type only) |
-| `WindowSpec::assign_tumbling(ts, size, offset)` | `window::tumbling_id(ts, size, offset)` | alias |
-| `WindowSpec::assign_sliding(..)` → `Vec<i64>` | `window::sliding_ids(..)` → iterator | |
-| `WindowSpec::validate` → `Result<(), String>` | `validate` → `SaciResult<()>` | |
-| `WindowedSystemBuilder`, `SideOutput`, `DroppedLate` | `WindowedSystem::new(T::TIME, spec, function)`; `WindowResults::{on_time, late, dropped}` | |
-| `io::drain_into_dataset(src, data, comp)`, `io::drain_dataset(data, comp, sink)` | `io::read_all(src, data, comp)`, `io::write_all(sink, data, comp)` | |
-| `saci::transformer::*`, `Transformer`, `TransformerFactory`, `TransformerRegistry`, `*Transformer` | `saci::codec::*`, `Codec`, `CodecFactory`, `CodecRegistry`, `*Codec` | |
-| `saci::processor`, `saci::plugin`, `export_pipeline!`, `export_plugin!` | `saci::sdk`, `#[processor]`, `#[plugin]` | |
-| `saci::ProcessorState<C>`, `sdk::ProcessorState<C>` | `sdk::State<C>` | alias |
-| `RouteDecision(vec![..])` | `RouteDecision::to([..])`, `RouteDecision::none()` | |
-| `connector::tcp::TcpIngestSource` | `TcpSource`, built with `TcpSource::new(config, schema, codec)` | |
-| `connector::http::{HttpPushSource, HttpPushOptions, Window}` | `HttpListenSource`, `HttpListenConfig`, `BatchWindow` | |
-| `connector::http::HttpClientOptions` | `HttpClientConfig` | alias |
-| `connector::http::{HttpSourceOptions, HttpSinkOptions}` | `HttpSourceConfig`, `HttpSinkConfig` | |
-| `connector::saci::{SaciSource, SaciSink}` | `connector::peer::{PeerSource, PeerSink}` | |
-| `connector::opentelemetry::*` | `connector::otlp::*` (`OtlpMetrics*`, `SourceMode`) | |
-| `connector::udp::ProbeSettings` | `ProbeConfig` | |
-| `clickhouse::ClickhouseConnectionConfig` | `clickhouse::ConnectionConfig` | alias |
-| `s3::S3ConnectionConfig` | `s3::ConnectionConfig` | alias |
-| `ChannelSource::from_receiver`, `ChannelSink::from_sender` | `with_receiver`, `with_sender` | alias |
-| `ChannelSource::new` → `(Sender, Self)` | `new` → `(Self, Sender)` | |
-| `ConnectorContext::channel_bridge()` | `channels()` | alias |
-| `ConnectorContext::transformer(what)` | `codec(what)` | |
-| `connector::schema::parse_schema_fields` → `Arc<Schema>`, `parse_optional_schema_fields` | `parse_fields` → `Vec<FieldSpec>`, `parse_optional_fields`; `schema_of(&fields)` builds the schema | |
-| `service::BuiltService`, `ServiceBuilder::build_all` | `BuiltWorkflow`, `build` | `build_all` alias |
-| `service::ServiceFactory` | `WorkflowFactory` | alias |
-| `service::StandaloneStats` | `WorkflowStats` | alias (its `nodes` are `NodeStats`) |
-| `service::NodeRunStats` (`id: String`, `kind: String`) | `NodeStats` (`id: Arc<str>`, `kind: &'static str`) | |
-| `ServiceBuilder::with_dlq_registry`, `with_inspector`, `with_channel_bridge`, `with_wasm_engine` | `dlq_registry`, `inspector`, `channels`, `wasm_engine` | alias |
-| `ServiceBuilder::with_runtime(id, Box<dyn PipelineRuntime>)` | `runtime(id, impl PipelineRuntime)` | |
-| `ServiceBuilder::register_source`, `register_sink`, `register_transformer`, `*_mut` | `connector(c)`, `codec(f)` | |
-| `service::config::TransformerSpec` (`options`) | `CodecSpec` (`config`) | |
-| `RetryConfig::to_system_config` | `to_retry_mode` | |
-| `PipelineRuntime::run_on*` | `run_batch(data, prior)` | |
-| `WasmEngine::new()`, `PipelineRuntimeLoader::with_epoch_deadline(ticks)` | `new() -> SaciResult`, `with_timeout(Duration)` | |
-| `service::run_standalone`, `run_stream` | `BuiltWorkflow::run(options)` | |
+| 0.2 | Now |
+| --- | --- |
+| `Dataset::register_component::<C>()` | `register::<C>()` |
+| `register_raw_component`, `register_raw_component_versioned`, `register_named_component` | `register_schema`, `register_schema_versioned`; return `Result` |
+| `Dataset::columns::<C>()` → `Option` | `batch::<C>()` → `SaciResult` |
+| `Dataset::batch_for(name)` → `Option` | `batch_named(name)` → `SaciResult` |
+| `Dataset::column::<C>("f")` → `Option` | `column(C::F)` or `column_named("C", "f")` → `SaciResult` |
+| `DatasetBuilder`, `PipelineBuilder`, `Pipeline::add_*`, `run_with_io`, `run_on_with_stats` | `Pipeline::new().component().schema().system().source().sink()` |
+| `Scheduler::add_pipeline*`, `PipelineConfig::after(name, kind)`, `BackpressureSpec` | `Scheduler::pipeline`, `pipeline_with`; `after`, `after_data`, `pause_when` |
+| `SystemMeta::read(c, f)`, `write(c, f)` | `reads_named`, `writes_named` |
+| `SystemMeta::read_component(c)`, `write_component(c)` | `reads_all_named(c)`, `writes_all_named(c)` (or `reads_all::<C>()`) |
+| `SystemMeta::read_resource::<R>()`, `write_resource::<R>()` | `reads_resource::<R>()`, `writes_resource::<R>()` |
+| `FieldRef::field` (public field) | `FieldRef::name()` |
+| `SystemConfig`, `System::retry() -> SystemConfig` | `RetryMode` |
+| `saci::window_spec::WindowSpec` | `saci::window::WindowSpec` |
+| `WindowSpec::assign_tumbling(ts, size, offset)` | `window::tumbling_id(ts, size, offset)` |
+| `WindowSpec::assign_sliding(..)` → `Vec<i64>` | `window::sliding_ids(..)` → iterator |
+| `WindowSpec::validate` → `Result<(), String>` | `validate` → `SaciResult<()>` |
+| `WindowedSystemBuilder`, `SideOutput`, `DroppedLate` | `WindowedSystem::new(T::TIME, spec, function)`; `WindowResults::{on_time, late, dropped}` |
+| `io::drain_into_dataset(src, data, comp)`, `io::drain_dataset(data, comp, sink)` | `io::read_all(src, data, comp)`, `io::write_all(sink, data, comp)` |
+| `saci::transformer::*`, `Transformer`, `TransformerFactory`, `TransformerRegistry`, `*Transformer` | `saci::codec::*`, `Codec`, `CodecFactory`, `CodecRegistry`, `*Codec` |
+| `saci::processor`, `saci::plugin`, `export_pipeline!`, `export_plugin!` | `saci::sdk`, `#[processor]`, `#[plugin]` |
+| `saci::ProcessorState<C>`, `sdk::ProcessorState<C>` | `sdk::State<C>` |
+| `RouteDecision(vec![..])` | `RouteDecision::to([..])`, `RouteDecision::none()` |
+| `connector::tcp::TcpIngestSource` | `TcpSource`, built with `TcpSource::new(config, schema, codec)` |
+| `connector::http::{HttpPushSource, HttpPushOptions, Window}` | `HttpListenSource`, `HttpListenConfig`, `BatchWindow` |
+| `connector::http::HttpClientOptions` | `HttpClientConfig` |
+| `connector::http::{HttpSourceOptions, HttpSinkOptions}` | `HttpSourceConfig`, `HttpSinkConfig` |
+| `connector::saci::{SaciSource, SaciSink}` | `connector::peer::{PeerSource, PeerSink}` |
+| `connector::opentelemetry::*` | `connector::otlp::*` (`OtlpMetrics*`, `SourceMode`) |
+| `connector::udp::ProbeSettings` | `ProbeConfig` |
+| `clickhouse::ClickhouseConnectionConfig` | `clickhouse::ConnectionConfig` |
+| `s3::S3ConnectionConfig` | `s3::ConnectionConfig` |
+| `ChannelSource::from_receiver`, `ChannelSink::from_sender` | `with_receiver`, `with_sender` |
+| `ChannelSource::new` → `(Sender, Self)` | `new` → `(Self, Sender)` |
+| `ConnectorContext::channel_bridge()` | `channels()` |
+| `ConnectorContext::transformer(what)` | `codec(what)` |
+| `connector::schema::parse_schema_fields` → `Arc<Schema>`, `parse_optional_schema_fields` | `parse_fields` → `Vec<FieldSpec>`, `parse_optional_fields`; `schema_of(&fields)` builds the schema |
+| `service::BuiltService`, `ServiceBuilder::build_all` | `BuiltWorkflow`, `build` |
+| `service::ServiceFactory` | `WorkflowFactory` |
+| `service::StandaloneStats` | `WorkflowStats` (its `nodes` are `NodeStats`) |
+| `service::NodeRunStats` (`id: String`, `kind: String`) | `NodeStats` (`id: Arc<str>`, `kind: &'static str`) |
+| `ServiceBuilder::with_dlq_registry`, `with_inspector`, `with_channel_bridge`, `with_wasm_engine` | `dlq_registry`, `inspector`, `channels`, `wasm_engine` |
+| `ServiceBuilder::with_runtime(id, Box<dyn PipelineRuntime>)` | `runtime(id, impl PipelineRuntime)` |
+| `ServiceBuilder::register_source`, `register_sink`, `register_transformer`, `*_mut` | `connector(c)`, `codec(f)` |
+| `service::config::TransformerSpec` (`options`) | `CodecSpec` (`config`) |
+| `RetryConfig::to_system_config` | `to_retry_mode` |
+| `PipelineRuntime::run_on*` | `run_batch(data, prior)` |
+| `WasmEngine::new()`, `PipelineRuntimeLoader::with_epoch_deadline(ticks)` | `new() -> SaciResult`, `with_timeout(Duration)` |
+| `service::run_standalone`, `run_stream` | `BuiltWorkflow::run(options)` |
 
 #### Cargo features
 
-Each old feature is kept as an alias of its replacement and is removed in the next release.
+The 0.2 feature names are gone; a build that names one fails to resolve it.
 
-| 0.2 | Now | |
-| --- | --- | --- |
-| `runtime`, `io` | `engine` | alias |
-| `transformers` | `codecs` | alias |
-| `transformer-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet` | `codec-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet` | alias |
-| `transformer-contract` | `codec-api` | alias |
-| `connector-contract` | `connector-api` | alias |
-| `connector-saci` | `connector-peer` | alias |
-| `connector-opentelemetry` | `connector-otlp` | alias |
-
-An alias only enables the new feature. The Rust paths it gated moved, so a crate using
-`transformer-csv` still needs `saci::codec::CsvCodec` in place of `saci::transformer::csv`.
+| 0.2 | Now |
+| --- | --- |
+| `runtime`, `io` | `engine` |
+| `transformers` | `codecs` |
+| `transformer-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet` | `codec-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet` |
+| `transformer-contract` | `codec-api` |
+| `connector-contract` | `connector-api` |
+| `connector-saci` | `connector-peer` |
+| `connector-opentelemetry` | `connector-otlp` |
 
 #### KDL
 

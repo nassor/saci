@@ -46,7 +46,3 @@ pub use config::{ConnectionConfig, Flush, S3SinkConfig, S3SourceConfig};
 pub use factory::S3Connector;
 pub use sink::S3Sink;
 pub use source::S3Source;
-
-/// The name 0.2 gave [`ConnectionConfig`].
-#[deprecated(since = "0.3.0", note = "use `ConnectionConfig`")]
-pub type S3ConnectionConfig = ConnectionConfig;

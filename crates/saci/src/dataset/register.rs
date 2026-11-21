@@ -9,12 +9,6 @@ use crate::error::SaciError;
 use super::{Dataset, intern_component_name};
 
 impl Dataset {
-    /// Register a component type; see [`register`](Self::register).
-    #[deprecated(since = "0.3.0", note = "use `register`")]
-    pub fn register_component<C: Component>(&mut self) -> Result<(), SaciError> {
-        self.register::<C>()
-    }
-
     /// Register a component type, creating an empty chunk list for it.
     ///
     /// Idempotent: repeat calls for the same `C` return `Ok(())`.

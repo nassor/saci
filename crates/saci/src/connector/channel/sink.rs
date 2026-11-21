@@ -72,12 +72,6 @@ impl ChannelSink {
         }
     }
 
-    /// Wrap an existing sender half; see [`with_sender`](Self::with_sender).
-    #[deprecated(since = "0.3.0", note = "use `with_sender`")]
-    pub fn from_sender(schema: Arc<Schema>, buffer: usize, tx: mpsc::Sender<RecordBatch>) -> Self {
-        Self::with_sender(schema, buffer, tx)
-    }
-
     /// Messages accepted by the channel and not yet received.
     ///
     /// `tx.capacity()` is the number of free slots left, so the difference

@@ -155,40 +155,4 @@ impl SystemMeta {
         self.writes_resources.push(TypeId::of::<R>());
         self
     }
-
-    /// Declare that this system reads `field` within `component`.
-    #[deprecated(since = "0.3.0", note = "use `reads_named`")]
-    pub fn read(self, component: &'static str, field: &'static str) -> Self {
-        self.reads_named(component, field)
-    }
-
-    /// Declare that this system writes `field` within `component`.
-    #[deprecated(since = "0.3.0", note = "use `writes_named`")]
-    pub fn write(self, component: &'static str, field: &'static str) -> Self {
-        self.writes_named(component, field)
-    }
-
-    /// Declare that this system reads every field of `component`.
-    #[deprecated(since = "0.3.0", note = "use `reads_all_named`")]
-    pub fn read_component(self, component: &'static str) -> Self {
-        self.reads_all_named(component)
-    }
-
-    /// Declare that this system writes every field of `component`.
-    #[deprecated(since = "0.3.0", note = "use `writes_all_named`")]
-    pub fn write_component(self, component: &'static str) -> Self {
-        self.writes_all_named(component)
-    }
-
-    /// Declare that this system reads resource type `R`.
-    #[deprecated(since = "0.3.0", note = "use `reads_resource`")]
-    pub fn read_resource<R: 'static>(self) -> Self {
-        self.reads_resource::<R>()
-    }
-
-    /// Declare that this system writes resource type `R`.
-    #[deprecated(since = "0.3.0", note = "use `writes_resource`")]
-    pub fn write_resource<R: 'static>(self) -> Self {
-        self.writes_resource::<R>()
-    }
 }

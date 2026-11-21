@@ -98,7 +98,3 @@ pub use source::{
     BatchWindow, HttpClientConfig, HttpSource, HttpSourceConfig, Pagination, ReadMode,
 };
 pub use tls::TlsFiles;
-
-/// The name 0.2 gave [`HttpClientConfig`].
-#[deprecated(since = "0.3.0", note = "use `HttpClientConfig`")]
-pub type HttpClientOptions = HttpClientConfig;

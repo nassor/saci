@@ -1739,9 +1739,7 @@ workflow "w" {
                     .split("${")
                     .skip(1)
                     .map(|rest| {
-                        let end = rest
-                            .find(|c| c == ':' || c == '}')
-                            .expect("closed placeholder");
+                        let end = rest.find([':', '}']).expect("closed placeholder");
                         (rest[..end].to_string(), fixed(&rest[..end]).to_string())
                     })
                     .collect();

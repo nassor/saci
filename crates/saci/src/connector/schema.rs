@@ -228,7 +228,11 @@ impl FieldSpec {
     ///
     /// The first field [`from_arrow`](Self::from_arrow) refuses.
     pub fn from_schema(schema: &Schema) -> SaciResult<Vec<Self>> {
-        schema.fields().iter().map(|f| Self::from_arrow(f)).collect()
+        schema
+            .fields()
+            .iter()
+            .map(|f| Self::from_arrow(f))
+            .collect()
     }
 
     /// The declared scalar type of an Arrow type, with `(precision, scale)` for a decimal.

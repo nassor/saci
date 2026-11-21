@@ -74,17 +74,6 @@ pub mod io;
 /// declaration whether or not it carries the engine that serves one.
 pub mod window;
 
-/// The path 0.2 gave [`window`].
-#[deprecated(since = "0.3.0", note = "use `saci::window`")]
-pub mod window_spec {
-    pub use crate::window::WindowSpec;
-}
-
-/// The name 0.2 gave [`sdk::State`].
-#[cfg(any(feature = "processor", feature = "plugin"))]
-#[deprecated(since = "0.3.0", note = "use `saci::sdk::State`")]
-pub type ProcessorState<C> = sdk::State<C>;
-
 #[cfg(feature = "windows")]
 pub mod windows;
 

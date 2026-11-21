@@ -147,12 +147,6 @@ impl WindowSpec {
         };
         Err(SaciError::configuration(problem))
     }
-
-    /// The tumbling window id of `ts`; see [`tumbling_id`].
-    #[deprecated(since = "0.3.0", note = "use `window::tumbling_id`")]
-    pub fn assign_tumbling(ts: i64, size_ms: i64, offset_ms: i64) -> i64 {
-        tumbling_id(ts, size_ms, offset_ms)
-    }
 }
 
 /// The tumbling window id of `ts` (milliseconds): `floor((ts - offset_ms) /
