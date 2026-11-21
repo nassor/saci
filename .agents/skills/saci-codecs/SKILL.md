@@ -102,7 +102,7 @@ codec formats equal that file's `FORMATS` list.
 Each codec's `codec.rs` tests `open_reader` over `ReadInput::Memory` and `ReadInput::File` of the same bytes
 (`an_in_memory_document_reads_the_same_batches_as_a_file`) and that its factory rejects an unknown option.
 
-`arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide (`AGENTS.md` Conventions); the arrow-ipc
+`arrow-ipc = "=60.2.0"` is exact-pinned workspace-wide (`AGENTS.md` Conventions); the arrow-ipc
 codec shares that pin with the processor wire format, see skill `saci-processors`.
 
 ## Adding a codec

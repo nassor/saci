@@ -41,7 +41,7 @@ no `go.sum`.
 
 ## Load-bearing crate pin
 
-`arrow-ipc = "=60.1.0"` in the workspace `Cargo.toml` is the host's Arrow IPC
+`arrow-ipc = "=60.2.0"` in the workspace `Cargo.toml` is the host's Arrow IPC
 implementation and the byte layout this plugin walks. A patch bump there can
 move the buffers the codec resolves by offset. `crates/saci/PINS.md` holds
 the upgrade policy. The plugin ABI version is independent of it:

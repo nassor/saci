@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use redb::{Database, ReadableDatabase, TableDefinition, TableError};
+use redb::{
+    CompactionMode, Database, ReadableDatabase, ReadableTable, TableDefinition, TableError,
+};
 
 use crate::codec::Codec;
 use crate::error::SaciError;
@@ -381,7 +383,7 @@ impl Sink for RedbSink {
                 })?;
             }
             if compact {
-                let compacted = db.compact().map_err(|e| {
+                let compacted = db.compact(CompactionMode::Balanced).map_err(|e| {
                     SaciError::generic(format!(
                         "RedbSink: compaction of {} failed: {e}",
                         path.display()

@@ -549,7 +549,7 @@ the in-process inspector (`src/inspector/`) with the `/ui` dashboard (`crates/sa
   reports store lifecycle, host IPC encode, host IPC decode and the full `run_batch`
   round trip as separate groups, since a change there routinely moves cost between phases while
   leaving the total flat.
-- `arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide. It is the host to processor wire format and the
+- `arrow-ipc = "=60.2.0"` is exact-pinned workspace-wide. It is the host to processor wire format and the
   on-disk checkpoint format. See `crates/saci/PINS.md` before touching it.
 - Every workspace member takes `version.workspace = true`, and every dependency on a sibling
   crate is `{ workspace = true }` against the entry in the root `[workspace.dependencies]`. One

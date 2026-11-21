@@ -8,7 +8,7 @@ are validated against the `saci:pipeline@0.4.0` WIT package.
 
 | Tool          | Version | Install |
 |---------------|---------|---------|
-| `wasmtime`    | 50.0.1  | `cargo install wasmtime-cli --locked --version 50.0.1` |
+| `wasmtime`    | 51.0.0  | `cargo install wasmtime-cli --locked --version 51.0.0` |
 | `wit-bindgen` | 0.63.0  | workspace dependency (`features = ["async"]`); no separate install |
 | `wasm-tools`  | 1.246.2 | `cargo install wasm-tools --locked --version 1.246.2` |
 | Rust target   | `wasm32-wasip3` | `rustup target add wasm32-wasip3` |
@@ -18,7 +18,7 @@ in [`examples/plugins/settle-go/PINS.md`](../../examples/plugins/settle-go/PINS.
 
 ## Load-bearing crate pin
 
-`arrow-ipc = "=60.1.0"` is exact-pinned in the workspace (`Cargo.toml`). Both
+`arrow-ipc = "=60.2.0"` is exact-pinned in the workspace (`Cargo.toml`). Both
 the host and any processor built against this SDK MUST link against this exact
 version, because Arrow IPC is the wire format across the Component Model
 boundary. A patch-release drift here can silently corrupt `Dataset` round-trips

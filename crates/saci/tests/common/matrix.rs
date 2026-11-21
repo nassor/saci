@@ -305,7 +305,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
-use redb::ReadableDatabase as _;
+use redb::{ReadableDatabase as _, ReadableTable as _};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -3717,7 +3717,7 @@ fn read_redb_entries(dir: &Path) -> Result<Vec<Vec<u8>>, String> {
     };
     let mut values = Vec::new();
     for entry in table
-        .range::<&str>(..)
+        .range(..)
         .map_err(|e| format!("redb readback range: {e}"))?
     {
         let (_, value) = entry.map_err(|e| format!("redb readback entry: {e}"))?;
