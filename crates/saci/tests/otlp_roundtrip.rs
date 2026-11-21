@@ -35,15 +35,17 @@ fn canonical_batch() -> RecordBatch {
     let schema = schema::metrics_schema();
     let attributes = vec![
         json!({"http.request.method": "GET"}).to_string(),
+        // Keys in the order the source writes them: `serde_json/preserve_order`
+        // is on whenever `config` is, and sorted order otherwise, which agrees.
         json!({
+            "otel.scope": {"name": "saci", "version": "0.1.0"},
             "otel.aggregation_temporality": "delta",
             "otel.distribution": {
-                "bucket_counts": [3, 4],
                 "explicit_bounds": [1.0, 2.0],
-                "max": 9.0,
+                "bucket_counts": [3, 4],
                 "min": 0.5,
+                "max": 9.0,
             },
-            "otel.scope": {"name": "saci", "version": "0.1.0"},
         })
         .to_string(),
     ];
