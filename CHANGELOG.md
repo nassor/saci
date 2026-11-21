@@ -3,6 +3,16 @@
 `saci` and `saci-macros` share one version. The release process is in `AGENTS.md`, under
 "Releases".
 
+## Unreleased
+
+
+### Fixed
+
+- `connector::nats`: a JetStream `NatsSource` whose `next_batch` was cancelled mid-window keeps
+  its open pull request and drains it on the next call. Before, the dropped request stayed open on
+  the server, and a message published before it expired went to an inbox nobody read and came
+  back only after `ack_wait`.
+
 ## 0.3.0 - 2026-11-21
 
 ### Migrating from 0.2

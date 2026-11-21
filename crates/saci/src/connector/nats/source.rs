@@ -26,10 +26,14 @@
 //!
 //! [`next_batch`](Source::next_batch) is cancel-safe either way: the collected
 //! window lives on the source rather than in the future, and a message's ack
-//! travels beside it until the window is handed over. Dropping that future — as
-//! `run_stream`'s one-second source prime does — therefore loses no message
-//! that core NATS would never send again, and acknowledges none that no caller
-//! has seen.
+//! travels beside it until the window is handed over. A JetStream pull request
+//! lives on the source too, and the next call drains it before asking for
+//! more: the server keeps an abandoned request open until it expires and
+//! answers it into an inbox nobody reads, so the message it delivered there
+//! would wait out `ack_wait`. Dropping that future — as `run_stream`'s
+//! one-second source prime does — therefore loses no message that core NATS
+//! would never send again, delays none JetStream already sent, and
+//! acknowledges none that no caller has seen.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +41,7 @@ use std::time::Duration;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_nats::jetstream::consumer::PullConsumer;
+use async_nats::jetstream::consumer::pull::Batch;
 use async_nats::jetstream::message::{AckKind, Acker};
 use async_nats::{Client, Subject, Subscriber};
 use async_trait::async_trait;
@@ -132,6 +137,10 @@ enum Started {
     Jetstream {
         consumer: Box<PullConsumer>,
         window: PullWindow,
+        /// The pull request still open on the server, kept here rather than
+        /// in [`next_batch`](Source::next_batch)'s future so a cancelled call
+        /// does not abandon it. `None` once it has ended.
+        inflight: Option<Batch>,
     },
 }
 
@@ -311,6 +320,7 @@ impl NatsSource {
                         max_bytes: js.fetch_max_bytes,
                         heartbeat: Duration::from_millis(js.heartbeat_ms),
                     },
+                    inflight: None,
                 }
             }
         };
@@ -354,10 +364,13 @@ impl NatsSource {
         match state {
             Started::Core { subscribers, .. } => collect_core(subscribers, cfg, buffer).await,
             Started::Jetstream {
-                consumer, window, ..
+                consumer,
+                window,
+                inflight,
             } => {
                 collect_jetstream(
                     consumer.as_mut(),
+                    inflight,
                     window,
                     cfg,
                     *ack_mode,
@@ -577,6 +590,10 @@ impl Outstanding {
 /// cancelled call left in it. Each message keeps its own `Acker`, so a window
 /// this returns has been acknowledged by nobody yet.
 ///
+/// A pull request a cancelled call left open in `inflight` is drained before
+/// a new one is sent, and one still open when the window fills stays there
+/// for the next call.
+///
 /// `stop_at_end` uses `fetch`, which sets `no_wait` and returns only what is
 /// already there. An empty window is not EOF on its own: a consumer that has
 /// not started serving yet, and one whose delivered messages went into a
@@ -589,6 +606,7 @@ impl Outstanding {
 /// and loops until a window carries at least one message.
 async fn collect_jetstream(
     consumer: &mut PullConsumer,
+    inflight: &mut Option<Batch>,
     window: &PullWindow,
     cfg: &NatsSourceConfig,
     ack_mode: AckMode,
@@ -603,75 +621,90 @@ async fn collect_jetstream(
     }
     let mut confirm_deadline: Option<Instant> = None;
     loop {
-        {
-            // What this window still has room for, so a window resumed after a
-            // cancel asks for the rest of `batch_rows` rather than for another
-            // whole one. Never zero: a request for no messages is not a
-            // request, and the `stop_at_end` path above already returned a
-            // full carried window.
-            let room = cfg.batch_rows.saturating_sub(buffer.len()).max(1);
-            let batch = if cfg.stop_at_end {
-                let mut builder = consumer.fetch().max_messages(room).expires(window.expires);
-                if window.max_bytes > 0 {
-                    builder = builder.max_bytes(window.max_bytes);
+        let batch = match inflight {
+            Some(batch) => batch,
+            None => {
+                // What this window still has room for, so a window resumed
+                // after a cancel asks for the rest of `batch_rows` rather than
+                // for another whole one. Never zero: a request for no messages
+                // is not a request, and the `stop_at_end` path above already
+                // returned a full carried window.
+                let room = cfg.batch_rows.saturating_sub(buffer.len()).max(1);
+                let batch = if cfg.stop_at_end {
+                    let mut builder = consumer.fetch().max_messages(room).expires(window.expires);
+                    if window.max_bytes > 0 {
+                        builder = builder.max_bytes(window.max_bytes);
+                    }
+                    if !window.heartbeat.is_zero() {
+                        builder = builder.heartbeat(window.heartbeat);
+                    }
+                    builder.messages().await
+                } else {
+                    let mut builder = consumer
+                        .batch()
+                        .max_messages(room)
+                        .expires(Duration::from_millis(cfg.poll_timeout_ms));
+                    if window.max_bytes > 0 {
+                        builder = builder.max_bytes(window.max_bytes);
+                    }
+                    if !window.heartbeat.is_zero() {
+                        builder = builder.heartbeat(window.heartbeat);
+                    }
+                    builder.messages().await
                 }
-                if !window.heartbeat.is_zero() {
-                    builder = builder.heartbeat(window.heartbeat);
-                }
-                builder.messages().await
-            } else {
-                let mut builder = consumer
-                    .batch()
-                    .max_messages(room)
-                    .expires(Duration::from_millis(cfg.poll_timeout_ms));
-                if window.max_bytes > 0 {
-                    builder = builder.max_bytes(window.max_bytes);
-                }
-                if !window.heartbeat.is_zero() {
-                    builder = builder.heartbeat(window.heartbeat);
-                }
-                builder.messages().await
-            }
-            .map_err(|e| {
-                SaciError::generic(format!(
-                    "{WHAT}: pull request on stream '{}' failed: {e}",
-                    window.stream
-                ))
-            })?;
-
-            let mut batch = std::pin::pin!(batch);
-            while let Some(item) = batch.next().await {
-                let message = item.map_err(|e| {
+                .map_err(|e| {
                     SaciError::generic(format!(
-                        "{WHAT}: pull on stream '{}' failed: {e}",
+                        "{WHAT}: pull request on stream '{}' failed: {e}",
                         window.stream
                     ))
                 })?;
-                // `info` parses the reply subject, with no round-trip.
-                let (sequence, pending, delivered) = {
-                    let info = message.info().map_err(|e| {
-                        SaciError::generic(format!(
-                            "{WHAT}: message on stream '{}' carries no JetStream metadata: {e}",
-                            window.stream
-                        ))
-                    })?;
-                    (info.stream_sequence, info.pending, info.delivered)
-                };
-                *last_pending = Some(usize::try_from(pending).unwrap_or(usize::MAX));
-
-                let (payload, ack) = if ack_mode == AckMode::Never {
-                    (message.message.payload, None)
-                } else {
-                    let (message, acker) = message.split();
-                    (message.payload, Some(acker))
-                };
-                buffer.push(Received {
-                    origin: Origin::Sequence(sequence),
-                    payload,
-                    ack,
-                    delivered: u32::try_from(delivered).unwrap_or(u32::MAX),
-                });
+                inflight.insert(batch)
             }
+        };
+
+        // A `request_batch_rows` hint can shrink the window below what the
+        // open request asked for; what it still delivers waits for the next
+        // call.
+        while buffer.len() < cfg.batch_rows {
+            let Some(item) = batch.next().await else {
+                *inflight = None;
+                break;
+            };
+            let message = match item {
+                Ok(message) => message,
+                Err(e) => {
+                    // `Batch` ends itself after an error status.
+                    *inflight = None;
+                    return Err(SaciError::generic(format!(
+                        "{WHAT}: pull on stream '{}' failed: {e}",
+                        window.stream
+                    )));
+                }
+            };
+            // `info` parses the reply subject, with no round-trip.
+            let (sequence, pending, delivered) = {
+                let info = message.info().map_err(|e| {
+                    SaciError::generic(format!(
+                        "{WHAT}: message on stream '{}' carries no JetStream metadata: {e}",
+                        window.stream
+                    ))
+                })?;
+                (info.stream_sequence, info.pending, info.delivered)
+            };
+            *last_pending = Some(usize::try_from(pending).unwrap_or(usize::MAX));
+
+            let (payload, ack) = if ack_mode == AckMode::Never {
+                (message.message.payload, None)
+            } else {
+                let (message, acker) = message.split();
+                (message.payload, Some(acker))
+            };
+            buffer.push(Received {
+                origin: Origin::Sequence(sequence),
+                payload,
+                ack,
+                delivered: u32::try_from(delivered).unwrap_or(u32::MAX),
+            });
         }
 
         if !buffer.is_empty() {
@@ -708,10 +741,11 @@ impl Source for NatsSource {
         Arc::clone(&self.schema)
     }
 
-    /// Cancel-safe: the collected window lives on the source, and a message's
-    /// `Acker` joins `pending_acks` only once that message is on its way to
-    /// the caller, so a dropped future neither loses a window nor
-    /// acknowledges one.
+    /// Cancel-safe: the collected window and any open JetStream pull request
+    /// live on the source, and a message's `Acker` joins `pending_acks` only
+    /// once that message is on its way to the caller, so a dropped future
+    /// neither loses a window, strands a pull request, nor acknowledges a
+    /// window.
     ///
     /// # Errors
     ///
