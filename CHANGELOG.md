@@ -168,6 +168,8 @@
 
 ### Added
 
+- `SystemMeta::read_fields`, `write_fields`, `read_components`, `write_components`, `read_resources` and
+  `write_resources` read back what a system declared.
 - `service::serve(config, builder, ServeOptions)` runs the full service (stores, HTTP plane,
   runners, shutdown budget) from library code and returns a `ServeExit`; the `saci-service
   serve` command calls it.

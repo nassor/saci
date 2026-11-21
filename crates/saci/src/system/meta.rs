@@ -63,6 +63,38 @@ impl SystemMeta {
         self.name
     }
 
+    /// The fields declared with [`reads`](Self::reads) and [`reads_named`](Self::reads_named).
+    pub fn read_fields(&self) -> &[FieldAccess] {
+        &self.reads
+    }
+
+    /// The fields declared with [`writes`](Self::writes) and [`writes_named`](Self::writes_named).
+    pub fn write_fields(&self) -> &[FieldAccess] {
+        &self.writes
+    }
+
+    /// The component names declared with [`reads_all`](Self::reads_all) and
+    /// [`reads_all_named`](Self::reads_all_named).
+    pub fn read_components(&self) -> &[&'static str] {
+        &self.reads_components
+    }
+
+    /// The component names declared with [`writes_all`](Self::writes_all) and
+    /// [`writes_all_named`](Self::writes_all_named).
+    pub fn write_components(&self) -> &[&'static str] {
+        &self.writes_components
+    }
+
+    /// The resource types declared with [`reads_resource`](Self::reads_resource).
+    pub fn read_resources(&self) -> &[TypeId] {
+        &self.reads_resources
+    }
+
+    /// The resource types declared with [`writes_resource`](Self::writes_resource).
+    pub fn write_resources(&self) -> &[TypeId] {
+        &self.writes_resources
+    }
+
     /// Declare that this system reads one field of `C`.
     pub fn reads<C: Component>(self, f: FieldRef<C>) -> Self {
         self.reads_named(C::name(), f.name())
