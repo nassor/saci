@@ -49,6 +49,7 @@ pub struct WindowConfig {
     /// types.
     pub time_field: String,
     /// Grouping key columns; empty for a global window.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub key_fields: Vec<String>,
     /// How many milliseconds past the watermark a late row is still accepted
     /// by the processor's windowing logic. Defaults to 0.
@@ -61,6 +62,20 @@ fn is_zero(value: &i64) -> bool {
 }
 
 impl WindowConfig {
+    /// A declaration of `spec` over `time_field`, with no key columns (a
+    /// global window) and no allowed lateness.
+    ///
+    /// Set [`key_fields`](Self::key_fields) and
+    /// [`allowed_lateness_ms`](Self::allowed_lateness_ms) directly.
+    pub fn new(spec: crate::window::WindowSpec, time_field: impl Into<String>) -> Self {
+        Self {
+            spec,
+            time_field: time_field.into(),
+            key_fields: Vec::new(),
+            allowed_lateness_ms: 0,
+        }
+    }
+
     /// Whether the declaration is geometrically sane and names a non-empty
     /// time field with a non-negative lateness budget.
     pub fn validate(&self) -> SaciResult<()> {

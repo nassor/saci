@@ -92,6 +92,13 @@ impl ConnectorContext {
         self.channels.as_ref()
     }
 
+    /// The channel bridge, if one was registered; see
+    /// [`channels`](Self::channels).
+    #[deprecated(since = "0.3.0", note = "use `channels`")]
+    pub fn channel_bridge(&self) -> Option<&Arc<dyn ChannelBridge>> {
+        self.channels()
+    }
+
     /// The bound codec, or a configuration error naming `what`.
     ///
     /// `what` prefixes the error, so a bad key names the connector that

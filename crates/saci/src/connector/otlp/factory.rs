@@ -25,7 +25,7 @@ pub struct OtlpMetricsConnector;
 
 impl Connector for OtlpMetricsConnector {
     fn name(&self) -> &'static str {
-        "otlp-metrics"
+        super::NAME
     }
 
     fn source(

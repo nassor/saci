@@ -127,6 +127,116 @@ pub trait PipelineRuntime: Send {
     fn template_dataset(&self) -> Dataset;
 }
 
+/// A [`PipelineRuntime`] whose state lives entirely in the [`Dataset`].
+///
+/// Most runtimes carry no state between batches: they read the dataset, write
+/// the dataset, and ignore the `prior` blob and the routing decision that
+/// [`PipelineRuntime::run_batch`] exposes. Implement this trait instead of
+/// `PipelineRuntime` for those: a blanket impl supplies `run_batch`, passing
+/// `data` to [`run`](Self::run) and returning [`RuntimeOutput::default`], which
+/// carries no state and no routes.
+///
+/// A runtime that persists state across batches or routes rows to branches
+/// implements `PipelineRuntime` directly instead. A type must not implement
+/// both traits: the blanket impl would conflict with the direct one, and the
+/// compiler rejects it.
+///
+/// The bounds match [`PipelineRuntime`]: implementations are `Send`, and the
+/// future returned by `run` need not be.
+///
+/// ```
+/// use saci::prelude::*;
+/// use saci::runtime::StatelessRuntime;
+///
+/// struct Idle;
+///
+/// #[async_trait(?Send)]
+/// impl StatelessRuntime for Idle {
+///     fn name(&self) -> &str {
+///         "idle"
+///     }
+///
+///     async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
+///         Ok(())
+///     }
+///
+///     fn template_dataset(&self) -> Dataset {
+///         Dataset::new()
+///     }
+/// }
+///
+/// let runtime: Box<dyn PipelineRuntime> = Box::new(Idle);
+/// assert_eq!(runtime.name(), "idle");
+/// ```
+///
+/// `name`, `declared_components`, `descriptor_info` and `template_dataset`
+/// exist on both traits, so a scope that imports both and calls one of them
+/// on the concrete type is ambiguous (E0034). Import only the trait you call
+/// through, or call `PipelineRuntime::run_batch(&runtime, ..)` by path.
+#[async_trait(?Send)]
+pub trait StatelessRuntime: Send {
+    /// Human-readable name for logging, metrics, and status endpoints.
+    ///
+    /// Same contract as [`PipelineRuntime::name`].
+    fn name(&self) -> &str;
+
+    /// Execute all systems against the provided dataset.
+    ///
+    /// `data` is owned by the caller. Sources and sinks are **not** drained
+    /// here; the host layer handles IO before and after this call.
+    async fn run(&self, data: &mut Dataset) -> SaciResult<()>;
+
+    /// Component names this runtime expects to find in the dataset.
+    ///
+    /// Same contract as [`PipelineRuntime::declared_components`]; the default
+    /// returns an empty list.
+    fn declared_components(&self) -> Vec<&str> {
+        Vec::new()
+    }
+
+    /// What this runtime reports about itself beyond its name.
+    ///
+    /// Same contract as [`PipelineRuntime::descriptor_info`]; the default
+    /// returns an empty [`RuntimeDescriptorInfo`].
+    fn descriptor_info(&self) -> RuntimeDescriptorInfo {
+        RuntimeDescriptorInfo::default()
+    }
+
+    /// Return a schema-only, empty [`Dataset`] matching this runtime's components.
+    ///
+    /// Same contract as [`PipelineRuntime::template_dataset`]; there is no
+    /// default body.
+    fn template_dataset(&self) -> Dataset;
+}
+
+#[async_trait(?Send)]
+impl<T: StatelessRuntime> PipelineRuntime for T {
+    fn name(&self) -> &str {
+        StatelessRuntime::name(self)
+    }
+
+    async fn run_batch(
+        &self,
+        data: &mut Dataset,
+        _prior: Option<&[u8]>,
+    ) -> SaciResult<RuntimeOutput> {
+        self.run(data).await?;
+        Ok(RuntimeOutput::default())
+    }
+
+    fn declared_components(&self) -> Vec<&str> {
+        StatelessRuntime::declared_components(self)
+    }
+
+    fn descriptor_info(&self) -> RuntimeDescriptorInfo {
+        StatelessRuntime::descriptor_info(self)
+    }
+
+    fn template_dataset(&self) -> Dataset {
+        StatelessRuntime::template_dataset(self)
+    }
+}
+
 #[async_trait(?Send)]
 impl PipelineRuntime for Pipeline {
     fn name(&self) -> &str {
@@ -322,5 +432,47 @@ mod tests {
         assert!(tmpl.schemas().contains("Beta"));
         assert!(tmpl.schemas().contains("Gamma"));
         assert_eq!(tmpl.rows(), 0);
+    }
+
+    struct Counting {
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait(?Send)]
+    impl StatelessRuntime for Counting {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
+            self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn declared_components(&self) -> Vec<&str> {
+            vec!["Alpha"]
+        }
+
+        fn template_dataset(&self) -> Dataset {
+            Dataset::new().with::<Alpha>().unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn stateless_runtime_is_a_pipeline_runtime_that_ignores_prior() {
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rt: Box<dyn PipelineRuntime> = Box::new(Counting {
+            seen: std::sync::Arc::clone(&seen),
+        });
+        assert_eq!(rt.name(), "counting");
+        assert_eq!(rt.declared_components(), vec!["Alpha"]);
+        assert_eq!(rt.descriptor_info(), RuntimeDescriptorInfo::default());
+        assert!(rt.template_dataset().schemas().contains("Alpha"));
+
+        let mut data = rt.template_dataset();
+        let out = rt.run_batch(&mut data, Some(b"ignored")).await.unwrap();
+        assert_eq!(out.state, None);
+        assert_eq!(out.routes, None);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

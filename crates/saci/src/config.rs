@@ -45,6 +45,18 @@
 //! written once is a single value. Such fields carry [`one_or_many`], which
 //! accepts both shapes.
 //!
+//! # Writing
+//!
+//! [`to_kdl_string`] and [`to_kdl`] run the mapping backwards: a table entry
+//! with a scalar value is a property, a string `id` is the leading argument,
+//! nested tables are child nodes and arrays are repeated nodes or one node
+//! with several arguments. Reading the output back with [`from_kdl_str`]
+//! returns the tree that was written, except that `null` entries and empty
+//! arrays vanish and a one-element array comes back as its element (which is
+//! why list fields carry [`one_or_many`]). An array of arrays, or one that
+//! mixes tables with scalars, has no spelling and is an error naming the key
+//! path.
+//!
 //! # Variable substitution
 //!
 //! Both entry points run over the raw text before the parser, so they are
@@ -64,7 +76,9 @@
 //! carried such a character, never the value itself.
 
 use crate::error::{SaciError, SaciResult};
-use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use kdl::{
+    FormatConfig, KdlDocument, KdlDocumentFormat, KdlEntry, KdlEntryFormat, KdlNode, KdlValue,
+};
 use std::collections::HashMap;
 
 /// A parsed configuration value.
@@ -115,6 +129,122 @@ pub fn from_kdl_str_with_vars(
 ) -> SaciResult<ConfigValue> {
     let substituted = substitute_vars(raw, declared)?;
     from_kdl_str(&substituted).map_err(|error| with_substitution_context(error, raw, declared))
+}
+
+/// Write `value` as KDL text: the inverse of [`from_kdl_str`].
+///
+/// `value` must be a table. The document is built from `kdl` nodes, so
+/// quoting and escaping are that crate's, then laid out the way the files
+/// under `examples/configs` are: two-space indent, strings always quoted, a
+/// blank line between top-level nodes. Entries come out in the table's own
+/// order, which is declaration order (the `config` feature turns on
+/// `serde_json/preserve_order`), so the same value is always the same bytes.
+///
+/// The mapping is the seven rules of the module docs read backwards:
+///
+/// - A scalar entry of a table is a property on the node that owns the
+///   table. A scalar at the top of the document is a node with one argument:
+///   `mode "standalone"`.
+/// - A string `id` is the owning node's leading argument (`source "orders"
+///   connector="file"`), unless it is the only entry that survives: then it
+///   is the property `id="orders"`, because a node holding one argument
+///   alone reads back as a scalar, not as a table. A numeric or boolean `id`
+///   is always the property, as `node id=1` is written in every example.
+/// - A nested table is a child node; an empty one is a bare node.
+/// - An array of tables is repeated sibling nodes. An array of scalars is
+///   one child node with the elements as arguments, never a property, which
+///   holds one value only.
+/// - `null` and an empty array are omitted.
+///
+/// Strings are written exactly as they are. A `${NAME}` or `${NAME:-fallback}`
+/// inside one stays a placeholder, which [`substitute_vars`] expands on the
+/// next load, so a value that really holds `${` cannot be spelled.
+///
+/// # Round trip
+///
+/// `from_kdl_str(&to_kdl_string(&value)?)` is `value` for every table the
+/// reader can return. For a hand-built tree it is `value` with these
+/// differences, each a consequence of the reader's rules:
+///
+/// - `null` entries and empty arrays are gone: KDL has no spelling for
+///   either. A table that held only those is `{}`.
+/// - An array of one element comes back as that element, because sibling
+///   nodes collapse into an array only from the second one (rule 5). Fields
+///   that hold a list read it with [`one_or_many`], which accepts both.
+///
+/// # Errors
+///
+/// Returns [`SaciError::Configuration`], naming the key path
+/// (`workflow[1].source.tags`), when:
+///
+/// - `value` is not a table;
+/// - an array holds an array, a `null`, or tables mixed with scalars: none
+///   has a spelling the reader maps back to the same array;
+/// - a name or string holds a character KDL cannot carry inside a quoted
+///   string (a control character, a direction mark or a line separator other
+///   than `\n` and `\r`).
+///
+/// ```
+/// use saci::config::{from_kdl_str, to_kdl_string};
+///
+/// let value = from_kdl_str(r#"
+///     source "csv_orders" connector="file" {
+///         config path="orders.csv"
+///     }
+/// "#).unwrap();
+///
+/// let text = to_kdl_string(&value).unwrap();
+/// assert_eq!(
+///     text,
+///     "source \"csv_orders\" connector=\"file\" {\n  config path=\"orders.csv\"\n}\n"
+/// );
+/// assert_eq!(from_kdl_str(&text).unwrap(), value);
+/// ```
+pub fn to_kdl_string(value: &ConfigValue) -> SaciResult<String> {
+    let ConfigValue::Object(table) = value else {
+        let found = match value {
+            ConfigValue::Null => "null",
+            ConfigValue::Bool(_) => "a boolean",
+            ConfigValue::Number(_) => "a number",
+            ConfigValue::String(_) => "a string",
+            ConfigValue::Array(_) => "an array",
+            ConfigValue::Object(_) => "a table",
+        };
+        return Err(SaciError::configuration(format!(
+            "writing KDL: the top level must be a table, found {found}"
+        )));
+    };
+
+    let mut document = KdlDocument::new();
+    for (key, value) in table {
+        let at = KeyPath::key(None, key);
+        push_entry_nodes(document.nodes_mut(), key, value, &at)?;
+    }
+    document.autoformat_config(&FormatConfig::builder().indent("  ").build());
+    for node in document.nodes_mut().iter_mut().skip(1) {
+        if let Some(format) = node.format_mut() {
+            format.leading.insert(0, '\n');
+        }
+    }
+    Ok(document.to_string())
+}
+
+/// Serialize `value` and write it as KDL text with [`to_kdl_string`].
+///
+/// `value` goes through `serde_json::to_value` first, so a struct writes its
+/// fields in declaration order and honours `skip_serializing_if`, and the
+/// round-trip rules and errors are those of [`to_kdl_string`]. A type with a
+/// `HashMap` field should serialize it sorted, or the text changes from run
+/// to run.
+///
+/// # Errors
+///
+/// Returns [`SaciError::Configuration`] when `value` cannot be serialized,
+/// or for anything [`to_kdl_string`] rejects.
+pub fn to_kdl<T: serde::Serialize + ?Sized>(value: &T) -> SaciResult<String> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| SaciError::configuration(format!("serializing config: {error}")))?;
+    to_kdl_string(&value)
 }
 
 /// Deserialize a field that may be written once or several times into a `Vec`.
@@ -554,6 +684,279 @@ fn line_column(input: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+/// Where a value sits in the tree, for an error message: `workflow[1].source`.
+///
+/// A linked list on the stack rather than a `String` built per entry: the path
+/// is only rendered when a write fails.
+struct KeyPath<'a> {
+    parent: Option<&'a KeyPath<'a>>,
+    step: Step<'a>,
+}
+
+enum Step<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+impl<'a> KeyPath<'a> {
+    fn key(parent: Option<&'a KeyPath<'a>>, key: &'a str) -> Self {
+        Self {
+            parent,
+            step: Step::Key(key),
+        }
+    }
+
+    fn index(parent: Option<&'a KeyPath<'a>>, index: usize) -> Self {
+        Self {
+            parent,
+            step: Step::Index(index),
+        }
+    }
+}
+
+impl std::fmt::Display for KeyPath<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(parent) = self.parent {
+            parent.fmt(f)?;
+            if matches!(self.step, Step::Key(_)) {
+                f.write_str(".")?;
+            }
+        }
+        match self.step {
+            Step::Key(key) => f.write_str(key),
+            Step::Index(index) => write!(f, "[{index}]"),
+        }
+    }
+}
+
+fn write_error(path: &KeyPath<'_>, message: &str) -> SaciError {
+    SaciError::configuration(format!("writing KDL: {path}: {message}"))
+}
+
+/// Append the nodes `key = value` contributes to its owner: none for a `null`
+/// or an empty array, one node for a scalar or a table, one node per element
+/// for an array of tables.
+fn push_entry_nodes(
+    out: &mut Vec<KdlNode>,
+    key: &str,
+    value: &ConfigValue,
+    path: &KeyPath<'_>,
+) -> SaciResult<()> {
+    match value {
+        ConfigValue::Null => {}
+        ConfigValue::Array(items) => push_array_nodes(out, key, items, path)?,
+        ConfigValue::Object(table) => out.push(table_node(key, table, path)?),
+        scalar => {
+            let mut node = named_node(key, path)?;
+            node.entries_mut().push(scalar_entry(None, scalar, path)?);
+            out.push(node);
+        }
+    }
+    Ok(())
+}
+
+/// An array is one node with several arguments when every element is a scalar,
+/// and repeated sibling nodes when every element is a table. Anything else has
+/// no spelling the reader would map back to the same array.
+fn push_array_nodes(
+    out: &mut Vec<KdlNode>,
+    key: &str,
+    items: &[ConfigValue],
+    path: &KeyPath<'_>,
+) -> SaciResult<()> {
+    let mut tables = 0usize;
+    let mut scalars = 0usize;
+    for item in items {
+        match item {
+            ConfigValue::Array(_) => {
+                return Err(write_error(
+                    path,
+                    "an array of arrays has no KDL spelling; \
+                     sibling nodes collapse into one flat array",
+                ));
+            }
+            ConfigValue::Null => {
+                return Err(write_error(
+                    path,
+                    "a null inside an array has no KDL spelling; \
+                     drop the element or the key",
+                ));
+            }
+            ConfigValue::Object(_) => tables += 1,
+            _ => scalars += 1,
+        }
+    }
+    if tables > 0 && scalars > 0 {
+        return Err(write_error(
+            path,
+            "an array mixing tables and scalars has no KDL spelling; \
+             an array holds either one argument list or repeated nodes",
+        ));
+    }
+
+    if tables > 0 {
+        for (index, item) in items.iter().enumerate() {
+            if let ConfigValue::Object(table) = item {
+                let at = KeyPath::index(Some(path), index);
+                out.push(table_node(key, table, &at)?);
+            }
+        }
+    } else if scalars > 0 {
+        let mut node = named_node(key, path)?;
+        for item in items {
+            node.entries_mut().push(scalar_entry(None, item, path)?);
+        }
+        out.push(node);
+    }
+    Ok(())
+}
+
+/// One table as a node named `name`: rule 4 read backwards.
+///
+/// Scalar entries become properties, every other entry becomes a child node,
+/// and a string `id` becomes the leading argument once the node has anything
+/// else on it. A lone `id` stays a property: `source "a"` alone would be read
+/// back as the scalar `"a"` (rule 3), not as a table holding `id`.
+fn table_node(name: &str, table: &ConfigMap, path: &KeyPath<'_>) -> SaciResult<KdlNode> {
+    let mut node = named_node(name, path)?;
+    let mut properties: Vec<(&str, &ConfigValue)> = Vec::new();
+    let mut children = KdlDocument::new();
+
+    for (key, value) in table {
+        let at = KeyPath::key(Some(path), key);
+        match value {
+            ConfigValue::Null => {}
+            ConfigValue::Array(_) | ConfigValue::Object(_) => {
+                push_entry_nodes(children.nodes_mut(), key, value, &at)?;
+            }
+            scalar => properties.push((key, scalar)),
+        }
+    }
+
+    // Only a string id leads: `node id=1` and `peer id=1` are how every
+    // example spells a numeric one, and the reader takes either form.
+    let leading_id = match table.get("id") {
+        Some(id @ ConfigValue::String(_)) if properties.len() > 1 || !children.is_empty() => {
+            let at = KeyPath::key(Some(path), "id");
+            node.entries_mut().push(scalar_entry(None, id, &at)?);
+            true
+        }
+        _ => false,
+    };
+    for (key, value) in properties {
+        if leading_id && key == "id" {
+            continue;
+        }
+        let at = KeyPath::key(Some(path), key);
+        node.entries_mut()
+            .push(scalar_entry(Some(key), value, &at)?);
+    }
+
+    if !children.is_empty() {
+        // A document with a format is laid out by `autoformat`; one without is
+        // printed with a fixed four-space indent that ignores the nesting.
+        children.set_format(KdlDocumentFormat::default());
+        node.set_children(children);
+    }
+    Ok(node)
+}
+
+fn named_node(name: &str, path: &KeyPath<'_>) -> SaciResult<KdlNode> {
+    reject_unspellable(name, path)?;
+    Ok(KdlNode::new(name))
+}
+
+/// One KDL argument, or a property when `name` is given.
+///
+/// Quoting and escaping are the `kdl` crate's. Its one choice made here: a
+/// string it would print as a bare identifier (`mode standalone`) is wrapped
+/// in quotes, which is how every example writes one and cannot be mistaken
+/// for a keyword or a number.
+fn scalar_entry(
+    name: Option<&str>,
+    value: &ConfigValue,
+    path: &KeyPath<'_>,
+) -> SaciResult<KdlEntry> {
+    let value = match value {
+        ConfigValue::String(text) => {
+            reject_unspellable(text, path)?;
+            KdlValue::String(text.clone())
+        }
+        ConfigValue::Bool(flag) => KdlValue::Bool(*flag),
+        ConfigValue::Number(number) => {
+            if let Some(signed) = number.as_i64() {
+                KdlValue::Integer(signed.into())
+            } else if let Some(unsigned) = number.as_u64() {
+                KdlValue::Integer(unsigned.into())
+            } else {
+                let float = number.as_f64().ok_or_else(|| {
+                    write_error(path, &format!("number {number} is not representable"))
+                })?;
+                KdlValue::Float(float)
+            }
+        }
+        ConfigValue::Null | ConfigValue::Array(_) | ConfigValue::Object(_) => {
+            return Err(write_error(path, "expected a scalar"));
+        }
+    };
+
+    let mut entry = match name {
+        Some(key) => {
+            reject_unspellable(key, path)?;
+            KdlEntry::new_prop(key, value)
+        }
+        None => KdlEntry::new(value),
+    };
+    if entry.value().is_string() {
+        let mut repr = entry.value().to_string();
+        if !repr.starts_with('"') {
+            repr = format!("\"{repr}\"");
+        }
+        // `autoformat_keep` makes `autoformat` retain the representation and
+        // the leading space instead of resetting both.
+        entry.set_format(KdlEntryFormat {
+            value_repr: repr,
+            leading: " ".into(),
+            autoformat_keep: true,
+            ..KdlEntryFormat::default()
+        });
+    }
+    Ok(entry)
+}
+
+/// Refuse a name or string the `kdl` crate would print in a form its own
+/// parser rejects.
+///
+/// The crate escapes quotes, backslashes and the common whitespace controls
+/// but writes every other character as itself, and KDL forbids literal
+/// control characters, direction marks and the line separators beyond `\n`
+/// and `\r`. A file that cannot be read back is worse than an error here.
+fn reject_unspellable(text: &str, path: &KeyPath<'_>) -> SaciResult<()> {
+    let unspellable = |c: &char| {
+        matches!(
+            *c,
+            '\u{0}'..='\u{7}'
+                | '\u{B}'
+                | '\u{E}'..='\u{1F}'
+                | '\u{85}'
+                | '\u{200E}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
+    };
+    match text.chars().find(unspellable) {
+        Some(c) => Err(write_error(
+            path,
+            &format!(
+                "U+{:04X} cannot be written in a KDL string or name",
+                u32::from(c)
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,5 +1285,412 @@ field "amount" type="float64"
         assert!(message.contains("backslash"), "got: {message}");
         assert!(!message.contains(r"C:\"), "leaked the value: {message}");
         assert!(!message.contains("Users"), "leaked the value: {message}");
+    }
+
+    // ── Writer ───────────────────────────────────────────────────────────────
+
+    fn write(value: &ConfigValue) -> String {
+        to_kdl_string(value).expect("writable")
+    }
+
+    fn write_failure(value: &ConfigValue) -> String {
+        let err = to_kdl_string(value).expect_err("unwritable");
+        assert_eq!(err.category(), "configuration");
+        err.message().to_string()
+    }
+
+    /// The tree read back from what was written. Equal to the input whenever
+    /// the round-trip caveats (nulls, empty arrays, one-element arrays) do not
+    /// apply to it.
+    fn round_trip(value: &ConfigValue) -> ConfigValue {
+        let text = write(value);
+        from_kdl_str(&text).unwrap_or_else(|error| panic!("{error}\n{text}"))
+    }
+
+    #[test]
+    fn a_top_level_scalar_is_a_node_with_one_argument() {
+        let value = serde_json::json!({
+            "mode": "standalone", "retries": 3, "on": true, "ratio": 0.5,
+        });
+        assert_eq!(
+            write(&value),
+            "mode \"standalone\"\n\nretries 3\n\non #true\n\nratio 0.5\n"
+        );
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn an_empty_document_writes_no_text() {
+        let value = serde_json::json!({});
+        assert_eq!(write(&value), "");
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn a_table_holding_only_an_id_writes_it_as_a_property() {
+        let value = serde_json::json!({ "peer": { "id": 1 }, "source": { "id": "orders" } });
+        assert_eq!(write(&value), "peer id=1\n\nsource id=\"orders\"\n");
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn a_string_id_beside_other_entries_is_the_leading_argument() {
+        let value = serde_json::json!({
+            "source": { "id": "csv_orders", "connector": "file", "component": "orders" },
+        });
+        assert_eq!(
+            write(&value),
+            "source \"csv_orders\" connector=\"file\" component=\"orders\"\n"
+        );
+        assert_eq!(round_trip(&value), value);
+
+        let with_child = serde_json::json!({ "source": { "id": "a", "config": { "path": "x" } } });
+        assert_eq!(
+            write(&with_child),
+            "source \"a\" {\n  config path=\"x\"\n}\n"
+        );
+        assert_eq!(round_trip(&with_child), with_child);
+    }
+
+    #[test]
+    fn a_numeric_id_stays_a_property_as_in_the_examples() {
+        let value = serde_json::json!({
+            "node": { "id": 1, "name": "saci", "data_dir": "/tmp/saci" },
+        });
+        assert_eq!(
+            write(&value),
+            "node id=1 name=\"saci\" data_dir=\"/tmp/saci\"\n"
+        );
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn an_id_whose_siblings_are_all_omitted_is_still_a_property() {
+        // `source "a"` would read back as the scalar "a", so the omitted
+        // entries count as absent when deciding where the id goes.
+        let value = serde_json::json!({ "source": { "id": "a", "codec": null, "tags": [] } });
+        assert_eq!(write(&value), "source id=\"a\"\n");
+        assert_eq!(
+            round_trip(&value),
+            serde_json::json!({ "source": { "id": "a" } })
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_scalar_is_an_ordinary_entry() {
+        let value = serde_json::json!({ "x": { "id": [1, 2], "a": 1 } });
+        assert_eq!(write(&value), "x a=1 {\n  id 1 2\n}\n");
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn an_array_of_scalars_is_one_child_node_with_arguments() {
+        let value = serde_json::json!({
+            "cluster": { "servers": ["nats://a", "nats://b"], "backoff_ms": [100, 500] },
+            "tags": ["x", "y"],
+        });
+        assert_eq!(
+            write(&value),
+            "cluster {\n  servers \"nats://a\" \"nats://b\"\n  backoff_ms 100 500\n}\n\ntags \"x\" \"y\"\n"
+        );
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn an_array_of_tables_is_repeated_sibling_nodes() {
+        let value = serde_json::json!({
+            "workflow": {
+                "id": "w",
+                "source": [{ "id": "a", "connector": "file" }, { "id": "b" }],
+            },
+        });
+        assert_eq!(
+            write(&value),
+            "workflow \"w\" {\n  source \"a\" connector=\"file\"\n  source id=\"b\"\n}\n"
+        );
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn nesting_indents_two_spaces_a_level() {
+        let value = serde_json::json!({
+            "workflow": {
+                "id": "w",
+                "source": {
+                    "id": "in",
+                    "config": {
+                        "path": "a",
+                        "field": [{ "id": "x", "type": "int64" }, { "id": "y", "type": "utf8" }],
+                    },
+                },
+            },
+        });
+        assert_eq!(
+            write(&value),
+            "workflow \"w\" {\n  source \"in\" {\n    config path=\"a\" {\n      \
+             field \"x\" type=\"int64\"\n      field \"y\" type=\"utf8\"\n    }\n  }\n}\n"
+        );
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn quotes_backslashes_and_whitespace_are_escaped_by_the_kdl_crate() {
+        let value = serde_json::json!({
+            "sink": {
+                "id": "s",
+                "path": "C:\\dir\\\"quoted\"",
+                "note": "line1\nline2\ttab\u{8}\u{c}",
+                "empty": "",
+                "keyword": "true",
+                "number": "42",
+            },
+        });
+        let text = write(&value);
+        assert!(
+            text.contains(r##"path="C:\\dir\\\"quoted\"""##),
+            "got: {text}"
+        );
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn a_plain_string_is_still_quoted() {
+        let value =
+            serde_json::json!({ "mode": "standalone", "sink": { "id": "s", "kind": "file" } });
+        assert_eq!(
+            write(&value),
+            "mode \"standalone\"\n\nsink \"s\" kind=\"file\"\n"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_is_written_verbatim_and_survives_a_read_without_substitution() {
+        let value = serde_json::json!({
+            "node": { "name": "saci-${NODE:-1}", "data_dir": "${SACI_DATA_DIR:-/tmp/saci}" },
+        });
+        let text = write(&value);
+        assert!(
+            text.contains(r#"data_dir="${SACI_DATA_DIR:-/tmp/saci}""#),
+            "got: {text}"
+        );
+        assert_eq!(round_trip(&value), value);
+
+        // The next load expands it, which is why a literal `${` cannot be spelled.
+        let declared = HashMap::from([("NODE".to_string(), "7".to_string())]);
+        let expanded = from_kdl_str_with_vars(&text, &declared).expect("substituted");
+        assert_eq!(expanded["node"]["name"], "saci-7");
+    }
+
+    #[test]
+    fn names_that_are_not_plain_identifiers_are_quoted_by_the_kdl_crate() {
+        let value = serde_json::json!({
+            "content-type": "x",
+            "has space": { "k y": 1 },
+            "true": 2,
+            "": 3,
+        });
+        assert_eq!(
+            write(&value),
+            "content-type \"x\"\n\n\"has space\" \"k y\"=1\n\n\"true\" 2\n\n\"\" 3\n"
+        );
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn entries_are_written_in_declaration_order() {
+        let value = serde_json::json!({ "zeta": 1, "alpha": { "y": 1, "b": 2 }, "mid": 3 });
+        assert_eq!(write(&value), "zeta 1\n\nalpha y=1 b=2\n\nmid 3\n");
+    }
+
+    #[test]
+    fn numbers_round_trip_with_their_kind() {
+        let value = serde_json::json!({
+            "negative": -7,
+            "big": 18446744073709551615u64,
+            "min": i64::MIN,
+            "whole_float": 2.0,
+            "huge": 1e21,
+            "tiny": 1.5e-7,
+            "max": f64::MAX,
+            "fraction": 0.1,
+        });
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn null_and_empty_array_entries_are_omitted() {
+        let value = serde_json::json!({
+            "a": null,
+            "b": [],
+            "c": { "d": null, "e": [], "f": 1 },
+            "g": { "h": null },
+        });
+        assert_eq!(write(&value), "c f=1\n\ng\n");
+        assert_eq!(
+            round_trip(&value),
+            serde_json::json!({ "c": { "f": 1 }, "g": {} })
+        );
+    }
+
+    #[test]
+    fn an_empty_table_is_a_bare_node() {
+        let value = serde_json::json!({ "http": {}, "pipeline": {} });
+        assert_eq!(write(&value), "http\n\npipeline\n");
+        assert_eq!(round_trip(&value), value);
+    }
+
+    #[test]
+    fn a_one_element_array_reads_back_as_its_element_which_one_or_many_accepts() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Spec {
+            #[serde(deserialize_with = "one_or_many")]
+            peer: Vec<Peer>,
+        }
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Peer {
+            id: u64,
+        }
+
+        let value = serde_json::json!({ "peer": [{ "id": 1 }], "tags": ["x"] });
+        let back = round_trip(&value);
+        assert_eq!(
+            back,
+            serde_json::json!({ "peer": { "id": 1 }, "tags": "x" })
+        );
+
+        let spec: Spec = serde::Deserialize::deserialize(back).expect("one_or_many");
+        assert_eq!(spec.peer, vec![Peer { id: 1 }]);
+    }
+
+    #[test]
+    fn a_document_that_is_not_a_table_is_an_error() {
+        assert_eq!(
+            write_failure(&serde_json::json!([1, 2])),
+            "writing KDL: the top level must be a table, found an array"
+        );
+        assert_eq!(
+            write_failure(&serde_json::json!("mode")),
+            "writing KDL: the top level must be a table, found a string"
+        );
+    }
+
+    #[test]
+    fn an_array_of_arrays_is_an_error_naming_the_key_path() {
+        let message = write_failure(&serde_json::json!({ "a": { "b": [[1], [2]] } }));
+        assert!(
+            message.starts_with("writing KDL: a.b: an array of arrays"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn tables_mixed_with_scalars_are_an_error_naming_the_key_path() {
+        let message = write_failure(&serde_json::json!({
+            "workflow": [{ "id": "w", "source": [{ "id": "a" }, "b"] }],
+        }));
+        assert!(
+            message
+                .starts_with("writing KDL: workflow[0].source: an array mixing tables and scalars"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_null_inside_an_array_is_an_error_naming_the_key_path() {
+        let message = write_failure(&serde_json::json!({ "a": [1, null] }));
+        assert!(
+            message.starts_with("writing KDL: a: a null inside an array"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_character_kdl_cannot_carry_is_an_error_naming_the_key_path() {
+        let message = write_failure(&serde_json::json!({ "a": { "b": "x\u{1}y" } }));
+        assert_eq!(
+            message,
+            "writing KDL: a.b: U+0001 cannot be written in a KDL string or name"
+        );
+
+        let message = write_failure(&serde_json::json!({ "a": { "b\u{85}": 1 } }));
+        assert!(
+            message.starts_with("writing KDL: a.b\u{85}: U+0085"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_writer_refuses_exactly_the_characters_the_parser_refuses() {
+        // Characters the kdl crate prints unescaped: the writer must reject
+        // each one the parser rejects and accept each one it accepts.
+        let candidates = [
+            '\u{0}',
+            '\u{1}',
+            '\u{7}',
+            '\u{B}',
+            '\u{E}',
+            '\u{1F}',
+            '\u{7F}',
+            '\u{85}',
+            '\u{200D}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2030}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{FEFF}',
+            'é',
+            '\u{1F600}',
+        ];
+        for c in candidates {
+            let parses = from_kdl_str(&format!("k \"{c}\"\n")).is_ok();
+            let writes = to_kdl_string(&serde_json::json!({ "k": c.to_string() })).is_ok();
+            assert_eq!(writes, parses, "U+{:04X}", u32::from(c));
+        }
+    }
+
+    #[test]
+    fn to_kdl_serializes_a_struct_in_field_order_and_drops_nones() {
+        #[derive(serde::Serialize)]
+        struct Peer {
+            id: u64,
+            addr: String,
+        }
+        #[derive(serde::Serialize)]
+        struct Cluster {
+            bootstrap: bool,
+            note: Option<String>,
+            peer: Vec<Peer>,
+        }
+
+        let text = to_kdl(&Cluster {
+            bootstrap: true,
+            note: None,
+            peer: vec![
+                Peer {
+                    id: 1,
+                    addr: "a:1".into(),
+                },
+                Peer {
+                    id: 2,
+                    addr: "b:2".into(),
+                },
+            ],
+        })
+        .expect("serializable");
+        assert_eq!(
+            text,
+            "bootstrap #true\n\npeer id=1 addr=\"a:1\"\n\npeer id=2 addr=\"b:2\"\n"
+        );
+
+        let err = to_kdl(&5).expect_err("a number is not a document");
+        assert_eq!(
+            err.message(),
+            "writing KDL: the top level must be a table, found a number"
+        );
     }
 }

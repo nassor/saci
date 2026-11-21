@@ -23,32 +23,49 @@ fn default_sample_ratio() -> f64 {
     1.0
 }
 
+// `skip_serializing_if` predicates: a field at its default is not written.
+fn is_default_log_level(value: &str) -> bool {
+    value == default_log_level()
+}
+fn is_default_sample_ratio(value: &f64) -> bool {
+    *value == default_sample_ratio()
+}
+
 /// Observability (logging) configuration.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Log output format.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "super::is_default")]
     pub log_format: LogFormat,
     /// Tracing level filter string (`"info"`, `"debug"`, etc.).
-    #[serde(default = "default_log_level")]
+    #[serde(
+        default = "default_log_level",
+        skip_serializing_if = "is_default_log_level"
+    )]
     pub log_level: String,
     /// OTLP/HTTP collector base URL, for example
     /// `http://127.0.0.1:4318`. `None` disables span export.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otlp_endpoint: Option<String>,
     /// Fraction of spans and events below ERROR that `log_level` admits and
     /// the subscriber keeps, 0.0 to 1.0. Decided once per root span or root
     /// event; children follow their root.
-    #[serde(default = "default_sample_ratio")]
+    #[serde(
+        default = "default_sample_ratio",
+        skip_serializing_if = "is_default_sample_ratio"
+    )]
     pub sample_ratio: f64,
     /// Fraction of ERROR-level spans and events kept, 0.0 to 1.0. Independent
     /// of `sample_ratio`: an error inside a trace `sample_ratio` dropped is
     /// still rolled against this ratio.
-    #[serde(default = "default_sample_ratio")]
+    #[serde(
+        default = "default_sample_ratio",
+        skip_serializing_if = "is_default_sample_ratio"
+    )]
     pub error_sample_ratio: f64,
     /// In-process telemetry capture, its JSON API and the `/ui` dashboard.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "super::is_default")]
     pub inspector: crate::inspector::InspectorConfig,
 }
 

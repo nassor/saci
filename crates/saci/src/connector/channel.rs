@@ -14,6 +14,9 @@
 //! registered [`crate::connector::ChannelBridge`]), `buffer` (mpsc capacity,
 //! default 8, at least 1) and `field` entries.
 
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "channel";
+
 pub mod factory;
 pub mod registry;
 pub mod sink;

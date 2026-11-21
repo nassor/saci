@@ -54,6 +54,12 @@ impl ChannelSource {
     pub fn with_receiver(schema: Arc<Schema>, rx: mpsc::Receiver<RecordBatch>) -> Self {
         Self { rx, schema }
     }
+
+    /// Wrap an existing receiver half; see [`with_receiver`](Self::with_receiver).
+    #[deprecated(since = "0.3.0", note = "use `with_receiver`")]
+    pub fn from_receiver(schema: Arc<Schema>, rx: mpsc::Receiver<RecordBatch>) -> Self {
+        Self::with_receiver(schema, rx)
+    }
 }
 
 #[async_trait]

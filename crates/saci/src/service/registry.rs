@@ -95,6 +95,23 @@ impl Registry {
         names
     }
 
+    /// Names of the registered connectors that serve `role`, sorted like
+    /// [`names`](Self::names).
+    ///
+    /// A connector serves a role when its [`Connector::roles`] contains it, so
+    /// `names_for(Role::Source)` is what a config editor offers for a `source`
+    /// node's `connector` property.
+    pub fn names_for(&self, role: Role) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = self
+            .connectors
+            .iter()
+            .filter(|(_, connector)| connector.roles().contains(&role))
+            .map(|(name, _)| *name)
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     /// The codec registry a [`ConnectorContext`] is built from.
     ///
     /// [`ConnectorContext`]: crate::connector::ConnectorContext
@@ -271,6 +288,17 @@ mod tests {
                 .contains("connector 'sink-only' has no source"),
             "{err}"
         );
+    }
+
+    #[cfg(feature = "connector-channel")]
+    #[test]
+    fn test_names_for_filters_by_role_and_sorts() {
+        let mut reg = Registry::new();
+        reg.register(TestConnector);
+        reg.register(SinkOnlyConnector);
+        assert_eq!(reg.names_for(Role::Source), vec!["test"]);
+        assert_eq!(reg.names_for(Role::Sink), vec!["sink-only", "test"]);
+        assert!(Registry::new().names_for(Role::Source).is_empty());
     }
 
     #[test]

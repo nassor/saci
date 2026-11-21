@@ -93,11 +93,21 @@ impl From<Vec<u8>> for ReadInput {
 // compiles it; registering it as a `format` stays behind its own feature.
 #[cfg(any(feature = "codec-arrow-ipc", feature = "service"))]
 pub mod arrow_ipc;
+#[cfg(any(feature = "codec-arrow-ipc", feature = "service"))]
+pub use arrow_ipc::ArrowIpcCodec;
 #[cfg(feature = "codec-avro")]
 pub mod avro;
+#[cfg(feature = "codec-avro")]
+pub use avro::AvroCodec;
 #[cfg(feature = "codec-csv")]
 pub mod csv;
+#[cfg(feature = "codec-csv")]
+pub use csv::CsvCodec;
 #[cfg(feature = "codec-ndjson")]
 pub mod ndjson;
+#[cfg(feature = "codec-ndjson")]
+pub use ndjson::NdjsonCodec;
 #[cfg(feature = "codec-parquet")]
 pub mod parquet;
+#[cfg(feature = "codec-parquet")]
+pub use parquet::ParquetCodec;

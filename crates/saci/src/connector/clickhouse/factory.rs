@@ -22,7 +22,7 @@ pub struct ClickhouseConnector;
 
 impl Connector for ClickhouseConnector {
     fn name(&self) -> &'static str {
-        "clickhouse"
+        super::NAME
     }
 
     fn source(

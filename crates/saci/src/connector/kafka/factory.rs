@@ -32,7 +32,7 @@ pub struct KafkaConnector;
 
 impl Connector for KafkaConnector {
     fn name(&self) -> &'static str {
-        "kafka"
+        super::NAME
     }
 
     fn source(

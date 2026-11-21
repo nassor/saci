@@ -46,7 +46,7 @@ pub struct TcpConnector;
 
 impl Connector for TcpConnector {
     fn name(&self) -> &'static str {
-        "tcp"
+        super::NAME
     }
 
     fn source(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Source>> {

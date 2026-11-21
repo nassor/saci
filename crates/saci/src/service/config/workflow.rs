@@ -32,13 +32,29 @@ pub struct CodecSpec {
     /// Mandatory id, from the node's leading argument. Unique workflow-wide.
     pub id: String,
     /// Optional display name. The dashboard shows the id when this is absent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Registered format name, resolved against the `CodecRegistry`.
     pub format: String,
     /// Handed to that format's factory. Empty table when absent.
-    #[serde(default = "default_config")]
+    #[serde(
+        default = "default_config",
+        skip_serializing_if = "super::is_default_config"
+    )]
     pub config: ConfigValue,
+}
+
+impl CodecSpec {
+    /// A codec `id` for registered byte format `format`, with an empty
+    /// `config`.
+    pub fn new(id: impl Into<String>, format: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            format: format.into(),
+            config: default_config(),
+        }
+    }
 }
 
 /// Declares an IO source that feeds rows into a component column.
@@ -48,7 +64,7 @@ pub struct SourceSpec {
     /// Mandatory id, from the node's leading argument. Unique workflow-wide.
     pub id: String,
     /// Optional display name. The dashboard shows the id when this is absent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Name of the connector that builds this source, the `connector`
     /// property of the node.
@@ -56,29 +72,57 @@ pub struct SourceSpec {
     pub connector: String,
     /// Id of the `codec` node that decodes this source's bytes. Absent
     /// for a connector that produces `RecordBatch`es directly.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
     /// Name of the component this source writes into. Checked against the
     /// runtime's `declared_components()` at load time.
     pub component: String,
     /// Retry policy for every source operation. Omitted block uses the
     /// defaults (4 attempts, exponential backoff).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "super::is_default")]
     pub retry: RetryConfig,
     /// Self-healing override for this source, layered field by field over
     /// the top-level `heal` block. Absent means the top-level policy.
     ///
     /// Declaring the block on a connector that cannot be rebuilt is a
     /// load-time error rather than a block that quietly does nothing.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heal: Option<HealConfig>,
     /// Flow-control override for this source, layered field by field over the
     /// top-level `flow_control` block. Absent means the top-level policy.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_control: Option<FlowControlConfig>,
     /// Opaque per-source configuration.
-    #[serde(default = "default_config")]
+    #[serde(
+        default = "default_config",
+        skip_serializing_if = "super::is_default_config"
+    )]
     pub config: ConfigValue,
+}
+
+impl SourceSpec {
+    /// A source `id` that feeds `component` from `connector`.
+    ///
+    /// No codec, the default retry policy, no `heal` or `flow_control`
+    /// override and an empty `config`; set the public fields for anything
+    /// else.
+    pub fn new(
+        id: impl Into<String>,
+        connector: impl Into<String>,
+        component: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            connector: connector.into(),
+            codec: None,
+            component: component.into(),
+            retry: RetryConfig::default(),
+            heal: None,
+            flow_control: None,
+            config: default_config(),
+        }
+    }
 }
 
 /// Declares an IO sink that drains rows from a component column.
@@ -88,7 +132,7 @@ pub struct SinkSpec {
     /// Mandatory id, from the node's leading argument. Unique workflow-wide.
     pub id: String,
     /// Optional display name. The dashboard shows the id when this is absent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Name of the connector that builds this sink, the `connector` property
     /// of the node.
@@ -96,25 +140,51 @@ pub struct SinkSpec {
     pub connector: String,
     /// Id of the `codec` node that encodes this sink's bytes. Absent
     /// for a connector that consumes `RecordBatch`es directly.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
     /// Name of the component this sink reads from. Checked against the
     /// runtime's `declared_components()` at load time.
     pub component: String,
     /// Retry policy for every sink operation. Omitted block uses the
     /// defaults (4 attempts, exponential backoff).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "super::is_default")]
     pub retry: RetryConfig,
     /// Self-healing override for this sink, layered field by field over the
     /// top-level `heal` block. Absent means the top-level policy.
     ///
     /// Declaring the block on a connector that cannot be rebuilt is a
     /// load-time error rather than a block that quietly does nothing.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heal: Option<HealConfig>,
     /// Opaque per-sink configuration.
-    #[serde(default = "default_config")]
+    #[serde(
+        default = "default_config",
+        skip_serializing_if = "super::is_default_config"
+    )]
     pub config: ConfigValue,
+}
+
+impl SinkSpec {
+    /// A sink `id` that drains `component` through `connector`.
+    ///
+    /// No codec, the default retry policy, no `heal` override and an empty
+    /// `config`; set the public fields for anything else.
+    pub fn new(
+        id: impl Into<String>,
+        connector: impl Into<String>,
+        component: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            connector: connector.into(),
+            codec: None,
+            component: component.into(),
+            retry: RetryConfig::default(),
+            heal: None,
+            config: default_config(),
+        }
+    }
 }
 
 /// An explicit directed edge between two declared node ids.
@@ -132,8 +202,21 @@ pub struct LinkSpec {
     /// selects the links its output is delivered to by this name. Absent =
     /// unlabelled: never selected by a routing decision, delivered only under
     /// legacy multicast.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+}
+
+impl LinkSpec {
+    /// An unlabelled edge from node `from` to node `to`.
+    ///
+    /// Set [`branch`](Self::branch) to select the edge by a routing decision.
+    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            branch: None,
+        }
+    }
 }
 
 /// A schema declared once for the workflow: a list of `field` entries a
@@ -156,6 +239,20 @@ pub struct SchemaSpec {
     /// connector's `config` carries them (see
     /// [`parse_fields`](crate::connector::parse_fields)).
     pub field: ConfigValue,
+}
+
+impl SchemaSpec {
+    /// A schema for component `id` with no `field` entries yet.
+    ///
+    /// Set [`field`](Self::field) to one entry or an array of them, in the
+    /// shape [`parse_fields`](crate::connector::parse_fields) reads. A schema
+    /// left empty writes no `field` node and is refused when read back.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            field: ConfigValue::Array(Vec::new()),
+        }
+    }
 }
 
 /// Which of the three graph roles a declared node plays.
@@ -189,37 +286,92 @@ pub struct WorkflowSpec {
     /// Mandatory id, from the node's leading argument.
     pub id: String,
     /// Optional display name. The dashboard shows the id when this is absent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Declared byte formats, one `codec` node each.
-    #[serde(rename = "codec", default, deserialize_with = "one_or_many")]
+    #[serde(
+        rename = "codec",
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub codecs: Vec<CodecSpec>,
     /// Declared schemas, one `schema` node each, adopted by the sources and
     /// sinks whose `component` names one and that declare no `field` themselves.
-    #[serde(rename = "schema", default, deserialize_with = "one_or_many")]
+    #[serde(
+        rename = "schema",
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub schemas: Vec<SchemaSpec>,
     /// Data sources feeding the workflow. One `source` node each.
-    #[serde(rename = "source", default, deserialize_with = "one_or_many")]
+    #[serde(
+        rename = "source",
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub sources: Vec<SourceSpec>,
     /// WASM processor nodes, one `wasm` node each. Needs `--features wasm-host`
     /// to build; see the type docs for why it parses without it.
-    #[serde(default, deserialize_with = "one_or_many")]
+    #[serde(
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub wasm: Vec<WasmSpec>,
     /// Native plugin processor nodes, one `plugin` node each. Needs
     /// `--features plugin-host` to build.
-    #[serde(default, deserialize_with = "one_or_many")]
+    #[serde(
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub plugin: Vec<PluginSpec>,
     /// Data sinks draining the workflow. One `sink` node each.
-    #[serde(rename = "sink", default, deserialize_with = "one_or_many")]
+    #[serde(
+        rename = "sink",
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub sinks: Vec<SinkSpec>,
     /// Explicit edges between declared nodes. One `link` node each.
-    #[serde(rename = "link", default, deserialize_with = "one_or_many")]
+    #[serde(
+        rename = "link",
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub links: Vec<LinkSpec>,
     /// This workflow's dead letter queue. Absent means a batch a sink
     /// refuses is logged and dropped, which is the behaviour with no `dlq`
     /// block at all.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dlq: Option<DlqConfig>,
+}
+
+impl WorkflowSpec {
+    /// An empty workflow `id`: no name, codecs, schemas, nodes, links or
+    /// `dlq`.
+    ///
+    /// Push the declarations onto the public fields, in the order they are
+    /// written in the file.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            codecs: Vec::new(),
+            schemas: Vec::new(),
+            sources: Vec::new(),
+            wasm: Vec::new(),
+            plugin: Vec::new(),
+            sinks: Vec::new(),
+            links: Vec::new(),
+            dlq: None,
+        }
+    }
 }
 
 /// `^[A-Za-z0-9][A-Za-z0-9_-]*$`, at most 64 bytes.

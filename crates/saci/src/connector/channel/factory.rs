@@ -66,7 +66,7 @@ pub struct ChannelConnector;
 
 impl Connector for ChannelConnector {
     fn name(&self) -> &'static str {
-        "channel"
+        super::NAME
     }
 
     fn source(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Source>> {

@@ -37,7 +37,7 @@ pub struct TursoConnector;
 
 impl Connector for TursoConnector {
     fn name(&self) -> &'static str {
-        "turso"
+        super::NAME
     }
 
     fn source(

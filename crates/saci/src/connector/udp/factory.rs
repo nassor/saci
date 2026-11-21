@@ -62,7 +62,7 @@ pub struct UdpConnector;
 
 impl Connector for UdpConnector {
     fn name(&self) -> &'static str {
-        "udp"
+        super::NAME
     }
 
     fn source(

@@ -74,7 +74,7 @@ pub struct RedbConnector;
 
 impl Connector for RedbConnector {
     fn name(&self) -> &'static str {
-        "redb"
+        super::NAME
     }
 
     fn source(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Source>> {

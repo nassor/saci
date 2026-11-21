@@ -54,6 +54,9 @@
 //! }
 //! ```
 
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "udp";
+
 mod config;
 
 pub mod factory;

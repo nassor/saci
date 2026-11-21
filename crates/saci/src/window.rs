@@ -32,7 +32,7 @@ pub enum WindowSpec {
         /// Window size in milliseconds.
         size_ms: i64,
         /// Alignment offset in milliseconds (default 0).
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_zero")]
         offset_ms: i64,
     },
     /// Gap-based session windows.
@@ -55,9 +55,13 @@ pub enum WindowSpec {
         /// Slide (advance) interval in milliseconds. Must be ≤ `size_ms`.
         slide_ms: i64,
         /// Alignment offset in milliseconds (default 0).
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_zero")]
         offset_ms: i64,
     },
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 impl WindowSpec {
@@ -142,6 +146,12 @@ impl WindowSpec {
             _ => return Ok(()),
         };
         Err(SaciError::configuration(problem))
+    }
+
+    /// The tumbling window id of `ts`; see [`tumbling_id`].
+    #[deprecated(since = "0.3.0", note = "use `window::tumbling_id`")]
+    pub fn assign_tumbling(ts: i64, size_ms: i64, offset_ms: i64) -> i64 {
+        tumbling_id(ts, size_ms, offset_ms)
     }
 }
 

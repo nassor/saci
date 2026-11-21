@@ -47,7 +47,7 @@ pub struct S3Connector;
 
 impl Connector for S3Connector {
     fn name(&self) -> &'static str {
-        "s3"
+        super::NAME
     }
 
     fn source(

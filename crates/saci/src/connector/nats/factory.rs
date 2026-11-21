@@ -32,7 +32,7 @@ pub struct NatsConnector;
 
 impl Connector for NatsConnector {
     fn name(&self) -> &'static str {
-        "nats"
+        super::NAME
     }
 
     fn source(

@@ -74,6 +74,17 @@ pub mod io;
 /// declaration whether or not it carries the engine that serves one.
 pub mod window;
 
+/// The path 0.2 gave [`window`].
+#[deprecated(since = "0.3.0", note = "use `saci::window`")]
+pub mod window_spec {
+    pub use crate::window::WindowSpec;
+}
+
+/// The name 0.2 gave [`sdk::State`].
+#[cfg(any(feature = "processor", feature = "plugin"))]
+#[deprecated(since = "0.3.0", note = "use `saci::sdk::State`")]
+pub type ProcessorState<C> = sdk::State<C>;
+
 #[cfg(feature = "windows")]
 pub mod windows;
 
@@ -96,7 +107,7 @@ pub use system::{
 #[cfg(feature = "engine")]
 pub use io::{Sink, Source};
 #[cfg(feature = "engine")]
-pub use runtime::{PipelineRuntime, RuntimeDescriptorInfo, RuntimeOutput};
+pub use runtime::{PipelineRuntime, RuntimeDescriptorInfo, RuntimeOutput, StatelessRuntime};
 
 /// What macro expansions name. Not part of the API.
 #[doc(hidden)]
@@ -198,7 +209,9 @@ pub mod prelude {
         System, SystemMeta, WriteSet, async_trait, parallel_fn, system_fn,
     };
     #[cfg(feature = "engine")]
-    pub use crate::{PipelineRuntime, RuntimeDescriptorInfo, RuntimeOutput, Sink, Source};
+    pub use crate::{
+        PipelineRuntime, RuntimeDescriptorInfo, RuntimeOutput, Sink, Source, StatelessRuntime,
+    };
     #[cfg(feature = "derive")]
     pub use crate::{fold, transform};
 

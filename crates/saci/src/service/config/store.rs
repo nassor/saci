@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// unreplicated. Cluster mode takes no `store` block, because its
 /// application state is the raft-replicated `cluster-app.redb` under
 /// `node.data_dir`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub enum StoreConfig {
     /// A local embedded redb file.
     Redb {
@@ -32,6 +32,30 @@ pub enum StoreConfig {
         /// Opt-in interval/one-shot processor state carry across iterations.
         batch_resume: bool,
     },
+}
+
+impl Serialize for StoreConfig {
+    /// The inverse of [`Deserialize`]: the kind is the `id` entry, which is
+    /// the leading argument when written as KDL (`store "redb" { path .. }`).
+    /// `batch_resume` is left out at its default, false.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+
+        match self {
+            Self::Redb { path, batch_resume } => {
+                let mut table = serializer.serialize_map(Some(2 + usize::from(*batch_resume)))?;
+                table.serialize_entry("id", "redb")?;
+                table.serialize_entry("path", path)?;
+                if *batch_resume {
+                    table.serialize_entry("batch_resume", batch_resume)?;
+                }
+                table.end()
+            }
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for StoreConfig {

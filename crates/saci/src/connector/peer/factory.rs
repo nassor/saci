@@ -55,7 +55,7 @@ pub struct PeerConnector;
 
 impl Connector for PeerConnector {
     fn name(&self) -> &'static str {
-        "peer"
+        super::NAME
     }
 
     fn source(

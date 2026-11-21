@@ -36,7 +36,7 @@ pub struct MariadbConnector;
 
 impl Connector for MariadbConnector {
     fn name(&self) -> &'static str {
-        "mariadb"
+        super::NAME
     }
 
     fn source(

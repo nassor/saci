@@ -1410,18 +1410,14 @@ mod tests {
     }
 
     #[async_trait(?Send)]
-    impl PipelineRuntime for RowCounter {
+    impl crate::runtime::StatelessRuntime for RowCounter {
         fn name(&self) -> &str {
             "row-counter"
         }
 
-        async fn run_batch(
-            &self,
-            data: &mut Dataset,
-            _prior: Option<&[u8]>,
-        ) -> SaciResult<crate::runtime::RuntimeOutput> {
+        async fn run(&self, data: &mut Dataset) -> SaciResult<()> {
             *self.rows_seen.lock().unwrap() += data.rows() as u64;
-            Ok(crate::runtime::RuntimeOutput::default())
+            Ok(())
         }
 
         fn template_dataset(&self) -> Dataset {
@@ -1847,16 +1843,12 @@ mod tests {
 
         struct PassThrough;
         #[async_trait(?Send)]
-        impl PipelineRuntime for PassThrough {
+        impl crate::runtime::StatelessRuntime for PassThrough {
             fn name(&self) -> &str {
                 "pass-through"
             }
-            async fn run_batch(
-                &self,
-                _data: &mut Dataset,
-                _prior: Option<&[u8]>,
-            ) -> SaciResult<crate::runtime::RuntimeOutput> {
-                Ok(crate::runtime::RuntimeOutput::default())
+            async fn run(&self, _data: &mut Dataset) -> SaciResult<()> {
+                Ok(())
             }
             fn template_dataset(&self) -> Dataset {
                 let mut dataset = Dataset::new();

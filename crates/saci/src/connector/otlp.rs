@@ -45,6 +45,12 @@
 
 #![deny(missing_docs)]
 
+/// The name this connector registers under and a config's `connector` property selects.
+///
+/// Unrelated to [`schema`]'s `NAME` column constant: this is the connector
+/// name, not a metric column.
+pub const NAME: &str = "otlp-metrics";
+
 pub mod config;
 pub mod factory;
 pub mod schema;

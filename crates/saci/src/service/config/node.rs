@@ -18,13 +18,25 @@ pub struct NodeConfig {
     #[serde(deserialize_with = "de_u64_flexible")]
     pub id: u64,
     /// Human-readable label used in logs and metrics. Optional.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Filesystem path used for redb data files and WAL.
     pub data_dir: PathBuf,
 }
 
 impl NodeConfig {
+    /// A node with this `id` and `data_dir`, and no `name`.
+    ///
+    /// The label then falls back to the decimal id; set [`name`](Self::name)
+    /// directly to give it one.
+    pub fn new(id: u64, data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            id,
+            name: None,
+            data_dir: data_dir.into(),
+        }
+    }
+
     /// The service label: `name` when set, otherwise the decimal `id`.
     ///
     /// A `saci` sink announces this to its peer, and the `saci` source on the

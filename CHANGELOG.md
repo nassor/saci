@@ -5,6 +5,162 @@
 
 ## Unreleased
 
+### Migrating from 0.2
+
+What changed and why is in [Breaking](#breaking); this section is the lookup from the 0.2
+spelling to the new one. A row marked **alias** still compiles through a `#[deprecated(since =
+"0.3.0")]` item or a deprecated Cargo feature, and is removed in the next release. Every other
+row is a break with no alias, because the new item returns a different type or needs more than
+a rename.
+
+#### Rust
+
+| 0.2 | Now | |
+| --- | --- | --- |
+| `Dataset::register_component::<C>()` | `register::<C>()` | alias |
+| `register_raw_component`, `register_raw_component_versioned`, `register_named_component` | `register_schema`, `register_schema_versioned`; return `Result` | |
+| `Dataset::columns::<C>()` → `Option` | `batch::<C>()` → `SaciResult` | |
+| `Dataset::batch_for(name)` → `Option` | `batch_named(name)` → `SaciResult` | |
+| `Dataset::column::<C>("f")` → `Option` | `column(C::F)` or `column_named("C", "f")` → `SaciResult` | |
+| `DatasetBuilder`, `PipelineBuilder`, `Pipeline::add_*`, `run_with_io`, `run_on_with_stats` | `Pipeline::new().component().schema().system().source().sink()` | |
+| `Scheduler::add_pipeline*`, `PipelineConfig::after(name, kind)`, `BackpressureSpec` | `Scheduler::pipeline`, `pipeline_with`; `after`, `after_data`, `pause_when` | |
+| `SystemMeta::read(c, f)`, `write(c, f)` | `reads_named`, `writes_named` | alias |
+| `SystemMeta::read_component(c)`, `write_component(c)` | `reads_all_named(c)`, `writes_all_named(c)` (or `reads_all::<C>()`) | alias |
+| `SystemMeta::read_resource::<R>()`, `write_resource::<R>()` | `reads_resource::<R>()`, `writes_resource::<R>()` | alias |
+| `FieldRef::field` (public field) | `FieldRef::name()` | |
+| `SystemConfig`, `System::retry() -> SystemConfig` | `RetryMode` | |
+| `saci::window_spec::WindowSpec` | `saci::window::WindowSpec` | alias (the type only) |
+| `WindowSpec::assign_tumbling(ts, size, offset)` | `window::tumbling_id(ts, size, offset)` | alias |
+| `WindowSpec::assign_sliding(..)` → `Vec<i64>` | `window::sliding_ids(..)` → iterator | |
+| `WindowSpec::validate` → `Result<(), String>` | `validate` → `SaciResult<()>` | |
+| `WindowedSystemBuilder`, `SideOutput`, `DroppedLate` | `WindowedSystem::new(T::TIME, spec, function)`; `WindowResults::{on_time, late, dropped}` | |
+| `io::drain_into_dataset(src, data, comp)`, `io::drain_dataset(data, comp, sink)` | `io::read_all(src, data, comp)`, `io::write_all(sink, data, comp)` | |
+| `saci::transformer::*`, `Transformer`, `TransformerFactory`, `TransformerRegistry`, `*Transformer` | `saci::codec::*`, `Codec`, `CodecFactory`, `CodecRegistry`, `*Codec` | |
+| `saci::processor`, `saci::plugin`, `export_pipeline!`, `export_plugin!` | `saci::sdk`, `#[processor]`, `#[plugin]` | |
+| `saci::ProcessorState<C>`, `sdk::ProcessorState<C>` | `sdk::State<C>` | alias |
+| `RouteDecision(vec![..])` | `RouteDecision::to([..])`, `RouteDecision::none()` | |
+| `connector::tcp::TcpIngestSource` | `TcpSource`, built with `TcpSource::new(config, schema, codec)` | |
+| `connector::http::{HttpPushSource, HttpPushOptions, Window}` | `HttpListenSource`, `HttpListenConfig`, `BatchWindow` | |
+| `connector::http::HttpClientOptions` | `HttpClientConfig` | alias |
+| `connector::http::{HttpSourceOptions, HttpSinkOptions}` | `HttpSourceConfig`, `HttpSinkConfig` | |
+| `connector::saci::{SaciSource, SaciSink}` | `connector::peer::{PeerSource, PeerSink}` | |
+| `connector::opentelemetry::*` | `connector::otlp::*` (`OtlpMetrics*`, `SourceMode`) | |
+| `connector::udp::ProbeSettings` | `ProbeConfig` | |
+| `clickhouse::ClickhouseConnectionConfig` | `clickhouse::ConnectionConfig` | alias |
+| `s3::S3ConnectionConfig` | `s3::ConnectionConfig` | alias |
+| `ChannelSource::from_receiver`, `ChannelSink::from_sender` | `with_receiver`, `with_sender` | alias |
+| `ChannelSource::new` → `(Sender, Self)` | `new` → `(Self, Sender)` | |
+| `ConnectorContext::channel_bridge()` | `channels()` | alias |
+| `ConnectorContext::transformer(what)` | `codec(what)` | |
+| `connector::schema::parse_schema_fields` → `Arc<Schema>`, `parse_optional_schema_fields` | `parse_fields` → `Vec<FieldSpec>`, `parse_optional_fields`; `schema_of(&fields)` builds the schema | |
+| `service::BuiltService`, `ServiceBuilder::build_all` | `BuiltWorkflow`, `build` | `build_all` alias |
+| `service::ServiceFactory` | `WorkflowFactory` | alias |
+| `service::StandaloneStats` | `WorkflowStats` | alias (its `nodes` are `NodeStats`) |
+| `service::NodeRunStats` (`id: String`, `kind: String`) | `NodeStats` (`id: Arc<str>`, `kind: &'static str`) | |
+| `ServiceBuilder::with_dlq_registry`, `with_inspector`, `with_channel_bridge`, `with_wasm_engine` | `dlq_registry`, `inspector`, `channels`, `wasm_engine` | alias |
+| `ServiceBuilder::with_runtime(id, Box<dyn PipelineRuntime>)` | `runtime(id, impl PipelineRuntime)` | |
+| `ServiceBuilder::register_source`, `register_sink`, `register_transformer`, `*_mut` | `connector(c)`, `codec(f)` | |
+| `service::config::TransformerSpec` (`options`) | `CodecSpec` (`config`) | |
+| `RetryConfig::to_system_config` | `to_retry_mode` | |
+| `PipelineRuntime::run_on*` | `run_batch(data, prior)` | |
+| `WasmEngine::new()`, `PipelineRuntimeLoader::with_epoch_deadline(ticks)` | `new() -> SaciResult`, `with_timeout(Duration)` | |
+| `service::run_standalone`, `run_stream` | `BuiltWorkflow::run(options)` | |
+
+#### Cargo features
+
+Each old feature is kept as an alias of its replacement and is removed in the next release.
+
+| 0.2 | Now | |
+| --- | --- | --- |
+| `runtime`, `io` | `engine` | alias |
+| `transformers` | `codecs` | alias |
+| `transformer-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet` | `codec-arrow-ipc`, `-avro`, `-csv`, `-ndjson`, `-parquet` | alias |
+| `transformer-contract` | `codec-api` | alias |
+| `connector-contract` | `connector-api` | alias |
+| `connector-saci` | `connector-peer` | alias |
+| `connector-opentelemetry` | `connector-otlp` | alias |
+
+An alias only enables the new feature. The Rust paths it gated moved, so a crate using
+`transformer-csv` still needs `saci::codec::CsvCodec` in place of `saci::transformer::csv`.
+
+#### KDL
+
+| 0.2 | Now |
+| --- | --- |
+| `source "id" type="FileSource"`, `sink "id" type="FileSink"` | `source "id" connector="file"`, `sink "id" connector="file"` |
+| `transformer "id" format=".." { options .. }`, `transformer="id"` on a node | `codec "id" format=".." { config .. }`, `codec="id"` |
+| `wasm "id" module=".."`, `plugin "id" library=".."` | `wasm "id" path=".."`, `plugin "id" path=".."` |
+| `run_mode kind="one_shot"` | `run "once"` |
+| `run_mode kind="continuous"`, `kind="stream"` | `run "continuous"`, `run "stream"` |
+| `run_mode kind="interval" interval_ms=N` | `run "interval" every_ms=N` |
+| `lease_ttl_ms`, `election_timeout_ms`, `bootstrap`, `peer ..` at top level | the same nodes inside one `cluster { }` block |
+| `http disabled=#true` | `http enabled=#false` |
+| `window .. { key_field "a" }` | `window .. { key_fields "a" }` |
+| `schema_fields "id" type="Int64"` | `field "id" type="int64"`; `pg_type` and `mariadb_type` are `native_type` |
+| a schema repeated on every node of a component | one `schema "Component" { field .. }` in the workflow |
+| `batch_size` on a kafka or nats source, http `mode` | `batch_rows` |
+| `schema_from "body"`, `"object"` | `schema_from "payload"` |
+
+An unknown top-level key, or `mode "standalone"` beside a `cluster` block, is an error.
+
+Before:
+
+```kdl
+run_mode kind="interval" interval_ms=5000
+
+workflow "orders" {
+    transformer "csv_fmt" format="csv" {
+        options has_headers=#true
+    }
+    source "in" type="FileSource" component="Order" transformer="csv_fmt" {
+        config {
+            path "orders.csv"
+            schema_fields "id" type="Int64" nullable=#false
+            schema_fields "total" type="Float64"
+        }
+    }
+    wasm "settle" module="settle.wasm" {
+        window kind="tumbling" size_ms=30000 time_field="ts" {
+            key_field "region"
+        }
+    }
+    sink "out" type="FileSink" component="Order" transformer="csv_fmt" {
+        config { path "out.csv" }
+    }
+    link from="in" to="settle"
+    link from="settle" to="out"
+}
+```
+
+After:
+
+```kdl
+run "interval" every_ms=5000
+
+workflow "orders" {
+    codec "csv_fmt" format="csv" {
+        config has_headers=#true
+    }
+    schema "Order" {
+        field "id" type="int64" nullable=#false
+        field "total" type="float64"
+    }
+    source "in" connector="file" component="Order" codec="csv_fmt" {
+        config { path "orders.csv" }
+    }
+    wasm "settle" path="settle.wasm" {
+        window kind="tumbling" size_ms=30000 time_field="ts" {
+            key_fields "region"
+        }
+    }
+    sink "out" connector="file" component="Order" codec="csv_fmt" {
+        config { path "out.csv" }
+    }
+    link from="in" to="settle"
+    link from="settle" to="out"
+}
+```
+
 ### Breaking
 
 - Features: `runtime` and `io` are folded into `engine`; a feature that implied either implies
@@ -173,6 +329,24 @@
 - `service::serve(config, builder, ServeOptions)` runs the full service (stores, HTTP plane,
   runners, shutdown budget) from library code and returns a `ServeExit`; the `saci-service
   serve` command calls it.
+- `config::to_kdl_string` and `config::to_kdl` write a value tree or any `Serialize` type as KDL, the
+  inverse of `from_kdl_str`; `ServiceConfig::to_kdl` writes a whole service config. A program that
+  generates its config builds the typed specs and lets saci spell the keywords. Default-valued
+  fields are left out, a `dlq` with only a store writes as `dlq "redb"`, and the `config` feature
+  turns on `serde_json/preserve_order` so output keeps declaration order.
+- Constructors for the config specs: `ServiceConfig::standalone`, `NodeConfig::new`,
+  `WorkflowSpec::new`, `SourceSpec::new`, `SinkSpec::new`, `WasmSpec::new`, `PluginSpec::new`,
+  `CodecSpec::new`, `LinkSpec::new`, `SchemaSpec::new`, `WindowConfig::new`.
+- `ServiceConfig::from_kdl` names the replacement when a config uses a 0.2 spelling (`type=`,
+  `transformer`, `run_mode`, `schema_fields`, `module`, `key_field`, the old connector type names).
+- `FieldSpec` is `Serialize`; `FieldSpec::new`, `from_arrow` and `from_schema` declare existing
+  Arrow fields.
+- `runtime::StatelessRuntime`: implement `run(&mut Dataset)` and get `PipelineRuntime` through a
+  blanket impl, for runtimes that carry no state and pick no route.
+- `service::Registry::names_for(Role)`; every built-in connector module exports its `NAME`
+  (`connector::nats::NAME == "nats"`); `saci::codec` re-exports each codec type
+  (`saci::codec::NdjsonCodec`).
+- `Dataset::with::<C>()` and `with_schema(name, schema)`: consuming, chainable registration.
 
 ### Changed
 

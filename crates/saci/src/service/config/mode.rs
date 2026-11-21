@@ -161,6 +161,23 @@ fn default_lease_ttl() -> u64 {
     30_000
 }
 
+// `skip_serializing_if` predicates: a field at its default is not written.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+fn is_default_election_timeout(value: &u64) -> bool {
+    *value == default_election_timeout()
+}
+fn is_default_heartbeat_interval(value: &u64) -> bool {
+    *value == default_heartbeat_interval()
+}
+fn is_default_snapshot_log_interval(value: &u64) -> bool {
+    *value == default_snapshot_log_interval()
+}
+fn is_default_lease_ttl(value: &u64) -> bool {
+    *value == default_lease_ttl()
+}
+
 /// Configuration for cluster (multi-node Raft) mode: the `cluster { }` block.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
@@ -174,25 +191,41 @@ pub struct ClusterConfig {
     /// Accepts either a bare bool or a string parseable as `bool`
     /// (`"true"` / `"false"`). The string form lets env-var substitution work
     /// in templates.
-    #[serde(default, deserialize_with = "de_bool_flexible")]
+    #[serde(
+        default,
+        deserialize_with = "de_bool_flexible",
+        skip_serializing_if = "is_false"
+    )]
     pub bootstrap: bool,
     /// How long a claimed row-range lease is held before it may be reclaimed.
     ///
     /// Must be at least three election timeouts: a batch lease has to outlive
     /// one SACI election, or a leader change alone would let a second node
     /// claim a range that is still being processed.
-    #[serde(default = "default_lease_ttl")]
+    #[serde(
+        default = "default_lease_ttl",
+        skip_serializing_if = "is_default_lease_ttl"
+    )]
     pub lease_ttl_ms: u64,
     /// Raft election timeout in milliseconds.
-    #[serde(default = "default_election_timeout")]
+    #[serde(
+        default = "default_election_timeout",
+        skip_serializing_if = "is_default_election_timeout"
+    )]
     pub election_timeout_ms: u64,
     /// Raft heartbeat interval in milliseconds.
-    #[serde(default = "default_heartbeat_interval")]
+    #[serde(
+        default = "default_heartbeat_interval",
+        skip_serializing_if = "is_default_heartbeat_interval"
+    )]
     pub heartbeat_interval_ms: u64,
     /// Take a snapshot, and purge the log behind it, every N committed log
     /// entries. Sets the Raft snapshot policy; must be at least 1, because a
     /// zero interval would snapshot on every entry.
-    #[serde(default = "default_snapshot_log_interval")]
+    #[serde(
+        default = "default_snapshot_log_interval",
+        skip_serializing_if = "is_default_snapshot_log_interval"
+    )]
     pub snapshot_log_interval: u64,
 }
 

@@ -1615,8 +1615,27 @@ impl Default for DlqBlock {
 /// `dlq` alone is an empty table, `dlq "redb"` a scalar and
 /// `dlq "redb" { ... }` a table carrying `id`, so the scalar form is the one
 /// case a derived `Deserialize` would refuse.
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DlqConfig(pub DlqBlock);
+
+/// Writes the scalar form (`dlq "redb"`) when only the store differs from the
+/// defaults, so a written config stays as short as a hand-written one.
+impl Serialize for DlqConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let defaults = DlqBlock {
+            store: self.0.store.clone(),
+            ..DlqBlock::default()
+        };
+        if self.0 == defaults {
+            serializer.serialize_str(&self.0.store)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
 
 impl<'de> Deserialize<'de> for DlqConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

@@ -24,6 +24,9 @@
 
 #![deny(missing_docs)]
 
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "file";
+
 mod config;
 
 pub mod factory;

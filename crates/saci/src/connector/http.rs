@@ -71,6 +71,14 @@
 
 #![deny(missing_docs)]
 
+/// The name the HTTP client connector registers under and a config's
+/// `connector` property selects.
+pub const NAME: &str = "http";
+
+/// The name the HTTP listener connector registers under and a config's
+/// `connector` property selects.
+pub const LISTEN_NAME: &str = "http-listen";
+
 mod client;
 mod document;
 pub mod factory;
@@ -90,3 +98,7 @@ pub use source::{
     BatchWindow, HttpClientConfig, HttpSource, HttpSourceConfig, Pagination, ReadMode,
 };
 pub use tls::TlsFiles;
+
+/// The name 0.2 gave [`HttpClientConfig`].
+#[deprecated(since = "0.3.0", note = "use `HttpClientConfig`")]
+pub type HttpClientOptions = HttpClientConfig;

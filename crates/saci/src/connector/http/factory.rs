@@ -493,7 +493,7 @@ pub struct HttpConnector;
 
 impl Connector for HttpConnector {
     fn name(&self) -> &'static str {
-        "http"
+        super::NAME
     }
 
     fn source(
@@ -607,7 +607,7 @@ pub struct HttpListenConnector;
 
 impl Connector for HttpListenConnector {
     fn name(&self) -> &'static str {
-        "http-listen"
+        super::LISTEN_NAME
     }
 
     fn roles(&self) -> &'static [Role] {

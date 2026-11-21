@@ -27,6 +27,25 @@ fn default_retry_max_ms() -> u64 {
 fn default_retry_jitter() -> f64 {
     0.1
 }
+
+// `skip_serializing_if` predicates: a field at its default is not written, so a
+// retry block holds only what the file declared.
+fn is_default_attempts(value: &u32) -> bool {
+    *value == default_retry_attempts()
+}
+fn is_default_base_ms(value: &u64) -> bool {
+    *value == default_retry_base_ms()
+}
+fn is_default_mult(value: &f64) -> bool {
+    *value == default_retry_mult()
+}
+fn is_default_max_ms(value: &u64) -> bool {
+    *value == default_retry_max_ms()
+}
+fn is_default_jitter(value: &f64) -> bool {
+    *value == default_retry_jitter()
+}
+
 /// Retry policy for a source or sink node.
 ///
 /// An omitted `retry` block retries a connector call 3 times (4 attempts)
@@ -36,19 +55,34 @@ fn default_retry_jitter() -> f64 {
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     /// Total attempts including the initial one; 1 disables retrying.
-    #[serde(default = "default_retry_attempts")]
+    #[serde(
+        default = "default_retry_attempts",
+        skip_serializing_if = "is_default_attempts"
+    )]
     pub max_attempts: u32,
     /// Delay before the second attempt.
-    #[serde(default = "default_retry_base_ms")]
+    #[serde(
+        default = "default_retry_base_ms",
+        skip_serializing_if = "is_default_base_ms"
+    )]
     pub base_delay_ms: u64,
     /// Growth factor applied per attempt.
-    #[serde(default = "default_retry_mult")]
+    #[serde(
+        default = "default_retry_mult",
+        skip_serializing_if = "is_default_mult"
+    )]
     pub multiplier: f64,
     /// Ceiling on the computed delay.
-    #[serde(default = "default_retry_max_ms")]
+    #[serde(
+        default = "default_retry_max_ms",
+        skip_serializing_if = "is_default_max_ms"
+    )]
     pub max_delay_ms: u64,
     /// Fraction of the delay randomised, in `0.0..=1.0`.
-    #[serde(default = "default_retry_jitter")]
+    #[serde(
+        default = "default_retry_jitter",
+        skip_serializing_if = "is_default_jitter"
+    )]
     pub jitter: f64,
 }
 

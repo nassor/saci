@@ -36,7 +36,7 @@ pub struct PostgresConnector;
 
 impl Connector for PostgresConnector {
     fn name(&self) -> &'static str {
-        "postgresql"
+        super::NAME
     }
 
     fn source(

@@ -51,6 +51,9 @@
 //! - `metrics`: the `saci_peer_source_*` series, labelled with the receiving
 //!   node and the peer that fed it.
 
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "peer";
+
 mod config;
 mod metrics;
 #[cfg(feature = "trace-context")]

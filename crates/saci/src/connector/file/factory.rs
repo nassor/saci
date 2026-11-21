@@ -39,7 +39,7 @@ pub struct FileConnector;
 
 impl Connector for FileConnector {
     fn name(&self) -> &'static str {
-        "file"
+        super::NAME
     }
 
     fn source(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Source>> {

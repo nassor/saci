@@ -43,6 +43,21 @@
 //! over a same-named process env var, with the environment still the
 //! fallback for undeclared names, so a file can reference its own
 //! declarations with the same `${name}` / `${name:-default}` syntax.
+//!
+//! ## Writing a config
+//!
+//! A config built in code is written with [`ServiceConfig::to_kdl`]:
+//! [`ServiceConfig::standalone`] and the `new` constructor of each spec
+//! ([`WorkflowSpec::new`], [`SourceSpec::new`], [`SinkSpec::new`],
+//! [`WasmSpec::new`], ...) fill in every field but the required ones, and the
+//! public fields take the rest. The text holds only what differs from the
+//! defaults and is the same on every call, so a generated file can be
+//! committed and diffed. See [`crate::config::to_kdl_string`] for the layout
+//! and what a round trip through [`ServiceConfig::from_kdl`] preserves.
+//!
+//! A config in the v0.2.0 spelling (`type=` on a source, `run_mode`,
+//! `transformer`, `schema_fields`, ...) is refused, and the error names what
+//! each old key became.
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -54,6 +69,7 @@ use crate::error::{SaciError, SaciResult};
 
 pub(super) mod flexible;
 mod http;
+mod legacy;
 mod mode;
 mod node;
 mod observability;
@@ -85,6 +101,45 @@ pub use super::heal::HealConfig;
 /// rejects.
 pub(super) fn default_config() -> ConfigValue {
     ConfigValue::Object(ConfigMap::new())
+}
+
+/// Whether an opaque per-instance `config` is the empty table that omitting it
+/// would give, so serializing it adds nothing.
+pub(super) fn is_default_config(value: &ConfigValue) -> bool {
+    matches!(value, ConfigValue::Object(table) if table.is_empty())
+}
+
+/// Whether `value` equals its type's default, for `skip_serializing_if`.
+pub(super) fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+/// Whether the `run` node would be the one an omitted node means.
+fn run_is_default(run: &Option<RunMode>) -> bool {
+    matches!(run, None | Some(RunMode::Continuous))
+}
+
+/// Serialize a string map with its entries sorted by key.
+///
+/// A `HashMap` iterates in a different order in every process, so a config
+/// written from one would be different text on every run. The field keeps its
+/// type; only the order it is written in is fixed.
+pub(super) fn serialize_sorted<S>(
+    map: &HashMap<String, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap as _;
+
+    let mut entries: Vec<(&String, &String)> = map.iter().collect();
+    entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let mut out = serializer.serialize_map(Some(entries.len()))?;
+    for (key, value) in entries {
+        out.serialize_entry(key, value)?;
+    }
+    out.end()
 }
 
 /// Top-level service configuration.
@@ -136,26 +191,30 @@ pub struct ServiceConfig {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawServiceConfig {
-    node: NodeConfig,
     mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node: NodeConfig,
+    #[serde(default, skip_serializing_if = "run_is_default")]
     run: Option<RunMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cluster: Option<ClusterConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     store: Option<StoreConfig>,
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "serialize_sorted"
+    )]
+    variables: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    http: HttpConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    observability: ObservabilityConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    flow_control: FlowControlConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    heal: HealConfig,
     #[serde(rename = "workflow", deserialize_with = "one_or_many")]
     workflows: Vec<WorkflowSpec>,
-    #[serde(default)]
-    http: HttpConfig,
-    #[serde(default)]
-    observability: ObservabilityConfig,
-    #[serde(default)]
-    flow_control: FlowControlConfig,
-    #[serde(default)]
-    heal: HealConfig,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    variables: HashMap<String, String>,
 }
 
 impl TryFrom<RawServiceConfig> for ServiceConfig {
@@ -245,6 +304,28 @@ fn extract_declared_variables(value: &ConfigValue) -> SaciResult<HashMap<String,
 }
 
 impl ServiceConfig {
+    /// A standalone config: `node`, the `run` mode, and nothing else yet.
+    ///
+    /// Every other field is its default: no store, the default `http`,
+    /// `observability`, `flow_control` and `heal` blocks, no `variables` and no
+    /// workflows. Push the workflows onto [`workflows`](Self::workflows) and
+    /// set any other public field directly.
+    pub fn standalone(node: NodeConfig, run: RunMode) -> Self {
+        Self {
+            node,
+            mode: ServiceMode::Standalone {
+                config: StandaloneConfig { run },
+            },
+            store: None,
+            workflows: Vec::new(),
+            http: HttpConfig::default(),
+            observability: ObservabilityConfig::default(),
+            flow_control: FlowControlConfig::default(),
+            heal: HealConfig::default(),
+            variables: HashMap::new(),
+        }
+    }
+
     /// Load a [`ServiceConfig`] from a KDL file at `path`.
     ///
     /// The file is read and its text handed to [`from_kdl`](Self::from_kdl).
@@ -272,15 +353,53 @@ impl ServiceConfig {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] for parse errors or any validation
-    /// constraint violation.
+    /// constraint violation. A config written in the v0.2.0 spelling (`type=`
+    /// on a source, `run_mode`, `transformer`, `schema_fields`, ...) is still
+    /// refused, but the message ends with one `hint:` line per old spelling
+    /// naming what replaced it.
     pub fn from_kdl(text: &str) -> SaciResult<Self> {
         let value_pre = crate::config::from_kdl_str(text)?;
         let declared = extract_declared_variables(&value_pre)?;
         let value = crate::config::from_kdl_str_with_vars(text, &declared)?;
-        let config = ServiceConfig::deserialize(value)
-            .map_err(|e| SaciError::configuration(format!("parsing config: {e}")))?;
+        let config = ServiceConfig::deserialize(value).map_err(|e| {
+            let mut message = format!("parsing config: {e}");
+            for hint in legacy::hints(&value_pre) {
+                message.push_str("\n  hint: ");
+                message.push_str(&hint);
+            }
+            SaciError::configuration(message)
+        })?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Write this config as KDL text that [`from_kdl`](Self::from_kdl) reads
+    /// back into an equal config.
+    ///
+    /// The config is serialized through the document's own top-level keys
+    /// (`mode`, `run`, `cluster`, `workflow`, ...) and written with
+    /// [`to_kdl`](crate::config::to_kdl), which documents the layout. A field
+    /// at its default is left out, so the text holds what was declared and
+    /// nothing else: no `retry` block on a node that retries by default, no
+    /// `http` block when the control plane is untouched, no `run` node for
+    /// the default continuous mode.
+    ///
+    /// The text is the same on every call: entries come out in declaration
+    /// order and the maps (`variables`, a processor's `config`) are sorted by
+    /// key.
+    ///
+    /// A string is written verbatim, so a `${NAME}` placeholder in it is
+    /// expanded by the next [`from_kdl`](Self::from_kdl), and a value that
+    /// really holds `${` cannot be spelled. A config with no workflow writes
+    /// no `workflow` node, which `from_kdl` refuses, as it does a schema
+    /// whose `field` list is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Configuration`] when a value has no KDL spelling,
+    /// naming its key path: see [`to_kdl_string`](crate::config::to_kdl_string).
+    pub fn to_kdl(&self) -> SaciResult<String> {
+        crate::config::to_kdl(self)
     }
 
     /// Validate semantic constraints that serde cannot enforce.
@@ -1557,6 +1676,482 @@ workflow "w" {
         assert!(
             err.contains("mode \"cluster\" does not take a `dlq` block"),
             "got: {err}"
+        );
+    }
+
+    // ── Writer ───────────────────────────────────────────────────────────────
+
+    /// Every `.kdl` file under `examples/`, sorted: the files the repository
+    /// tells an operator to copy, so the ones a writer must never break.
+    fn example_files() -> Vec<PathBuf> {
+        fn walk(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable directory") {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "kdl") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples"),
+            &mut found,
+        );
+        found.sort();
+        found
+    }
+
+    fn as_json(config: &ServiceConfig) -> serde_json::Value {
+        serde_json::to_value(config).expect("serialize")
+    }
+
+    /// Examples whose typed fields (`node id`, `cluster bootstrap`) hold a
+    /// `${...}` placeholder, which only substitution turns into a number or a
+    /// bool. The rest are read with `from_kdl_str` and no substitution, so
+    /// their placeholders reach the deserializer as the strings they are.
+    const TYPED_PLACEHOLDERS: &[&str] = &["cluster.kdl"];
+
+    #[test]
+    fn every_example_config_survives_a_write_and_a_read() {
+        let files = example_files();
+        assert!(files.len() >= 20, "examples not found: {files:?}");
+
+        for path in files {
+            let name = path.display();
+            let text = std::fs::read_to_string(&path).expect("readable example");
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("a file name");
+            let config = if TYPED_PLACEHOLDERS.contains(&file_name) {
+                // Every placeholder name in the file is declared with a fixed
+                // value (a declared name beats the environment), so nothing
+                // here reads the process environment.
+                let fixed = |name: &str| match name {
+                    "SACI_NODE_ID" => "2",
+                    "SACI_BOOTSTRAP" => "false",
+                    _ => "fixed",
+                };
+                let declared: HashMap<String, String> = text
+                    .split("${")
+                    .skip(1)
+                    .map(|rest| {
+                        let end = rest
+                            .find(|c| c == ':' || c == '}')
+                            .expect("closed placeholder");
+                        (rest[..end].to_string(), fixed(&rest[..end]).to_string())
+                    })
+                    .collect();
+                assert!(declared.contains_key("SACI_NODE_ID"), "{name}");
+                let value = crate::config::from_kdl_str_with_vars(&text, &declared)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                ServiceConfig::deserialize(value).unwrap_or_else(|e| panic!("{name}: {e}"))
+            } else {
+                parse(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+            };
+
+            let written = config
+                .to_kdl()
+                .unwrap_or_else(|e| panic!("{name}: writing: {e}"));
+            let reread = parse(&written).unwrap_or_else(|e| {
+                panic!("{name}: the written text does not parse: {e}\n{written}")
+            });
+
+            assert_eq!(as_json(&reread), as_json(&config), "{name}\n{written}");
+            assert_eq!(
+                reread.to_kdl().expect("writes again"),
+                written,
+                "{name}: writing what was read is not a fixed point"
+            );
+        }
+    }
+
+    /// The same files one level down, on the value tree: placeholders and every
+    /// other string come back byte for byte, including the ones a typed
+    /// field would reject before substitution.
+    #[test]
+    fn every_example_document_survives_a_write_and_a_read_as_a_value_tree() {
+        for path in example_files() {
+            let name = path.display();
+            let text = std::fs::read_to_string(&path).expect("readable example");
+            let tree = crate::config::from_kdl_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+
+            let written = crate::config::to_kdl_string(&tree)
+                .unwrap_or_else(|e| panic!("{name}: writing: {e}"));
+            let reread = crate::config::from_kdl_str(&written).unwrap_or_else(|e| {
+                panic!("{name}: the written text does not parse: {e}\n{written}")
+            });
+
+            assert_eq!(reread, tree, "{name}\n{written}");
+        }
+    }
+
+    #[test]
+    fn a_config_at_its_defaults_writes_only_what_it_declares() {
+        let mut config =
+            ServiceConfig::standalone(NodeConfig::new(1, "/tmp/saci"), RunMode::Continuous);
+        let mut workflow = WorkflowSpec::new("w");
+        workflow.sources.push(SourceSpec::new("in", "noop", "X"));
+        workflow.sinks.push(SinkSpec::new("out", "noop", "X"));
+        workflow.links.push(LinkSpec::new("in", "out"));
+        config.workflows.push(workflow);
+
+        let written = config.to_kdl().expect("writes");
+        assert_eq!(
+            written,
+            "mode \"standalone\"\n\n\
+             node id=1 data_dir=\"/tmp/saci\"\n\n\
+             workflow \"w\" {\n  \
+             source \"in\" connector=\"noop\" component=\"X\"\n  \
+             sink \"out\" connector=\"noop\" component=\"X\"\n  \
+             link from=\"in\" to=\"out\"\n}\n"
+        );
+
+        let json = as_json(&config);
+        for absent in [
+            "run",
+            "store",
+            "http",
+            "observability",
+            "flow_control",
+            "heal",
+            "variables",
+        ] {
+            assert!(
+                json.get(absent).is_none(),
+                "{absent} is at its default: {json}"
+            );
+        }
+        let source = &json["workflow"][0]["source"][0];
+        for absent in ["name", "codec", "retry", "heal", "flow_control", "config"] {
+            assert!(
+                source.get(absent).is_none(),
+                "{absent} is at its default: {source}"
+            );
+        }
+
+        let reread = ServiceConfig::from_kdl(&written).expect("reads back and validates");
+        assert_eq!(as_json(&reread), json);
+    }
+
+    #[test]
+    fn a_config_built_with_the_constructors_writes_every_block_it_sets() {
+        use crate::window::WindowSpec;
+        use serde_json::json;
+
+        let mut config = ServiceConfig::standalone(
+            NodeConfig::new(7, "/var/lib/saci"),
+            RunMode::Interval { every_ms: 5_000 },
+        );
+        config.node.name = Some("saci-7".to_string());
+        config.store = Some(StoreConfig::Redb {
+            path: PathBuf::from("/var/lib/saci/state.redb"),
+            batch_resume: true,
+        });
+        config.variables = HashMap::from([
+            ("region".to_string(), "eu".to_string()),
+            ("bucket".to_string(), "orders".to_string()),
+        ]);
+        config.http.bind = "127.0.0.1:9090".to_string();
+
+        let mut workflow = WorkflowSpec::new("orders");
+        workflow.name = Some("Orders".to_string());
+        let mut codec = CodecSpec::new("csv_fmt", "csv");
+        codec.config = json!({ "has_headers": true });
+        workflow.codecs.push(codec);
+        let mut schema = SchemaSpec::new("Order");
+        schema.field = json!([
+            { "id": "id", "type": "int64", "nullable": false },
+            { "id": "amount", "type": "float64" },
+        ]);
+        workflow.schemas.push(schema);
+        let mut source = SourceSpec::new("csv_orders", "file", "Order");
+        source.codec = Some("csv_fmt".to_string());
+        source.retry = RetryConfig {
+            max_attempts: 6,
+            ..RetryConfig::default()
+        };
+        source.config = json!({ "path": "orders.csv" });
+        workflow.sources.push(source);
+        let mut wasm = WasmSpec::new("process");
+        wasm.path = Some("process.wasm".to_string());
+        wasm.config = HashMap::from([
+            ("mode".to_string(), "fast".to_string()),
+            ("batch_size".to_string(), "1000".to_string()),
+        ]);
+        let mut window = WindowConfig::new(
+            WindowSpec::Tumbling {
+                size_ms: 30_000,
+                offset_ms: 0,
+            },
+            "ts",
+        );
+        window.key_fields = vec!["region".to_string(), "category".to_string()];
+        wasm.window = Some(window);
+        workflow.wasm.push(wasm);
+        let mut sink = SinkSpec::new("out", "file", "Order");
+        sink.codec = Some("csv_fmt".to_string());
+        sink.config = json!({ "path": "out.csv" });
+        workflow.sinks.push(sink);
+        workflow.links.push(LinkSpec::new("csv_orders", "process"));
+        let mut routed = LinkSpec::new("process", "out");
+        routed.branch = Some("ok".to_string());
+        workflow.links.push(routed);
+        config.workflows.push(workflow);
+
+        let written = config.to_kdl().expect("writes");
+        assert_eq!(
+            written,
+            r#"mode "standalone"
+
+node id=7 name="saci-7" data_dir="/var/lib/saci"
+
+run "interval" every_ms=5000
+
+store "redb" path="/var/lib/saci/state.redb" batch_resume=#true
+
+variables bucket="orders" region="eu"
+
+http bind="127.0.0.1:9090"
+
+workflow "orders" name="Orders" {
+  codec "csv_fmt" format="csv" {
+    config has_headers=#true
+  }
+  schema "Order" {
+    field "id" type="int64" nullable=#false
+    field "amount" type="float64"
+  }
+  source "csv_orders" connector="file" codec="csv_fmt" component="Order" {
+    retry max_attempts=6
+    config path="orders.csv"
+  }
+  wasm "process" path="process.wasm" {
+    config batch_size="1000" mode="fast"
+    window kind="tumbling" size_ms=30000 time_field="ts" {
+      key_fields "region" "category"
+    }
+  }
+  sink "out" connector="file" codec="csv_fmt" component="Order" {
+    config path="out.csv"
+  }
+  link from="csv_orders" to="process"
+  link from="process" to="out" branch="ok"
+}
+"#
+        );
+
+        let reread = parse(&written).expect("reads back");
+        assert_eq!(as_json(&reread), as_json(&config));
+    }
+
+    /// A `HashMap` iterates in an order of its own per instance, so two
+    /// configs built from the same entries must still write the same bytes.
+    #[test]
+    fn map_entries_are_written_sorted_and_identically_every_time() {
+        let keys = [
+            "zeta", "alpha", "mid", "beta", "omega", "gamma", "delta", "kappa", "sigma", "theta",
+        ];
+        let build = || {
+            let pairs = || {
+                keys.iter()
+                    .map(|key| (key.to_string(), format!("value-of-{key}")))
+            };
+            let mut wasm = WasmSpec::new("wasm_node");
+            wasm.config = pairs().collect();
+            let mut plugin = PluginSpec::new("plugin_node");
+            plugin.config = pairs().rev().collect();
+            let mut workflow = WorkflowSpec::new("w");
+            workflow.wasm.push(wasm);
+            workflow.plugin.push(plugin);
+            let mut config =
+                ServiceConfig::standalone(NodeConfig::new(1, "/tmp/saci"), RunMode::Once);
+            config.variables = pairs().collect();
+            config.workflows.push(workflow);
+            config
+        };
+
+        let first = build().to_kdl().expect("writes");
+        for _ in 0..16 {
+            assert_eq!(build().to_kdl().expect("writes"), first);
+        }
+
+        let mut sorted = keys;
+        sorted.sort_unstable();
+        for section in ["variables ", "  config "] {
+            for line in first
+                .lines()
+                .filter(|line| line.trim_start().starts_with(section.trim_start()))
+            {
+                let positions: Vec<usize> = sorted
+                    .iter()
+                    .map(|key| {
+                        line.find(&format!("{key}="))
+                            .unwrap_or_else(|| panic!("{key} in {line}"))
+                    })
+                    .collect();
+                assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{line}");
+            }
+        }
+
+        let json = as_json(&build());
+        let order = |value: &serde_json::Value| -> Vec<String> {
+            value
+                .as_object()
+                .expect("a table")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        let expected: Vec<String> = sorted.iter().map(|key| key.to_string()).collect();
+        assert_eq!(order(&json["variables"]), expected);
+        assert_eq!(order(&json["workflow"][0]["wasm"][0]["config"]), expected);
+        assert_eq!(order(&json["workflow"][0]["plugin"][0]["config"]), expected);
+    }
+
+    /// A constructor is the node a file would declare with only its required
+    /// keys: every other field is what deserializing leaves it as.
+    #[test]
+    fn constructors_build_what_a_minimal_node_deserializes_to() {
+        use crate::window::WindowSpec;
+
+        fn read<T: serde::de::DeserializeOwned>(kdl: &str, node: &str) -> T {
+            let document = crate::config::from_kdl_str(kdl).expect("valid KDL");
+            T::deserialize(document[node].clone()).expect("deserializes")
+        }
+
+        assert_eq!(
+            format!("{:?}", NodeConfig::new(3, "/data")),
+            format!(
+                "{:?}",
+                read::<NodeConfig>(r#"node id=3 data_dir="/data""#, "node")
+            ),
+        );
+        assert_eq!(
+            format!("{:?}", WorkflowSpec::new("w")),
+            format!(
+                "{:?}",
+                read::<WorkflowSpec>(r#"workflow id="w""#, "workflow")
+            ),
+        );
+        assert_eq!(
+            format!("{:?}", SourceSpec::new("in", "file", "X")),
+            format!(
+                "{:?}",
+                read::<SourceSpec>(r#"source id="in" connector="file" component="X""#, "source")
+            ),
+        );
+        assert_eq!(
+            format!("{:?}", SinkSpec::new("out", "file", "X")),
+            format!(
+                "{:?}",
+                read::<SinkSpec>(r#"sink id="out" connector="file" component="X""#, "sink")
+            ),
+        );
+        assert_eq!(
+            format!("{:?}", CodecSpec::new("c", "csv")),
+            format!(
+                "{:?}",
+                read::<CodecSpec>(r#"codec id="c" format="csv""#, "codec")
+            ),
+        );
+        assert_eq!(
+            format!("{:?}", LinkSpec::new("a", "b")),
+            format!("{:?}", read::<LinkSpec>(r#"link from="a" to="b""#, "link")),
+        );
+        assert_eq!(
+            format!("{:?}", WasmSpec::new("p")),
+            format!("{:?}", read::<WasmSpec>(r#"wasm id="p""#, "wasm")),
+        );
+        assert_eq!(
+            format!("{:?}", PluginSpec::new("p")),
+            format!("{:?}", read::<PluginSpec>(r#"plugin id="p""#, "plugin")),
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                WindowConfig::new(WindowSpec::Session { gap_ms: 5 }, "ts")
+            ),
+            format!(
+                "{:?}",
+                read::<WindowConfig>(
+                    r#"window kind="session" gap_ms=5 time_field="ts""#,
+                    "window"
+                )
+            ),
+        );
+
+        let schema = SchemaSpec::new("Order");
+        assert_eq!(schema.id, "Order");
+        assert_eq!(schema.field, serde_json::json!([]));
+
+        let standalone = ServiceConfig::standalone(NodeConfig::new(1, "/d"), RunMode::Stream);
+        let read_back: ServiceConfig = parse(
+            "mode \"standalone\"\nnode id=1 data_dir=\"/d\"\nrun \"stream\"\nworkflow id=\"w\"\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            format!(
+                "{:?}",
+                ServiceConfig {
+                    workflows: read_back.workflows.clone(),
+                    ..standalone
+                }
+            ),
+            format!("{read_back:?}"),
+        );
+    }
+
+    #[test]
+    fn a_store_block_is_written_the_way_it_is_read() {
+        for batch_resume in [false, true] {
+            let mut config = parse(&minimal_standalone_kdl()).expect("parses");
+            config.store = Some(StoreConfig::Redb {
+                path: PathBuf::from("/var/lib/saci/state.redb"),
+                batch_resume,
+            });
+            let written = config.to_kdl().expect("writes");
+            assert!(
+                written.contains(&format!(
+                    "store \"redb\" path=\"/var/lib/saci/state.redb\"{}\n",
+                    if batch_resume {
+                        " batch_resume=#true"
+                    } else {
+                        ""
+                    }
+                )),
+                "{written}"
+            );
+            let reread = parse(&written).expect("reads back");
+            assert_eq!(as_json(&reread), as_json(&config));
+        }
+    }
+
+    #[test]
+    fn a_block_writes_only_the_fields_that_differ_from_the_default() {
+        let mut config = parse(&minimal_cluster_kdl()).expect("parses");
+        config.http.control = false;
+        config.observability.log_level = "debug".to_string();
+
+        let written = config.to_kdl().expect("writes");
+        assert!(
+            written.contains(
+                "\ncluster bootstrap=#true {\n  peer id=1 addr=\"127.0.0.1:9000\"\n  \
+                 peer id=2 addr=\"127.0.0.2:9000\"\n}\n"
+            ),
+            "{written}"
+        );
+        assert!(written.contains("\nhttp control=#false\n"), "{written}");
+        assert!(
+            written.contains("\nobservability log_level=\"debug\"\n"),
+            "{written}"
+        );
+        assert_eq!(
+            as_json(&parse(&written).expect("reads back")),
+            as_json(&config)
         );
     }
 }

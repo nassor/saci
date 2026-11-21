@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, IntervalUnit, Schema, TimeUnit};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigValue;
 use crate::error::{SaciError, SaciResult};
@@ -38,7 +38,7 @@ fn default_true() -> bool {
 /// `uint8`, `utf8`, `largeutf8`, `time64_micros`, `timestamp_micros_utc`. A
 /// connector accepts the subset it maps and refuses the rest when it
 /// validates its fields.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
     /// Arrow `Boolean`.
@@ -142,7 +142,7 @@ impl fmt::Display for FieldType {
 /// Flat rather than an internally tagged enum, so `deny_unknown_fields` still
 /// applies; `#[serde(flatten)]` would switch it off. A key the entry does not
 /// name is an error.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
     /// Column name.
@@ -160,28 +160,116 @@ pub struct FieldSpec {
     pub nullable: bool,
     /// Total digits. `decimal128` only, whether as the type or as the `item`,
     /// and required there.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precision: Option<u8>,
     /// Fractional digits. `decimal128` only, and required there.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<i8>,
     /// Element type. `list` only, and required there.
     ///
     /// Typed as [`FieldType`], so `item="list"` parses; it is refused with a
     /// message naming the column, because Arrow's `List` here is
     /// one-dimensional.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<FieldType>,
     /// The type this column has on the server, for a database connector that
     /// asserts it on connect or forces the codec from it.
     ///
     /// Never changes the Arrow type: `type` alone decides that. A connector
     /// with no native types refuses the key.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_type: Option<String>,
 }
 
 impl FieldSpec {
+    /// A spec of `name` with type `ty`, nullable, and no decimal, list or native-type details.
+    pub fn new(name: impl Into<String>, ty: FieldType) -> Self {
+        Self {
+            name: name.into(),
+            ty,
+            nullable: true,
+            precision: None,
+            scale: None,
+            item: None,
+            native_type: None,
+        }
+    }
+
+    /// The spec that declares `field`: the inverse of [`to_arrow`](Self::to_arrow).
+    ///
+    /// `Utf8` maps to `utf8` (never `json`, which declares the same Arrow type).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Configuration`] for an Arrow type no [`FieldType`]
+    /// declares, naming the field.
+    pub fn from_arrow(field: &Field) -> SaciResult<Self> {
+        let mut spec = Self::new(field.name().as_str(), FieldType::Boolean);
+        spec.nullable = field.is_nullable();
+        match field.data_type() {
+            DataType::List(item) => {
+                spec.ty = FieldType::List;
+                let (ty, decimal) = Self::scalar_of(field.name(), item.data_type())?;
+                spec.item = Some(ty);
+                (spec.precision, spec.scale) = decimal.unzip();
+            }
+            other => {
+                let (ty, decimal) = Self::scalar_of(field.name(), other)?;
+                spec.ty = ty;
+                (spec.precision, spec.scale) = decimal.unzip();
+            }
+        }
+        Ok(spec)
+    }
+
+    /// One spec per field of `schema`, in order. See [`from_arrow`](Self::from_arrow).
+    ///
+    /// # Errors
+    ///
+    /// The first field [`from_arrow`](Self::from_arrow) refuses.
+    pub fn from_schema(schema: &Schema) -> SaciResult<Vec<Self>> {
+        schema.fields().iter().map(|f| Self::from_arrow(f)).collect()
+    }
+
+    /// The declared scalar type of an Arrow type, with `(precision, scale)` for a decimal.
+    fn scalar_of(name: &str, data_type: &DataType) -> SaciResult<(FieldType, Option<(u8, i8)>)> {
+        let ty = match data_type {
+            DataType::Boolean => FieldType::Boolean,
+            DataType::Int8 => FieldType::Int8,
+            DataType::Int16 => FieldType::Int16,
+            DataType::Int32 => FieldType::Int32,
+            DataType::Int64 => FieldType::Int64,
+            DataType::UInt8 => FieldType::UInt8,
+            DataType::UInt16 => FieldType::UInt16,
+            DataType::UInt32 => FieldType::UInt32,
+            DataType::UInt64 => FieldType::UInt64,
+            DataType::Float32 => FieldType::Float32,
+            DataType::Float64 => FieldType::Float64,
+            DataType::Utf8 => FieldType::Utf8,
+            DataType::LargeUtf8 => FieldType::LargeUtf8,
+            DataType::Binary => FieldType::Binary,
+            DataType::Date32 => FieldType::Date32,
+            DataType::Date64 => FieldType::Date64,
+            DataType::Time64(TimeUnit::Microsecond) => FieldType::Time64Micros,
+            DataType::Timestamp(TimeUnit::Microsecond, None) => FieldType::TimestampMicros,
+            DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) if tz.as_ref() == "UTC" => {
+                FieldType::TimestampMicrosUtc
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, None) => FieldType::TimestampMillis,
+            DataType::FixedSizeBinary(16) => FieldType::Uuid,
+            DataType::Interval(IntervalUnit::MonthDayNano) => FieldType::IntervalMonthDayNano,
+            DataType::Decimal128(precision, scale) => {
+                return Ok((FieldType::Decimal128, Some((*precision, *scale))));
+            }
+            other => {
+                return Err(SaciError::configuration(format!(
+                    "field '{name}': no declared type maps to Arrow {other}"
+                )));
+            }
+        };
+        Ok((ty, None))
+    }
+
     /// The Arrow field this spec declares.
     ///
     /// # Errors
@@ -448,6 +536,33 @@ pub enum SchemaFrom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_arrow_inverts_to_arrow_and_serializes_back_to_kdl() {
+        let text = r#"
+            field "a" type="boolean" nullable=#false
+            field "b" type="uint16"
+            field "c" type="largeutf8"
+            field "d" type="timestamp_micros_utc"
+            field "e" type="decimal128" precision=10 scale=2
+            field "f" type="list" item="decimal128" precision=5 scale=1
+            field "g" type="uuid"
+        "#;
+        let schema = built(text);
+        let specs = FieldSpec::from_schema(&schema).expect("every field maps");
+        assert_eq!(schema_of(&specs).expect("rebuild"), schema);
+
+        let written = crate::config::to_kdl(&serde_json::json!({ "field": specs })).expect("write");
+        let reread = parse_fields(&value(&written), "TestFactory").expect("reparse");
+        assert_eq!(reread, specs);
+    }
+
+    #[test]
+    fn from_arrow_names_the_field_it_cannot_declare() {
+        let field = Field::new("m", DataType::Float16, true);
+        let err = FieldSpec::from_arrow(&field).unwrap_err().to_string();
+        assert!(err.contains("'m'"), "{err}");
+    }
 
     fn value(text: &str) -> ConfigValue {
         crate::config::from_kdl_str(text).expect("parse")

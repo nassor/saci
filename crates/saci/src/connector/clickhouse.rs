@@ -51,6 +51,9 @@
 
 #![deny(missing_docs)]
 
+/// The name this connector registers under and a config's `connector` property selects.
+pub const NAME: &str = "clickhouse";
+
 pub mod config;
 pub mod connection;
 pub mod factory;
@@ -64,3 +67,7 @@ pub use config::{
 pub use factory::ClickhouseConnector;
 pub use sink::ClickhouseSink;
 pub use source::ClickhouseSource;
+
+/// The name 0.2 gave [`ConnectionConfig`].
+#[deprecated(since = "0.3.0", note = "use `ConnectionConfig`")]
+pub type ClickhouseConnectionConfig = ConnectionConfig;

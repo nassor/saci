@@ -14,15 +14,23 @@ fn default_http_enabled() -> bool {
     true
 }
 
+// `skip_serializing_if` predicates: a field at its default is not written.
+fn is_default_bind(value: &str) -> bool {
+    value == default_http_bind()
+}
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// HTTP control-plane configuration.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// Socket address to bind the HTTP server on.
-    #[serde(default = "default_http_bind")]
+    #[serde(default = "default_http_bind", skip_serializing_if = "is_default_bind")]
     pub bind: String,
     /// Serve the HTTP control plane. `enabled=#false` turns it off entirely.
-    #[serde(default = "default_http_enabled")]
+    #[serde(default = "default_http_enabled", skip_serializing_if = "is_true")]
     pub enabled: bool,
     /// Mount the workflow lifecycle endpoints (`/api/workflows*`).
     ///
@@ -33,7 +41,7 @@ pub struct HttpConfig {
     /// opt-out and drops the routes from the router entirely. Standalone mode
     /// only: a cluster node declares one workflow and stopping it is stopping
     /// the node, so the routes are never mounted there.
-    #[serde(default = "default_http_control")]
+    #[serde(default = "default_http_control", skip_serializing_if = "is_true")]
     pub control: bool,
 }
 

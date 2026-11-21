@@ -31,27 +31,49 @@ pub struct WasmSpec {
     /// Mandatory id, from the node's leading argument. Unique workflow-wide.
     pub id: String,
     /// Optional display name. The dashboard shows the id when this is absent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Path to the `.wasm` component file (relative or absolute). Absent for
     /// a node whose runtime is supplied through `runtime`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Optional expected SHA3-256 hex digest of the module bytes. Validation
     /// fails at load time if the digest does not match. The value may carry
     /// an optional `sha3-256:` prefix.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha3_256: Option<String>,
     /// Opaque key-value config the processor reads through the
     /// `saci:pipeline/host-io` `get-config` import.
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "super::serialize_sorted"
+    )]
     pub config: HashMap<String, String>,
     /// Windowing declaration: how the host merges this node's inbound
     /// streams and tracks its event-time watermark. The geometry is injected
     /// into `config` as `window.*` keys, so the processor's merging logic
     /// reads one source of truth.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<WindowConfig>,
+}
+
+impl WasmSpec {
+    /// A wasm node with this `id`, no `path`, no digest, an empty `config` and
+    /// no `window`.
+    ///
+    /// With no `path` the runtime must be registered under `id` through
+    /// `ServiceBuilder::runtime`; set the public fields for anything else.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            path: None,
+            sha3_256: None,
+            config: HashMap::new(),
+            window: None,
+        }
+    }
 }
 
 /// Native plugin processor node (requires the `plugin-host` feature at runtime).
@@ -77,27 +99,49 @@ pub struct PluginSpec {
     /// Mandatory id, from the node's leading argument. Unique workflow-wide.
     pub id: String,
     /// Optional display name. The dashboard shows the id when this is absent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Path to the shared library file (relative or absolute). Absent for a
     /// node whose runtime is supplied through `runtime`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Optional expected SHA3-256 hex digest of the library file bytes.
     /// Validation fails at load time if the digest does not match. The value
     /// may carry an optional `sha3-256:` prefix.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha3_256: Option<String>,
     /// Opaque key-value config the plugin reads through the `get_config`
     /// callback on the host vtable.
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "super::serialize_sorted"
+    )]
     pub config: HashMap<String, String>,
     /// Windowing declaration: how the host merges this node's inbound
     /// streams and tracks its event-time watermark. The geometry is injected
     /// into `config` as `window.*` keys, so the plugin's merging logic reads
     /// one source of truth.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<WindowConfig>,
+}
+
+impl PluginSpec {
+    /// A plugin node with this `id`, no `path`, no digest, an empty `config`
+    /// and no `window`.
+    ///
+    /// With no `path` the runtime must be registered under `id` through
+    /// `ServiceBuilder::runtime`; set the public fields for anything else.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            path: None,
+            sha3_256: None,
+            config: HashMap::new(),
+            window: None,
+        }
+    }
 }
 
 #[cfg(all(test, feature = "service"))]
