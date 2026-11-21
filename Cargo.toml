@@ -82,7 +82,7 @@ parquet       = { version = "=60.1.0", default-features = false, features = ["ar
 # `parquet`'s `ChunkReader` is implemented for `File` and for `bytes::Bytes`
 # only, so a Parquet file that lives in a message payload rather than on disk
 # is read through `Bytes`.
-bytes         = { version = "1.12.1" }
+bytes         = { version = "1.12.2" }
 serde_arrow   = { version = "0.15.1", features = ["arrow-60"] }
 
 # Common runtime deps
@@ -104,8 +104,8 @@ tracing       = { version = "0.1.44" }
 rayon         = { version = "1.12.0" }
 num_cpus      = { version = "1.17.0" }
 fnv           = { version = "1.0.7" }
-rand          = { version = "0.10.3" }
-uuid          = { version = "1.29.2", features = ["v7", "serde"] }
+rand          = { version = "0.10.4" }
+uuid          = { version = "1.29.3", features = ["v7", "serde"] }
 # Loads a repo-root `.env` so cloud-service credentials (Turso and any later
 # one) resolve without a manual export. Never overrides an existing variable.
 dotenvy       = { version = "0.15" }
@@ -115,7 +115,7 @@ dotenvy       = { version = "0.15" }
 # feature, which installs a `#[global_allocator]` and would collide with the
 # allocator every host binary already sets; `fts` is unneeded. `sync` adds the
 # HTTP/TLS path for a synced remote replica (Turso Cloud / sqld).
-turso         = { version = "=0.8.3", default-features = false, features = ["sync"] }
+turso         = { version = "=0.8.4", default-features = false, features = ["sync"] }
 
 # The ClickHouse client used by the `clickhouse` connector.
 clickhouse    = { version = "0.15.3", default-features = false, features = ["lz4"] }
@@ -138,18 +138,18 @@ prost         = { version = "0.14" }
 # The embedded key/value store. The `distributed` feature keeps its
 # local state file and its raft log in one, and the `redb` connector uses one as
 # a transport, so a single version covers every user.
-redb          = { version = "4.6.0" }
+redb          = { version = "5.0.0" }
 
 # The MariaDB/MySQL driver the `mariadb` connector uses. `binlog` adds the
 # replication stream; TLS is chosen by the connector crate (rustls + ring).
 mysql_async   = { version = "0.37.1", default-features = false, features = ["minimal-rust", "binlog"] }
 # Same release mysql_async 0.37.1 depends on, so the two unify; named directly
 # for `Sid`, `GnoInterval`, `Tag` and the binlog event types.
-mysql_common  = { version = "0.37.1", default-features = false, features = ["binlog"] }
+mysql_common  = { version = "0.37.3", default-features = false, features = ["binlog"] }
 
 # WASM component model host
-wasmtime      = { version = "50.0.1", features = ["component-model", "component-model-async", "async"] }
-wasmtime-wasi = { version = "50.0.1", default-features = false, features = ["p3"] }
+wasmtime      = { version = "51.0.0", features = ["component-model", "component-model-async", "async"] }
+wasmtime-wasi = { version = "51.0.0", default-features = false, features = ["p3"] }
 sha3          = { version = "0.12.0" }
 
 # WASM component model guest. Every Rust processor component invokes

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use saci::codec::Codec;
 use saci::codec::csv::CsvCodec;
@@ -147,7 +147,7 @@ fn keys(dir: &std::path::Path) -> Vec<String> {
     let txn = db.begin_read().expect("begin_read");
     let table = txn.open_table(TABLE).expect("open table");
     table
-        .range::<&str>(..)
+        .range(..)
         .expect("range")
         .map(|entry| entry.expect("entry").0.value().to_string())
         .collect()

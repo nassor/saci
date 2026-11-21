@@ -85,7 +85,7 @@ impl RaftLogReader<SaciTypeConfig> for ArrowRedbLogStore {
             let txn = db.begin_read().map_err(to_io)?;
             let table = txn.open_table(ENTRIES_TABLE).map_err(to_io)?;
             let mut out = Vec::new();
-            for item in table.range::<u64>(bounds).map_err(to_io)? {
+            for item in table.range(bounds).map_err(to_io)? {
                 let (_k, v) = item.map_err(to_io)?;
                 out.push(dec(v.value())?);
             }

@@ -15,7 +15,9 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use redb::{Database, ReadOnlyDatabase, ReadableDatabase, TableDefinition, TableError};
+use redb::{
+    Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition, TableError,
+};
 use tokio::sync::mpsc;
 
 use crate::codec::Codec;

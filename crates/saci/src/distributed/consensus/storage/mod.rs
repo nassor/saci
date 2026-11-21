@@ -131,7 +131,7 @@ pub(crate) mod raft_impl {
         use crate::distributed::consensus::state_machine::KEY_SM_LAST_APPLIED;
         use openraft::entry::RaftEntry;
         use openraft::type_config::alias::EntryOf;
-        use redb::{Database, ReadableDatabase};
+        use redb::{Database, ReadableDatabase, ReadableTable};
         use tempfile::TempDir;
 
         pub(super) fn make_store(dir: &TempDir) -> ArrowRedbLogStore {

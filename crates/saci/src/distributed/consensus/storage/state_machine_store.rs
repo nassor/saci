@@ -18,7 +18,7 @@ use openraft::EntryPayload;
 use openraft::StoredMembership;
 use openraft::storage::{EntryResponder, RaftStateMachine};
 use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
-use redb::{Database, ReadableDatabase};
+use redb::{Database, ReadableDatabase, ReadableTable};
 
 use super::{SM_META_TABLE, dec, enc, join_to_io, to_io};
 use crate::distributed::consensus::snapshot::raft_impl::{

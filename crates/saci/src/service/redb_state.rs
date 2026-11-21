@@ -24,7 +24,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use crate::SaciResult;
