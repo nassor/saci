@@ -175,7 +175,7 @@ cargo run -p saci --features conformance --example conformance_vectors -- emit
 The `conformance` feature exists to enable `arrow-ipc/lz4` for the generator alone, so a normal
 build still cannot write a compressed record batch and must reject one.
 
-`arrow-ipc = "=60.1.0"` is exact-pinned workspace-wide. It is the host to processor wire format and
+`arrow-ipc = "=60.2.0"` is exact-pinned workspace-wide. It is the host to processor wire format and
 the on-disk checkpoint format. See `crates/saci/PINS.md` before touching it. A bump of that pin
 regenerates the corpus above and reruns the Go plugin's `arrowipc` suite (`examples/plugins/settle-go`):
 arrow-rs writes a zero-length validity buffer for a column with no nulls, so an independent writer

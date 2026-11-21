@@ -3,12 +3,13 @@
 `saci` and `saci-macros` share one version. The release process is in `AGENTS.md`, under
 "Releases".
 
-## Unreleased
+## 0.3.1 - 2026-11-21
 
 ### Changed
 
 - Dependencies: `wasmtime` and `wasmtime-wasi` 51, `redb` 5, `rdkafka` 0.40 (bundled librdkafka
-  2.16.0), `async-nats` 0.53, `turso` 0.8.4, `openraft` 0.10.1, plus the compatible patch
+  2.16.0), `async-nats` 0.53, `turso` 0.8.4, `openraft` 0.10.1, the arrow crates and `parquet`
+  60.2.0 (`arrow-ipc` still exact-pinned), `postcard` 1.2, plus the compatible patch
   releases. redb files written by earlier releases open unchanged: no saci table stores a type
   whose encoding redb 5 changed. `mysql_common` stays on 0.37, the line `mysql_async` 0.37.1
   depends on.

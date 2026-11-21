@@ -18,7 +18,7 @@ in [`examples/plugins/settle-go/PINS.md`](../../examples/plugins/settle-go/PINS.
 
 ## Load-bearing crate pin
 
-`arrow-ipc = "=60.1.0"` is exact-pinned in the workspace (`Cargo.toml`). Both
+`arrow-ipc = "=60.2.0"` is exact-pinned in the workspace (`Cargo.toml`). Both
 the host and any processor built against this SDK MUST link against this exact
 version, because Arrow IPC is the wire format across the Component Model
 boundary. A patch-release drift here can silently corrupt `Dataset` round-trips
