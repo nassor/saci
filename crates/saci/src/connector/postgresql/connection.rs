@@ -153,6 +153,7 @@ impl Connector {
     /// `password_file` cannot be read, or when the TLS configuration cannot be
     /// built. The message carries the parse error, never the DSN.
     pub(crate) fn new(what: &'static str, cfg: &ConnectionConfig) -> Result<Self, SaciError> {
+        cfg.validate(what)?;
         let mut pg: tokio_postgres::Config = cfg.dsn.parse().map_err(|e| {
             SaciError::configuration(format!("{what}: cannot parse connection.dsn: {e}"))
         })?;
@@ -443,17 +444,28 @@ fn build_client_config(
         let _ = roots.add_parsable_certificates(loaded.certs);
     }
 
-    Ok(
-        rustls::ClientConfig::builder_with_provider(
-            rustls::crypto::ring::default_provider().into(),
-        )
-        .with_safe_default_protocol_versions()
-        .map_err(|e| {
-            SaciError::configuration(format!("{what}: cannot build a rustls configuration: {e}"))
-        })?
-        .with_root_certificates(roots)
-        .with_no_client_auth(),
+    let builder = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
     )
+    .with_safe_default_protocol_versions()
+    .map_err(|e| {
+        SaciError::configuration(format!("{what}: cannot build a rustls configuration: {e}"))
+    })?
+    .with_root_certificates(roots);
+
+    let identity = crate::tls::load_client_identity(
+        what,
+        cfg.sslcert.as_deref().map(std::path::Path::new),
+        cfg.sslkey.as_deref().map(std::path::Path::new),
+    )?;
+    match identity {
+        Some((chain, key)) => builder.with_client_auth_cert(chain, key).map_err(|e| {
+            SaciError::configuration(format!(
+                "{what}: connection.sslcert and sslkey are not a usable pair: {e}"
+            ))
+        }),
+        None => Ok(builder.with_no_client_auth()),
+    }
 }
 
 /// Render a `tokio_postgres::Error` with the server's own message.
@@ -817,6 +829,8 @@ mod tests {
             statement_timeout_ms: 0,
             sslmode: SslModeConfig::Disable,
             sslrootcert: None,
+            sslcert: None,
+            sslkey: None,
             reconnect: ReconnectConfig::default(),
         }
     }
@@ -835,6 +849,28 @@ mod tests {
         cfg.dsn = "postgres://db.example/app".to_string();
         let connector = Connector::new("PostgresSource", &cfg).unwrap();
         assert_eq!(connector.target(), "db.example:5432/app");
+    }
+
+    #[test]
+    fn sslcert_requires_sslkey_and_non_disabled_sslmode() {
+        let mut half = base();
+        half.sslmode = SslModeConfig::Require;
+        half.sslcert = Some("client.pem".to_string());
+        let err = Connector::new("PostgresSource", &half)
+            .err()
+            .expect("half identity refused");
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("sslcert"), "got: {err}");
+
+        let mut disabled = base();
+        disabled.sslmode = SslModeConfig::Disable;
+        disabled.sslcert = Some("client.pem".to_string());
+        disabled.sslkey = Some("client.key".to_string());
+        let err = Connector::new("PostgresSource", &disabled)
+            .err()
+            .expect("sslcert with sslmode disable refused");
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("disable"), "got: {err}");
     }
 
     #[test]

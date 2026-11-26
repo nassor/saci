@@ -44,7 +44,8 @@
     feature = "codec-avro",
     feature = "codec-csv",
     feature = "codec-parquet",
-    feature = "wasm-host"
+    feature = "wasm-host",
+    feature = "crypto"
 ))]
 
 use std::sync::Arc;

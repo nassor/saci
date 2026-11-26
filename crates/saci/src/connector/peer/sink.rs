@@ -27,15 +27,20 @@
 //! session does not resend it.
 
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamEncoder;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use rustls_pki_types::ServerName;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter, ReadBuf};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
@@ -59,17 +64,64 @@ pub struct PeerSink {
     /// on it failed.
     session: Option<Session>,
     /// Candidate peers in declaration order, each with the address string it
-    /// was resolved from so an error names what the file said.
-    peers: Vec<(String, SocketAddr)>,
+    /// was resolved from and optional TLS server name.
+    peers: Vec<(String, SocketAddr, Option<ServerName<'static>>)>,
     schema: Arc<Schema>,
     identity: NodeIdentity,
     handshake_timeout: Duration,
+    tls: Option<TlsConnector>,
+}
+
+/// Transport stream for a peer client session: plaintext TCP or `rustls` TLS.
+enum PeerStream {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for PeerStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            Self::Tls(s) => Pin::new(&mut **s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for PeerStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s) => Pin::new(&mut **s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+            Self::Tls(s) => Pin::new(&mut **s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        }
+    }
 }
 
 /// One open session: the socket, and the encoder whose schema message rode out
 /// on its first data frame.
 struct Session {
-    writer: BufWriter<TcpStream>,
+    writer: BufWriter<PeerStream>,
     /// Exactly one encoder per session, created at `accept`, so the Arrow IPC
     /// schema message is emitted once and the peer's decoder never sees a
     /// second one.
@@ -90,9 +142,9 @@ impl PeerSink {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] if `connect` is empty, if the
-    /// handshake timeout is `0`, if an entry cannot be resolved or resolves
-    /// to no address at all, or if Arrow refuses to encode `schema` as an IPC
-    /// stream.
+    /// handshake timeout is `0`, if `tls` files or server names are invalid,
+    /// if an entry cannot be resolved or resolves to no address at all, or if
+    /// Arrow refuses to encode `schema` as an IPC stream.
     pub fn new(
         config: PeerSinkConfig,
         schema: Arc<Schema>,
@@ -104,8 +156,27 @@ impl PeerSink {
                 "PeerSink: 'connect' names no address",
             ));
         }
+        let tls_connector = config
+            .tls
+            .as_ref()
+            .map(|cfg| crate::tls::load_client_config("PeerSink", cfg, &[]).map(TlsConnector::from))
+            .transpose()?;
+        let server_name_override = config
+            .tls
+            .as_ref()
+            .and_then(|cfg| cfg.server_name.as_deref());
+
         let mut peers = Vec::with_capacity(config.connect.len());
         for entry in config.connect {
+            let server_name = if tls_connector.is_some() {
+                Some(crate::tls::resolve_server_name(
+                    "PeerSink",
+                    &entry,
+                    server_name_override,
+                )?)
+            } else {
+                None
+            };
             let addr = entry
                 .to_socket_addrs()
                 .map_err(|e| {
@@ -119,7 +190,7 @@ impl PeerSink {
                         "PeerSink: 'connect' address '{entry}' resolved to no address"
                     ))
                 })?;
-            peers.push((entry, addr));
+            peers.push((entry, addr, server_name));
         }
 
         // The call each session makes, so a schema Arrow will not encode is
@@ -133,12 +204,13 @@ impl PeerSink {
             schema,
             identity,
             handshake_timeout: Duration::from_millis(config.handshake_timeout_ms),
+            tls: tls_connector,
         })
     }
 
     /// The peers this sink dials, in the order it tries them.
     pub fn peers(&self) -> Vec<SocketAddr> {
-        self.peers.iter().map(|(_, addr)| *addr).collect()
+        self.peers.iter().map(|(_, addr, _)| *addr).collect()
     }
 
     /// Dial the peers in order and keep the first that accepts.
@@ -150,11 +222,11 @@ impl PeerSink {
     /// no peer accepted a session.
     async fn open_session(&self) -> Result<Session, SaciError> {
         let mut failures = Vec::with_capacity(self.peers.len());
-        for (entry, addr) in &self.peers {
+        for (entry, addr, server_name) in &self.peers {
             // One encoder per attempt, so the schema message is still pending
             // for whichever peer accepts.
             let encoder = new_encoder(&self.schema)?;
-            match self.try_peer(*addr, encoder).await {
+            match self.try_peer(*addr, server_name.clone(), encoder).await {
                 Ok(session) => {
                     #[cfg(feature = "tracing")]
                     tracing::info!(
@@ -197,12 +269,29 @@ impl PeerSink {
     async fn try_peer(
         &self,
         addr: SocketAddr,
+        server_name: Option<ServerName<'static>>,
         encoder: StreamEncoder,
     ) -> Result<Session, PeerVerdict> {
         let down = |e: String| PeerVerdict::Unreachable(SaciError::generic(e));
-        let stream = TcpStream::connect(addr)
+        let tcp = TcpStream::connect(addr)
             .await
             .map_err(|e| down(e.to_string()))?;
+        let stream = match (&self.tls, server_name) {
+            (Some(connector), Some(name)) => {
+                let tls_stream =
+                    tokio::time::timeout(self.handshake_timeout, connector.connect(name, tcp))
+                        .await
+                        .map_err(|_| {
+                            down(format!(
+                                "TLS handshake timed out after {} ms",
+                                self.handshake_timeout.as_millis()
+                            ))
+                        })?
+                        .map_err(|e| down(format!("TLS handshake failed: {e}")))?;
+                PeerStream::Tls(Box::new(tls_stream))
+            }
+            _ => PeerStream::Plain(tcp),
+        };
         let mut writer = BufWriter::new(stream);
 
         let mut hello = Vec::new();
@@ -274,7 +363,7 @@ enum PeerVerdict {
 }
 
 /// Read one length-prefixed frame from the peer.
-async fn read_reply(writer: &mut BufWriter<TcpStream>) -> Result<Frame, SaciError> {
+async fn read_reply(writer: &mut BufWriter<PeerStream>) -> Result<Frame, SaciError> {
     let stream = writer.get_mut();
     let mut len_buf = [0u8; 4];
     stream

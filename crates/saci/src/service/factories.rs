@@ -349,6 +349,12 @@ pub fn missing_cluster_host_error() -> SaciError {
     )
 }
 
+/// The error a declared `encryption` / `encrypt` / `decrypt` block reports in a
+/// binary built without `crypto`.
+pub(crate) fn missing_crypto_error(subject: &str) -> SaciError {
+    capability_error(subject, "data encryption module", "crypto")
+}
+
 /// Register every enabled connector into `registry`.
 ///
 /// A connector reaches the registry only when its feature is on.
@@ -613,7 +619,19 @@ mod tests {
             let connector = registry.connector(name).expect("a listed name resolves");
             for role in [Role::Source, Role::Sink] {
                 for key in connector.detail_keys(role) {
-                    for secret in ["password", "dsn", "secret", "token", "key_file", "auth"] {
+                    for secret in [
+                        "password",
+                        "dsn",
+                        "secret",
+                        "token",
+                        "key_file",
+                        "auth",
+                        "tls",
+                        "cert_file",
+                        "encryption",
+                        "hexkey",
+                        "sslkey",
+                    ] {
                         assert!(
                             !key.contains(secret),
                             "connector '{name}' lists detail key '{key}' for its {role}, \
@@ -660,6 +678,11 @@ mod tests {
             "workflow 'orders': the `window` block on wasm node 'aggregate' needs the \
              windowing engine, which this binary was built without, so rebuild or \
              reinstall with `--features windows`"
+        );
+        assert_eq!(
+            missing_crypto_error("the config's `encryption` block").message(),
+            "the config's `encryption` block needs the data encryption module, which this \
+             binary was built without, so rebuild or reinstall with `--features crypto`"
         );
     }
 }

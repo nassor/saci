@@ -34,14 +34,16 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
 
 use crate::codec::Codec;
 use crate::connector::tcp::TcpSourceConfig;
@@ -66,6 +68,7 @@ pub struct TcpSource {
     tx: mpsc::Sender<RecordBatch>,
     rx: mpsc::Receiver<RecordBatch>,
     max_frame_bytes: usize,
+    tls: Option<TlsAcceptor>,
     listener_task: Option<JoinHandle<()>>,
 }
 
@@ -83,8 +86,8 @@ impl TcpSource {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] if `buffer` or `max_frame_bytes`
-    /// is `0`, if `codec` cannot open a message decoder for `schema`, or if
-    /// `bind` cannot be bound.
+    /// is `0`, if `tls` files are missing or invalid, if `codec` cannot open a
+    /// message decoder for `schema`, or if `bind` cannot be bound.
     pub fn new(
         config: TcpSourceConfig,
         schema: Arc<Schema>,
@@ -102,7 +105,12 @@ impl TcpSource {
             bind,
             buffer,
             max_frame_bytes,
+            tls,
         } = config;
+        let tls = tls
+            .as_ref()
+            .map(|cfg| crate::tls::load_server_config("TcpSource", cfg, &[]).map(TlsAcceptor::from))
+            .transpose()?;
         let listener = std::net::TcpListener::bind(&bind).map_err(|e| {
             SaciError::configuration(format!("TcpSource: cannot bind '{bind}': {e}"))
         })?;
@@ -123,6 +131,7 @@ impl TcpSource {
             tx,
             rx,
             max_frame_bytes,
+            tls,
             listener_task: None,
         })
     }
@@ -150,6 +159,7 @@ impl TcpSource {
         let schema = Arc::clone(&self.schema);
         let codec = Arc::clone(&self.codec);
         let max_frame_bytes = self.max_frame_bytes;
+        let tls = self.tls.clone();
 
         self.listener_task = Some(tokio::spawn(async move {
             loop {
@@ -165,8 +175,27 @@ impl TcpSource {
                 let tx = tx.clone();
                 let schema = Arc::clone(&schema);
                 let codec = Arc::clone(&codec);
+                let tls = tls.clone();
                 tokio::spawn(async move {
-                    read_connection(stream, tx, schema, codec, max_frame_bytes).await;
+                    if let Some(acceptor) = tls {
+                        match tokio::time::timeout(Duration::from_secs(30), acceptor.accept(stream))
+                            .await
+                        {
+                            Ok(Ok(accepted)) => {
+                                read_connection(accepted, tx, schema, codec, max_frame_bytes).await;
+                            }
+                            Ok(Err(_e)) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(error = %_e, "TcpSource: TLS handshake failed");
+                            }
+                            Err(_) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!("TcpSource: TLS handshake timed out");
+                            }
+                        }
+                    } else {
+                        read_connection(stream, tx, schema, codec, max_frame_bytes).await;
+                    }
                 });
             }
         }));
@@ -180,8 +209,8 @@ impl TcpSource {
 /// batch never leaks into the next frame's. [`TcpSource::new`] already
 /// opened one off the same schema, so the open below fails only for a
 /// codec that answers differently twice.
-async fn read_connection(
-    stream: TcpStream,
+async fn read_connection<S: AsyncRead + Unpin>(
+    stream: S,
     tx: mpsc::Sender<RecordBatch>,
     schema: Arc<Schema>,
     codec: Arc<dyn Codec>,
@@ -291,6 +320,7 @@ mod tests {
     use super::*;
     use crate::codec::arrow_ipc::ArrowIpcCodec;
     use arrow_schema::{DataType, Field};
+    use tokio::net::TcpStream;
 
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]))

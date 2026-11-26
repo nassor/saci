@@ -39,7 +39,7 @@ host (`src/plugin_host/`) in skill `saci-plugins`; connectors and codecs in thei
 ## Features
 
 Defined in `crates/saci/Cargo.toml` `[features]`. The library default is `engine` only. The
-**`server`** bundle is `mimalloc`, `service`, `wasm-host`, `windows`, `parquet-checkpoint`,
+**`server`** bundle is `mimalloc`, `service`, `crypto`, `wasm-host`, `windows`, `parquet-checkpoint`,
 `connector-channel`, `connector-file`, `connector-http`, `connector-tcp`, `connector-udp`,
 `connector-peer`, `connector-redb`, and
 every codec,
@@ -69,8 +69,10 @@ and `service-cluster` stay opt-in because a cluster node is a deliberate deploym
   one per connector module `connector::<name>`. Each implies `connector-api`. Its connector
   registers in `ServiceBuilder::new()` only when `service` is also on; without `service` the
   feature is a library module.
-  TLS is always compiled into `connector-postgresql`, `connector-mariadb` and
-  `connector-clickhouse`; there is no `tls` feature.
+  `tls` is enabled by the connectors that speak rustls (`connector-http`, `connector-peer`,
+  `connector-tcp`, `connector-otlp`, `connector-postgresql`), while `connector-mariadb` and
+  `connector-clickhouse` compile rustls directly. `crypto` enables `saci::crypto` (whole-payload
+  and field-level AEAD) and is included in `server`.
   `connector-kafka`, `connector-nats` and `connector-udp` imply `codec-ndjson` and
   `connector-tcp` implies
   `codec-arrow-ipc`, so the connector feature alone is runnable. No connector resolves a
@@ -222,12 +224,23 @@ Key types:
 - `ServiceConfig` and `ServiceMode`: the config schema (`mode "standalone"` or `mode "cluster"`).
   `ServiceConfig`, `RawServiceConfig`, `load`, `from_kdl` and `validate` are in
   `src/service/config.rs`; the section types are in `src/service/config/`: `node.rs`
-  (`NodeConfig`), `mode.rs` (`ServiceMode`, `StandaloneConfig`, `RunMode`, `ClusterConfig`,
+  (`NodeConfig`), `encryption.rs` (`ServiceEncryptionConfig`, `KeySpec`, `CodecEncryptionConfig`,
+  `NodeCryptoConfig`), `mode.rs` (`ServiceMode`, `StandaloneConfig`, `RunMode`, `ClusterConfig`,
   `PeerSpec`), `store.rs` (`StoreConfig`), `workflow.rs` (`WorkflowSpec`, `SourceSpec`, `SinkSpec`,
   `LinkSpec`, `CodecSpec`, `SchemaSpec`, `NodeKind`, `validate`, `topological_order`),
   `processor.rs` (`WasmSpec`, `PluginSpec`), `window.rs` (`WindowConfig`), `retry.rs`
   (`RetryConfig`), `http.rs` (`HttpConfig`), `observability.rs` (`ObservabilityConfig`,
   `LogFormat`) and `flexible.rs`
+- `ServiceEncryptionConfig` (`encryption { active_key "..." key "..." env|file|hex|base64 ... }`):
+  optional top-level keyring and default AEAD algorithm (`aes-256-gcm` or `chacha20-poly1305`).
+  Consumed by `codec.encryption` (`CodecEncryptionConfig`), `source.decrypt`, and `sink.encrypt`
+  (`NodeCryptoConfig`, supporting `fields` or `mode="payload"`, `encoding="binary"|"base64"`, and
+  per-node algorithm/key overrides). When `source.decrypt` or `sink.encrypt` is set,
+  `ServiceBuilder` rewrites the declared `field` entries to the wire type (`binary`/`utf8`) before
+  constructing the inner `Rebuilder` and wraps outside `HealingSource`/`HealingSink`. Embedders can
+  also supply a provider programmatically via `ServiceBuilder::key_provider`. All four blocks parse
+  unconditionally; when `crypto` is disabled, `validate_build_capabilities` and `ServiceBuilder`
+  refuse them naming `--features crypto`.
 - `StoreConfig`: the top-level `store "redb"` block (`path`, `batch_resume`), the local
   unreplicated store the standalone and stream runners persist through. `mode "cluster"` rejects
   a `store` block, because a cluster node's state is the raft-replicated `cluster-app.redb` under

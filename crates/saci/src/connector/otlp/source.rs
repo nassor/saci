@@ -88,6 +88,7 @@ enum State {
         /// The bound socket, until the first read adopts it into the runtime.
         listener: Option<std::net::TcpListener>,
         local_addr: SocketAddr,
+        tls: Option<tokio_rustls::TlsAcceptor>,
         handler: Arc<PushHandler>,
         rx: mpsc::Receiver<Result<RecordBatch, SaciError>>,
         tasks: Vec<JoinHandle<()>>,
@@ -181,6 +182,7 @@ impl OtlpMetricsSource {
                 State::Push {
                     listener: Some(bound.listener),
                     local_addr: bound.local_addr,
+                    tls: bound.tls,
                     handler: bound.handler,
                     rx: bound.rx,
                     tasks: Vec::new(),
@@ -222,6 +224,7 @@ impl OtlpMetricsSource {
     fn ensure_listening(&mut self) -> Result<(), SaciError> {
         let State::Push {
             listener,
+            tls,
             handler,
             tasks,
             listen_failure,
@@ -243,7 +246,11 @@ impl OtlpMetricsSource {
             *listen_failure = Some(failure.clone());
             failure
         })?;
-        tasks.push(tokio::spawn(accept(listener, Arc::clone(handler))));
+        tasks.push(tokio::spawn(accept(
+            listener,
+            tls.clone(),
+            Arc::clone(handler),
+        )));
         Ok(())
     }
 }
@@ -301,6 +308,15 @@ async fn fetch(pull: &mut PullState, target: Option<&Schema>) -> Result<(), Saci
 ///
 /// Returns [`SaciError::Configuration`] when the address cannot be bound.
 fn bind_listener(push: &PushMode, target: Option<Arc<Schema>>) -> Result<PushListener, SaciError> {
+    crate::connector::otlp::install_ring();
+    let tls = push
+        .tls
+        .as_ref()
+        .map(|cfg| {
+            crate::tls::load_server_config(WHAT, cfg, &[b"h2", b"http/1.1"])
+                .map(tokio_rustls::TlsAcceptor::from)
+        })
+        .transpose()?;
     let listener = std::net::TcpListener::bind(&push.bind).map_err(|e| {
         SaciError::configuration(format!("{WHAT}: cannot bind '{}': {e}", push.bind))
     })?;
@@ -324,6 +340,7 @@ fn bind_listener(push: &PushMode, target: Option<Arc<Schema>>) -> Result<PushLis
     Ok(PushListener {
         listener,
         local_addr,
+        tls,
         handler,
         rx,
     })
@@ -333,6 +350,7 @@ fn bind_listener(push: &PushMode, target: Option<Arc<Schema>>) -> Result<PushLis
 struct PushListener {
     listener: std::net::TcpListener,
     local_addr: SocketAddr,
+    tls: Option<tokio_rustls::TlsAcceptor>,
     handler: Arc<PushHandler>,
     rx: mpsc::Receiver<Result<RecordBatch, SaciError>>,
 }
@@ -355,14 +373,16 @@ fn pull_state(pull: &PullMode) -> Result<PullState, SaciError> {
         })?;
         headers.append(name, value);
     }
-    let client = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         // A pull reads whole bodies, one after another, so the timeout is the
         // whole exchange rather than an idle gap.
-        .timeout(Duration::from_millis(30_000))
-        .build()
-        .map_err(|e| {
-            SaciError::configuration(format!("{WHAT}: cannot build an HTTP client: {e}"))
-        })?;
+        .timeout(Duration::from_millis(30_000));
+    let client =
+        crate::connector::otlp::config::apply_reqwest_tls(WHAT, builder, pull.tls.as_ref())?
+            .build()
+            .map_err(|e| {
+                SaciError::configuration(format!("{WHAT}: cannot build an HTTP client: {e}"))
+            })?;
     Ok(PullState {
         client,
         url: pull.url.clone(),
@@ -472,7 +492,11 @@ impl Drop for OtlpMetricsSource {
 }
 
 /// Accept requests forever, serving each connection on its own task.
-async fn accept(listener: tokio::net::TcpListener, handler: Arc<PushHandler>) {
+async fn accept(
+    listener: tokio::net::TcpListener,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    handler: Arc<PushHandler>,
+) {
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(pair) => pair,
@@ -484,6 +508,7 @@ async fn accept(listener: tokio::net::TcpListener, handler: Arc<PushHandler>) {
                 continue;
             }
         };
+        let tls = tls.clone();
         let handler = Arc::clone(&handler);
         tokio::spawn(async move {
             let mut builder =
@@ -498,14 +523,47 @@ async fn accept(listener: tokio::net::TcpListener, handler: Arc<PushHandler>) {
                 let handler = Arc::clone(&handler);
                 async move { Ok::<_, std::convert::Infallible>(serve_hyper(&handler, request).await) }
             });
-            if !preface_settled(&stream).await {
-                #[cfg(feature = "tracing")]
-                tracing::debug!("{WHAT}: dropped a connection that sent no request");
-                return;
-            }
-            let served = builder
-                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
-                .await;
+            let served =
+                match tls {
+                    None => {
+                        if !preface_settled(&stream).await {
+                            #[cfg(feature = "tracing")]
+                            tracing::debug!("{WHAT}: dropped a connection that sent no request");
+                            return;
+                        }
+                        builder
+                            .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                            .await
+                    }
+                    Some(acceptor) => {
+                        let accepted =
+                            match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+                                .await
+                            {
+                                Ok(Ok(stream)) => stream,
+                                Ok(Err(_e)) => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::warn!(error = %_e, "{WHAT}: TLS handshake failed");
+                                    #[cfg(not(feature = "tracing"))]
+                                    let _ = _e;
+                                    return;
+                                }
+                                Err(_) => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!("{WHAT}: TLS handshake timed out");
+                                    return;
+                                }
+                            };
+                        let builder = if accepted.get_ref().1.alpn_protocol() == Some(b"h2") {
+                            builder.http2_only()
+                        } else {
+                            builder.http1_only()
+                        };
+                        builder
+                            .serve_connection(hyper_util::rt::TokioIo::new(accepted), service)
+                            .await
+                    }
+                };
             if let Err(_e) = served {
                 #[cfg(feature = "tracing")]
                 tracing::debug!(error = %_e, "{WHAT}: connection ended");
@@ -780,6 +838,7 @@ mod tests {
             buffer: crate::connector::otlp::config::DEFAULT_BUFFER,
             auth: None,
             max_body_bytes: crate::connector::otlp::config::DEFAULT_MAX_BODY_BYTES,
+            tls: None,
         }
     }
 

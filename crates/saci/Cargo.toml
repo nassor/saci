@@ -30,7 +30,7 @@ default = ["engine"]
 # broker, database, object store or OTLP endpoint first is opt-in, and so is a
 # Raft cluster node, which is a deliberate deployment choice.
 server = [
-    "mimalloc", "service", "wasm-host", "windows", "parquet-checkpoint",
+    "mimalloc", "service", "wasm-host", "windows", "parquet-checkpoint", "crypto",
     "connector-channel", "connector-file", "connector-http", "connector-tcp",
     "connector-udp", "connector-peer", "connector-redb",
     "codec-ndjson", "codec-csv", "codec-parquet",
@@ -77,6 +77,10 @@ tracing = ["dep:tracing"]
 metrics = ["dep:opentelemetry"]
 # Trace context carried across a `saci` connector link.
 trace-context = ["tracing", "dep:opentelemetry", "dep:tracing-opentelemetry"]
+# Shared rustls (ring provider) TLS and mTLS transport helpers.
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:rustls-platform-verifier"]
+# Whole-payload and field-level AEAD data encryption (AES-256-GCM / ChaCha20-Poly1305) on `ring`.
+crypto = ["engine", "dep:ring", "dep:base64", "dep:zeroize", "dep:tempfile"]
 
 # Authoring SDKs
 
@@ -110,25 +114,24 @@ codec-parquet = ["codec-api", "dep:parquet", "dep:bytes"]
 connector-channel = ["connector-api"]
 connector-file = ["connector-api"]
 connector-http = [
-    "connector-api", "dep:bytes", "dep:futures-util", "tokio/fs", "dep:tempfile",
+    "connector-api", "tls", "dep:bytes", "dep:futures-util", "tokio/fs", "dep:tempfile",
     "dep:reqwest", "reqwest/http2", "reqwest/gzip", "reqwest/brotli", "reqwest/zstd", "reqwest/deflate",
-    "dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pki-types",
-    "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:tokio-rustls",
+    "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util",
     "dep:h3", "dep:h3-quinn", "dep:quinn", "dep:brotli", "dep:flate2", "dep:zstd", "dep:subtle",
 ]
 connector-kafka = ["connector-api", "dep:futures-util", "dep:rdkafka", "codec-ndjson"]
 connector-nats = ["connector-api", "dep:futures-util", "tokio/fs", "dep:bytes", "dep:async-nats", "codec-ndjson"]
 connector-otlp = [
-    "connector-api", "dep:base64", "dep:bytes", "dep:serde_json", "tokio/net",
+    "connector-api", "tls", "dep:base64", "dep:bytes", "dep:serde_json", "tokio/net",
     "dep:opentelemetry-proto", "dep:prost",
     "dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util",
     "dep:reqwest", "reqwest/http2", "reqwest/gzip", "reqwest/brotli", "reqwest/zstd", "reqwest/deflate",
-    "dep:rustls", "dep:subtle",
+    "dep:subtle",
 ]
 connector-postgresql = [
-    "connector-api", "tokio/net", "tokio/io-util", "dep:futures-util",
+    "connector-api", "tls", "tokio/net", "tokio/io-util", "dep:futures-util",
     "dep:tokio-postgres", "dep:postgres-protocol", "dep:bytes",
-    "dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types",
+    "dep:tokio-postgres-rustls", "dep:rustls-native-certs",
 ]
 # MariaDB and MySQL servers share one connector.
 connector-mariadb = [
@@ -144,12 +147,12 @@ connector-clickhouse = [
 connector-turso = ["connector-api", "dep:serde_json", "dep:base64", "dep:turso"]
 connector-s3 = [
     "connector-api", "dep:futures-util", "tokio/fs", "tokio/io-util",
-    "dep:tempfile", "dep:object_store", "dep:chrono",
+    "dep:tempfile", "dep:object_store", "dep:chrono", "dep:base64",
 ]
-connector-tcp = ["connector-api", "tokio/net", "tokio/io-util", "codec-arrow-ipc"]
+connector-tcp = ["connector-api", "tls", "tokio/net", "tokio/io-util", "codec-arrow-ipc"]
 connector-udp = ["connector-api", "tokio/net", "codec-ndjson", "dep:futures"]
 connector-redb = ["connector-api", "dep:redb"]
-connector-peer = ["connector-api", "tokio/net", "tokio/io-util"]
+connector-peer = ["connector-api", "tls", "tokio/net", "tokio/io-util"]
 
 # Host
 
@@ -245,6 +248,8 @@ brotli        = { version = "9.1.3", optional = true }
 flate2        = { version = "1", optional = true }
 zstd          = { version = "0.14.4", optional = true }
 subtle        = { version = "2", optional = true }
+ring          = { version = "0.17", optional = true }
+zeroize       = { version = "1.9", features = ["derive"], optional = true }
 rdkafka       = { version = "0.40", features = ["cmake-build"], optional = true }
 async-nats    = { version = "0.53.0", default-features = false, features = [
     "jetstream", "nkeys", "nuid", "ring", "server_2_10", "server_2_12", "server_2_14",
@@ -506,3 +511,7 @@ required-features = ["connector-mariadb"]
 name = "postgres_roundtrip"
 path = "../../examples/connectors/postgres_roundtrip.rs"
 required-features = ["connector-postgresql"]
+
+[[example]]
+name = "encrypted_pipelines"
+required-features = ["crypto", "connector-peer", "connector-file", "codec-parquet"]

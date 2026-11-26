@@ -2997,6 +2997,7 @@ async fn tls_needs_the_ca_file_to_trust_a_private_certificate() {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
+                client_ca_file: None,
             }),
             ..listen_config()
         },
@@ -3044,6 +3045,7 @@ async fn a_client_identity_is_accepted_at_build_and_used() {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
+                client_ca_file: None,
             }),
             ..listen_config()
         },
@@ -3260,6 +3262,7 @@ async fn an_http3_sink_posts_to_the_listen_sources_quic_endpoint() {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
+                client_ca_file: None,
             }),
             quic_bind: Some("127.0.0.1:0".to_string()),
             ..listen_config()
@@ -3321,6 +3324,7 @@ async fn the_quic_endpoint_refuses_a_wrong_path_and_an_oversized_body() {
             tls: Some(ServerTls {
                 cert_file: certificate.cert.clone(),
                 key_file: certificate.key.clone(),
+                client_ca_file: None,
             }),
             quic_bind: Some("127.0.0.1:0".to_string()),
             max_body_bytes: 16,

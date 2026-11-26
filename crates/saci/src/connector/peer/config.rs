@@ -39,6 +39,9 @@ pub struct PeerSourceConfig {
     /// closed. At least 1; default 8 MiB.
     #[serde(default = "default_max_frame_bytes")]
     pub max_frame_bytes: usize,
+    /// Optional TLS / mutual-TLS server configuration (`rustls`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::tls::ServerTlsConfig>,
 }
 
 impl PeerSourceConfig {
@@ -48,6 +51,7 @@ impl PeerSourceConfig {
             bind: bind.into(),
             buffer: DEFAULT_BUFFER,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            tls: None,
         }
     }
 
@@ -70,6 +74,9 @@ pub struct PeerSinkConfig {
     /// peer. At least 1; default `5000`.
     #[serde(default = "default_handshake_timeout_ms")]
     pub handshake_timeout_ms: u64,
+    /// Optional TLS / mutual-TLS client configuration (`rustls`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::tls::ClientTlsConfig>,
 }
 
 impl PeerSinkConfig {
@@ -83,6 +90,7 @@ impl PeerSinkConfig {
         Self {
             connect: connect.into_iter().map(Into::into).collect(),
             handshake_timeout_ms: DEFAULT_HANDSHAKE_TIMEOUT_MS,
+            tls: None,
         }
     }
 

@@ -507,6 +507,7 @@ connection url="nats://localhost:4222" password="hunter2"
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
+                decrypt: None,
                 config: source_config,
             }],
             wasm: Vec::new(),
@@ -519,6 +520,7 @@ connection url="nats://localhost:4222" password="hunter2"
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
+                encrypt: None,
                 config: sink_config,
             }],
             links: vec![super::super::config::LinkSpec {
@@ -546,6 +548,7 @@ connection url="nats://localhost:4222" password="hunter2"
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            encryption: None,
             variables: HashMap::new(),
         }
     }
@@ -565,6 +568,7 @@ connection url="nats://localhost:4222" password="hunter2"
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            encryption: None,
             variables: HashMap::new(),
         }
     }
@@ -869,6 +873,7 @@ field "v" type="int64" nullable=#false
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
+                decrypt: None,
                 config: default_config_value(),
             }],
             wasm: Vec::new(),
@@ -881,6 +886,7 @@ field "v" type="int64" nullable=#false
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
+                encrypt: None,
                 config: cfg("name \"bridge\""),
             }],
             links: vec![super::super::config::LinkSpec {
@@ -904,6 +910,7 @@ field "v" type="int64" nullable=#false
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
+                decrypt: None,
                 config: cfg("name \"bridge\""),
             }],
             wasm: Vec::new(),
@@ -916,6 +923,7 @@ field "v" type="int64" nullable=#false
                 codec: None,
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
+                encrypt: None,
                 config: default_config_value(),
             }],
             links: vec![super::super::config::LinkSpec {

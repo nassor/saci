@@ -188,6 +188,7 @@ fn config_with(run_mode: RunMode, flow: FlowControlConfig) -> ServiceConfig {
         http: HttpConfig::default(),
         store: None,
         observability: ObservabilityConfig::default(),
+        encryption: None,
         variables: std::collections::HashMap::new(),
     }
 }

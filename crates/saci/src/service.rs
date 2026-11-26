@@ -114,10 +114,11 @@ pub use builder::{
 pub use cluster::{ClusterStats, run_cluster};
 #[cfg(feature = "service")]
 pub use config::{
-    ClusterConfig, CodecSpec, DlqBlock, DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig,
-    HttpConfig, LinkSpec, LogFormat, NodeConfig, ObservabilityConfig, PeerSpec, PluginSpec,
-    RetryConfig, RunMode, SchemaSpec, ServiceConfig, ServiceMode, SinkSpec, SourceSpec,
-    StandaloneConfig, StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
+    ClusterConfig, CodecEncryptionConfig, CodecSpec, DlqBlock, DlqConfig, DlqReplayPoint,
+    FlowControlConfig, HealConfig, HttpConfig, KeySpec, LinkSpec, LogFormat, NodeConfig,
+    NodeCryptoConfig, ObservabilityConfig, PeerSpec, PluginSpec, RetryConfig, RunMode, SchemaSpec,
+    ServiceConfig, ServiceEncryptionConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig,
+    StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
 };
 #[cfg(feature = "service")]
 pub use dlq::{DeadLetterQueue, DlqError, DlqRegistry, DlqShared, ReplayFilter};
