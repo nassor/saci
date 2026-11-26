@@ -269,6 +269,7 @@ is the runnable example.
 | `name` | string | the id | display name on the dashboard |
 | `format` | string | required | `csv`, `ndjson`, `parquet`, `avro` or `arrow-ipc`; see [Formats](@/service/formats/_index.md) |
 | `config` | child block | empty | handed to that format; the keys are on the format's own page, and a key the format does not read is an error |
+| `encryption` | child block | none | wrap encoded streams and messages in AEAD envelopes; see [Encryption and TLS](@/service/config/encryption.md) |
 
 ### schema
 
@@ -288,6 +289,7 @@ is the runnable example.
 | `codec` | string | none | id of the `codec` node whose format decodes its bytes; omitted by a connector that carries rows already |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
 | `flow_control` | child block | the top-level policy | admission override for this source; see [Flow control](@/service/operate/flow-control.md) |
+| `decrypt` | child block | none | decrypt fields or whole batches read from the source; see [Encryption and TLS](@/service/config/encryption.md) |
 | `config` | child block | empty | read verbatim by the connector; the keys are on the connector's own page |
 
 ### sink
@@ -300,6 +302,7 @@ is the runnable example.
 | `component` | string | required | the rows this sink reads, which its upstream processor must declare |
 | `codec` | string | none | id of the `codec` node whose format encodes its bytes; omitted by a connector that takes rows directly |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
+| `encrypt` | child block | none | encrypt fields or whole batches before writing to the sink; see [Encryption and TLS](@/service/config/encryption.md) |
 | `config` | child block | empty | read verbatim by the connector; the keys are on the connector's own page |
 
 ### wasm and plugin

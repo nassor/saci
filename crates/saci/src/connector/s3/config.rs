@@ -22,6 +22,29 @@ use serde::Deserialize;
 use crate::connector::SchemaFrom;
 use crate::error::SaciError;
 
+/// Typed server-side encryption configuration for S3 objects.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum S3EncryptionConfig {
+    /// Server-side encryption with Amazon S3 managed keys (`AES256`).
+    SseS3,
+    /// Server-side encryption with AWS KMS keys (`sse:kms`).
+    SseKms {
+        /// Optional KMS key ARN or alias; omitted uses the bucket default key.
+        #[serde(default)]
+        kms_key_id: Option<String>,
+    },
+    /// Server-side encryption with customer-provided 256-bit keys (`sse-c`).
+    SseC {
+        /// Base64-encoded 32-byte key. Mutually exclusive with `customer_key_file`.
+        #[serde(default)]
+        customer_key_base64: Option<String>,
+        /// Path to a file containing the 32-byte raw or base64-encoded key.
+        #[serde(default)]
+        customer_key_file: Option<String>,
+    },
+}
+
 /// Endpoint, credentials and client options shared by both halves.
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +85,9 @@ pub struct ConnectionConfig {
     /// how the IMDS, ECS, EKS and web-identity credential paths are reached.
     #[serde(default)]
     pub from_env: bool,
+    /// Typed server-side encryption settings (`sse_s3`, `sse_kms`, `sse_c`).
+    #[serde(default)]
+    pub encryption: Option<Box<S3EncryptionConfig>>,
     /// Every remaining `object_store` S3 or HTTP-client option, by its own
     /// name: `unsigned_payload`, `checksum_algorithm`, `conditional_put`,
     /// `copy_if_not_exists`, `request_payer`, `disable_tagging`, `s3_express`,
@@ -117,6 +143,9 @@ impl ConnectionConfig {
         if let Some(session_token) = &self.session_token {
             builder = builder.with_token(session_token);
         }
+        if let Some(encryption) = &self.encryption {
+            builder = apply_s3_encryption(what, builder, encryption.as_ref())?;
+        }
         let store = builder
             .with_allow_http(self.allow_http)
             .with_virtual_hosted_style_request(self.virtual_hosted_style)
@@ -124,6 +153,96 @@ impl ConnectionConfig {
             .build()
             .map_err(|e| SaciError::configuration(format!("{what}: {e}")))?;
         Ok(Arc::new(store))
+    }
+}
+
+fn apply_s3_encryption(
+    what: &str,
+    mut builder: AmazonS3Builder,
+    encryption: &S3EncryptionConfig,
+) -> Result<AmazonS3Builder, SaciError> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let set_key =
+        |b: AmazonS3Builder, key_name: &str, val: &str| -> Result<AmazonS3Builder, SaciError> {
+            let key = AmazonS3ConfigKey::from_str(key_name).map_err(|e| {
+                SaciError::configuration(format!("{what}: internal S3 key error: {e}"))
+            })?;
+            Ok(b.with_config(key, val))
+        };
+
+    match encryption {
+        S3EncryptionConfig::SseS3 => set_key(builder, "aws_server_side_encryption", "AES256"),
+        S3EncryptionConfig::SseKms { kms_key_id } => {
+            builder = set_key(builder, "aws_server_side_encryption", "aws:kms")?;
+            if let Some(id) = kms_key_id {
+                if id.trim().is_empty() {
+                    return Err(SaciError::configuration(format!(
+                        "{what}: connection.encryption.kms_key_id must not be empty"
+                    )));
+                }
+                builder = set_key(builder, "aws_sse_kms_key_id", id.trim())?;
+            }
+            Ok(builder)
+        }
+        S3EncryptionConfig::SseC {
+            customer_key_base64,
+            customer_key_file,
+        } => {
+            let b64 = match (customer_key_base64, customer_key_file) {
+                (Some(inline), None) => {
+                    let decoded = STANDARD.decode(inline.trim()).map_err(|e| {
+                        SaciError::configuration(format!(
+                            "{what}: connection.encryption.customer_key_base64 is invalid base64: {e}"
+                        ))
+                    })?;
+                    if decoded.len() != 32 {
+                        return Err(SaciError::configuration(format!(
+                            "{what}: connection.encryption.customer_key_base64 must decode to 32 bytes, got {}",
+                            decoded.len()
+                        )));
+                    }
+                    inline.trim().to_string()
+                }
+                (None, Some(path)) => {
+                    let raw = std::fs::read(path).map_err(|e| {
+                        SaciError::configuration(format!(
+                            "{what}: cannot read connection.encryption.customer_key_file '{path}': {e}"
+                        ))
+                    })?;
+                    if raw.len() == 32 {
+                        STANDARD.encode(raw)
+                    } else {
+                        let text = std::str::from_utf8(&raw).map_err(|_| {
+                            SaciError::configuration(format!(
+                                "{what}: connection.encryption.customer_key_file '{path}' must be 32 raw bytes or base64"
+                            ))
+                        })?;
+                        let trimmed = text.trim();
+                        let decoded = STANDARD.decode(trimmed).map_err(|e| {
+                            SaciError::configuration(format!(
+                                "{what}: connection.encryption.customer_key_file '{path}' is invalid base64: {e}"
+                            ))
+                        })?;
+                        if decoded.len() != 32 {
+                            return Err(SaciError::configuration(format!(
+                                "{what}: connection.encryption.customer_key_file '{path}' must decode to 32 bytes, got {}",
+                                decoded.len()
+                            )));
+                        }
+                        trimmed.to_string()
+                    }
+                }
+                _ => {
+                    return Err(SaciError::configuration(format!(
+                        "{what}: connection.encryption (sse_c) requires exactly one of 'customer_key_base64' or 'customer_key_file'"
+                    )));
+                }
+            };
+            builder = set_key(builder, "aws_server_side_encryption", "sse-c")?;
+            set_key(builder, "aws_sse_customer_key_base64", &b64)
+        }
     }
 }
 
@@ -291,5 +410,29 @@ mod tests {
         .expect("config parses");
         cfg.build_store("S3Source")
             .expect("construction is request-free");
+    }
+
+    #[test]
+    fn typed_s3_encryption_modes_parse_and_validate() {
+        for kdl in [
+            r#"bucket "b"
+               encryption kind="sse_s3""#,
+            r#"bucket "b"
+               encryption kind="sse_kms" kms_key_id="arn:aws:kms:us-east-1:123:key/abc""#,
+            r#"bucket "b"
+               encryption kind="sse_c" customer_key_base64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=""#,
+        ] {
+            let cfg = ConnectionConfig::deserialize(config(kdl)).expect("parses");
+            cfg.build_store("S3Sink").expect("valid encryption builds");
+        }
+
+        let bad = ConnectionConfig::deserialize(config(
+            r#"bucket "b"
+               encryption kind="sse_c" customer_key_base64="AAAA""#,
+        ))
+        .expect("parses");
+        let err = bad.build_store("S3Sink").expect_err("short key refused");
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("32 bytes"), "got: {err}");
     }
 }

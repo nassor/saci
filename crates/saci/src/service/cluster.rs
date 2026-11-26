@@ -635,6 +635,7 @@ mod tests {
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            encryption: None,
             variables: HashMap::new(),
         }
     }
@@ -918,6 +919,7 @@ mod tests {
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            encryption: None,
             variables: HashMap::new(),
         };
 

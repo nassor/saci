@@ -334,12 +334,14 @@ Source:
 | `auth.bearer` | string | none | the token every request must present |
 | `buffer` | integer | `64` | requests queued before backpressure |
 | `max_body_bytes` | integer | `16777216` | the largest body accepted, 16 MiB by default |
+| `tls` | table | none | `cert_file`, `key_file`, and optional `client_ca_file` for push shorthand; see [Encryption and TLS](@/service/config/encryption.md) |
 | `mode.kind` | string | `push` | `push` listens, `pull` reads `mode.url` |
 | `mode.url` | string | required for pull | the url a body is read from |
 | `mode.interval_ms` | integer | `10000` | the gap between pull reads |
 | `mode.headers` | table | none | headers every pull read carries |
 | `mode.stop_at_end` | bool | `false` | read once and finish instead of repeating |
 | `mode.max_body_bytes` | integer | `16777216` | the largest pull body accepted |
+| `mode.tls` | table | none | server or client TLS settings matching `mode.kind`; see [Encryption and TLS](@/service/config/encryption.md) |
 | `field` | lines | none | the columns to emit instead of the canonical ten |
 
 Sink:
@@ -349,6 +351,7 @@ Sink:
 | `url` | string | required | the endpoint every export is posted to |
 | `encoding` | string | `protobuf` | `protobuf` or `json` |
 | `headers` | table | none | header pairs every export carries |
+| `tls` | table | none | `ca_file`, `cert_file`, `key_file`, `server_name`, and `use_platform_roots`; see [Encryption and TLS](@/service/config/encryption.md) |
 | `timeout_ms` | integer | `10000` | how long one export waits for a response |
 | `metric_name` | string | `saci_metric` | the name for a batch whose name column is empty |
 | `service_name` | string | none | the `service.name` resource attribute every export carries |

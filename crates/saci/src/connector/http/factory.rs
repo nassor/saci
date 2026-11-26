@@ -724,21 +724,50 @@ fn listen_methods(config: &ConfigValue, what: &str) -> Result<Vec<String>, SaciE
         .collect()
 }
 
-/// The listening source's `tls` block: the pair, or neither.
+/// The listening source's `tls` block: `cert_file` + `key_file`, plus optional `client_ca_file`.
 fn listen_tls(config: &ConfigValue, what: &str) -> Result<Option<ServerTls>, SaciError> {
-    let files = tls_files(config, what)?;
-    if files.ca_file.is_some() {
-        return Err(SaciError::configuration(format!(
-            "{what} config.tls['ca_file'] is not a listener key: a listening source authenticates \
-             callers with auth {{ bearer }}, not with a client certificate"
-        )));
+    let Some(value) = config.get("tls") else {
+        return Ok(None);
+    };
+    let table = value
+        .as_object()
+        .ok_or_else(|| SaciError::configuration(format!("{what} config.tls must be a table")))?;
+    let mut cert_file = None;
+    let mut key_file = None;
+    let mut client_ca_file = None;
+    for (key, value) in table {
+        let path = value.as_str().ok_or_else(|| {
+            SaciError::configuration(format!("{what} config.tls['{key}'] must be a string"))
+        })?;
+        match key.as_str() {
+            "ca_file" => {
+                return Err(SaciError::configuration(format!(
+                    "{what} config.tls['ca_file'] is not a listener key: a listening source \
+                     authenticates callers with auth {{ bearer }} or tls.client_ca_file, not \
+                     with ca_file"
+                )));
+            }
+            "cert_file" => cert_file = Some(PathBuf::from(path)),
+            "key_file" => key_file = Some(PathBuf::from(path)),
+            "client_ca_file" => client_ca_file = Some(PathBuf::from(path)),
+            _ => {
+                return Err(SaciError::configuration(format!(
+                    "{what} config.tls['{key}'] is not a tls key: expected 'cert_file', \
+                     'key_file' or 'client_ca_file'"
+                )));
+            }
+        }
     }
-    match (files.cert_file, files.key_file) {
-        (None, None) => Ok(None),
-        (Some(cert_file), Some(key_file)) => Ok(Some(ServerTls {
+    match (cert_file, key_file, client_ca_file) {
+        (None, None, None) => Ok(None),
+        (Some(cert_file), Some(key_file), client_ca_file) => Ok(Some(ServerTls {
             cert_file,
             key_file,
+            client_ca_file,
         })),
+        (None, None, Some(_)) => Err(SaciError::configuration(format!(
+            "{what} config.tls needs 'cert_file' and 'key_file' alongside 'client_ca_file'"
+        ))),
         _ => Err(SaciError::configuration(format!(
             "{what} config.tls needs both 'cert_file' and 'key_file'"
         ))),

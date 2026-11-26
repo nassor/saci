@@ -219,7 +219,9 @@ peer surfaces as `TcpSink: cannot connect to {peer}`. One connection then serves
 lifetime, so a peer that goes away mid-run fails every later write on that socket.
 
 A clean close between frames is a normal disconnect, and the sink's own shutdown closes its write
-half that way.
+half that way. Both halves accept an optional `tls` block for TLS or mutual TLS via `rustls` (30
+seconds for incoming server handshakes); see
+[Encryption and TLS](@/service/config/encryption.md).
 
 ## Every key
 
@@ -230,6 +232,7 @@ Source:
 | `bind` | string | required | the address the listener accepts producers on |
 | `buffer` | integer | `64` | decoded batches queued before backpressure; at least 1 |
 | `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default; at least 1 |
+| `tls` | table | none | `cert_file`, `key_file`, and optional `client_ca_file`; see [Encryption and TLS](@/service/config/encryption.md) |
 | `field` | lines | required | the schema each payload decodes against |
 
 Sink:
@@ -237,6 +240,7 @@ Sink:
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `connect` | string | required | the peer this sink dials |
+| `tls` | table | none | `ca_file`, `cert_file`, `key_file`, `server_name`, and `use_platform_roots`; see [Encryption and TLS](@/service/config/encryption.md) |
 | `field` | lines | required | the schema the frames are written with |
 
 An unrecognised key inside `config` is a configuration error naming the key, and so is a value of the wrong type. `field` lines sit beside these keys on both halves.

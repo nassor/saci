@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use super::default_config;
+use super::encryption::{CodecEncryptionConfig, NodeCryptoConfig};
 use super::mode::{RunMode, ServiceMode};
 use super::processor::{PluginSpec, WasmSpec};
 use super::retry::RetryConfig;
@@ -36,6 +37,9 @@ pub struct CodecSpec {
     pub name: Option<String>,
     /// Registered format name, resolved against the `CodecRegistry`.
     pub format: String,
+    /// Optional whole-payload AEAD encryption wrapper around this codec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<CodecEncryptionConfig>,
     /// Handed to that format's factory. Empty table when absent.
     #[serde(
         default = "default_config",
@@ -52,6 +56,7 @@ impl CodecSpec {
             id: id.into(),
             name: None,
             format: format.into(),
+            encryption: None,
             config: default_config(),
         }
     }
@@ -92,6 +97,9 @@ pub struct SourceSpec {
     /// top-level `flow_control` block. Absent means the top-level policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_control: Option<FlowControlConfig>,
+    /// Optional field-level or whole-payload decryption on incoming batches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decrypt: Option<NodeCryptoConfig>,
     /// Opaque per-source configuration.
     #[serde(
         default = "default_config",
@@ -120,6 +128,7 @@ impl SourceSpec {
             retry: RetryConfig::default(),
             heal: None,
             flow_control: None,
+            decrypt: None,
             config: default_config(),
         }
     }
@@ -156,6 +165,9 @@ pub struct SinkSpec {
     /// load-time error rather than a block that quietly does nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heal: Option<HealConfig>,
+    /// Optional field-level or whole-payload encryption before writing to the sink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypt: Option<NodeCryptoConfig>,
     /// Opaque per-sink configuration.
     #[serde(
         default = "default_config",
@@ -182,6 +194,7 @@ impl SinkSpec {
             component: component.into(),
             retry: RetryConfig::default(),
             heal: None,
+            encrypt: None,
             config: default_config(),
         }
     }
@@ -825,6 +838,26 @@ impl WorkflowSpec {
                     e.message()
                 ))
             })?;
+        }
+
+        // 20. Validate codec/source/sink encryption blocks.
+        for codec in &self.codecs {
+            if let Some(enc) = &codec.encryption {
+                enc.validate(&format!("workflow '{wf}' codec '{}'", codec.id))?;
+            }
+        }
+        for source in &self.sources {
+            if let Some(dec) = &source.decrypt {
+                dec.validate(
+                    &format!("workflow '{wf}' source '{}'.decrypt", source.id),
+                    false,
+                )?;
+            }
+        }
+        for sink in &self.sinks {
+            if let Some(enc) = &sink.encrypt {
+                enc.validate(&format!("workflow '{wf}' sink '{}'.encrypt", sink.id), true)?;
+            }
         }
 
         Ok(())

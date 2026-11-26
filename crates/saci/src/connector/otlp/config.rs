@@ -68,6 +68,9 @@ pub struct PushMode {
     /// The largest body accepted.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    /// Optional TLS / mutual-TLS server configuration (`rustls`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::tls::ServerTlsConfig>,
 }
 
 /// The pull mode: a url read once or on an interval.
@@ -88,6 +91,9 @@ pub struct PullMode {
     /// The largest body accepted.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    /// Optional TLS / mutual-TLS client configuration (`rustls`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::tls::ClientTlsConfig>,
 }
 
 /// The read strategy of one source.
@@ -146,6 +152,9 @@ pub struct OtlpMetricsSourceConfig {
     /// The largest body accepted, when no `mode` block is given.
     #[serde(default)]
     pub max_body_bytes: Option<usize>,
+    /// Optional TLS / mutual-TLS server configuration for push shorthand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::tls::ServerTlsConfig>,
 }
 
 impl OtlpMetricsSourceConfig {
@@ -160,10 +169,11 @@ impl OtlpMetricsSourceConfig {
             || self.path.is_some()
             || self.auth.is_some()
             || self.buffer.is_some()
-            || self.max_body_bytes.is_some();
+            || self.max_body_bytes.is_some()
+            || self.tls.is_some();
         if self.mode.is_some() && shorthand {
             return Err(SaciError::configuration(format!(
-                "{what}: bind, path, auth, buffer and max_body_bytes belong to the push mode, and a \
+                "{what}: bind, path, auth, buffer, max_body_bytes and tls belong to the push mode, and a \
                  'mode' block sets them for whichever kind it names"
             )));
         }
@@ -178,6 +188,7 @@ impl OtlpMetricsSourceConfig {
                 buffer: self.buffer.unwrap_or(DEFAULT_BUFFER).max(1),
                 auth: self.auth.clone(),
                 max_body_bytes: self.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES),
+                tls: self.tls.clone(),
             }),
         };
         match &mode {
@@ -254,6 +265,9 @@ pub struct OtlpMetricsSinkConfig {
     /// How many rows one export carries at most.
     #[serde(default = "default_batch_rows")]
     pub batch_rows: usize,
+    /// Optional TLS / mutual-TLS client configuration (`rustls`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::tls::ClientTlsConfig>,
 }
 
 impl OtlpMetricsSinkConfig {
@@ -317,6 +331,56 @@ fn default_timeout_ms() -> u64 {
 
 fn default_batch_rows() -> usize {
     DEFAULT_BATCH_ROWS
+}
+
+/// Apply optional [`crate::tls::ClientTlsConfig`] settings onto a `reqwest::ClientBuilder`.
+pub(crate) fn apply_reqwest_tls(
+    what: &str,
+    mut builder: reqwest::ClientBuilder,
+    tls: Option<&crate::tls::ClientTlsConfig>,
+) -> Result<reqwest::ClientBuilder, SaciError> {
+    let Some(tls) = tls else {
+        return Ok(builder);
+    };
+    if !tls.use_platform_roots && tls.ca_file.is_none() {
+        return Err(SaciError::configuration(format!(
+            "{what}: tls.use_platform_roots is false, so tls.ca_file must be set"
+        )));
+    }
+    if let Some(ca_path) = &tls.ca_file {
+        let pem = crate::tls::read_pem(what, "ca_file", ca_path)?;
+        let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| {
+            SaciError::configuration(format!(
+                "{what}: invalid tls.ca_file '{}': {e}",
+                ca_path.display()
+            ))
+        })?;
+        builder = if tls.use_platform_roots {
+            builder.tls_certs_merge(certs)
+        } else {
+            builder.tls_certs_only(certs)
+        };
+    }
+    match (&tls.cert_file, &tls.key_file) {
+        (Some(cert_path), Some(key_path)) => {
+            let mut pem = crate::tls::read_pem(what, "cert_file", cert_path)?;
+            pem.push(b'\n');
+            pem.extend_from_slice(&crate::tls::read_pem(what, "key_file", key_path)?);
+            let identity = reqwest::Identity::from_pem(&pem).map_err(|e| {
+                SaciError::configuration(format!(
+                    "{what}: config.tls cert_file and key_file are not a usable pair: {e}"
+                ))
+            })?;
+            builder = builder.identity(identity);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(SaciError::configuration(format!(
+                "{what} config.tls needs both 'cert_file' and 'key_file', or neither"
+            )));
+        }
+    }
+    Ok(builder)
 }
 
 #[cfg(test)]

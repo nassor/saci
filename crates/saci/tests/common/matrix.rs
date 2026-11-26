@@ -477,6 +477,21 @@ pub const FORMATS: [Format; 6] = [
     Format::Parquet,
 ];
 
+/// Shared 256-bit AES-GCM key for all encrypted byte codecs in the matrix.
+const MATRIX_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+/// Shared 256-bit key for Turso encrypted local databases in the matrix.
+const TURSO_HEXKEY: &str = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
+
+fn matrix_cipher() -> Arc<saci::crypto::Cipher> {
+    let material =
+        saci::crypto::KeyMaterial::from_hex(MATRIX_KEY_HEX).expect("matrix hex key is valid");
+    let provider = Arc::new(
+        saci::crypto::StaticKeyProvider::single("matrix", material).expect("matrix key provider"),
+    );
+    Arc::new(saci::crypto::Cipher::aes_256_gcm(provider))
+}
+
 impl Format {
     /// The `format` key, `None` for [`Format::None`].
     fn key(self) -> Option<&'static str> {
@@ -495,17 +510,21 @@ impl Format {
         self.key().unwrap_or("none")
     }
 
-    /// A codec instance matching what the registry builds for this
+    /// An AEAD-encrypted codec wrapping what the registry builds for this
     /// format, for seeding and reading back outside the service.
     fn codec(self) -> Option<Arc<dyn Codec>> {
-        match self {
-            Self::None => None,
-            Self::ArrowIpc => Some(Arc::new(saci::codec::arrow_ipc::ArrowIpcCodec::new())),
-            Self::Avro => Some(Arc::new(saci::codec::avro::AvroCodec::new())),
-            Self::Csv => Some(Arc::new(saci::codec::csv::CsvCodec::new())),
-            Self::Ndjson => Some(Arc::new(saci::codec::ndjson::NdjsonCodec::default())),
-            Self::Parquet => Some(Arc::new(saci::codec::parquet::ParquetCodec::new())),
-        }
+        let inner: Arc<dyn Codec> = match self {
+            Self::None => return None,
+            Self::ArrowIpc => Arc::new(saci::codec::arrow_ipc::ArrowIpcCodec::new()),
+            Self::Avro => Arc::new(saci::codec::avro::AvroCodec::new()),
+            Self::Csv => Arc::new(saci::codec::csv::CsvCodec::new()),
+            Self::Ndjson => Arc::new(saci::codec::ndjson::NdjsonCodec::default()),
+            Self::Parquet => Arc::new(saci::codec::parquet::ParquetCodec::new()),
+        };
+        Some(Arc::new(saci::crypto::EncryptedCodec::new(
+            inner,
+            matrix_cipher(),
+        )))
     }
 
     /// A self-describing format reads the schema the document carries. Every
@@ -1399,7 +1418,7 @@ impl Resource {
 
 /// `host:port` of a Kafka broker advertising that same address.
 const KAFKA_BROKERS: &str = "SACI_MATRIX_KAFKA_BROKERS";
-/// `nats://host:port` of a NATS server running JetStream.
+/// `tls://host:port` of a NATS server running JetStream over mTLS.
 const NATS_URL: &str = "SACI_MATRIX_NATS_URL";
 /// A `postgres://` DSN.
 const POSTGRES_DSN: &str = "SACI_MATRIX_POSTGRES_DSN";
@@ -1415,6 +1434,226 @@ const S3_ACCESS_KEY_ID: &str = "SACI_MATRIX_S3_ACCESS_KEY_ID";
 const S3_SECRET_ACCESS_KEY: &str = "SACI_MATRIX_S3_SECRET_ACCESS_KEY";
 /// `http://host:port` of ClickHouse's HTTP interface.
 const CLICKHOUSE_URL: &str = "SACI_MATRIX_CLICKHOUSE_URL";
+/// Ephemeral PEM paths set by `cargo xtask matrix` for TLS/mTLS containers.
+const TLS_CA_FILE: &str = "SACI_MATRIX_TLS_CA_FILE";
+const TLS_CLIENT_CERT_FILE: &str = "SACI_MATRIX_TLS_CLIENT_CERT_FILE";
+const TLS_CLIENT_KEY_FILE: &str = "SACI_MATRIX_TLS_CLIENT_KEY_FILE";
+
+/// Client-side TLS file paths used by connectors talking to a remote or local server.
+#[derive(Clone)]
+struct TlsClientPaths {
+    ca_file: PathBuf,
+    client_cert_file: PathBuf,
+    client_key_file: PathBuf,
+}
+
+impl TlsClientPaths {
+    fn from_env() -> Option<Self> {
+        let ca_file = variable(TLS_CA_FILE)?;
+        let client_cert_file = variable(TLS_CLIENT_CERT_FILE)?;
+        let client_key_file = variable(TLS_CLIENT_KEY_FILE)?;
+        Some(Self {
+            ca_file: PathBuf::from(ca_file),
+            client_cert_file: PathBuf::from(client_cert_file),
+            client_key_file: PathBuf::from(client_key_file),
+        })
+    }
+
+    fn client_tls_config(&self) -> saci::tls::ClientTlsConfig {
+        saci::tls::ClientTlsConfig {
+            ca_file: Some(self.ca_file.clone()),
+            cert_file: Some(self.client_cert_file.clone()),
+            key_file: Some(self.client_key_file.clone()),
+            server_name: Some("localhost".to_string()),
+            use_platform_roots: false,
+        }
+    }
+
+    fn pg_tls(&self) -> Result<tokio_postgres_rustls::MakeRustlsConnect, String> {
+        let cfg = saci::tls::load_client_config("matrix postgres", &self.client_tls_config(), &[])
+            .map_err(|e| format!("postgres tls config: {e}"))?;
+        Ok(tokio_postgres_rustls::MakeRustlsConnect::new(
+            (*cfg).clone(),
+        ))
+    }
+
+    fn mysql_ssl_opts(&self) -> Result<mysql_async::SslOpts, String> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let pem = std::fs::read(&self.ca_file)
+            .map_err(|e| format!("read mariadb ssl_ca {}: {e}", self.ca_file.display()))?;
+        Ok(mysql_async::SslOpts::default().with_root_certs(vec![pem.into()]))
+    }
+}
+
+/// Ephemeral mTLS CA, server, and client bundle generated per slice for
+/// in-process network connectors (`http`, `http-listen`, `otlp-metrics`, `tcp`, `peer`).
+struct MatrixTls {
+    _dir: tempfile::TempDir,
+    ca_file: PathBuf,
+    srv_cert_file: PathBuf,
+    srv_key_file: PathBuf,
+    cli_cert_file: PathBuf,
+    cli_key_file: PathBuf,
+    server_config: Arc<rustls::ServerConfig>,
+    client_config: Arc<rustls::ClientConfig>,
+    http_client: reqwest::Client,
+}
+
+impl MatrixTls {
+    fn generate() -> Result<Self, String> {
+        use rcgen::{
+            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose,
+        };
+
+        let dir = tempfile::tempdir().map_err(|e| format!("matrix tls tempdir: {e}"))?;
+
+        let mut ca_params =
+            CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
+        ca_params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::Utf8String("SACI Matrix Local CA".to_string()),
+        );
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca_key = KeyPair::generate().map_err(|e| e.to_string())?;
+        let ca_cert = ca_params.self_signed(&ca_key).map_err(|e| e.to_string())?;
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let mut srv_params =
+            CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+                .map_err(|e| e.to_string())?;
+        srv_params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::Utf8String("SACI Matrix Local Server".to_string()),
+        );
+        srv_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let srv_key = KeyPair::generate().map_err(|e| e.to_string())?;
+        let srv_cert = srv_params
+            .signed_by(&srv_key, &issuer)
+            .map_err(|e| e.to_string())?;
+
+        let mut cli_params =
+            CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+                .map_err(|e| e.to_string())?;
+        cli_params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::Utf8String("SACI Matrix Local Client".to_string()),
+        );
+        cli_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let cli_key = KeyPair::generate().map_err(|e| e.to_string())?;
+        let cli_cert = cli_params
+            .signed_by(&cli_key, &issuer)
+            .map_err(|e| e.to_string())?;
+
+        let ca_pem = ca_cert.pem();
+        let srv_cert_pem = srv_cert.pem();
+        let srv_key_pem = srv_key.serialize_pem();
+        let cli_cert_pem = cli_cert.pem();
+        let cli_key_pem = cli_key.serialize_pem();
+
+        let ca_file = dir.path().join("ca.pem");
+        let srv_cert_file = dir.path().join("srv.pem");
+        let srv_key_file = dir.path().join("srv.key");
+        let cli_cert_file = dir.path().join("cli.pem");
+        let cli_key_file = dir.path().join("cli.key");
+
+        std::fs::write(&ca_file, &ca_pem).map_err(|e| e.to_string())?;
+        std::fs::write(&srv_cert_file, &srv_cert_pem).map_err(|e| e.to_string())?;
+        std::fs::write(&srv_key_file, &srv_key_pem).map_err(|e| e.to_string())?;
+        std::fs::write(&cli_cert_file, &cli_cert_pem).map_err(|e| e.to_string())?;
+        std::fs::write(&cli_key_file, &cli_key_pem).map_err(|e| e.to_string())?;
+
+        let server_config = saci::tls::load_server_config(
+            "matrix local server",
+            &saci::tls::ServerTlsConfig {
+                cert_file: srv_cert_file.clone(),
+                key_file: srv_key_file.clone(),
+                client_ca_file: Some(ca_file.clone()),
+            },
+            &[],
+        )
+        .map_err(|e| format!("matrix local server tls: {e}"))?;
+
+        let client_config = saci::tls::load_client_config(
+            "matrix local client",
+            &saci::tls::ClientTlsConfig {
+                ca_file: Some(ca_file.clone()),
+                cert_file: Some(cli_cert_file.clone()),
+                key_file: Some(cli_key_file.clone()),
+                server_name: Some("localhost".to_string()),
+                use_platform_roots: false,
+            },
+            &[],
+        )
+        .map_err(|e| format!("matrix local client tls: {e}"))?;
+
+        saci::service::install_ring_provider();
+        let mut identity_pem = Vec::new();
+        identity_pem.extend_from_slice(cli_cert_pem.as_bytes());
+        identity_pem.extend_from_slice(cli_key_pem.as_bytes());
+        let http_client = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(ca_pem.as_bytes()).map_err(|e| e.to_string())?,
+            )
+            .identity(reqwest::Identity::from_pem(&identity_pem).map_err(|e| e.to_string())?)
+            .build()
+            .map_err(|e| format!("matrix http client: {e}"))?;
+
+        Ok(Self {
+            _dir: dir,
+            ca_file,
+            srv_cert_file,
+            srv_key_file,
+            cli_cert_file,
+            cli_key_file,
+            server_config,
+            client_config,
+            http_client,
+        })
+    }
+
+    fn client_paths(&self) -> TlsClientPaths {
+        TlsClientPaths {
+            ca_file: self.ca_file.clone(),
+            client_cert_file: self.cli_cert_file.clone(),
+            client_key_file: self.cli_key_file.clone(),
+        }
+    }
+
+    fn server_tls_kdl(&self, indent: &str) -> String {
+        format!(
+            "{indent}tls {{\n\
+             {indent}    cert_file \"{}\"\n\
+             {indent}    key_file \"{}\"\n\
+             {indent}    client_ca_file \"{}\"\n\
+             {indent}}}",
+            kdl_path(&self.srv_cert_file),
+            kdl_path(&self.srv_key_file),
+            kdl_path(&self.ca_file),
+        )
+    }
+
+    fn client_tls_kdl(&self, indent: &str, with_platform_roots: bool) -> String {
+        let extra = if with_platform_roots {
+            format!(
+                "\n{indent}    use_platform_roots #false\n{indent}    server_name \"localhost\""
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "{indent}tls {{\n\
+             {indent}    ca_file \"{}\"\n\
+             {indent}    cert_file \"{}\"\n\
+             {indent}    key_file \"{}\"{extra}\n\
+             {indent}}}",
+            kdl_path(&self.ca_file),
+            kdl_path(&self.cli_cert_file),
+            kdl_path(&self.cli_key_file),
+        )
+    }
+}
 
 /// How long a named endpoint may take to answer before its slice fails.
 ///
@@ -1428,22 +1667,25 @@ pub struct KafkaResource {
     pub brokers: String,
 }
 
-/// A live NATS server with JetStream enabled.
+/// A live NATS server with JetStream enabled over mTLS.
 pub struct NatsResource {
     pub url: String,
+    tls: TlsClientPaths,
 }
 
-/// A live PostgreSQL server.
+/// A live PostgreSQL server over mTLS.
 pub struct PostgresResource {
     pub dsn: String,
+    tls: TlsClientPaths,
 }
 
-/// A live MariaDB server and a live MySQL server. Sources read from the
-/// MariaDB one and sinks write into the MySQL one, so every case crosses the
-/// two.
+/// A live MariaDB server and a live MySQL server, both over TLS. Sources read
+/// from the MariaDB one and sinks write into the MySQL one, so every case
+/// crosses the two.
 pub struct MariadbResource {
     pub mariadb_dsn: String,
     pub mysql_dsn: String,
+    tls: TlsClientPaths,
 }
 
 /// A live S3-compatible endpoint with the run's one bucket created.
@@ -1456,7 +1698,8 @@ pub struct ClickhouseResource {
     pub url: String,
 }
 
-/// The six resources, each live or absent for the whole slice.
+/// The six resources, each live or absent for the whole slice, plus the
+/// slice's local mTLS bundle.
 ///
 /// Every endpoint comes from its variable rather than from a container
 /// started here: nextest runs each slice in a process of its own, so a
@@ -1471,6 +1714,7 @@ pub struct Resources {
     mariadb: Option<MariadbResource>,
     s3: Option<S3Resource>,
     clickhouse: Option<ClickhouseResource>,
+    local_tls: Arc<MatrixTls>,
 }
 
 impl Resources {
@@ -1479,11 +1723,13 @@ impl Resources {
     /// Every wait ends before any case starts, so a readiness poll never
     /// shares the poll loop with the slice's case futures.
     pub async fn connect() -> Self {
+        let local_tls = Arc::new(MatrixTls::generate().expect("matrix local mTLS bundle"));
+        let docker_tls = TlsClientPaths::from_env();
         let (kafka, nats, postgres, mariadb, clickhouse) = tokio::join!(
             await_kafka(),
-            await_nats(),
-            await_postgres(),
-            await_mariadb(),
+            await_nats(docker_tls.as_ref()),
+            await_postgres(docker_tls.as_ref()),
+            await_mariadb(docker_tls.as_ref()),
             await_clickhouse()
         );
         Self {
@@ -1493,6 +1739,7 @@ impl Resources {
             mariadb,
             s3: s3_from_env(),
             clickhouse,
+            local_tls,
         }
     }
 
@@ -1597,13 +1844,24 @@ async fn await_kafka() -> Option<KafkaResource> {
     Some(KafkaResource { brokers })
 }
 
-async fn await_nats() -> Option<NatsResource> {
+async fn await_nats(docker_tls: Option<&TlsClientPaths>) -> Option<NatsResource> {
     let url = variable(NATS_URL)?;
+    let tls = docker_tls
+        .cloned()
+        .unwrap_or_else(|| panic!("{NATS_URL} is set but {TLS_CA_FILE} / client TLS vars are not"));
     let probe = url.as_str();
+    let probe_tls = &tls;
     // `-js` starts the subsystem after the client port opens, so a JetStream
     // API round trip is the only sound readiness gate.
     await_ready(NATS_URL, &url, move || async move {
-        let Ok(client) = async_nats::connect(probe).await else {
+        let options = async_nats::ConnectOptions::new()
+            .require_tls(true)
+            .add_root_certificates(probe_tls.ca_file.clone())
+            .add_client_certificate(
+                probe_tls.client_cert_file.clone(),
+                probe_tls.client_key_file.clone(),
+            );
+        let Ok(client) = options.connect(probe).await else {
             return false;
         };
         let js = async_nats::jetstream::new(client);
@@ -1613,14 +1871,19 @@ async fn await_nats() -> Option<NatsResource> {
         )
     })
     .await;
-    Some(NatsResource { url })
+    Some(NatsResource { url, tls })
 }
 
-async fn await_postgres() -> Option<PostgresResource> {
+async fn await_postgres(docker_tls: Option<&TlsClientPaths>) -> Option<PostgresResource> {
     let dsn = variable(POSTGRES_DSN)?;
+    let tls = docker_tls.cloned().unwrap_or_else(|| {
+        panic!("{POSTGRES_DSN} is set but {TLS_CA_FILE} / client TLS vars are not")
+    });
+    let connector = tls.pg_tls().expect("postgres tls connector");
     let probe = dsn.as_str();
+    let probe_tls = &connector;
     await_ready(POSTGRES_DSN, &dsn, move || async move {
-        let Ok((client, connection)) = tokio_postgres::connect(probe, tokio_postgres::NoTls).await
+        let Ok((client, connection)) = tokio_postgres::connect(probe, probe_tls.clone()).await
         else {
             return false;
         };
@@ -1632,20 +1895,29 @@ async fn await_postgres() -> Option<PostgresResource> {
         ready
     })
     .await;
-    Some(PostgresResource { dsn })
+    Some(PostgresResource { dsn, tls })
 }
 
 /// Both servers are required: a MariaDB source feeds a MySQL sink in every
 /// case, so one alone leaves the resource absent.
-async fn await_mariadb() -> Option<MariadbResource> {
+async fn await_mariadb(docker_tls: Option<&TlsClientPaths>) -> Option<MariadbResource> {
     let (Some(mariadb_dsn), Some(mysql_dsn)) = (variable(MARIADB_DSN), variable(MYSQL_DSN)) else {
         return None;
     };
+    let tls = docker_tls.cloned().unwrap_or_else(|| {
+        panic!("{MARIADB_DSN} is set but {TLS_CA_FILE} / client TLS vars are not")
+    });
+    let ssl_opts = tls.mysql_ssl_opts().expect("mysql ssl opts");
     for (name, dsn) in [(MARIADB_DSN, &mariadb_dsn), (MYSQL_DSN, &mysql_dsn)] {
         let probe = dsn.as_str();
+        let probe_ssl = &ssl_opts;
         await_ready(name, dsn, move || async move {
             use mysql_async::prelude::Queryable;
-            let Ok(mut conn) = mysql_async::Conn::from_url(probe).await else {
+            let opts = mysql_async::OptsBuilder::from_opts(
+                mysql_async::Opts::from_url(probe).expect("valid mysql dsn"),
+            )
+            .ssl_opts(probe_ssl.clone());
+            let Ok(mut conn) = mysql_async::Conn::new(opts).await else {
                 return false;
             };
             conn.query_drop("SELECT 1").await.is_ok()
@@ -1655,6 +1927,7 @@ async fn await_mariadb() -> Option<MariadbResource> {
     Some(MariadbResource {
         mariadb_dsn,
         mysql_dsn,
+        tls,
     })
 }
 
@@ -2122,10 +2395,10 @@ struct HttpProbe {
 }
 
 impl HttpProbe {
-    fn spawn(body: Vec<u8>) -> Result<Self, String> {
+    fn spawn(body: Vec<u8>, tls: &Arc<MatrixTls>) -> Result<Self, String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let url = format!(
-            "http://{}/matrix",
+            "https://{}/matrix",
             listener.local_addr().map_err(|e| e.to_string())?
         );
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -2139,6 +2412,7 @@ impl HttpProbe {
             let handlers = Arc::clone(&handlers);
             let stop = Arc::clone(&stop);
             let body = Arc::new(body);
+            let server_config = Arc::clone(&tls.server_config);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     match listener.accept() {
@@ -2153,8 +2427,9 @@ impl HttpProbe {
                             };
                             let captured = Arc::clone(&captured);
                             let body = Arc::clone(&body);
+                            let server_config = Arc::clone(&server_config);
                             let handler = std::thread::spawn(move || {
-                                if let Some(request) = exchange(stream, &body) {
+                                if let Some(request) = exchange(stream, &body, server_config) {
                                     lock(&captured)[slot] = Some(request);
                                 }
                             });
@@ -2211,17 +2486,7 @@ impl Drop for HttpProbe {
     }
 }
 
-/// A stand-in `saci` source: it accepts every session and keeps the bytes.
-///
-/// Same thread shape as [`HttpProbe`]: a non-blocking acceptor thread that
-/// reserves each connection's slot at accept time, and one handler thread per
-/// connection, so `finish` reports sessions in arrival order however the
-/// handlers interleave.
-///
-/// The handler writes `accept` before it has read the hello. That is sound
-/// because the two directions are independent: the sink reads the reply only
-/// after its own hello is out, and nothing in the reply depends on what the
-/// hello said.
+/// A stand-in `saci` source over mTLS: it accepts every session and keeps the bytes.
 struct SaciProbe {
     addr: std::net::SocketAddr,
     captured: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
@@ -2231,7 +2496,11 @@ struct SaciProbe {
 }
 
 impl SaciProbe {
-    fn spawn() -> Result<Self, String> {
+    fn spawn(tls: &Arc<MatrixTls>) -> Result<Self, String> {
+        Self::spawn_tls(tls, true)
+    }
+
+    fn spawn_tls(tls: &Arc<MatrixTls>, send_peer_accept: bool) -> Result<Self, String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -2244,6 +2513,7 @@ impl SaciProbe {
             let captured = Arc::clone(&captured);
             let handlers = Arc::clone(&handlers);
             let stop = Arc::clone(&stop);
+            let server_config = Arc::clone(&tls.server_config);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     match listener.accept() {
@@ -2258,8 +2528,11 @@ impl SaciProbe {
                             };
                             let captured = Arc::clone(&captured);
                             let stop = Arc::clone(&stop);
+                            let server_config = Arc::clone(&server_config);
                             let handler = std::thread::spawn(move || {
-                                if let Some(session) = accept_session(stream, &stop) {
+                                if let Some(session) =
+                                    accept_session(stream, &stop, server_config, send_peer_accept)
+                                {
                                     lock(&captured)[slot] = Some(session);
                                 }
                             });
@@ -2308,35 +2581,64 @@ impl Drop for SaciProbe {
     }
 }
 
-/// Accept one session at once, then read it until the sink closes or the probe
-/// is asked to stop.
-///
-/// The read timeout is short and the loop rechecks `stop`, rather than one
-/// `read_to_end` under a long timeout: a stream-mode case holds its sink open
-/// for as long as the runner lives, which under a loaded full-matrix run is
-/// well past any timeout worth waiting out, and a timed-out `read_to_end`
-/// discards everything it had already read. `finish` sets `stop` only after
-/// the built service is gone, so the normal path still ends on a clean EOF.
-fn accept_session(mut stream: std::net::TcpStream, stop: &AtomicBool) -> Option<Vec<u8>> {
+/// Accept one mTLS `peer` or raw `tcp` session, then read it until the sink closes or the
+/// probe is asked to stop.
+fn accept_session(
+    mut stream: std::net::TcpStream,
+    stop: &AtomicBool,
+    server_config: Arc<rustls::ServerConfig>,
+    send_peer_accept: bool,
+) -> Option<Vec<u8>> {
     stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .ok()?;
-    let mut accept = Vec::new();
-    saci::connector::peer::wire::encode_frame(
-        &mut accept,
-        &saci::connector::peer::wire::Frame::Accept,
-    )
-    .ok()?;
-    stream.write_all(&accept).ok()?;
-    stream.flush().ok()?;
+    let mut conn = rustls::ServerConnection::new(server_config).ok()?;
+    while conn.is_handshaking() {
+        while conn.wants_write() {
+            if conn.write_tls(&mut stream).is_err() {
+                return None;
+            }
+        }
+        if conn.wants_read() {
+            let read = conn.read_tls(&mut stream).ok()?;
+            if read == 0 {
+                return None;
+            }
+            conn.process_new_packets().ok()?;
+        }
+    }
+    if send_peer_accept {
+        let mut accept = Vec::new();
+        saci::connector::peer::wire::encode_frame(
+            &mut accept,
+            &saci::connector::peer::wire::Frame::Accept,
+        )
+        .ok()?;
+        let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
+        tls_stream.write_all(&accept).ok()?;
+        tls_stream.flush().ok()?;
+    }
 
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let mut session = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        match stream.read(&mut chunk) {
-            // A clean close: the sink is done with this session.
+        loop {
+            match conn.reader().read(&mut chunk) {
+                // Clean TLS close_notify with all plaintext drained.
+                Ok(0) => return Some(session),
+                Ok(read) => session.extend_from_slice(&chunk[..read]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => return Some(session),
+            }
+        }
+        match conn.read_tls(&mut stream) {
             Ok(0) => return Some(session),
-            Ok(read) => session.extend_from_slice(&chunk[..read]),
+            Ok(_) => {
+                if conn.process_new_packets().is_err() {
+                    return Some(session);
+                }
+            }
             Err(e)
                 if matches!(
                     e.kind(),
@@ -2354,21 +2656,29 @@ fn accept_session(mut stream: std::net::TcpStream, stop: &AtomicBool) -> Option<
     }
 }
 
-/// Read one request, answer with `body`, and return the request body.
+/// Read one HTTPS mTLS request, answer with `body`, and return the request body.
 ///
 /// `connection: close` keeps one accept per request: the client cannot pool a
 /// socket the server said it would close.
-fn exchange(mut stream: std::net::TcpStream, body: &[u8]) -> Option<Vec<u8>> {
+fn exchange(
+    mut stream: std::net::TcpStream,
+    body: &[u8],
+    server_config: Arc<rustls::ServerConfig>,
+) -> Option<Vec<u8>> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .ok()?;
+    let mut conn = rustls::ServerConnection::new(server_config).ok()?;
+    conn.complete_io(&mut stream).ok()?;
+    let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+
     let mut buffered = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
         if let Some(at) = buffered.windows(4).position(|w| w == b"\r\n\r\n") {
             break at + 4;
         }
-        let read = stream.read(&mut chunk).ok()?;
+        let read = tls_stream.read(&mut chunk).ok()?;
         if read == 0 {
             break buffered.len();
         }
@@ -2385,7 +2695,7 @@ fn exchange(mut stream: std::net::TcpStream, body: &[u8]) -> Option<Vec<u8>> {
 
     let mut request = buffered[head_end..].to_vec();
     while request.len() < length {
-        let read = stream.read(&mut chunk).ok()?;
+        let read = tls_stream.read(&mut chunk).ok()?;
         if read == 0 {
             break;
         }
@@ -2396,9 +2706,10 @@ fn exchange(mut stream: std::net::TcpStream, body: &[u8]) -> Option<Vec<u8>> {
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(response.as_bytes()).ok()?;
-    stream.write_all(body).ok()?;
-    stream.flush().ok()?;
+    tls_stream.write_all(response.as_bytes()).ok()?;
+    tls_stream.write_all(body).ok()?;
+    tls_stream.conn.send_close_notify();
+    let _ = tls_stream.flush();
     Some(request)
 }
 
@@ -2498,6 +2809,7 @@ enum SourceProbe {
         url: String,
         format: Format,
         schema: Arc<Schema>,
+        tls: Arc<MatrixTls>,
     },
     S3 {
         connection: saci::connector::s3::ConnectionConfig,
@@ -2513,6 +2825,7 @@ enum SourceProbe {
         document: Vec<u8>,
         format: Format,
         schema: Arc<Schema>,
+        tls: Arc<MatrixTls>,
     },
 }
 
@@ -2525,11 +2838,17 @@ impl SourceProbe {
                 url,
                 format,
                 schema,
+                tls,
             } => Box::new(
                 saci::connector::http::HttpSource::new(
                     saci::connector::http::HttpSourceConfig {
                         client: saci::connector::http::HttpClientConfig {
                             timeout: Duration::from_secs(15),
+                            tls: saci::connector::http::TlsFiles {
+                                ca_file: Some(tls.ca_file.clone()),
+                                cert_file: Some(tls.cli_cert_file.clone()),
+                                key_file: Some(tls.cli_key_file.clone()),
+                            },
                             ..Default::default()
                         },
                         schema_from: saci::connector::SchemaFrom::Payload,
@@ -2566,6 +2885,7 @@ impl SourceProbe {
                 document,
                 format,
                 schema,
+                tls,
             } => {
                 return push_refusal(
                     document,
@@ -2573,6 +2893,7 @@ impl SourceProbe {
                         .codec()
                         .ok_or("a probed source always names a format")?,
                     schema,
+                    tls,
                 )
                 .await;
             }
@@ -2587,35 +2908,33 @@ impl SourceProbe {
     }
 }
 
-/// Post `document` at a fresh `HttpListenSource` and return the refusal its one
-/// `next_batch` reports.
-///
-/// The listener is bound by `new`, so the request waits in the accept backlog
-/// until `next_batch` starts the accept loop; the POST therefore runs as its
-/// own task rather than being awaited first. A refused document is answered
-/// and sent down the channel as an `Err`, which is what this reads.
+/// Post `document` at a fresh mTLS `HttpListenSource` and return the refusal
+/// its one `next_batch` reports.
 async fn push_refusal(
     document: Vec<u8>,
     codec: Arc<dyn Codec>,
     schema: Arc<Schema>,
+    tls: Arc<MatrixTls>,
 ) -> Result<String, String> {
     let mut source = saci::connector::http::HttpListenSource::new(
         saci::connector::http::HttpListenConfig {
             schema_from: saci::connector::SchemaFrom::Payload,
             path: "/matrix".to_string(),
+            tls: Some(saci::connector::http::ServerTls {
+                cert_file: tls.srv_cert_file.clone(),
+                key_file: tls.srv_key_file.clone(),
+                client_ca_file: Some(tls.ca_file.clone()),
+            }),
             ..saci::connector::http::HttpListenConfig::new("127.0.0.1:0")
         },
         schema,
         codec,
     )
     .map_err(|e| format!("probe source: {e}"))?;
-    let url = format!("http://{}/matrix", source.local_addr());
+    let url = format!("https://{}/matrix", source.local_addr());
+    let http_client = tls.http_client.clone();
     let post = tokio::spawn(async move {
-        // `rustls-no-provider` refuses to build a `Client` until a provider is
-        // installed process-wide. Idempotent, and asserted here rather than
-        // left to whichever connector happened to install one first.
-        saci::service::install_ring_provider();
-        reqwest::Client::new()
+        http_client
             .post(url)
             .body(document)
             .timeout(Duration::from_secs(15))
@@ -2662,7 +2981,7 @@ enum Readback {
         format: Format,
     },
     Tcp {
-        listener: tokio::net::TcpListener,
+        probe: SaciProbe,
         format: Format,
     },
     /// A `udp` sink sends to a collector socket the harness holds; the
@@ -2685,14 +3004,17 @@ enum Readback {
         url: String,
         stream: String,
         format: Format,
+        tls: TlsClientPaths,
     },
     Postgres {
         dsn: String,
         table: String,
+        tls: TlsClientPaths,
     },
     Mariadb {
         dsn: String,
         table: String,
+        tls: TlsClientPaths,
     },
     Turso {
         path: PathBuf,
@@ -2723,11 +3045,15 @@ const PLACEHOLDER_MYSQL_DSN: &str = "mysql://root:saci@127.0.0.1:1/saci";
 struct Endpoints {
     brokers: String,
     nats_url: String,
+    nats_tls: TlsClientPaths,
     dsn: String,
+    pg_tls: TlsClientPaths,
     mariadb_dsn: String,
     mysql_dsn: String,
+    mariadb_tls: TlsClientPaths,
     clickhouse_url: String,
     s3: saci::connector::s3::ConnectionConfig,
+    local_tls: Arc<MatrixTls>,
 }
 
 impl Endpoints {
@@ -2738,13 +3064,16 @@ impl Endpoints {
         let mariadb = if live { resources.mariadb() } else { None };
         let s3 = if live { resources.s3() } else { None };
         let clickhouse = if live { resources.clickhouse() } else { None };
+        let fallback_tls = resources.local_tls.client_paths();
         Self {
             brokers: kafka.map_or_else(|| "127.0.0.1:1".to_string(), |k| k.brokers.clone()),
-            nats_url: nats.map_or_else(|| "nats://127.0.0.1:1".to_string(), |n| n.url.clone()),
+            nats_url: nats.map_or_else(|| "tls://127.0.0.1:1".to_string(), |n| n.url.clone()),
+            nats_tls: nats.map_or_else(|| fallback_tls.clone(), |n| n.tls.clone()),
             dsn: postgres.map_or_else(
                 || "postgres://postgres:saci@127.0.0.1:1/postgres".to_string(),
                 |p| p.dsn.clone(),
             ),
+            pg_tls: postgres.map_or_else(|| fallback_tls.clone(), |p| p.tls.clone()),
             mariadb_dsn: mariadb.map_or_else(
                 || PLACEHOLDER_MYSQL_DSN.to_string(),
                 |m| m.mariadb_dsn.clone(),
@@ -2753,6 +3082,7 @@ impl Endpoints {
                 || PLACEHOLDER_MYSQL_DSN.to_string(),
                 |m| m.mysql_dsn.clone(),
             ),
+            mariadb_tls: mariadb.map_or_else(|| fallback_tls, |m| m.tls.clone()),
             clickhouse_url: clickhouse
                 .map_or_else(|| "http://127.0.0.1:1".to_string(), |c| c.url.clone()),
             s3: s3.map_or_else(
@@ -2766,13 +3096,15 @@ impl Endpoints {
                 },
                 |s| s.connection.clone(),
             ),
+            local_tls: Arc::clone(&resources.local_tls),
         }
     }
 }
 
-/// Open a PostgreSQL client whose connection task lives as long as the client.
-async fn pg_client(dsn: &str) -> Result<tokio_postgres::Client, String> {
-    let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+/// Open a PostgreSQL mTLS client whose connection task lives as long as the client.
+async fn pg_client(dsn: &str, tls: &TlsClientPaths) -> Result<tokio_postgres::Client, String> {
+    let connector = tls.pg_tls()?;
+    let (client, connection) = tokio_postgres::connect(dsn, connector)
         .await
         .map_err(|e| format!("postgres connect: {e}"))?;
     tokio::spawn(async move {
@@ -2781,9 +3113,14 @@ async fn pg_client(dsn: &str) -> Result<tokio_postgres::Client, String> {
     Ok(client)
 }
 
-/// Open a MariaDB or MySQL connection for seeding and reading back fixtures.
-async fn mysql_conn(dsn: &str) -> Result<mysql_async::Conn, String> {
-    mysql_async::Conn::from_url(dsn)
+/// Open a MariaDB or MySQL TLS connection for seeding and reading back fixtures.
+async fn mysql_conn(dsn: &str, tls: &TlsClientPaths) -> Result<mysql_async::Conn, String> {
+    let ssl_opts = tls.mysql_ssl_opts()?;
+    let opts = mysql_async::OptsBuilder::from_opts(
+        mysql_async::Opts::from_url(dsn).map_err(|e| format!("mariadb dsn: {e}"))?,
+    )
+    .ssl_opts(ssl_opts);
+    mysql_async::Conn::new(opts)
         .await
         .map_err(|e| format!("mariadb connect: {e}"))
 }
@@ -2804,9 +3141,66 @@ fn s3_connection_kdl(connection: &saci::connector::s3::ConnectionConfig, indent:
     )
 }
 
-/// Open a raw Turso connection to `path`.
+fn nats_connection_kdl(servers: &str, tls: &TlsClientPaths, indent: &str) -> String {
+    format!(
+        "{indent}connection {{\n\
+         {indent}    servers \"{servers}\"\n\
+         {indent}    tls {{\n\
+         {indent}        require #true\n\
+         {indent}        root_certificates \"{}\"\n\
+         {indent}        client_certificate \"{}\"\n\
+         {indent}        client_key \"{}\"\n\
+         {indent}    }}\n\
+         {indent}}}",
+        kdl_path(&tls.ca_file),
+        kdl_path(&tls.client_cert_file),
+        kdl_path(&tls.client_key_file),
+    )
+}
+
+fn pg_connection_kdl(dsn: &str, tls: &TlsClientPaths, indent: &str) -> String {
+    format!(
+        "{indent}connection {{\n\
+         {indent}    dsn \"{dsn}\"\n\
+         {indent}    sslmode \"require\"\n\
+         {indent}    sslrootcert \"{}\"\n\
+         {indent}    sslcert \"{}\"\n\
+         {indent}    sslkey \"{}\"\n\
+         {indent}}}",
+        kdl_path(&tls.ca_file),
+        kdl_path(&tls.client_cert_file),
+        kdl_path(&tls.client_key_file),
+    )
+}
+
+fn mariadb_connection_kdl(dsn: &str, tls: &TlsClientPaths, indent: &str) -> String {
+    format!(
+        "{indent}connection {{\n\
+         {indent}    dsn \"{dsn}\"\n\
+         {indent}    ssl_mode \"verify_identity\"\n\
+         {indent}    ssl_ca \"{}\"\n\
+         {indent}}}",
+        kdl_path(&tls.ca_file),
+    )
+}
+
+fn turso_connection_kdl(path: &Path, indent: &str) -> String {
+    format!(
+        "{indent}connection path=\"{}\" {{\n\
+         {indent}    encryption cipher=\"aes256gcm\" hexkey=\"{TURSO_HEXKEY}\"\n\
+         {indent}}}",
+        kdl_path(path),
+    )
+}
+
+/// Open a raw encrypted Turso connection to `path`.
 async fn turso_client(path: &std::path::Path) -> Result<turso::Connection, String> {
     let db = turso::Builder::new_local(path.to_str().ok_or("non-utf8 turso path")?)
+        .experimental_encryption(true)
+        .with_encryption(turso::EncryptionOpts {
+            cipher: "aes256gcm".to_string(),
+            hexkey: TURSO_HEXKEY.to_string(),
+        })
         .build()
         .await
         .map_err(|e| format!("turso open: {e}"))?;
@@ -2904,7 +3298,7 @@ async fn prepare_source(
             let feed = unique("feed");
             side.paired = Some(format!(
                 "workflow \"{feed}\" {{\n\
-                 \x20   codec \"{feed}_fmt\" format=\"ndjson\"\n\n\
+                 \x20   codec \"{feed}_fmt\" format=\"ndjson\" {{\n        encryption enabled=#true\n    }}\n\n\
                  \x20   source \"{feed}_in\" connector=\"file\" component=\"{component}\" codec=\"{feed}_fmt\" {{\n\
                  \x20       config {{\n            path \"{}\"\n{fields}\n        }}\n    }}\n\n\
                  \x20   sink \"{feed}_out\" connector=\"channel\" component=\"{component}\" {{\n\
@@ -2951,7 +3345,7 @@ async fn prepare_source(
         }
         Connector::Http => {
             let body = seed_bytes;
-            let probe = HttpProbe::spawn(body)?;
+            let probe = HttpProbe::spawn(body, &endpoints.local_tls)?;
             // `schema_from "payload"` reads a self-describing format under the
             // schema the body carries rather than projecting it onto the
             // declared one: the declared schema stays behind for the link check
@@ -2965,30 +3359,23 @@ async fn prepare_source(
                 url: probe.url.clone(),
                 format,
                 schema: row.schema(),
+                tls: Arc::clone(&endpoints.local_tls),
             });
             side.kdl = format!(
                 "    source \"in\" connector=\"http\" component=\"{component}\"{codec_key} {{\n\
-                 \x20       config {{\n            url \"{}\"{schema_from_kdl}\n            timeout_ms 15000\n{fields}\n        }}\n    }}",
-                probe.url
+                 \x20       config {{\n            url \"{}\"{schema_from_kdl}\n            timeout_ms 15000\n{}\n{fields}\n        }}\n    }}",
+                probe.url,
+                endpoints.local_tls.client_tls_kdl("            ", false)
             );
             side._probe = Some(probe);
         }
         Connector::HttpPush => {
             let bind = format!("127.0.0.1:{}", reserved_port()?);
-            // `schema_from "payload"` reads a self-describing format under the
-            // schema the request body carries rather than projecting it onto
-            // the declared one: the declared schema stays behind for the link
-            // check and is cross-checked against the body's own, exactly as on
-            // an `http` source.
             let schema_from_kdl = if format.carries_its_own_schema() {
                 "\n            schema_from \"payload\""
             } else {
                 ""
             };
-            // One request is one whole document, exactly what an `HttpSink`
-            // sends. A format the source could not decode is refused while the
-            // node builds, so nothing is ever posted: same rule as
-            // `seed_bytes` above.
             let documents = if seedable {
                 vec![seed_bytes]
             } else {
@@ -3001,19 +3388,17 @@ async fn prepare_source(
                     document,
                     format,
                     schema: row.schema(),
+                    tls: Arc::clone(&endpoints.local_tls),
                 });
             side.kdl = format!(
                 "    source \"in\" connector=\"http-listen\" component=\"{component}\"{codec_key} {{\n\
-                 \x20       config {{\n            bind \"{bind}\"\n            path \"/matrix\"\n            buffer 8{schema_from_kdl}\n{fields}\n        }}\n    }}"
+                 \x20       config {{\n            bind \"{bind}\"\n            path \"/matrix\"\n            buffer 8{schema_from_kdl}\n{}\n{fields}\n        }}\n    }}",
+                endpoints.local_tls.server_tls_kdl("            ")
             );
-            side.http_push = Some((format!("http://{bind}/matrix"), documents));
+            side.http_push = Some((format!("https://{bind}/matrix"), documents));
         }
         Connector::OpenTelemetry => {
             let bind = format!("127.0.0.1:{}", reserved_port()?);
-            // An OTLP body is not one of the byte formats, so the feed is built
-            // by the connector's own encoder from the rows this source is meant
-            // to deliver: one request per case, holding every row of `batch`.
-            // `seedable` gates it like every other seed here.
             let bodies = if seedable {
                 let request = saci::connector::otlp::schema::record_batch_to_export_request(
                     &batch, None, None,
@@ -3029,21 +3414,16 @@ async fn prepare_source(
             } else {
                 Vec::new()
             };
-            // The declared schema is what the source projects onto, so the
-            // link check sees the row's own schema and the body above is read
-            // through it.
             side.kdl = format!(
                 "    source \"in\" connector=\"otlp-metrics\" component=\"{component}\" \
                  {{\n            config {{\n            bind \"{bind}\"\n            \
-                 path \"/v1/metrics\"\n            buffer 8\n{fields}\n        }}\n    }}"
+                 path \"/v1/metrics\"\n            buffer 8\n{}\n{fields}\n        }}\n    }}",
+                endpoints.local_tls.server_tls_kdl("            ")
             );
-            side.otlp = Some((format!("http://{bind}/v1/metrics"), bodies));
+            side.otlp = Some((format!("https://{bind}/v1/metrics"), bodies));
         }
         Connector::Tcp => {
             let bind = format!("127.0.0.1:{}", reserved_port()?);
-            // A format with no message decoder is refused while the source
-            // builds, so no frame is ever sent: same rule as `seed_bytes`
-            // above.
             let frames = if seedable {
                 encode_frames(format, &batch)?
             } else {
@@ -3051,23 +3431,18 @@ async fn prepare_source(
             };
             side.kdl = format!(
                 "    source \"in\" connector=\"tcp\" component=\"{component}\"{codec_key} {{\n\
-                 \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n            max_frame_bytes 1048576\n{fields}\n        }}\n    }}"
+                 \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n            max_frame_bytes 1048576\n{}\n{fields}\n        }}\n    }}",
+                endpoints.local_tls.server_tls_kdl("            ")
             );
             side.tcp = Some((bind, frames));
         }
         Connector::Udp => {
             let bind = format!("127.0.0.1:{}", reserved_udp_port()?);
-            // A format with no message decoder is refused while the source
-            // builds, so no datagram is ever sent: same rule as `seed_bytes`
-            // above.
             let datagrams = if seedable {
                 encode_datagrams(format, &batch)?
             } else {
                 Vec::new()
             };
-            // The factory binds the socket while the service is built, so the
-            // kernel holds every datagram the driver sends before the receive
-            // loop starts. That is what stands in for tcp's accept backlog.
             side.kdl = format!(
                 "    source \"in\" connector=\"udp\" component=\"{component}\"{codec_key} {{\n\
                  \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n{fields}\n        }}\n    }}"
@@ -3076,16 +3451,11 @@ async fn prepare_source(
         }
         Connector::Saci => {
             let bind = format!("127.0.0.1:{}", reserved_port()?);
-            // One transport entry, so `drive_tcp_stream`'s `frames.len() - 1`
-            // item arithmetic still holds: the hello rides in front of the
-            // first data frame rather than being an entry of its own, and one
-            // data frame is one batch whatever the declared format is. A
-            // `saci` node resolves no codec, so `format` never gates
-            // this half.
             let bytes = saci_hello_and_batch(&batch)?;
             side.kdl = format!(
                 "    source \"in\" connector=\"peer\" component=\"{component}\" {{\n\
-                 \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n            max_frame_bytes 1048576\n{fields}\n        }}\n    }}"
+                 \x20       config {{\n            bind \"{bind}\"\n            buffer 8\n            max_frame_bytes 1048576\n{}\n{fields}\n        }}\n    }}",
+                endpoints.local_tls.server_tls_kdl("            ")
             );
             side.tcp = Some((bind, vec![bytes]));
         }
@@ -3106,22 +3476,29 @@ async fn prepare_source(
             let stream = unique("MATRIX_IN").to_uppercase();
             let subject = format!("matrix.in.{}", unique("s"));
             if live && seedable {
-                seed_nats(&endpoints.nats_url, &stream, &subject, format, &batch).await?;
+                seed_nats(
+                    &endpoints.nats_url,
+                    &endpoints.nats_tls,
+                    &stream,
+                    &subject,
+                    format,
+                    &batch,
+                )
+                .await?;
             }
             side.kdl = format!(
                 "    source \"in\" connector=\"nats\" component=\"{component}\"{codec_key} {{\n\
-                 \x20       config {{\n            stop_at_end #true\n            poll_timeout_ms 20000\n\
-                 \x20           connection {{\n                servers \"{}\"\n            }}\n\
+                 \x20       config {{\n            stop_at_end #true\n            poll_timeout_ms 20000\n{}\n\
                  \x20           mode kind=\"jetstream\" {{\n                stream \"{stream}\"\n\
                  \x20               durable_name \"{}\"\n                fetch_expires_ms 15000\n            }}\n{fields}\n        }}\n    }}",
-                endpoints.nats_url,
+                nats_connection_kdl(&endpoints.nats_url, &endpoints.nats_tls, "            "),
                 unique("d")
             );
         }
         Connector::Postgresql => {
             let table = unique("matrix_in").to_lowercase();
             if live {
-                let client = pg_client(&endpoints.dsn).await?;
+                let client = pg_client(&endpoints.dsn, &endpoints.pg_tls).await?;
                 client
                     .batch_execute(&format!(
                         "CREATE TABLE {table} ({}); {}",
@@ -3133,10 +3510,9 @@ async fn prepare_source(
             }
             side.kdl = format!(
                 "    source \"in\" connector=\"postgresql\" component=\"{component}\" {{\n\
-                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
-                 \x20           connection {{\n                dsn \"{}\"\n                sslmode \"disable\"\n            }}\n\
+                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n{}\n\
                  \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
-                endpoints.dsn,
+                pg_connection_kdl(&endpoints.dsn, &endpoints.pg_tls, "            "),
                 row.postgres_cursor()
             );
         }
@@ -3144,7 +3520,7 @@ async fn prepare_source(
             let table = unique("matrix_in").to_lowercase();
             if live {
                 use mysql_async::prelude::Queryable;
-                let mut conn = mysql_conn(&endpoints.mariadb_dsn).await?;
+                let mut conn = mysql_conn(&endpoints.mariadb_dsn, &endpoints.mariadb_tls).await?;
                 conn.query_drop(format!("CREATE TABLE {table} ({})", row.mariadb_columns()))
                     .await
                     .map_err(|e| format!("mariadb seed table: {e}"))?;
@@ -3154,10 +3530,13 @@ async fn prepare_source(
             }
             side.kdl = format!(
                 "    source \"in\" connector=\"mariadb\" component=\"{component}\" {{\n\
-                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
-                 \x20           connection {{\n                dsn \"{}\"\n                ssl_mode \"disabled\"\n            }}\n\
+                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n{}\n\
                  \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
-                endpoints.mariadb_dsn,
+                mariadb_connection_kdl(
+                    &endpoints.mariadb_dsn,
+                    &endpoints.mariadb_tls,
+                    "            "
+                ),
                 row.postgres_cursor()
             );
         }
@@ -3211,10 +3590,9 @@ async fn prepare_source(
             // engine accepts type-name for type-name.
             side.kdl = format!(
                 "    source \"in\" connector=\"turso\" component=\"{component}\" {{\n\
-                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n\
-                 \x20           connection path=\"{}\"\n\
+                 \x20       config {{\n            name \"{table}\"\n            batch_rows 100\n{}\n\
                  \x20           mode kind=\"polling\" table=\"{table}\" cursor_column=\"{}\"\n{fields}\n        }}\n    }}",
-                kdl_path(&path),
+                turso_connection_kdl(&path, "            "),
                 row.postgres_cursor()
             );
             side._dir = Some(dir);
@@ -3288,7 +3666,7 @@ async fn prepare_sink(
             let drain = unique("drain");
             paired = Some(format!(
                 "workflow \"{drain}\" {{\n\
-                 \x20   codec \"{drain}_fmt\" format=\"ndjson\"\n\n\
+                 \x20   codec \"{drain}_fmt\" format=\"ndjson\" {{\n        encryption enabled=#true\n    }}\n\n\
                  \x20   source \"{drain}_in\" connector=\"channel\" component=\"{component}\" {{\n\
                  \x20       config name=\"{name}\" buffer=8 {{\n{fields}\n        }}\n    }}\n\n\
                  \x20   sink \"{drain}_out\" connector=\"file\" component=\"{component}\" codec=\"{drain}_fmt\" {{\n\
@@ -3341,11 +3719,12 @@ async fn prepare_sink(
             )
         }
         Connector::Http => {
-            let probe = HttpProbe::spawn(Vec::new())?;
+            let probe = HttpProbe::spawn(Vec::new(), &endpoints.local_tls)?;
             let kdl = format!(
                 "    sink \"out\" connector=\"http\" component=\"{component}\"{codec_key} {{\n\
-                 \x20       config {{\n            url \"{}\"\n            method \"POST\"\n            timeout_ms 15000\n{fields}\n        }}\n    }}",
-                probe.url
+                 \x20       config {{\n            url \"{}\"\n            method \"POST\"\n            timeout_ms 15000\n{}\n{fields}\n        }}\n    }}",
+                probe.url,
+                endpoints.local_tls.client_tls_kdl("            ", false)
             );
             (kdl, Readback::Http { probe, format })
         }
@@ -3362,27 +3741,25 @@ async fn prepare_sink(
         Connector::OpenTelemetry => {
             // The stand-in collector answers an empty `200`, which is OTLP's
             // success response, and keeps every body it was posted.
-            let probe = HttpProbe::spawn(Vec::new())?;
+            let probe = HttpProbe::spawn(Vec::new(), &endpoints.local_tls)?;
             let kdl = format!(
                 "    sink \"out\" connector=\"otlp-metrics\" component=\"{component}\" {{\n\
-                 \x20       config {{\n            url \"{}\"\n            encoding \"protobuf\"\n{fields}\n        }}\n    }}",
-                probe.url
+                 \x20       config {{\n            url \"{}\"\n            encoding \"protobuf\"\n{}\n{fields}\n        }}\n    }}",
+                probe.url,
+                endpoints.local_tls.client_tls_kdl("            ", true)
             );
             (kdl, Readback::Otlp { probe })
         }
         Connector::Tcp => {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .map_err(|e| format!("tcp collector bind: {e}"))?;
-            let addr = listener
-                .local_addr()
-                .map_err(|e| format!("tcp collector addr: {e}"))?;
+            let probe = SaciProbe::spawn_tls(&endpoints.local_tls, false)?;
+            let addr = probe.addr;
             (
                 format!(
                     "    sink \"out\" connector=\"tcp\" component=\"{component}\"{codec_key} {{\n\
-                     \x20       config {{\n            connect \"{addr}\"\n{fields}\n        }}\n    }}"
+                     \x20       config {{\n            connect \"{addr}\"\n{}\n{fields}\n        }}\n    }}",
+                    endpoints.local_tls.client_tls_kdl("            ", true)
                 ),
-                Readback::Tcp { listener, format },
+                Readback::Tcp { probe, format },
             )
         }
         Connector::Udp => {
@@ -3403,12 +3780,13 @@ async fn prepare_sink(
             )
         }
         Connector::Saci => {
-            let probe = SaciProbe::spawn()?;
+            let probe = SaciProbe::spawn(&endpoints.local_tls)?;
             let addr = probe.addr;
             (
                 format!(
                     "    sink \"out\" connector=\"peer\" component=\"{component}\" {{\n\
-                     \x20       config {{\n            connect \"{addr}\"\n{fields}\n        }}\n    }}"
+                     \x20       config {{\n            connect \"{addr}\"\n{}\n{fields}\n        }}\n    }}",
+                    endpoints.local_tls.client_tls_kdl("            ", true)
                 ),
                 Readback::Saci { probe },
             )
@@ -3434,21 +3812,22 @@ async fn prepare_sink(
             (
                 format!(
                     "    sink \"out\" connector=\"nats\" component=\"{component}\"{codec_key} {{\n\
-                     \x20       config {{\n            connection {{\n                servers \"{}\"\n            }}\n\
+                     \x20       config {{\n{}\n\
                      \x20           mode kind=\"jetstream\" {{\n                stream \"{stream}\"\n                subject \"{subject}\"\n            }}\n{fields}\n        }}\n    }}",
-                    endpoints.nats_url
+                    nats_connection_kdl(&endpoints.nats_url, &endpoints.nats_tls, "            "),
                 ),
                 Readback::Nats {
                     url: endpoints.nats_url.clone(),
                     stream,
                     format,
+                    tls: endpoints.nats_tls.clone(),
                 },
             )
         }
         Connector::Postgresql => {
             let table = unique("matrix_out").to_lowercase();
             if read_back {
-                let client = pg_client(&endpoints.dsn).await?;
+                let client = pg_client(&endpoints.dsn, &endpoints.pg_tls).await?;
                 client
                     .batch_execute(&format!(
                         "CREATE TABLE {table} ({})",
@@ -3461,14 +3840,14 @@ async fn prepare_sink(
                 format!(
                     "    sink \"out\" connector=\"postgresql\" component=\"{component}\" {{\n\
                      \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
-                     \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n\
-                     \x20           connection {{\n                dsn \"{}\"\n                sslmode \"disable\"\n            }}\n{fields}\n        }}\n    }}",
+                     \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n{}\n{fields}\n        }}\n    }}",
                     row.postgres_cursor(),
-                    endpoints.dsn
+                    pg_connection_kdl(&endpoints.dsn, &endpoints.pg_tls, "            "),
                 ),
                 Readback::Postgres {
                     dsn: endpoints.dsn.clone(),
                     table,
+                    tls: endpoints.pg_tls.clone(),
                 },
             )
         }
@@ -3476,7 +3855,7 @@ async fn prepare_sink(
             let table = unique("matrix_out").to_lowercase();
             if read_back {
                 use mysql_async::prelude::Queryable;
-                let mut conn = mysql_conn(&endpoints.mysql_dsn).await?;
+                let mut conn = mysql_conn(&endpoints.mysql_dsn, &endpoints.mariadb_tls).await?;
                 conn.query_drop(format!("CREATE TABLE {table} ({})", row.mariadb_columns()))
                     .await
                     .map_err(|e| format!("mariadb sink table: {e}"))?;
@@ -3485,14 +3864,18 @@ async fn prepare_sink(
                 format!(
                     "    sink \"out\" connector=\"mariadb\" component=\"{component}\" {{\n\
                      \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
-                     \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n\
-                     \x20           connection {{\n                dsn \"{}\"\n                ssl_mode \"disabled\"\n            }}\n{fields}\n        }}\n    }}",
+                     \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n{}\n{fields}\n        }}\n    }}",
                     row.postgres_cursor(),
-                    endpoints.mysql_dsn
+                    mariadb_connection_kdl(
+                        &endpoints.mysql_dsn,
+                        &endpoints.mariadb_tls,
+                        "            "
+                    ),
                 ),
                 Readback::Mariadb {
                     dsn: endpoints.mysql_dsn.clone(),
                     table,
+                    tls: endpoints.mariadb_tls.clone(),
                 },
             )
         }
@@ -3540,10 +3923,9 @@ async fn prepare_sink(
                 format!(
                     "    sink \"out\" connector=\"turso\" component=\"{component}\" {{\n\
                      \x20       config {{\n            name \"{table}\"\n            table \"{table}\"\n\
-                     \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n\
-                     \x20           connection path=\"{}\"\n{fields}\n        }}\n    }}",
+                     \x20           write_mode \"upsert\"\n            conflict_columns \"{}\"\n{}\n{fields}\n        }}\n    }}",
                     row.postgres_cursor(),
-                    kdl_path(&path)
+                    turso_connection_kdl(&path, "            "),
                 ),
                 Readback::Turso {
                     path,
@@ -3607,8 +3989,19 @@ async fn seed_kafka(
         .map_err(|e| format!("kafka seed finish: {e}"))
 }
 
+fn nats_tls_config(tls: &TlsClientPaths) -> saci::connector::nats::TlsConfig {
+    saci::connector::nats::TlsConfig {
+        require: true,
+        tls_first: false,
+        root_certificates: Some(tls.ca_file.to_string_lossy().into_owned()),
+        client_certificate: Some(tls.client_cert_file.to_string_lossy().into_owned()),
+        client_key: Some(tls.client_key_file.to_string_lossy().into_owned()),
+    }
+}
+
 async fn seed_nats(
     url: &str,
+    tls: &TlsClientPaths,
     stream: &str,
     subject: &str,
     format: Format,
@@ -3619,6 +4012,7 @@ async fn seed_nats(
         saci::connector::nats::NatsSinkConfig {
             connection: saci::connector::nats::ConnectionConfig {
                 servers: vec![url.to_string()],
+                tls: nats_tls_config(tls),
                 ..Default::default()
             },
             mode: saci::connector::nats::SinkMode::Jetstream(Box::new(
@@ -3824,26 +4218,9 @@ async fn read_back(
             }
             return Ok(rendered);
         }
-        Readback::Tcp { listener, format } => {
-            // The sink dialled while the run was live and its connection was
-            // closed when the built service dropped, so the frames are already
-            // in the socket buffer and the accept returns at once.
-            match tokio::time::timeout(Duration::from_secs(5), listener.accept()).await {
-                Ok(Ok((mut stream, _))) => {
-                    let mut bytes = Vec::new();
-                    tokio::time::timeout(
-                        Duration::from_secs(10),
-                        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut bytes),
-                    )
-                    .await
-                    .map_err(|_| "tcp readback timed out".to_string())?
-                    .map_err(|e| format!("tcp readback: {e}"))?;
-                    decode_frames(format, row, &bytes)?
-                }
-                // No dial at all is the observable "no rows" answer.
-                Ok(Err(e)) => return Err(format!("tcp collector accept: {e}")),
-                Err(_) => Vec::new(),
-            }
+        Readback::Tcp { probe, format } => {
+            let bytes: Vec<u8> = probe.finish().into_iter().flatten().collect();
+            decode_frames(format, row, &bytes)?
         }
         Readback::Udp { socket, format } => {
             // Every datagram the sink sent is already in this socket's receive
@@ -3905,12 +4282,14 @@ async fn read_back(
             url,
             stream,
             format,
+            tls,
         } => {
             let codec = format.codec().ok_or("nats needs a format")?;
             let source = saci::connector::nats::NatsSource::new(
                 saci::connector::nats::NatsSourceConfig {
                     connection: saci::connector::nats::ConnectionConfig {
                         servers: vec![url],
+                        tls: nats_tls_config(&tls),
                         ..Default::default()
                     },
                     mode: saci::connector::nats::SourceMode::Jetstream(Box::new(
@@ -3931,8 +4310,8 @@ async fn read_back(
             .map_err(|e| format!("nats readback source: {e}"))?;
             drain(Box::new(source)).await?
         }
-        Readback::Postgres { dsn, table } => {
-            let client = pg_client(&dsn).await?;
+        Readback::Postgres { dsn, table, tls } => {
+            let client = pg_client(&dsn, &tls).await?;
             let columns = row
                 .schema()
                 .fields()
@@ -3966,9 +4345,9 @@ async fn read_back(
                 })
                 .collect());
         }
-        Readback::Mariadb { dsn, table } => {
+        Readback::Mariadb { dsn, table, tls } => {
             use mysql_async::prelude::Queryable;
-            let mut conn = mysql_conn(&dsn).await?;
+            let mut conn = mysql_conn(&dsn, &tls).await?;
             let columns = row
                 .schema()
                 .fields()
@@ -4177,6 +4556,31 @@ fn processor_kdl(case: Case, fixtures: &Fixtures) -> String {
 /// `feeder` and `drainer` are the paired-channel workflows, declared around
 /// the case's own so `build` builds them in that order: a build failure
 /// inside the case's workflow is then the first one reported.
+fn encryption_block_kdl() -> String {
+    format!(
+        "encryption algorithm=\"aes-256-gcm\" active_key=\"matrix\" {{\n\
+         \x20   key \"matrix\" hex=\"{MATRIX_KEY_HEX}\"\n\
+         }}"
+    )
+}
+
+fn codec_kdl(id: &str, format: Format) -> String {
+    match format.key() {
+        Some("csv") => format!(
+            "    codec \"{id}\" format=\"csv\" {{\n\
+             \x20       encryption enabled=#true\n\
+             \x20       config has_headers=#true\n\
+             \x20   }}"
+        ),
+        Some(key) => format!(
+            "    codec \"{id}\" format=\"{key}\" {{\n\
+             \x20       encryption enabled=#true\n\
+             \x20   }}"
+        ),
+        None => String::new(),
+    }
+}
+
 fn case_kdl(
     case: Case,
     source: &SourceSide,
@@ -4184,14 +4588,13 @@ fn case_kdl(
     processor: &str,
     data_dir: &Path,
 ) -> String {
-    let codec = match case.format.key() {
-        Some("csv") => {
-            "    codec \"fmt\" format=\"csv\" {\n        config has_headers=#true\n    }\n"
-                .to_string()
-        }
-        Some(key) => format!("    codec \"fmt\" format=\"{key}\"\n"),
-        None => String::new(),
+    let codec_line = codec_kdl("fmt", case.format);
+    let codec = if codec_line.is_empty() {
+        String::new()
+    } else {
+        format!("{codec_line}\n")
     };
+    let encryption = encryption_block_kdl();
     let run_kind = if case.stream_mode() { "stream" } else { "once" };
     let feeder = source
         .paired
@@ -4209,6 +4612,8 @@ fn case_kdl(
 node id=1 name="saci-matrix" data_dir="{data_dir}"
 
 run "{run_kind}"
+
+{encryption}
 
 {feeder}workflow "matrix" {{
 {codec}{source_kdl}
@@ -4372,17 +4777,23 @@ async fn execute(
             source.http_push.clone(),
             source.otlp.clone(),
         ) {
-            (Some((bind, frames)), _, _, _) => Feed::Tcp { bind, frames },
+            (Some((bind, frames)), _, _, _) => Feed::Tcp {
+                bind,
+                frames,
+                tls: Arc::clone(&resources.local_tls),
+            },
             (None, Some((bind, datagrams)), _, _) => Feed::Udp { bind, datagrams },
             (None, None, Some((url, documents)), _) => Feed::HttpPush {
                 url,
                 documents,
                 accepted: matches!(expect, Expect::Supported),
+                tls: Arc::clone(&resources.local_tls),
             },
             (None, None, None, Some((url, bodies))) => Feed::Otlp {
                 url,
                 bodies,
                 accepted: matches!(expect, Expect::Supported),
+                tls: Arc::clone(&resources.local_tls),
             },
             (None, None, None, None) => {
                 return Err(
@@ -4580,29 +4991,44 @@ async fn await_stats(
 /// waiting advances them, because no further item is coming. `targets` is set
 /// one item short for that reason, and the last item is given a settle window
 /// rather than being waited for.
+async fn connect_tls_tcp(
+    bind: &str,
+    tls: &MatrixTls,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, String> {
+    let connected = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::TcpStream::connect(bind),
+    )
+    .await;
+    let tcp = match connected {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => return Err(format!("connect to {bind}: {e}")),
+        Err(_) => return Err(format!("connecting to {bind} timed out")),
+    };
+    let connector = tokio_rustls::TlsConnector::from(Arc::clone(&tls.client_config));
+    let server_name = rustls_pki_types::ServerName::try_from("localhost".to_string())
+        .map_err(|e| format!("server name: {e}"))?;
+    tokio::time::timeout(Duration::from_secs(10), connector.connect(server_name, tcp))
+        .await
+        .map_err(|_| format!("TLS handshake with {bind} timed out"))?
+        .map_err(|e| format!("TLS handshake with {bind}: {e}"))
+}
+
 async fn drive_tcp_stream(
     bind: String,
     frames: Vec<Vec<u8>>,
+    tls: Arc<MatrixTls>,
     live: Arc<RwLock<WorkflowStats>>,
     targets: StreamTargets,
     cancel: CancellationToken,
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt as _;
 
-    let connected = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::net::TcpStream::connect(&bind),
-    )
-    .await;
-    let mut producer = match connected {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(e)) => {
+    let mut producer = match connect_tls_tcp(&bind, &tls).await {
+        Ok(stream) => stream,
+        Err(e) => {
             cancel.cancel();
-            return Err(format!("connect to the tcp source at {bind}: {e}"));
-        }
-        Err(_) => {
-            cancel.cancel();
-            return Err(format!("connecting to the tcp source at {bind} timed out"));
+            return Err(format!("tcp source {e}"));
         }
     };
     for frame in &frames {
@@ -4633,6 +5059,7 @@ enum Feed {
     Tcp {
         bind: String,
         frames: Vec<Vec<u8>>,
+        tls: Arc<MatrixTls>,
     },
     Udp {
         bind: String,
@@ -4645,6 +5072,7 @@ enum Feed {
         /// refuses the document answers `400` instead, which is the refusal
         /// the case is here to observe.
         accepted: bool,
+        tls: Arc<MatrixTls>,
     },
     Otlp {
         url: String,
@@ -4652,6 +5080,7 @@ enum Feed {
         /// Does every POST have to be answered `200`, OTLP's success response?
         /// A case whose source refuses the body answers `400` instead.
         accepted: bool,
+        tls: Arc<MatrixTls>,
     },
 }
 
@@ -4674,8 +5103,8 @@ impl Feed {
         cancel: CancellationToken,
     ) -> Result<(), String> {
         match self {
-            Self::Tcp { bind, frames } => {
-                drive_tcp_stream(bind, frames, live, targets, cancel).await
+            Self::Tcp { bind, frames, tls } => {
+                drive_tcp_stream(bind, frames, tls, live, targets, cancel).await
             }
             Self::Udp { bind, datagrams } => {
                 drive_udp_stream(bind, datagrams, live, targets, cancel).await
@@ -4684,11 +5113,13 @@ impl Feed {
                 url,
                 documents,
                 accepted,
+                tls,
             } => {
                 drive_push_stream(
                     url,
                     documents,
                     accepted.then_some(202),
+                    &tls.http_client,
                     live,
                     targets,
                     cancel,
@@ -4699,8 +5130,18 @@ impl Feed {
                 url,
                 bodies,
                 accepted,
+                tls,
             } => {
-                drive_push_stream(url, bodies, accepted.then_some(200), live, targets, cancel).await
+                drive_push_stream(
+                    url,
+                    bodies,
+                    accepted.then_some(200),
+                    &tls.http_client,
+                    live,
+                    targets,
+                    cancel,
+                )
+                .await
             }
         }
     }
@@ -4746,30 +5187,17 @@ async fn drive_udp_stream(
     Ok(())
 }
 
-/// Post every body at a listening source, wait until the runner has reported
-/// `targets`, then cancel.
-///
-/// The listener is bound by the factory while the service is built, so a
-/// request sent before the accept loop starts waits in the backlog: that is
-/// the same guarantee tcp's accept backlog gives [`drive_tcp_stream`]. One
-/// request is one whole document and the source queues its batches before
-/// answering, so the item count is the document count.
-///
-/// The snapshot throttle is the same as [`drive_tcp_stream`]'s, and so is the
-/// answer to it: `targets` is one item short and the last item gets a settle
-/// window rather than a wait.
+/// Post every body at an HTTPS mTLS listening source, wait until the runner has
+/// reported `targets`, then cancel.
 async fn drive_push_stream(
     url: String,
     bodies: Vec<Vec<u8>>,
     expected_status: Option<u16>,
+    client: &reqwest::Client,
     live: Arc<RwLock<WorkflowStats>>,
     targets: StreamTargets,
     cancel: CancellationToken,
 ) -> Result<(), String> {
-    // `rustls-no-provider` refuses to build a `Client` until a provider is
-    // installed process-wide; idempotent.
-    saci::service::install_ring_provider();
-    let client = reqwest::Client::new();
     for body in bodies {
         let sent =
             tokio::time::timeout(Duration::from_secs(10), client.post(&url).body(body).send())
@@ -5002,12 +5430,7 @@ pub async fn run_maximal(
         // one of its sinks must hold.
         let mut fed_by: Vec<usize> = Vec::new();
         let fmt_id = format!("fmt{index}");
-        codecs.push(match format {
-            Format::Csv => format!(
-                "    codec \"{fmt_id}\" format=\"csv\" {{\n        config has_headers=#true\n    }}"
-            ),
-            other => format!("    codec \"{fmt_id}\" format=\"{}\"", other.label()),
-        });
+        codecs.push(codec_kdl(&fmt_id, format));
 
         let proc_id = format!("proc{index}");
         processor_labels.push(format!("{} ({})", proc_id, processor.label()));
@@ -5110,6 +5533,8 @@ node id=1 name="saci-matrix-maximal" data_dir="{}"
 
 run "stream"
 
+{}
+
 workflow "maximal" {{
 {}
 }}
@@ -5120,6 +5545,7 @@ http enabled=#false
 observability log_level="error"
 "#,
         kdl_path(dir.path()),
+        encryption_block_kdl(),
         body.join("\n\n"),
         paired
             .iter()
@@ -5163,13 +5589,7 @@ observability log_level="error"
         // data frame was read.
         let mut producers = Vec::with_capacity(tcp_feeds.len());
         for (bind, frames) in &tcp_feeds {
-            let mut producer = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::net::TcpStream::connect(bind),
-            )
-            .await
-            .map_err(|_| format!("connecting to {bind} timed out"))?
-            .map_err(|e| format!("connect to {bind}: {e}"))?;
+            let mut producer = connect_tls_tcp(bind, &endpoints.local_tls).await?;
             for frame in frames {
                 tokio::io::AsyncWriteExt::write_all(&mut producer, frame)
                     .await
@@ -5197,8 +5617,7 @@ observability log_level="error"
         // queued. The listener is bound by the factory, so a request sent
         // before the accept loop starts waits in the backlog the way a tcp
         // connection does.
-        saci::service::install_ring_provider();
-        let push_client = reqwest::Client::new();
+        let push_client = &endpoints.local_tls.http_client;
         for (url, documents) in &http_push_feeds {
             for document in documents {
                 let response = tokio::time::timeout(

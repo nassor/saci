@@ -27,13 +27,18 @@
 //! live.
 
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use rustls_pki_types::ServerName;
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 
 use crate::codec::Codec;
 use crate::connector::tcp::TcpSinkConfig;
@@ -55,14 +60,47 @@ use crate::io::Sink;
 /// The socket is buffered, and every `write_batch` flushes it once after its
 /// last frame, so a batch's frames reach the kernel in as few writes as the
 /// buffer allows and nothing is left behind when the call returns.
+enum TcpClientStream {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl AsyncWrite for TcpClientStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s) => Pin::new(&mut **s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+            Self::Tls(s) => Pin::new(&mut **s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        }
+    }
+}
+
 pub struct TcpSink {
     /// `None` until the first batch dials the peer.
-    stream: Option<BufWriter<TcpStream>>,
+    stream: Option<BufWriter<TcpClientStream>>,
     /// Resolved in [`new`](Self::new), so a malformed address is a
     /// config error rather than a first-batch one.
     peer: SocketAddr,
     schema: Arc<Schema>,
     codec: Arc<dyn Codec>,
+    tls: Option<(TlsConnector, ServerName<'static>)>,
 }
 
 impl TcpSink {
@@ -77,14 +115,15 @@ impl TcpSink {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] if `codec` declares no
-    /// [`message_shape`](Codec::message_shape), if `connect` cannot be
-    /// parsed or resolved, or if it resolves to no address at all.
+    /// [`message_shape`](Codec::message_shape), if `tls` files or server name
+    /// are invalid, if `connect` cannot be parsed or resolved, or if it
+    /// resolves to no address at all.
     pub fn new(
         config: TcpSinkConfig,
         schema: Arc<Schema>,
         codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
-        let TcpSinkConfig { connect } = config;
+        let TcpSinkConfig { connect, tls } = config;
         // The declaration is the whole answer for every batch this sink will
         // ever encode, so asking once here is what makes a format with no
         // message surface a config error the caller is told about, rather than
@@ -97,6 +136,19 @@ impl TcpSink {
                 codec.format()
             )));
         }
+        let tls = match tls {
+            Some(cfg) => {
+                let connector =
+                    TlsConnector::from(crate::tls::load_client_config("TcpSink", &cfg, &[])?);
+                let name = crate::tls::resolve_server_name(
+                    "TcpSink",
+                    &connect,
+                    cfg.server_name.as_deref(),
+                )?;
+                Some((connector, name))
+            }
+            None => None,
+        };
 
         let peer = connect
             .to_socket_addrs()
@@ -117,6 +169,7 @@ impl TcpSink {
             peer,
             schema,
             codec,
+            tls,
         })
     }
 
@@ -132,7 +185,7 @@ impl TcpSink {
 /// than one copied buffer, so a batch's payloads reach the socket without
 /// being staged again, and the stream is flushed once after the last frame.
 async fn write_frames(
-    stream: &mut BufWriter<TcpStream>,
+    stream: &mut BufWriter<TcpClientStream>,
     payloads: &[Vec<u8>],
     peer: SocketAddr,
 ) -> Result<(), SaciError> {
@@ -179,9 +232,24 @@ impl Sink for TcpSink {
         // so the frame loop owns it outright instead of reborrowing an option.
         let mut stream = match self.stream.take() {
             Some(stream) => stream,
-            None => BufWriter::new(TcpStream::connect(self.peer).await.map_err(|e| {
-                SaciError::generic(format!("TcpSink: cannot connect to {}: {e}", self.peer))
-            })?),
+            None => {
+                let tcp = TcpStream::connect(self.peer).await.map_err(|e| {
+                    SaciError::generic(format!("TcpSink: cannot connect to {}: {e}", self.peer))
+                })?;
+                let inner = match &self.tls {
+                    Some((connector, name)) => {
+                        let tls = connector.connect(name.clone(), tcp).await.map_err(|e| {
+                            SaciError::generic(format!(
+                                "TcpSink: TLS handshake with {} failed: {e}",
+                                self.peer
+                            ))
+                        })?;
+                        TcpClientStream::Tls(Box::new(tls))
+                    }
+                    None => TcpClientStream::Plain(tcp),
+                };
+                BufWriter::new(inner)
+            }
         };
         let result = write_frames(&mut stream, &payloads, self.peer).await;
         self.stream = Some(stream);

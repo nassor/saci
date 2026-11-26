@@ -17,10 +17,9 @@
 //! verifier has no extra-roots entry point, so a `ca_file` there is refused
 //! instead of quietly ignored.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::error::SaciError;
@@ -66,8 +65,8 @@ pub(crate) struct LoadedTls {
 pub(crate) fn load_client(what: &str, files: &TlsFiles) -> Result<LoadedTls, SaciError> {
     let (ca_pem, roots) = match &files.ca_file {
         Some(path) => {
-            let pem = read(what, "ca_file", path)?;
-            let roots = certificates(what, "ca_file", path, &pem)?;
+            let pem = crate::tls::read_pem(what, "ca_file", path)?;
+            let roots = crate::tls::parse_certs(what, "ca_file", path, &pem)?;
             (Some(pem), roots)
         }
         None => (None, Vec::new()),
@@ -75,10 +74,10 @@ pub(crate) fn load_client(what: &str, files: &TlsFiles) -> Result<LoadedTls, Sac
 
     let (cert_pem, key_pem, identity) = match (&files.cert_file, &files.key_file) {
         (Some(cert_path), Some(key_path)) => {
-            let cert_pem = read(what, "cert_file", cert_path)?;
-            let chain = certificates(what, "cert_file", cert_path, &cert_pem)?;
-            let key_pem = read(what, "key_file", key_path)?;
-            let key = private_key(what, key_path, &key_pem)?;
+            let cert_pem = crate::tls::read_pem(what, "cert_file", cert_path)?;
+            let chain = crate::tls::parse_certs(what, "cert_file", cert_path, &cert_pem)?;
+            let key_pem = crate::tls::read_pem(what, "key_file", key_path)?;
+            let key = crate::tls::parse_private_key(what, "key_file", key_path, &key_pem)?;
             (Some(cert_pem), Some(key_pem), Some((chain, key)))
         }
         (None, None) => (None, None, None),
@@ -178,73 +177,22 @@ fn extra_roots_verifier(
 ///
 /// Returns [`SaciError::Configuration`] when either file cannot be read or
 /// parsed, or when the pair is not a usable certificate and key.
+#[cfg(test)]
 pub(crate) fn load_server(
     what: &str,
-    cert_file: &Path,
-    key_file: &Path,
+    cert_file: &std::path::Path,
+    key_file: &std::path::Path,
 ) -> Result<rustls::ServerConfig, SaciError> {
-    let cert_pem = read(what, "cert_file", cert_file)?;
-    let chain = certificates(what, "cert_file", cert_file, &cert_pem)?;
-    let key_pem = read(what, "key_file", key_file)?;
-    let key = private_key(what, key_file, &key_pem)?;
-
-    rustls::ServerConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
-        .with_safe_default_protocol_versions()
-        .map_err(|e| {
-            SaciError::configuration(format!("{what}: cannot build a rustls configuration: {e}"))
-        })?
-        .with_no_client_auth()
-        .with_single_cert(chain, key)
-        .map_err(|e| {
-            SaciError::configuration(format!(
-                "{what}: config.tls cert_file and key_file are not a usable pair: {e}"
-            ))
-        })
-}
-
-/// Read one named PEM file, naming the key and the path on failure.
-fn read(what: &str, key: &str, path: &Path) -> Result<Vec<u8>, SaciError> {
-    std::fs::read(path).map_err(|e| {
-        SaciError::configuration(format!(
-            "{what}: cannot read tls.{key} '{}': {e}",
-            path.display()
-        ))
-    })
-}
-
-/// Every certificate in a PEM bundle, refusing a file that holds none.
-fn certificates(
-    what: &str,
-    key: &str,
-    path: &Path,
-    pem: &[u8],
-) -> Result<Vec<CertificateDer<'static>>, SaciError> {
-    let mut chain = Vec::new();
-    for certificate in CertificateDer::pem_slice_iter(pem) {
-        chain.push(certificate.map_err(|e| {
-            SaciError::configuration(format!(
-                "{what}: tls.{key} '{}' is not a valid PEM bundle: {e}",
-                path.display()
-            ))
-        })?);
-    }
-    if chain.is_empty() {
-        return Err(SaciError::configuration(format!(
-            "{what}: tls.{key} '{}' contains no certificates",
-            path.display()
-        )));
-    }
-    Ok(chain)
-}
-
-/// The private key in a PEM file, whichever of the three PKCS encodings it is.
-fn private_key(what: &str, path: &Path, pem: &[u8]) -> Result<PrivateKeyDer<'static>, SaciError> {
-    PrivateKeyDer::from_pem_slice(pem).map_err(|e| {
-        SaciError::configuration(format!(
-            "{what}: tls.key_file '{}' holds no private key: {e}",
-            path.display()
-        ))
-    })
+    let shared = crate::tls::load_server_config(
+        what,
+        &crate::tls::ServerTlsConfig {
+            cert_file: cert_file.to_path_buf(),
+            key_file: key_file.to_path_buf(),
+            client_ca_file: None,
+        },
+        &[],
+    )?;
+    Ok((*shared).clone())
 }
 
 #[cfg(test)]

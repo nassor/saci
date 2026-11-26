@@ -128,6 +128,11 @@ key is an error. Type names are lowercase only: `boolean`, `int8`, `int16`, `int
 declares no `field` line of its own; schema ids are unique per workflow and each holds at least one
 valid `field`.
 
+- Every connector that uses `rustls` shares `saci::tls` (behind the `tls` feature):
+  `ClientTlsConfig { ca_file, cert_file, key_file, server_name, use_platform_roots }`,
+  `ServerTlsConfig { cert_file, key_file, client_ca_file }`, `load_client_config`,
+  `load_server_config`, and `resolve_server_name`, all pinned to
+  `rustls::crypto::ring::default_provider()`.
 - `connector::channel`: `ChannelSource`, `ChannelSink`, an in-memory mpsc transport.
   `Sink::pending_rows` reports the row backlog still queued, not the message count.
   `ChannelRegistry` is the name-keyed `ChannelBridge` pairing a sink in one workflow with a source
@@ -185,9 +190,11 @@ valid `field`.
     an idle keep-alive connection holds its handler, and the ingest channel with it, for as long
     as the peer keeps the socket open. A `tls { cert_file key_file }` block terminates TLS with
     ALPN `h2` then `http/1.1`, and `quic_bind` adds HTTP/3 on its own UDP port, advertised as
-    `alt-svc` on every TCP response. `ca_file` is refused there: callers are authenticated by
-    `auth { bearer }`, the scheme matched without regard to case and the token compared in
-    constant time. One request is one whole document on `path` with a method `methods` lists,
+    `alt-svc` on every TCP response. `client_ca_file` enables mutual TLS via `WebPkiClientVerifier`,
+    while `ca_file` stays refused on listeners (`http: 'ca_file' is not a listener key`); callers
+    can also be authenticated by `auth { bearer }`, the scheme matched without regard to case and
+    the token compared in constant time. One request is one whole document on `path` with a method
+    `methods` lists,
     accepted whole or not at all because every batch it decoded to is queued in one send: `202`
     once the document is queued, `404` another path, `405` with `allow`, `401` a missing or wrong
     token, `413` over `max_body_bytes`, announced or discovered, `400` both a document the format
@@ -247,7 +254,9 @@ valid `field`.
     so the runner counts it. One body queues every row it converted in one send, so a retry of a
     refused request duplicates no row.
   - Sink keys: `url` (a base url gains `/v1/metrics`), `encoding` `protobuf` or `json`,
-    `headers`, `timeout_ms`, `service_name` (the `service.name` resource attribute, unless a row's
+    `headers`, `timeout_ms`, `tls` (`ClientTlsConfig` on `pull` and `OtlpMetricsSinkConfig`,
+    `ServerTlsConfig` with HTTP/1.1 + HTTP/2 ALPN on `push`), `service_name` (the `service.name`
+    resource attribute, unless a row's
     own resource attributes name one), `metric_name` (the fallback name, `saci_metric`),
     `batch_rows`, which splits a larger batch into several exports, and `field` lines, which both
     a source and a sink parse into the schema they report to the workflow graph check; the
@@ -258,8 +267,10 @@ valid `field`.
     double. Any status outside 2xx is a `SaciError::Store` naming the collector's own reason.
   - `Source::finish`, `request_batch_rows` and the metrics feature are not used: an export is
     awaited inside `write_batch`, so `Sink::pending_rows` answers `Some(0)`.
-- `connector::postgresql`: `PostgresSource`, `PostgresSink`, native (non-JDBC) client, TLS, and
-  `polling` / `cdc_trigger` / `cdc_logical` read modes. Every PostgreSQL type is read/write through
+- `connector::postgresql`: `PostgresSource`, `PostgresSink`, native (non-JDBC) client, TLS (and
+  optional client certificate mTLS via `connection.sslcert` and `connection.sslkey` when `sslmode`
+  is enabled), and `polling` / `cdc_trigger` / `cdc_logical` read modes. Every PostgreSQL type is
+  read/write through
   `ROWS` in `connector/postgresql/types.rs`; an unmatched type is canonical text. `field`'s `native_type` forces
   and asserts the type; `list` plus `item` cover one-dimensional arrays. `tests/postgresql_all_types.rs` is
   the Docker round-trip per type family. A sink flush is one transaction; a failed `write_batch`
@@ -437,7 +448,9 @@ valid `field`.
     there would reset the sequence and collide on the next write. `collect_keys` scans forward,
     where `break` on the first non-matching key is both correct and the early exit.
 - `connector::s3`: `S3Source`, `S3Sink`, any S3-compatible endpoint, timestamped object keys,
-  row/byte/age flush thresholds. The sink's open object (`Pending`) keeps its accepted batches and
+  row/byte/age flush thresholds, and optional typed `connection.encryption` (`S3EncryptionConfig`:
+  `kind="sse_s3"`, `kind="sse_kms"` with optional `kms_key_id`, or `kind="sse_c"` with 32-byte
+  `customer_key_base64` / `customer_key_file`). The sink's open object (`Pending`) keeps its accepted batches and
   treats the encoder as a cache of them: a failed `write_batch` does not keep its own batch
   (`RetryingSink` re-drives the same one), rows an earlier call accepted and a failed `finish` stay
   until a `put` answers `Ok`, and `seq` moves only then. `opened_at` is fixed once a `put` was
@@ -446,8 +459,9 @@ valid `field`.
   `max_age_ms` ticker, takes that batch back out (`take_back`). Tests drive an in-memory store
   with scripted `put` failures (`FlakyStore` in `connector/s3/sink.rs`).
 - `connector::tcp`: `TcpSource`, `TcpSink`, live length-prefixed frames, decoded and
-  encoded by a codec. The source listens, the sink dials, both are the `tcp` connector. Framing
-  is transport, decoding is format.
+  encoded by a codec, with optional `tls` (`ServerTlsConfig` / `ClientTlsConfig`) over `rustls`.
+  The source listens (30s TLS handshake timeout), the sink dials, both are the `tcp` connector.
+  Framing is transport, decoding is format.
 - `connector::udp`: `UdpSource`, `UdpSink`, fire-and-forget datagrams, one message each with
   no length prefix, decoded and encoded by a codec. The source binds, the sink sends, both
   are the `udp` connector.
@@ -609,12 +623,19 @@ The cases are split into 288 `#[ignore]`d tests, one per `{source, processor, fo
 named `live::<source>::<processor>::<format>` and each running its source against all 15 sinks,
 plus `live::maximal::workflow`. The `live_slices!` macro generates them from three hand-written
 lists. nextest runs every test in its own process, so the slices run in parallel and a slice
-starts no container: `cargo xtask matrix` (`xtask/src/matrix.rs`) starts one apiece for Kafka,
-NATS, PostgreSQL, RustFS, ClickHouse, MariaDB and MySQL with `docker run`, creates the run's S3 bucket, and runs
-`cargo nextest run --profile matrix --run-ignored all` with the endpoints in `SACI_MATRIX_*`
-variables, passing any further argument through (`-E 'test(/^live::kafka::/)'` runs one source).
-The MariaDB source reads from the MariaDB container and the MariaDB sink writes into the MySQL one,
-so every MariaDB case crosses both servers.
+starts no container: `cargo xtask matrix` (`xtask/src/matrix.rs`) generates an ephemeral CA +
+server + client TLS bundle (via `mariadb:11.8`'s `openssl`), starts Kafka, NATS (mTLS),
+PostgreSQL (mTLS), RustFS, ClickHouse, MariaDB (TLS) and MySQL (TLS), creates the run's S3 bucket,
+and runs `cargo nextest run --profile matrix --run-ignored all` with the endpoints in
+`SACI_MATRIX_*` variables and the client TLS paths in `SACI_MATRIX_TLS_CA_FILE`,
+`SACI_MATRIX_TLS_CLIENT_CERT_FILE`, and `SACI_MATRIX_TLS_CLIENT_KEY_FILE`, passing any further
+argument through (`-E 'test(/^live::kafka::/)'` runs one source). Every matrix case runs
+encrypted connections wherever supported: mTLS on `http`, `http-listen`, `otlp-metrics`, `tcp`,
+`peer`, `postgresql`, and `nats`; TLS (`verify_identity`) on `mariadb`/`mysql`; `aes256gcm`
+page encryption on `turso`; and `EncryptedCodec` (AES-256-GCM) on every byte-format codec
+(encrypting `file`, `redb`, `http`, `http-listen`, `tcp`, `udp`, `kafka`, `nats`, and `s3`
+payloads). The MariaDB source reads from the MariaDB container and the MariaDB sink writes into
+the MySQL one, so every MariaDB case crosses both servers.
 Without `--archive-file` it builds both processor fixtures first. `Resources::connect` reads the
 variables: an unset one skips every case needing that resource, and a set one that does not
 answer within 180 s fails the slice. Cases isolate themselves inside the shared containers by a

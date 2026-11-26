@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
@@ -19,10 +21,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Runs on every trigger, including pull requests. It carries no `environment:`
-  # key: GitHub evaluates a job's environment protection rules when the job
-  # starts, before any step `if:` is read, so a job that names github-pages is
-  # rejected on a PR ref no matter how its steps are guarded.
+  # Runs on pull requests, pushes to main, and v* tags. It carries no
+  # `environment:` key: GitHub evaluates a job's environment protection rules when
+  # the job starts, before any step `if:` is read, so a job naming github-pages
+  # is rejected on a PR ref no matter how its steps are guarded. Pages upload and
+  # deploy run only on v* tag releases.
   build:
     runs-on: ubuntu-latest
     steps:
@@ -45,21 +48,21 @@ jobs:
         run: python3 search-index.py public
 
       - name: Setup Pages
-        if: github.event_name != 'pull_request'
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        if: github.event_name != 'pull_request'
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-pages-artifact@v5
         with:
           path: 'docs/public'
 
-  # Pure deploy: the artifact is already uploaded by `build`. Skipped entirely on
-  # a pull request, so the github-pages environment gate is never evaluated
-  # against `refs/pull/N/merge`.
+  # Pure deploy: the artifact is already uploaded by `build`. Runs only on v*
+  # release tags so main pushes and pull requests never deploy or evaluate the
+  # github-pages environment gate.
   deploy:
     needs: build
-    if: github.event_name != 'pull_request'
+    if: startsWith(github.ref, 'refs/tags/v')
     environment:
       name: "github-pages"
       url: ${{ steps.deployment.outputs.page_url }}

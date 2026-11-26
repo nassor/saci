@@ -149,6 +149,11 @@ A node naming a `path` loads that artifact and never looks at
 `runtime`. A node naming neither takes the runtime registered under its own
 id, and `build()` errors naming the node when nothing is registered for it.
 
+When a workflow declares `encryption` on codecs or `encrypt`/`decrypt` on nodes,
+`builder.key_provider(provider)` supplies an `Arc<dyn KeyProvider>` programmatically
+in place of a KDL `encryption` block. `crates/saci/examples/encrypted_pipelines.rs`
+demonstrates combining peer mTLS, field-level AEAD, and an encrypted Parquet sink.
+
 The stock binary stops at the first connector it cannot resolve, so rerun `validate`
 after each registration:
 

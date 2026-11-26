@@ -148,6 +148,7 @@ Numbers and method: [benchmark results](https://nassor.github.io/saci/library/re
 | [Run the service](https://nassor.github.io/saci/service/) | What a config declares, and the vocabulary behind every key |
 | [Your first pipeline](https://nassor.github.io/saci/service/first-pipeline/) | Install the binary, then run a real pipeline in 15 minutes |
 | [The config file](https://nassor.github.io/saci/service/config/) | Every top-level key, variables, and validation |
+| [Encryption and TLS](https://nassor.github.io/saci/service/config/encryption/) | Transport TLS/mTLS, encrypted codecs, and field/payload AEAD |
 | [Sources and sinks](https://nassor.github.io/saci/service/connectors/) | One page per connector, as a source and as a sink |
 | [Formats](https://nassor.github.io/saci/service/formats/) | csv, ndjson, parquet, avro and arrow-ipc |
 | [Build a processor](https://nassor.github.io/saci/service/processors/build/) | The WIT contract, a recipe per language, and the six-language example |
@@ -184,6 +185,7 @@ Two crates are on crates.io:
 | `connector-<name>`, `codec-<format>` | One transport or one byte format each, in `saci::connector` and `saci::codec` |
 | `processor` | The processor SDK and the canonical `saci:pipeline@0.4.0` WIT world |
 | `plugin` | The native plugin SDK and its C ABI |
+| `tls`, `crypto` | Shared `rustls` TLS/mTLS helpers and AES-256-GCM / ChaCha20-Poly1305 codec, field, and batch encryption (`crypto` is in `server`) |
 | `server` | The `saci-service` binary: wasmtime, KDL config, HTTP control plane, distributed runner |
 
 `cargo xtask server` builds a `saci-service` from a checkout with only the connectors, formats and

@@ -70,6 +70,12 @@ pub mod runtime;
 #[cfg(feature = "engine")]
 pub mod io;
 
+#[cfg(feature = "tls")]
+pub mod tls;
+
+#[cfg(feature = "crypto")]
+pub mod crypto;
+
 /// The window geometry. Declared in every build: a host parses a window
 /// declaration whether or not it carries the engine that serves one.
 pub mod window;
@@ -207,4 +213,12 @@ pub mod prelude {
     pub use crate::window::WindowSpec;
     #[cfg(feature = "windows")]
     pub use crate::windows::{WindowFunction, WindowResults, WindowWatermark, WindowedSystem};
+
+    #[cfg(all(feature = "crypto", feature = "codec-api"))]
+    pub use crate::crypto::EncryptedCodec;
+    #[cfg(feature = "crypto")]
+    pub use crate::crypto::{
+        Algorithm, Cipher, DecryptingSource, EncryptingSink, EncryptionMode, FieldEncoding,
+        KeyMaterial, KeyProvider, StaticKeyProvider,
+    };
 }

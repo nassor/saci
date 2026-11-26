@@ -67,6 +67,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ConfigMap, ConfigValue, one_or_many};
 use crate::error::{SaciError, SaciResult};
 
+pub(super) mod encryption;
 pub(super) mod flexible;
 mod http;
 mod legacy;
@@ -81,6 +82,9 @@ pub(super) mod test_support;
 mod window;
 mod workflow;
 
+pub use self::encryption::{
+    CodecEncryptionConfig, KeySpec, NodeCryptoConfig, ServiceEncryptionConfig,
+};
 pub use self::http::HttpConfig;
 pub use self::mode::{ClusterConfig, PeerSpec, RunMode, ServiceMode, StandaloneConfig};
 pub use self::node::NodeConfig;
@@ -177,6 +181,8 @@ pub struct ServiceConfig {
     /// Connector self-healing for every source and sink. An omitted block is
     /// the enabled defaults.
     pub heal: HealConfig,
+    /// Optional keyring and default AEAD algorithm for pipeline encryption.
+    pub encryption: Option<ServiceEncryptionConfig>,
     /// Names usable as `${name}` placeholders anywhere in this file. A
     /// declared name wins over a same-named process env var, so the file is
     /// self-contained.
@@ -213,6 +219,8 @@ struct RawServiceConfig {
     flow_control: FlowControlConfig,
     #[serde(default, skip_serializing_if = "is_default")]
     heal: HealConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encryption: Option<ServiceEncryptionConfig>,
     #[serde(rename = "workflow", deserialize_with = "one_or_many")]
     workflows: Vec<WorkflowSpec>,
 }
@@ -252,6 +260,7 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             observability: raw.observability,
             flow_control: raw.flow_control,
             heal: raw.heal,
+            encryption: raw.encryption,
             variables: raw.variables,
         })
     }
@@ -276,6 +285,7 @@ impl From<ServiceConfig> for RawServiceConfig {
             observability: config.observability,
             flow_control: config.flow_control,
             heal: config.heal,
+            encryption: config.encryption,
             variables: config.variables,
         }
     }
@@ -322,6 +332,7 @@ impl ServiceConfig {
             observability: ObservabilityConfig::default(),
             flow_control: FlowControlConfig::default(),
             heal: HealConfig::default(),
+            encryption: None,
             variables: HashMap::new(),
         }
     }
@@ -414,6 +425,9 @@ impl ServiceConfig {
         }
 
         self.observability.validate()?;
+        if let Some(encryption) = &self.encryption {
+            encryption.validate()?;
+        }
 
         if let ServiceMode::Cluster { config } = &self.mode {
             if config.peers.is_empty() {
@@ -677,6 +691,7 @@ mod tests {
         ServiceConfig {
             heal: Default::default(),
             flow_control: Default::default(),
+            encryption: None,
             node: NodeConfig {
                 id: 1,
                 name: Some("node-1".to_string()),
@@ -701,6 +716,7 @@ mod tests {
                     codec: None,
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
+                    decrypt: None,
                     config: default_config(),
                 }],
                 wasm: Vec::new(),
@@ -713,6 +729,7 @@ mod tests {
                     codec: None,
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
+                    encrypt: None,
                     config: default_config(),
                 }],
                 links: Vec::new(),
@@ -1100,6 +1117,7 @@ node id=1 data_dir="/tmp/saci"
         let cfg = ServiceConfig {
             heal: Default::default(),
             flow_control: Default::default(),
+            encryption: None,
             node: NodeConfig {
                 id: 1,
                 name: None,

@@ -27,9 +27,11 @@ use crate::error::{SaciError, SaciResult};
 use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
+#[cfg(feature = "crypto")]
+use super::config::encryption::resolve_cipher;
 use super::config::{
-    CodecSpec, HealConfig, NodeKind, RunMode, SchemaSpec, ServiceConfig, ServiceMode, StoreConfig,
-    WindowConfig, WorkflowSpec,
+    CodecSpec, HealConfig, NodeKind, RunMode, SchemaSpec, ServiceConfig, ServiceEncryptionConfig,
+    ServiceMode, StoreConfig, WindowConfig, WorkflowSpec,
 };
 use super::dlq::{DeadLetterQueue, DlqRegistry, DlqShared};
 use super::factories::{lookup_connector, missing_codec_error};
@@ -45,6 +47,11 @@ use super::registry::{CodecFactory, Connector, Rebuild, Registry, Role};
 use super::standalone::WorkflowStats;
 use crate::codec::Codec;
 use crate::connector::{ChannelBridge, ConfigValue, NodeIdentity};
+#[cfg(feature = "crypto")]
+use crate::crypto::{
+    DecryptingSource, EncryptedCodec, EncryptingSink, EncryptionMode, FieldEncoding, KeyProvider,
+    PAYLOAD_COLUMN, wire_schema,
+};
 use crate::inspector::Inspector;
 #[cfg(feature = "wasm-host")]
 use crate::wasm_host::WasmEngine;
@@ -228,6 +235,9 @@ struct NodeBuild<'a> {
     heal: &'a HealConfig,
     /// `node.label()`, the service name a peer-facing connector announces.
     service: &'a str,
+    encryption: Option<&'a ServiceEncryptionConfig>,
+    #[cfg(feature = "crypto")]
+    cached_provider: std::cell::RefCell<Option<Arc<dyn KeyProvider>>>,
 }
 
 impl NodeBuild<'_> {
@@ -265,6 +275,7 @@ pub struct WorkflowFactory {
     /// Whether a batch run threads processor state through the redb store
     /// (`store "redb" { batch_resume #true }`).
     batch_resume: bool,
+    encryption: Option<ServiceEncryptionConfig>,
 }
 
 impl WorkflowFactory {
@@ -287,6 +298,7 @@ impl WorkflowFactory {
             &self.heal,
             &self.data_dir,
             &self.service,
+            self.encryption.as_ref(),
         )?;
         built.run = self.run.clone();
         built.flow = self.flow.clone();
@@ -837,6 +849,8 @@ pub struct ServiceBuilder {
     /// workflow. `None` for a library embedder, which gets a queue with a
     /// private shared half.
     dlq_registry: Option<Arc<DlqRegistry>>,
+    #[cfg(feature = "crypto")]
+    key_provider: Option<Arc<dyn KeyProvider>>,
 }
 
 impl ServiceBuilder {
@@ -856,7 +870,17 @@ impl ServiceBuilder {
             inspector: None,
             channels: None,
             dlq_registry: None,
+            #[cfg(feature = "crypto")]
+            key_provider: None,
         }
+    }
+
+    /// Supply a key provider for declarative `encryption`, `encrypt`, and
+    /// `decrypt` blocks without embedding keys directly in KDL config.
+    #[cfg(feature = "crypto")]
+    pub fn key_provider(mut self, provider: Arc<dyn KeyProvider>) -> Self {
+        self.key_provider = Some(provider);
+        self
     }
 
     /// Share every declared dead letter queue's summary and request slot
@@ -1000,6 +1024,7 @@ impl ServiceBuilder {
             run,
             flow: FlowPlan::from_config(config),
             batch_resume,
+            encryption: config.encryption.clone(),
         }
     }
 
@@ -1028,12 +1053,25 @@ impl ServiceBuilder {
         let registry = Arc::new(std::mem::replace(&mut self.registry, Registry::new()));
         let service = config.node.label();
         for workflow in &config.workflows {
-            let codecs = build_codecs(&registry, &workflow.codecs)?;
+            #[cfg(feature = "crypto")]
+            let mut cached_provider = None;
+            let codecs = build_codecs(
+                &registry,
+                &workflow.codecs,
+                config.encryption.as_ref(),
+                #[cfg(feature = "crypto")]
+                self.key_provider.as_ref(),
+                #[cfg(feature = "crypto")]
+                &mut cached_provider,
+            )?;
             let build = NodeBuild {
                 registry: &registry,
                 codecs: &codecs,
                 heal: &config.heal,
                 service: &service,
+                encryption: config.encryption.as_ref(),
+                #[cfg(feature = "crypto")]
+                cached_provider: std::cell::RefCell::new(cached_provider),
             };
             for spec in &workflow.sources {
                 self.build_source_node(&spec.id, workflow, &build, false)?;
@@ -1067,6 +1105,7 @@ impl ServiceBuilder {
     ///   registered for its id through [`runtime`](Self::runtime).
     /// - The links do not carry matching components and schemas end to end
     ///   (see [`validate_workflow_graph`](super::validation::validate_workflow_graph)).
+    #[allow(clippy::too_many_arguments)]
     fn build_one(
         &mut self,
         registry: &Arc<Registry>,
@@ -1075,13 +1114,27 @@ impl ServiceBuilder {
         heal: &HealConfig,
         data_dir: &std::path::Path,
         service: &str,
+        encryption: Option<&ServiceEncryptionConfig>,
     ) -> Result<BuiltWorkflow, SaciError> {
-        let codecs = build_codecs(registry, &workflow.codecs)?;
+        #[cfg(feature = "crypto")]
+        let mut cached_provider = None;
+        let codecs = build_codecs(
+            registry,
+            &workflow.codecs,
+            encryption,
+            #[cfg(feature = "crypto")]
+            self.key_provider.as_ref(),
+            #[cfg(feature = "crypto")]
+            &mut cached_provider,
+        )?;
         let build = NodeBuild {
             registry,
             codecs: &codecs,
             heal,
             service,
+            encryption,
+            #[cfg(feature = "crypto")]
+            cached_provider: std::cell::RefCell::new(cached_provider),
         };
         let order = workflow.topological_order()?;
         let nodes_meta = workflow.nodes();
@@ -1195,12 +1248,46 @@ impl ServiceBuilder {
             &spec.id,
             &spec.connector,
         )?;
+        let plain_config = config_with_schema(&spec.config, &spec.component, &workflow.schemas);
+        #[cfg(feature = "crypto")]
+        let (node_config, decrypt_ctx) = match &spec.decrypt {
+            Some(cfg) => {
+                let prepared = prepare_node_crypto(
+                    &format!("workflow '{}' source '{}'.decrypt", workflow.id, spec.id),
+                    &spec.id,
+                    &spec.component,
+                    plain_config,
+                    cfg,
+                    false,
+                    self.key_provider.as_ref(),
+                    build,
+                )?;
+                let wire_config = prepared.wire_config;
+                (
+                    wire_config,
+                    Some((prepared.plain_schema, prepared.cipher, prepared.mode)),
+                )
+            }
+            None => (plain_config, None),
+        };
+        #[cfg(not(feature = "crypto"))]
+        let node_config = {
+            let _ = build.encryption;
+            if spec.decrypt.is_some() {
+                return Err(super::factories::missing_crypto_error(&format!(
+                    "workflow '{}' source '{}'.decrypt",
+                    workflow.id, spec.id
+                )));
+            }
+            plain_config
+        };
+
         let bound = spec.codec.as_deref().map(|tid| build.codecs[tid].clone());
         let rebuilder = Rebuilder::new(
             build.registry.clone(),
             &spec.connector,
             &spec.id,
-            config_with_schema(&spec.config, &spec.component, &workflow.schemas),
+            node_config,
             bound,
             self.channels.clone(),
             retry_sources.then(|| spec.retry.to_retry_mode()),
@@ -1216,6 +1303,13 @@ impl ServiceBuilder {
                 &spec.id,
             )),
             None => built,
+        };
+        #[cfg(feature = "crypto")]
+        let source: Box<dyn Source> = match decrypt_ctx {
+            Some((plain_schema, cipher, mode)) => {
+                Box::new(DecryptingSource::new(source, plain_schema, cipher, mode)?)
+            }
+            None => source,
         };
         Ok(BuiltNode {
             id: spec.id.clone(),
@@ -1251,12 +1345,46 @@ impl ServiceBuilder {
             &spec.id,
             &spec.connector,
         )?;
+        let plain_config = config_with_schema(&spec.config, &spec.component, &workflow.schemas);
+        #[cfg(feature = "crypto")]
+        let (node_config, encrypt_ctx) = match &spec.encrypt {
+            Some(cfg) => {
+                let prepared = prepare_node_crypto(
+                    &format!("workflow '{}' sink '{}'.encrypt", workflow.id, spec.id),
+                    &spec.id,
+                    &spec.component,
+                    plain_config,
+                    cfg,
+                    true,
+                    self.key_provider.as_ref(),
+                    build,
+                )?;
+                let wire_config = prepared.wire_config;
+                (
+                    wire_config,
+                    Some((prepared.plain_schema, prepared.cipher, prepared.mode)),
+                )
+            }
+            None => (plain_config, None),
+        };
+        #[cfg(not(feature = "crypto"))]
+        let node_config = {
+            let _ = build.encryption;
+            if spec.encrypt.is_some() {
+                return Err(super::factories::missing_crypto_error(&format!(
+                    "workflow '{}' sink '{}'.encrypt",
+                    workflow.id, spec.id
+                )));
+            }
+            plain_config
+        };
+
         let bound = spec.codec.as_deref().map(|tid| build.codecs[tid].clone());
         let rebuilder = Rebuilder::new(
             build.registry.clone(),
             &spec.connector,
             &spec.id,
-            config_with_schema(&spec.config, &spec.component, &workflow.schemas),
+            node_config,
             bound,
             self.channels.clone(),
             Some(spec.retry.to_retry_mode()),
@@ -1270,6 +1398,13 @@ impl ServiceBuilder {
                 (Box::new(healing), Some(recovered))
             }
             None => (built, None),
+        };
+        #[cfg(feature = "crypto")]
+        let sink: Box<dyn Sink> = match encrypt_ctx {
+            Some((plain_schema, cipher, mode)) => {
+                Box::new(EncryptingSink::new(sink, plain_schema, cipher, mode)?)
+            }
+            None => sink,
         };
         Ok(BuiltNode {
             id: spec.id.clone(),
@@ -1546,15 +1681,143 @@ impl Default for ServiceBuilder {
 fn build_codecs(
     registry: &Registry,
     specs: &[CodecSpec],
+    encryption: Option<&ServiceEncryptionConfig>,
+    #[cfg(feature = "crypto")] injected_provider: Option<&Arc<dyn KeyProvider>>,
+    #[cfg(feature = "crypto")] cached_provider: &mut Option<Arc<dyn KeyProvider>>,
 ) -> SaciResult<HashMap<String, Arc<dyn Codec>>> {
     let mut out = HashMap::with_capacity(specs.len());
+    #[cfg(not(feature = "crypto"))]
+    let _ = encryption;
     for spec in specs {
         let factory = registry.codecs().get(&spec.format).ok_or_else(|| {
             missing_codec_error(&spec.id, &spec.format, &registry.codecs().names())
         })?;
-        out.insert(spec.id.clone(), factory.build(&spec.config)?);
+        let codec: Arc<dyn Codec> = factory.build(&spec.config)?;
+        #[cfg(feature = "crypto")]
+        let codec: Arc<dyn Codec> = if let Some(enc) = &spec.encryption
+            && enc.enabled
+        {
+            let ctx = format!("codec '{}'.encryption", spec.id);
+            enc.validate(&ctx)?;
+            let cipher = resolve_cipher(
+                &ctx,
+                injected_provider,
+                encryption,
+                cached_provider,
+                enc.algorithm.as_deref(),
+                enc.active_key.as_deref(),
+            )?;
+            Arc::new(EncryptedCodec::new(codec, cipher))
+        } else {
+            codec
+        };
+        #[cfg(not(feature = "crypto"))]
+        if let Some(enc) = &spec.encryption
+            && enc.enabled
+        {
+            return Err(super::factories::missing_crypto_error(&format!(
+                "codec '{}'.encryption",
+                spec.id
+            )));
+        }
+        out.insert(spec.id.clone(), codec);
     }
     Ok(out)
+}
+
+#[cfg(feature = "crypto")]
+struct PreparedNodeCrypto {
+    wire_config: ConfigValue,
+    plain_schema: Arc<arrow_schema::Schema>,
+    cipher: Arc<crate::crypto::Cipher>,
+    mode: EncryptionMode,
+}
+
+#[cfg(feature = "crypto")]
+#[allow(clippy::too_many_arguments)]
+fn prepare_node_crypto(
+    context: &str,
+    node_id: &str,
+    component: &str,
+    plain_config: ConfigValue,
+    crypto_cfg: &super::config::NodeCryptoConfig,
+    allow_active_key: bool,
+    injected_provider: Option<&Arc<dyn KeyProvider>>,
+    build: &NodeBuild<'_>,
+) -> SaciResult<PreparedNodeCrypto> {
+    crypto_cfg.validate(context, allow_active_key)?;
+    let mut cached = build.cached_provider.borrow_mut();
+    let cipher = resolve_cipher(
+        context,
+        injected_provider,
+        build.encryption,
+        &mut cached,
+        crypto_cfg.algorithm.as_deref(),
+        crypto_cfg.active_key.as_deref(),
+    )?;
+    drop(cached);
+    let mode = crypto_cfg.to_encryption_mode(context)?;
+    let fields =
+        crate::connector::parse_optional_fields(&plain_config, node_id)?.ok_or_else(|| {
+            SaciError::configuration(format!(
+                "{context}: source decrypt / sink encrypt requires declared 'field' entries \
+                 or a workflow 'schema' matching component '{component}'"
+            ))
+        })?;
+    let plain_schema = crate::connector::schema_of(&fields)?;
+    let _ = wire_schema(&plain_schema, &mode)?;
+    let wire_config = rewrite_config_fields_for_wire(plain_config, &fields, &mode)?;
+    Ok(PreparedNodeCrypto {
+        wire_config,
+        plain_schema,
+        cipher,
+        mode,
+    })
+}
+
+#[cfg(feature = "crypto")]
+fn rewrite_config_fields_for_wire(
+    mut config: ConfigValue,
+    fields: &[crate::connector::FieldSpec],
+    mode: &EncryptionMode,
+) -> SaciResult<ConfigValue> {
+    let wire_type = |enc: FieldEncoding| match enc {
+        FieldEncoding::Binary => "binary",
+        FieldEncoding::Base64Utf8 => "utf8",
+    };
+    let wire_entries: Vec<ConfigValue> = match mode {
+        EncryptionMode::Payload { encoding } => vec![serde_json::json!({
+            "id": PAYLOAD_COLUMN,
+            "type": wire_type(*encoding),
+            "nullable": false,
+        })],
+        EncryptionMode::Fields {
+            fields: targets,
+            encoding,
+        } => fields
+            .iter()
+            .map(|f| {
+                if targets.iter().any(|t| t == &f.name) {
+                    Ok(serde_json::json!({
+                        "id": f.name,
+                        "type": wire_type(*encoding),
+                        "nullable": f.nullable,
+                    }))
+                } else {
+                    serde_json::to_value(f).map_err(|e| {
+                        SaciError::configuration(format!(
+                            "crypto: failed to serialize field '{}': {e}",
+                            f.name
+                        ))
+                    })
+                }
+            })
+            .collect::<SaciResult<Vec<_>>>()?,
+    };
+    if let ConfigValue::Object(table) = &mut config {
+        table.insert("field".to_string(), ConfigValue::Array(wire_entries));
+    }
+    Ok(config)
 }
 
 /// `config` as the connector is built from it: with the workflow's schema for
@@ -1657,6 +1920,7 @@ mod tests {
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            encryption: None,
             variables: HashMap::new(),
         }
     }
@@ -1689,6 +1953,7 @@ mod tests {
             codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
+            decrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.sinks.push(SinkSpec {
@@ -1699,6 +1964,7 @@ mod tests {
             codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
+            encrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.links.push(super::super::config::LinkSpec {
@@ -1742,6 +2008,7 @@ mod tests {
             codec: None,
             component: "comp".to_string(),
             retry: RetryConfig::default(),
+            decrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         let config = base_config(workflow);
@@ -1885,6 +2152,7 @@ mod tests {
             codec: None,
             component: "comp".to_string(),
             retry: RetryConfig::default(),
+            encrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         let config = base_config(workflow);
@@ -1999,6 +2267,7 @@ mod tests {
                 codec: None,
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
+                decrypt: None,
                 config: source_config,
             });
             workflow.sinks.push(SinkSpec {
@@ -2009,6 +2278,7 @@ mod tests {
                 codec: None,
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
+                encrypt: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             });
             workflow.wasm.push(super::super::config::WasmSpec {
@@ -2160,6 +2430,7 @@ workflow "w" {
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            encryption: None,
             variables: HashMap::new(),
         };
 
@@ -2280,6 +2551,7 @@ workflow "w" {
             codec: None,
             component: "comp1".to_string(),
             retry: source_retry,
+            decrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.sinks.push(SinkSpec {
@@ -2290,6 +2562,7 @@ workflow "w" {
             codec: None,
             component: "comp1".to_string(),
             retry: sink_retry,
+            encrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.links.push(super::super::config::LinkSpec {
@@ -2548,6 +2821,7 @@ workflow "w" {
                 max_attempts: 1,
                 ..Default::default()
             },
+            decrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.sinks.push(SinkSpec {
@@ -2558,6 +2832,7 @@ workflow "w" {
             codec: None,
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
+            encrypt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.links.push(super::super::config::LinkSpec {
@@ -2743,5 +3018,206 @@ workflow "w" {
         let (extra, _tx) = crate::connector::channel::ChannelSource::new(int_schema(), 1);
         let err = nodes().source("a", "T", extra).build().unwrap_err();
         assert!(err.message().contains("duplicate node id 'a'"), "{err}");
+    }
+
+    #[cfg(feature = "crypto")]
+    #[tokio::test]
+    async fn builder_key_provider_rewrites_wire_schema_and_encrypts_decrypts()
+    -> Result<(), SaciError> {
+        use crate::crypto::{KeyMaterial, StaticKeyProvider};
+        use crate::service::config::ServiceConfig;
+        use arrow_array::{Array, Int64Array, StringArray};
+
+        struct MemPair {
+            tx: Mutex<Option<tokio::sync::mpsc::Sender<RecordBatch>>>,
+            rx: Mutex<Option<tokio::sync::mpsc::Receiver<RecordBatch>>>,
+        }
+
+        struct MemWireSource {
+            schema: Arc<Schema>,
+            rx: tokio::sync::mpsc::Receiver<RecordBatch>,
+        }
+        #[async_trait]
+        impl Source for MemWireSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+            async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+                Ok(self.rx.recv().await)
+            }
+        }
+
+        struct MemWireSink {
+            schema: Arc<Schema>,
+            tx: Option<tokio::sync::mpsc::Sender<RecordBatch>>,
+            observed_wire_type: Arc<Mutex<Option<DataType>>>,
+        }
+        #[async_trait]
+        impl Sink for MemWireSink {
+            async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
+                *self.observed_wire_type.lock().unwrap() =
+                    Some(batch.schema().field(1).data_type().clone());
+                let wire_vals = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("wire column is Utf8");
+                assert_ne!(wire_vals.value(0), "alpha");
+                assert_ne!(wire_vals.value(1), "beta");
+                if let Some(tx) = &self.tx {
+                    let _ = tx.send(batch.clone()).await;
+                }
+                Ok(())
+            }
+            async fn finish(&mut self) -> Result<(), SaciError> {
+                self.tx.take();
+                Ok(())
+            }
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+        }
+
+        struct MemConnector {
+            pair: Arc<MemPair>,
+            initial: Mutex<Option<RecordBatch>>,
+            collected: Arc<Mutex<Vec<RecordBatch>>>,
+            observed_wire_type: Arc<Mutex<Option<DataType>>>,
+        }
+        impl Connector for MemConnector {
+            fn name(&self) -> &'static str {
+                "memwire"
+            }
+            fn source(
+                &self,
+                config: &ConfigValue,
+                _ctx: &ConnectorContext,
+            ) -> SaciResult<Box<dyn Source>> {
+                let fields = crate::connector::parse_fields(config, "memwire")?;
+                let schema = crate::connector::schema_of(&fields)?;
+                if let Some(batch) = self.initial.lock().unwrap().take() {
+                    let (tx, rx) = tokio::sync::mpsc::channel(4);
+                    tokio::spawn(async move {
+                        let _ = tx.send(batch).await;
+                    });
+                    Ok(Box::new(MemWireSource { schema, rx }))
+                } else {
+                    let rx = self.pair.rx.lock().unwrap().take().unwrap();
+                    Ok(Box::new(MemWireSource { schema, rx }))
+                }
+            }
+            fn sink(
+                &self,
+                config: &ConfigValue,
+                _ctx: &ConnectorContext,
+            ) -> SaciResult<Box<dyn Sink>> {
+                let fields = crate::connector::parse_fields(config, "memwire")?;
+                let schema = crate::connector::schema_of(&fields)?;
+                let mut guard = self.pair.tx.lock().unwrap();
+                if let Some(tx) = guard.take() {
+                    Ok(Box::new(MemWireSink {
+                        schema,
+                        tx: Some(tx),
+                        observed_wire_type: Arc::clone(&self.observed_wire_type),
+                    }))
+                } else {
+                    struct CollectSink(Arc<Schema>, Arc<Mutex<Vec<RecordBatch>>>);
+                    #[async_trait]
+                    impl Sink for CollectSink {
+                        async fn write_batch(
+                            &mut self,
+                            batch: &RecordBatch,
+                        ) -> Result<(), SaciError> {
+                            self.1.lock().unwrap().push(batch.clone());
+                            Ok(())
+                        }
+                        async fn finish(&mut self) -> Result<(), SaciError> {
+                            Ok(())
+                        }
+                        fn schema(&self) -> Arc<Schema> {
+                            Arc::clone(&self.0)
+                        }
+                    }
+                    Ok(Box::new(CollectSink(schema, Arc::clone(&self.collected))))
+                }
+            }
+        }
+
+        let plain_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("secret", DataType::Utf8, false),
+        ]));
+        let input = RecordBatch::try_new(
+            plain_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![7, 8])),
+                Arc::new(StringArray::from(vec!["alpha", "beta"])),
+            ],
+        )
+        .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let pair = Arc::new(MemPair {
+            tx: Mutex::new(Some(tx)),
+            rx: Mutex::new(Some(rx)),
+        });
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let observed_wire_type = Arc::new(Mutex::new(None));
+
+        let kdl = r#"
+            mode "standalone"
+            node id=1 data_dir="/tmp/saci-builder-crypto"
+            run "once"
+            workflow "producer" {
+                schema "Rec" {
+                    field "id" type="int64" nullable=#false
+                    field "secret" type="utf8" nullable=#false
+                }
+                source "prod_in" connector="memwire" component="Rec"
+                sink "prod_out" connector="memwire" component="Rec" {
+                    encrypt fields="secret" encoding="base64"
+                }
+                link from="prod_in" to="prod_out"
+            }
+            workflow "consumer" {
+                schema "Rec" {
+                    field "id" type="int64" nullable=#false
+                    field "secret" type="utf8" nullable=#false
+                }
+                source "cons_in" connector="memwire" component="Rec" {
+                    decrypt fields="secret" encoding="base64"
+                }
+                sink "cons_out" connector="memwire" component="Rec"
+                link from="cons_in" to="cons_out"
+            }
+        "#;
+        let cfg = ServiceConfig::from_kdl(kdl)?;
+        let provider = Arc::new(StaticKeyProvider::single(
+            "k1",
+            KeyMaterial::from_bytes([0x42; 32]),
+        )?);
+        let built = ServiceBuilder::empty()
+            .connector(MemConnector {
+                pair,
+                initial: Mutex::new(Some(input)),
+                collected: Arc::clone(&collected),
+                observed_wire_type: Arc::clone(&observed_wire_type),
+            })
+            .key_provider(provider)
+            .build(&cfg)?;
+        for wf in built {
+            wf.run(CancellationToken::new()).await?;
+        }
+        assert_eq!(*observed_wire_type.lock().unwrap(), Some(DataType::Utf8));
+        let out = collected.lock().unwrap();
+        assert_eq!(out.len(), 1);
+        let secrets = out[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(secrets.value(0), "alpha");
+        assert_eq!(secrets.value(1), "beta");
+        Ok(())
     }
 }

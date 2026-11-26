@@ -306,6 +306,7 @@ mod tests {
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            encryption: None,
             variables: std::collections::HashMap::new(),
         }
     }
@@ -334,6 +335,7 @@ mod tests {
                 codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
+                encrypt: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
         );
@@ -358,6 +360,7 @@ mod tests {
                 codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
+                decrypt: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
             vec![],
@@ -386,6 +389,7 @@ mod tests {
                 codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
+                encrypt: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
         );
@@ -429,6 +433,7 @@ mod tests {
                 codec: None,
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
+                decrypt: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
             vec![],

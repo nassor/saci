@@ -242,6 +242,7 @@ fn pinned_config(run_mode: RunMode) -> ServiceConfig {
         http: HttpConfig::default(),
         store: None,
         observability: ObservabilityConfig::default(),
+        encryption: None,
         variables: std::collections::HashMap::new(),
     }
 }

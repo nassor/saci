@@ -62,6 +62,8 @@ Each module sits under `crates/saci/src/`. A module exists only when its feature
 | `saci::distributed` | `distributed` | `PartitionSource`, `CheckpointStore`, `DistributedRunner`, `CheckpointStrategy` and `RedbSharedStore`. |
 | `saci::inspector` | `inspector` | The in-process telemetry behind the `/ui` dashboard. |
 | `saci::metrics` | `metrics` | The OpenTelemetry instruments. |
+| `saci::tls` | `tls` | Shared `rustls` (`ring` provider) client and server TLS / mutual-TLS configuration loaders (`ClientTlsConfig`, `ServerTlsConfig`). |
+| `saci::crypto` | `crypto` | Whole-payload and field-level AEAD encryption (`Cipher`, `Algorithm`, `KeyMaterial`, `StaticKeyProvider`, `EncryptedCodec`, `EncryptingSink`, `DecryptingSource`). |
 | `saci::service` | `service` | The host: HTTP control plane, config loading, the connector `Registry`, the runners, and `saci::service::cli`, the `saci-service` command line. It ships no `Source`, `Sink` or `Codec` of its own. |
 
 ## Features
@@ -83,6 +85,8 @@ authoring SDK.
 - `metrics`: the OpenTelemetry instruments in `src/metrics.rs` and the `inspector_wire` types.
   Stands alone, so a library embedder can compile the writers without the HTTP control plane.
 - `trace-context`: trace context carried across a `connector-peer` link (implies `tracing`).
+- `tls`: shared `rustls` (`ring` provider) client and server TLS/mTLS loaders in `saci::tls`.
+- `crypto`: AES-256-GCM and ChaCha20-Poly1305 AEAD envelopes, `EncryptedCodec`, field/payload batch transforms, and `EncryptingSink` / `DecryptingSource` in `saci::crypto` (kept out of `processor`).
 - `processor`: the wasm processor SDK targeting WASI 0.3 (`wasm32-wasip3`) and Component Model
   Async. Build with `--no-default-features --features processor` so tokio stays out.
 - `plugin`: the native plugin SDK (implies `engine`).
@@ -128,8 +132,8 @@ authoring SDK.
   needs no other feature.
 - `mimalloc`: the mimalloc global allocator for the binary.
 - `server`: what `cargo install saci --features server` builds, a runnable `saci-service` with no
-  further flags: `mimalloc`, `service`, `wasm-host`, `windows`, `parquet-checkpoint`, the seven
-  `connectors` and all five codecs. A connector joins it only when nothing has to be
+  further flags: `mimalloc`, `service`, `wasm-host`, `windows`, `parquet-checkpoint`, `crypto`,
+  the seven `connectors` and all five codecs. A connector joins it only when nothing has to be
   installed or already running for it to work and it needs no extra build toolchain. Every
   connector that needs a database, broker, object store or OTLP endpoint is opt-in instead:
   `connector-postgresql`, `connector-mariadb`, `connector-nats`, `connector-s3`,
@@ -272,4 +276,6 @@ Add `windows` for windowed aggregation, or use `plugin` for a native plugin.
 | Cast helper | `cast_batch` | `saci::io` | `engine` |
 | Connector contract | `Connector`, `Role`, `ConnectorContext`, `parse_fields` | `saci::connector` | `connector-api` |
 | Codec contract | `Codec`, `BatchReader`, `BatchWriter`, `MessageDecoder` | `saci::codec` | `codec-api` |
+| Transport TLS | `ClientTlsConfig`, `ServerTlsConfig`, `load_client_config`, `load_server_config` | `saci::tls` | `tls` |
+| Payload & field AEAD | `Cipher`, `Algorithm`, `StaticKeyProvider`, `EncryptedCodec`, `EncryptingSink`, `DecryptingSource` | `saci::crypto` | `crypto` |
 | Config registration | `Registry`, `ServiceBuilder`, `BuiltWorkflow`, `RunOptions`, `serve` | `saci::service` | `service` |

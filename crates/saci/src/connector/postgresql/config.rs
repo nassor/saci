@@ -57,6 +57,12 @@ pub struct ConnectionConfig {
     /// PEM bundle of trusted roots. Absent means the OS trust store.
     #[serde(default)]
     pub sslrootcert: Option<String>,
+    /// Client certificate PEM path for mutual TLS. Paired with `sslkey`.
+    #[serde(default)]
+    pub sslcert: Option<String>,
+    /// Client private key PEM path for mutual TLS. Paired with `sslcert`.
+    #[serde(default)]
+    pub sslkey: Option<String>,
     /// Backoff applied when a connection cannot be established.
     #[serde(default)]
     pub reconnect: ReconnectConfig,
@@ -138,11 +144,24 @@ impl ReconnectConfig {
 }
 
 impl ConnectionConfig {
-    fn validate(&self, what: &str) -> Result<(), SaciError> {
+    pub(crate) fn validate(&self, what: &str) -> Result<(), SaciError> {
         if self.dsn.trim().is_empty() {
             return Err(SaciError::configuration(format!(
                 "{what}: connection.dsn must not be empty"
             )));
+        }
+        match (&self.sslcert, &self.sslkey) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(SaciError::configuration(format!(
+                    "{what}: connection.sslcert and connection.sslkey must be set together"
+                )));
+            }
+            (Some(_), Some(_)) if self.sslmode == SslModeConfig::Disable => {
+                return Err(SaciError::configuration(format!(
+                    "{what}: connection.sslcert/sslkey cannot be set when connection.sslmode is 'disable'"
+                )));
+            }
+            _ => {}
         }
         self.reconnect.validate(what)
     }

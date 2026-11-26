@@ -68,16 +68,19 @@ use crate::connector::http::metrics::Instruments;
 /// The connector name every error and metric label of this half carries.
 const WHAT: &str = "HttpListenSource";
 
-/// The certificate and key a listener terminates TLS with.
+/// The certificate, key, and optional client CA a listener terminates TLS with.
 ///
-/// Both are required together: a listener with a certificate and no key cannot
-/// complete a handshake.
+/// `cert_file` and `key_file` are required together: a listener with a
+/// certificate and no key cannot complete a handshake. `client_ca_file` enables
+/// mutual TLS (client certificate verification).
 #[derive(Debug, Clone)]
 pub struct ServerTls {
     /// The certificate chain to present, PEM.
     pub cert_file: PathBuf,
     /// The private key for `cert_file`, PEM.
     pub key_file: PathBuf,
+    /// Optional CA bundle to require and verify client certificates (mTLS).
+    pub client_ca_file: Option<PathBuf>,
 }
 
 /// What [`HttpListenSource::new`] takes past the schema and the codec.
@@ -259,16 +262,14 @@ impl HttpListenSource {
         let (tcp_tls, quic_tls) = match &tls {
             None => (None, None),
             Some(files) => {
-                let base = crate::connector::http::tls::load_server(
-                    WHAT,
-                    &files.cert_file,
-                    &files.key_file,
-                )?;
-                let mut tcp = base.clone();
-                tcp.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-                let mut quic = base;
-                quic.alpn_protocols = vec![b"h3".to_vec()];
-                (Some(Arc::new(tcp)), Some(Arc::new(quic)))
+                let shared = crate::tls::ServerTlsConfig {
+                    cert_file: files.cert_file.clone(),
+                    key_file: files.key_file.clone(),
+                    client_ca_file: files.client_ca_file.clone(),
+                };
+                let tcp = crate::tls::load_server_config(WHAT, &shared, &[b"h2", b"http/1.1"])?;
+                let quic = crate::tls::load_server_config(WHAT, &shared, &[b"h3"])?;
+                (Some(tcp), Some(quic))
             }
         };
 

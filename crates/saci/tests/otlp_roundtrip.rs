@@ -95,6 +95,7 @@ fn sink_config(url: &str, encoding: Encoding) -> OtlpMetricsSinkConfig {
         metric_name: None,
         service_name: None,
         batch_rows: 8_192,
+        tls: None,
     }
 }
 
@@ -269,6 +270,7 @@ async fn a_pull_read_takes_one_body_and_then_reaches_eof() {
             headers: HashMap::new(),
             stop_at_end: true,
             max_body_bytes: 1 << 20,
+            tls: None,
         })),
         ..OtlpMetricsSourceConfig::default()
     };

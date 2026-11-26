@@ -1,6 +1,6 @@
 +++
 title = "The config file"
-description = "One KDL document describes the whole process: eleven top-level keys, the variables they can reference, and the command that proves the file."
+description = "One KDL document describes the whole process: twelve top-level keys, the variables they can reference, and the command that proves the file."
 template = "section.html"
 sort_by = "weight"
 weight = 3
@@ -13,7 +13,7 @@ accepts is the file `serve` runs.
     <div class="dgm-scroll"><svg viewBox="0 0 660 168" role="img" aria-labelledby="svc-cfg-t svc-cfg-d">
         <title id="svc-cfg-t">One config file feeds validate, and the same file feeds serve</title>
         <desc id="svc-cfg-d">
-            The file saci.kdl carries eleven top-level keys. Running saci-service validate
+            The file saci.kdl carries twelve top-level keys. Running saci-service validate
             against it parses the document, substitutes the environment placeholders and
             checks the workflow graph end to end, then exits, printing OK lines. Running
             saci-service serve against the same file does the same checks and then starts
@@ -25,7 +25,7 @@ accepts is the file `serve` runs.
             <rect class="hd hd-ctl" x="0" y="40" width="150" height="22" rx="8"/>
             <rect class="hd hd-ctl" x="0" y="54" width="150" height="8"/>
             <text class="t-lbl t-ctl" x="12" y="55">saci.kdl</text>
-            <text class="t-sm" x="12" y="80">eleven top-level keys</text>
+            <text class="t-sm" x="12" y="80">twelve top-level keys</text>
             <text class="t-sm" x="12" y="98">one or more workflows</text>
             <path class="arw arw-ctl" d="M150 74 H186" marker-end="url(#svc-cfg-c)"/>
         </g>
@@ -97,7 +97,7 @@ observability log_format="pretty" log_level="error"
 exactly one. Fill one in with
 [Workflows and links](@/service/config/workflows.md).
 
-## 2. The eleven top-level keys
+## 2. The twelve top-level keys
 
 | Key | Holds | Default |
 |---|---|---|
@@ -107,6 +107,7 @@ exactly one. Fill one in with
 | `cluster` | the Raft settings and member list of a cluster node, required by `mode "cluster"`; see [Running a cluster](@/service/operate/cluster.md) | none |
 | `workflow` | the graph: `codec` nodes, `schema` nodes, sources, processors, sinks, links; see [Workflows and links](@/service/config/workflows.md) | required |
 | `store` | standalone persistence, a `store "redb"` block; see [Run modes and persistence](@/service/config/run-modes.md) | none |
+| `encryption` | keyring and default AEAD algorithm for encrypted codecs and nodes; see [Encryption and TLS](@/service/config/encryption.md) | none |
 | `http` | the control-plane address, `enabled`, and `control`; see [Logs, metrics and traces](@/service/operate/observability.md) and [Workflow lifecycle](@/service/operate/workflows.md) | `bind="0.0.0.0:8080"`, control on |
 | `observability` | log format and level, sampling, OTLP export, the in-process capture behind the dashboard; see [Logs, metrics and traces](@/service/operate/observability.md) | pretty at `error`, capture on |
 | `flow_control` | adaptive admission pacing and chunk sizing for every source; see [Flow control](@/service/operate/flow-control.md) | on, at hard-coded defaults |

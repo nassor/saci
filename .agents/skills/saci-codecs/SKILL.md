@@ -58,6 +58,12 @@ config key it does not read with `"{format}: unknown option '{key}'"`.
   `PerBatch` messages, one whole file per payload. The factory takes no options: Snappy
   compression is fixed, and the reader reports `estimated_rows` from row-group metadata. The
   reader opens `ReadInput::Memory` through `bytes::Bytes`.
+- `crypto::EncryptedCodec` (`saci::crypto`, feature `crypto`): wraps any `Codec` to encrypt
+  whole-stream documents with chunked AEAD framing (`SACS` v1 framing binding the 9-byte stream
+  header, chunk index, and finality flag in AAD) and whole-message payloads
+  (`SACI` v1 envelope framing) using a `Cipher` (`Algorithm::Aes256Gcm` or `Algorithm::ChaCha20Poly1305`)
+  and `KeyProvider` (supporting `key_id`-tagged key rotation). Declared in KDL as a child
+  `encryption { enabled #true algorithm="aes-256-gcm" active_key="k1" }` block inside `codec`.
 
 ## Features
 

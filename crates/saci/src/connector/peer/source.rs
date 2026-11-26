@@ -28,16 +28,18 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow_array::RecordBatch;
 use arrow_buffer::Buffer;
 use arrow_ipc::reader::StreamDecoder;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
 
 use crate::connector::NodeIdentity;
 use crate::error::SaciError;
@@ -79,6 +81,8 @@ struct Shared {
     /// Base instruments: this source's own labels, no peer. A session that got
     /// as far as a hello records through its own peer-labelled set instead.
     instruments: Instruments,
+    /// Optional TLS acceptor for encrypted peer sessions.
+    tls: Option<TlsAcceptor>,
 }
 
 impl PeerSource {
@@ -93,8 +97,9 @@ impl PeerSource {
     /// # Errors
     ///
     /// Returns [`SaciError::Configuration`] if `buffer` or `max_frame_bytes`
-    /// is `0`, if `bind` cannot be bound, or if the bound socket cannot be put
-    /// into non-blocking mode or report its address.
+    /// is `0`, if `tls` files are missing or invalid, if `bind` cannot be bound,
+    /// or if the bound socket cannot be put into non-blocking mode or report its
+    /// address.
     pub fn new(
         config: PeerSourceConfig,
         schema: Arc<Schema>,
@@ -105,7 +110,14 @@ impl PeerSource {
             bind,
             buffer,
             max_frame_bytes,
+            tls,
         } = config;
+        let tls = tls
+            .as_ref()
+            .map(|cfg| {
+                crate::tls::load_server_config("PeerSource", cfg, &[]).map(TlsAcceptor::from)
+            })
+            .transpose()?;
         let listener = std::net::TcpListener::bind(&bind).map_err(|e| {
             SaciError::configuration(format!("PeerSource: cannot bind '{bind}': {e}"))
         })?;
@@ -129,6 +141,7 @@ impl PeerSource {
                 tx,
                 max_frame_bytes,
                 instruments,
+                tls,
             }),
             rx,
             listener_task: None,
@@ -174,7 +187,31 @@ impl PeerSource {
                 };
                 let shared = Arc::clone(&shared);
                 tokio::spawn(async move {
-                    serve_session(stream, peer, shared).await;
+                    if let Some(acceptor) = &shared.tls {
+                        let accepted = match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            acceptor.accept(stream),
+                        )
+                        .await
+                        {
+                            Ok(Ok(tls_stream)) => tls_stream,
+                            Ok(Err(_e)) => {
+                                shared.instruments.session_rejected();
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(peer = %peer, error = %_e, "PeerSource: TLS handshake failed");
+                                return;
+                            }
+                            Err(_) => {
+                                shared.instruments.session_rejected();
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(peer = %peer, "PeerSource: TLS handshake timed out");
+                                return;
+                            }
+                        };
+                        serve_session(accepted, peer, shared).await;
+                    } else {
+                        serve_session(stream, peer, shared).await;
+                    }
                 });
             }
         }));
@@ -200,7 +237,10 @@ enum Incoming {
 /// Read one length-prefixed frame body.
 ///
 /// `Err` is a protocol violation, already worded for the log.
-async fn read_frame(stream: &mut TcpStream, max_frame_bytes: usize) -> Result<Incoming, String> {
+async fn read_frame<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    max_frame_bytes: usize,
+) -> Result<Incoming, String> {
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -232,8 +272,8 @@ async fn read_frame(stream: &mut TcpStream, max_frame_bytes: usize) -> Result<In
 /// stream is dropped and the peer learns of it on its next write; a read
 /// abandoned part-way through a frame costs nothing, because that frame had
 /// nowhere left to go.
-async fn read_frame_or_closed(
-    stream: &mut TcpStream,
+async fn read_frame_or_closed<S: AsyncRead + Unpin>(
+    stream: &mut S,
     shared: &Shared,
 ) -> Option<Result<Incoming, String>> {
     tokio::select! {
@@ -243,7 +283,7 @@ async fn read_frame_or_closed(
 }
 
 /// Write one frame and flush it.
-async fn reply(stream: &mut TcpStream, frame: &Frame) -> Result<(), SaciError> {
+async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, frame: &Frame) -> Result<(), SaciError> {
     let mut buf = Vec::new();
     wire::encode_frame(&mut buf, frame)?;
     stream
@@ -260,8 +300,8 @@ async fn reply(stream: &mut TcpStream, frame: &Frame) -> Result<(), SaciError> {
 ///
 /// `instruments` is the peer-labelled set once a hello parsed, and the
 /// source's own base set before that.
-async fn refuse(
-    stream: &mut TcpStream,
+async fn refuse<S: AsyncWrite + Unpin>(
+    stream: &mut S,
     addr: SocketAddr,
     instruments: &Instruments,
     reason: String,
@@ -277,7 +317,11 @@ async fn refuse(
 
 /// Serve one accepted connection: the handshake, then batches until it closes
 /// or violates the protocol.
-async fn serve_session(mut stream: TcpStream, addr: SocketAddr, shared: Arc<Shared>) {
+async fn serve_session<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    addr: SocketAddr,
+    shared: Arc<Shared>,
+) {
     let Some((peer, session)) = handshake(&mut stream, addr, &shared).await else {
         return;
     };
@@ -285,8 +329,8 @@ async fn serve_session(mut stream: TcpStream, addr: SocketAddr, shared: Arc<Shar
 }
 
 /// Read the hello, decide, and answer. `Some` means the session is open.
-async fn handshake(
-    stream: &mut TcpStream,
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     addr: SocketAddr,
     shared: &Shared,
 ) -> Option<(NodeIdentity, Instruments)> {
@@ -388,8 +432,8 @@ async fn handshake(
 }
 
 /// Read data frames until the peer closes or violates the protocol.
-async fn receive(
-    stream: &mut TcpStream,
+async fn receive<S: AsyncRead + Unpin>(
+    stream: &mut S,
     addr: SocketAddr,
     shared: &Shared,
     peer: &NodeIdentity,
@@ -576,6 +620,7 @@ impl Drop for PeerSource {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::net::TcpStream;
 
     use arrow_array::{Int64Array, StringArray};
     use arrow_ipc::writer::StreamEncoder;

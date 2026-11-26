@@ -25,8 +25,8 @@ use super::builder::BuiltEdge;
 use super::builder::{BuiltNode, BuiltNodeKind};
 use super::config::{ServiceConfig, ServiceMode};
 use super::factories::{
-    missing_cluster_host_error, missing_plugin_host_error, missing_wasm_host_error,
-    missing_windows_engine_error,
+    missing_cluster_host_error, missing_crypto_error, missing_plugin_host_error,
+    missing_wasm_host_error, missing_windows_engine_error,
 };
 
 /// Verify every link can actually carry rows: matching components and
@@ -497,6 +497,36 @@ pub fn validate_build_capabilities(config: &ServiceConfig) -> SaciResult<()> {
 
     if !cfg!(feature = "service-cluster") && matches!(config.mode, ServiceMode::Cluster { .. }) {
         return Err(missing_cluster_host_error());
+    }
+
+    if !cfg!(feature = "crypto") {
+        if config.encryption.is_some() {
+            return Err(missing_crypto_error("the config's `encryption` block"));
+        }
+        for workflow in &config.workflows {
+            if let Some(codec) = workflow
+                .codecs
+                .iter()
+                .find(|c| c.encryption.as_ref().is_some_and(|e| e.enabled))
+            {
+                return Err(missing_crypto_error(&format!(
+                    "workflow '{}': codec '{}' encryption",
+                    workflow.id, codec.id
+                )));
+            }
+            if let Some(source) = workflow.sources.iter().find(|s| s.decrypt.is_some()) {
+                return Err(missing_crypto_error(&format!(
+                    "workflow '{}': source '{}' decrypt block",
+                    workflow.id, source.id
+                )));
+            }
+            if let Some(sink) = workflow.sinks.iter().find(|s| s.encrypt.is_some()) {
+                return Err(missing_crypto_error(&format!(
+                    "workflow '{}': sink '{}' encrypt block",
+                    workflow.id, sink.id
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -982,5 +1012,34 @@ mod tests {
         let mut proc = processor_node("p", pipeline);
         proc.window = Some(window());
         validate_workflow_graph("w", &[proc]).expect("no inbound stream, no check");
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    #[test]
+    fn crypto_blocks_are_refused_without_the_crypto_feature() {
+        let kdl = r#"
+            mode "standalone"
+            node id=1 data_dir="/tmp/saci-no-crypto"
+            encryption active_key="k1" {
+                key "k1" hex="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            }
+            workflow "w" {
+                source "in" connector="file" component="C" {
+                    config path="/tmp/in.csv"
+                    decrypt fields="secret"
+                }
+                sink "out" connector="file" component="C" {
+                    config path="/tmp/out.csv"
+                }
+                link from="in" to="out"
+            }
+        "#;
+        let cfg = crate::service::ServiceConfig::from_kdl(kdl).expect("parses unconditionally");
+        let err = validate_build_capabilities(&cfg).expect_err("crypto feature is off");
+        assert_eq!(err.category(), "configuration");
+        assert!(
+            err.message().contains("--features crypto"),
+            "expected --features crypto hint, got: {err}"
+        );
     }
 }

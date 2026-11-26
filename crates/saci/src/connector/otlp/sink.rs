@@ -41,6 +41,7 @@ const WHAT: &str = "OtlpMetricsSink";
 ///     metric_name: None,
 ///     service_name: None,
 ///     batch_rows: 8_192,
+///     tls: None,
 /// }, None)
 /// .expect("the config is usable");
 /// assert_eq!(sink.endpoint(), "http://localhost:4318/v1/metrics");
@@ -101,10 +102,13 @@ impl OtlpMetricsSink {
         // timeout is the whole exchange, and a gzip'd response is decoded by
         // the client without a key of its own.
         crate::connector::otlp::install_ring();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.timeout_ms))
-            .build()
-            .map_err(|e| SaciError::configuration(format!("{WHAT}: cannot build a client: {e}")))?;
+        let builder = reqwest::Client::builder().timeout(Duration::from_millis(config.timeout_ms));
+        let client =
+            crate::connector::otlp::config::apply_reqwest_tls(WHAT, builder, config.tls.as_ref())?
+                .build()
+                .map_err(|e| {
+                    SaciError::configuration(format!("{WHAT}: cannot build a client: {e}"))
+                })?;
         Ok(Self {
             schema: declared.unwrap_or_else(schema::metrics_schema),
             client,
@@ -217,6 +221,7 @@ mod tests {
             metric_name: None,
             service_name: None,
             batch_rows: crate::connector::otlp::config::DEFAULT_BATCH_ROWS,
+            tls: None,
         }
     }
 
