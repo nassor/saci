@@ -314,7 +314,7 @@ A misspelled key anywhere in this `config` fails the parse and is named in the e
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `dsn` | string | required | the connection string |
-| `user`<br>`password`<br>`password_file`<br>`application_name`<br>`sslrootcert` | string | absent | overrides and additions to the DSN |
+| `user`<br>`password`<br>`password_file`<br>`application_name`<br>`sslrootcert`<br>`sslcert`<br>`sslkey` | string | absent | overrides and additions to the DSN; `sslcert` and `sslkey` pair for client mTLS and require `sslmode` other than `disable` |
 | `connect_timeout_ms` | integer | `5000` | budget for one connect |
 | `statement_timeout_ms` | integer | `30000` | server-side statement timeout |
 | `sslmode` | string | `prefer` | `disable`, `prefer` or `require` |

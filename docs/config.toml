@@ -64,6 +64,9 @@ path = "@/service/config/workflows.md"
 [[extra.areas.nav.items]]
 title = "Run modes and persistence"
 path = "@/service/config/run-modes.md"
+[[extra.areas.nav.items]]
+title = "Encryption and TLS"
+path = "@/service/config/encryption.md"
 
 [[extra.areas.nav]]
 label = "Sources, sinks and formats"

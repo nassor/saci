@@ -108,6 +108,9 @@ Each format defines its own `config` keys, and its page lists them with their de
 `format` with different options, so one workflow reads Confluent framed Avro on one topic and
 single-object Avro on another.
 
+An optional `encryption` child block wraps any codec's stream or messages in AEAD framing using a
+key from the top-level `encryption` block. See [Encryption and TLS](@/service/config/encryption.md).
+
 ## Pick a format
 
 | `format` | Reads a stream | Writes a stream | Per-message | Declared schema |

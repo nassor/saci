@@ -335,11 +335,11 @@ a request in flight waits for its response, which is where backpressure reaches 
 `field` lines are required, and `schema_from` works as it does on the source.
 
 One TCP listener serves HTTP/1.1 and HTTP/2. The HTTP/2 connection preface is sniffed, so a client
-with prior knowledge and an HTTP/1.1 client share the port. A `tls` block here takes `cert_file`
-and `key_file` and terminates TLS, offering `h2` and `http/1.1` over ALPN; `ca_file` is refused on
-this node, because callers are authenticated by `auth { bearer }` instead of by a client
-certificate. `quic_bind` serves HTTP/3 on its own UDP `host:port` and needs that `tls` block, and
-every TCP response then advertises it as `alt-svc`.
+with prior knowledge and an HTTP/1.1 client share the port. A `tls` block here takes `cert_file`,
+`key_file`, and optional `client_ca_file` to terminate TLS or require mutual TLS, offering `h2`
+and `http/1.1` over ALPN; `ca_file` is refused on this node because callers authenticate through
+`auth { bearer }` or `tls.client_ca_file`. `quic_bind` serves HTTP/3 on its own UDP `host:port`
+and needs that `tls` block, and every TCP response then advertises it as `alt-svc`.
 
 `auth { bearer "token" }` demands `authorization: Bearer <token>` from every request, compared in
 constant time.
@@ -438,7 +438,7 @@ Sink:
 | `methods` | string or list | `POST` | the methods that accept documents |
 | `max_body_bytes` | integer | `67108864` | the largest body to accept, 64 MiB |
 | `buffer` | integer | `64` | decoded batches queued before backpressure |
-| `tls` | table | none | `cert_file` plus `key_file` terminate TLS on this listener |
+| `tls` | table | none | `cert_file`, `key_file`, and optional `client_ca_file` to terminate TLS or mutual TLS |
 | `quic_bind` | string | none | a UDP `host:port` serving HTTP/3, advertised as `alt-svc`; needs `tls` |
 | `auth` | table | none | `bearer` demands that token from every request |
 | `schema_from` | `"config"` or `"payload"` | `"config"` | as on the source |
@@ -457,6 +457,7 @@ Sink:
 | `ca_file` | string | none | PEM file whose certificates become extra roots; the client halves only |
 | `cert_file` | string | none | PEM certificate chain to present |
 | `key_file` | string | none | PEM private key for `cert_file` |
+| `client_ca_file` | string | none | PEM client CA bundle for mutual TLS; `http-listen` only |
 
 ### mode
 
@@ -510,7 +511,7 @@ A key outside the allowlist of a node's connector is a configuration error, `htt
 | `HttpListenSource config.methods must be one HTTP method name or a list of them` | write one method name, or several as arguments |
 | `HttpListenSource config.auth.bearer must be a non-empty string` | give `auth` a `bearer` token |
 | `HttpListenSource config.tls needs both 'cert_file' and 'key_file'` | name both files, or neither |
-| `HttpListenSource config.tls['ca_file'] is not a listener key: a listening source authenticates callers with auth { bearer }, not with a client certificate` | drop `ca_file` and use `auth { bearer }` |
+| `HttpListenSource config.tls['ca_file'] is not a listener key: a listening source authenticates callers with auth { bearer } or tls.client_ca_file, not with ca_file` | drop `ca_file` and use `auth { bearer }` or `tls.client_ca_file` |
 | `HttpListenSource: quic_bind needs a 'tls' block: HTTP/3 runs over TLS` | add `tls`, or drop `quic_bind` |
 | `HttpListenSource: cannot bind '{bind}': {e}` | free the port, or bind another address |
 | `source connector 'http-listen' never reaches EOF; it requires standalone mode with run "stream"` | set `run "stream"` |

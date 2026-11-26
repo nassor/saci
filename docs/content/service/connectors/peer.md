@@ -217,7 +217,9 @@ truncated body, a frame that is not a data frame, or Arrow IPC bytes that will n
 that one session and log the reason. The listener and every other peer keep running.
 
 The source is live and never reaches EOF, so only stream mode drives it. The sink's own `finish`
-closes its write half between frames, which the peer reads as a normal disconnect.
+closes its write half between frames, which the peer reads as a normal disconnect. Adding a `tls`
+block wraps the TCP session in TLS or mutual TLS via `rustls`, with a 30-second handshake timeout
+on incoming sessions; see [Encryption and TLS](@/service/config/encryption.md).
 
 ## The peer in metrics and traces
 
@@ -256,6 +258,7 @@ Source:
 | `bind` | string | required | the address the listener accepts peer services on |
 | `buffer` | integer | `64` | batches queued before backpressure; at least 1 |
 | `max_frame_bytes` | integer | `8388608` | the largest frame accepted, 8 MiB by default; at least 1 |
+| `tls` | table | none | `cert_file`, `key_file`, and optional `client_ca_file`; see [Encryption and TLS](@/service/config/encryption.md) |
 | `field` | lines | required | the schema a peer's hello must declare |
 
 Sink:
@@ -264,6 +267,7 @@ Sink:
 |---|---|---|---|
 | `connect` | string or list of strings | required | the peers this sink dials, in order |
 | `handshake_timeout_ms` | integer | `5000` | how long to wait for a peer's answer; at least 1 |
+| `tls` | table | none | `ca_file`, `cert_file`, `key_file`, `server_name`, and `use_platform_roots`; see [Encryption and TLS](@/service/config/encryption.md) |
 | `field` | lines | required | the schema announced to the peer |
 
 An unrecognised key inside `config` is a configuration error naming the key, and so is a value of the wrong type. `field` lines sit beside these keys on both halves.
