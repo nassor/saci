@@ -18,9 +18,9 @@
 //! 1. Build the processor components it loads (wasm components, native
 //!    plugins; the quickstart build runs its own task). A config whose
 //!    toolchains are missing is recorded as failed and does not stop the rest.
-//! 2. Build `saci-service` once with the union of features the configs whose
-//!    artifacts built need: each entry names the processor host it loads from
-//!    and every opt-in connector its config declares.
+//! 2. Build `saci-service` once with `--all-features` and reuse that binary
+//!    for both Pass 1 and Pass 2 (Pass 1 exercises the example-selected features,
+//!    and `--all-features` includes every feature any example declares).
 //! 3. Write a temp copy with the entry's `variables` block and run
 //!    `saci-service validate --config <copy>`.
 //!
@@ -58,8 +58,8 @@
 use std::path::PathBuf;
 
 use crate::examples::{
-    EXAMPLES, Example, build_service, build_service_all_features, inject, inject_variables,
-    service_binary,
+    EXAMPLES, Example, build_service_all_features, inject, inject_variables,
+    prebuild_all_artifacts, service_binary,
 };
 use crate::sh::{Ctx, Result};
 
@@ -181,6 +181,9 @@ pub fn run(args: &[String]) -> Result<()> {
     // Build every selected config's artifacts, recording (not aborting on) a
     // failure: a config whose toolchains are missing still lets the rest
     // validate. Configs that built then get validated below.
+    if only.is_none() {
+        prebuild_all_artifacts(&ctx);
+    }
     let mut build_failures: Vec<&'static str> = Vec::new();
     let mut buildable: Vec<&Example> = Vec::new();
     for ex in &selected {
@@ -207,8 +210,8 @@ pub fn run(args: &[String]) -> Result<()> {
         );
     }
 
-    ctx.log("building saci-service");
-    build_service(&ctx, &buildable)?;
+    ctx.log("building saci-service (--all-features, shared across both passes)");
+    build_service_all_features(&ctx)?;
     let binary = service_binary(&ctx);
 
     let tmp = std::env::temp_dir();
@@ -235,9 +238,7 @@ pub fn run(args: &[String]) -> Result<()> {
     // Pass 2: config-only, every examples/configs/*.kdl file. Independent of
     // --only and of pass 1 above: it needs no processor artifact, so every
     // file runs regardless of what pass 1 selected or found.
-    ctx.log("building saci-service (--all-features, for the config-only pass)");
-    build_service_all_features(&ctx)?;
-    let all_features_binary = service_binary(&ctx);
+    let all_features_binary = binary;
     let configs = config_files(&ctx)?;
     let mut config_only_failures: Vec<String> = Vec::new();
     for path in &configs {

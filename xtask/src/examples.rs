@@ -142,6 +142,60 @@ fn build_settle_wasm(ctx: &Ctx) -> Result<()> {
     cargo_wasm(ctx, "settle-wasm")
 }
 
+/// Pre-build every release WASM processor and native plugin in two batched
+/// `cargo build` invocations so Cargo compiles the shared dependency graph once
+/// and compiles all packages in parallel when `validate` runs over all
+/// examples. Errors are ignored here so each example's own `build` step still
+/// reports missing toolchains individually.
+pub fn prebuild_all_artifacts(ctx: &Ctx) {
+    ctx.log("pre-building all example WASM processors in parallel...");
+    if let Ok(cargo) = ctx.cargo() {
+        let _ = cargo
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip3",
+                "-p",
+                "order-processing-wasm",
+                "-p",
+                "branching-wasm",
+                "-p",
+                "windowing-tumbling-wasm",
+                "-p",
+                "windowing-sliding-wasm",
+                "-p",
+                "windowing-session-wasm",
+                "-p",
+                "quickstart-validate-wasm",
+                "-p",
+                "quickstart-settle-wasm",
+                "-p",
+                "settle-wasm",
+                "-p",
+                "integrity-classify-wasm",
+                "-p",
+                "integrity-aggregate-wasm",
+                "-p",
+                "integrity-audit-wasm",
+            ])
+            .run();
+    }
+    ctx.log("pre-building all example release plugins in parallel...");
+    if let Ok(cargo) = ctx.cargo() {
+        let _ = cargo
+            .args([
+                "build",
+                "--release",
+                "-p",
+                "branching-plugin",
+                "-p",
+                "windowing-tumbling-plugin",
+            ])
+            .run();
+    }
+}
+
 /// Every runnable example config, in the order `cargo xtask validate` checks
 /// them (cheapest builds first).
 pub const EXAMPLES: &[Example] = &[
