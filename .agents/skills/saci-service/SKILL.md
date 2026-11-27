@@ -249,9 +249,10 @@ Key types:
   exactly one). Declares `codec`, `source`, `wasm`, `plugin`, `operator` (`OperatorSpec`), and
   `sink` nodes, each with a mandatory id and an optional name, plus `link` nodes carrying `from`,
   `to` and an optional `branch`. `operator` nodes run native Arrow operators (`sql`, `filter`,
-  `project`, `group_by`, `sort`, `top_n`, `unnest`, `join`, `interval_join`, `lookup_join`,
-  `deduplicate`) built by `src/service/operator_builder.rs` (`connector = "operator:<kind>"`) with
-  automatic in-memory state carry in standalone runs for stateful kinds. `#[serde(deny_unknown_fields)]` means a key the service cannot honour is a parse error, not a silently dropped section.
+  `project`, `group_by`, `window`, `route` / `branch`, `sort`, `top_n`, `unnest`, `join`,
+  `interval_join`, `lookup_join`, `deduplicate`) built by `src/service/operator_builder.rs`
+  (`connector = "operator:<kind>"`) with automatic in-memory state carry in standalone runs for
+  stateful kinds and per-branch `BranchPayloads` row-split delivery via `RuntimeOutput`. `#[serde(deny_unknown_fields)]` means a key the service cannot honour is a parse error, not a silently dropped section.
   error, not a silently dropped section. The `wasm` and `plugin` fields, and the `window`
   block either carries, are declared unconditionally, like `ServiceMode::Cluster`: the schema
   is the same in every build, so a node whose host is compiled out, or a `window` block in a

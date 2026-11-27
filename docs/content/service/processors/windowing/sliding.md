@@ -172,6 +172,23 @@ four distinct windows. When it is not a multiple, the window ids of one
 timestamp repeat. Every key of the block is listed under
 [Every key](@/service/processors/windowing/_index.md#every-key).
 
+## Declarative sliding window (no artifact)
+
+Because declarative `operator kind="window"` emits `window_start_ms` and `window_end_ms` by default
+(`emit_bounds=#true`), you can reproduce `SlidingTotal` without compiling `windowing-sliding-wasm`:
+
+```kdl,name=Declarative sliding operator producing identical SlidingTotal rows
+operator "window_sliding" kind="window" component="Sale" into="SlidingTotal" {
+    window kind="sliding" size_ms=60000 slide_ms=15000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+        key_fields "symbol"
+    }
+    config {
+        aggregates "count(*) AS count"
+        aggregates "sum(amount) AS sum"
+    }
+}
+```
+
 ## Prerequisites
 
 - A clone of the repository, from the root of which every command runs.

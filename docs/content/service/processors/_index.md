@@ -6,6 +6,16 @@ sort_by = "weight"
 weight = 6
 +++
 
+A workflow declares processor nodes in one of three ways:
+
+- **[Declarative `operator` nodes](@/service/processors/operators.md)** run native Arrow
+  relational, analytical, windowing and routing transforms directly from KDL with no compiled
+  `.wasm` or shared-library artifact.
+- **`wasm` nodes** load a sandboxed `wasm32-wasip3` component compiled from Rust with `#[processor]`,
+  covered below.
+- **[Native `plugin` nodes](@/service/plugins/_index.md)** load a trusted shared library (`.so`,
+  `.dylib` or `.dll`) compiled with `#[plugin]`.
+
 A `wasm` node names a compiled processor and runs it over every batch the workflow delivers to
 it. You can declare one, hand it configuration, chain two of them, keep its state across batches,
 and read its counters.

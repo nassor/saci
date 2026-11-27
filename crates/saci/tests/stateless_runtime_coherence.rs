@@ -31,6 +31,7 @@ impl PipelineRuntime for Stateful {
         Ok(RuntimeOutput {
             state: Some(vec![n]),
             routes: None,
+            branch_batches: None,
         })
     }
 

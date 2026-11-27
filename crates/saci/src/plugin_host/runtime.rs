@@ -379,6 +379,7 @@ impl crate::runtime::PipelineRuntime for NativePluginRuntime {
         Ok(RuntimeOutput {
             state: checkpoint,
             routes,
+            branch_batches: None,
         })
     }
 

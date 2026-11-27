@@ -195,11 +195,14 @@ pub mod service;
 pub mod prelude {
     pub use crate::column::ComponentView;
     pub use crate::operators::{
-        AggregateOp, AggregateSpec, BinaryOp, DeduplicateState, DeduplicateSystem, Expr,
-        FilterSystem, GroupBySystem, IntervalJoinState, IntervalJoinSystem, JoinKey, JoinKind,
-        JoinSystem, KeepPolicy, LookupJoinState, LookupJoinSystem, ProjectItem, ProjectSystem,
-        ScalarFunc, ScalarValue, SortKey, SortSystem, SqlSystem, TopNSystem, UnaryOp, UnnestSystem,
+        AggregateOp, AggregateSpec, BinaryOp, BranchPayloads, BranchRule, DeduplicateState,
+        DeduplicateSystem, Expr, FilterSystem, GroupBySystem, IntervalJoinState,
+        IntervalJoinSystem, JoinKey, JoinKind, JoinSystem, KeepPolicy, LookupJoinState,
+        LookupJoinSystem, ProjectItem, ProjectSystem, RouteMode, RouteSystem, ScalarFunc,
+        ScalarValue, SortKey, SortSystem, SqlSystem, TopNSystem, UnaryOp, UnnestSystem,
     };
+    #[cfg(feature = "windows")]
+    pub use crate::operators::{WindowAggregateState, WindowAggregateSystem, WindowColumns};
     #[cfg(feature = "plugin")]
     pub use crate::plugin;
     #[cfg(feature = "processor")]

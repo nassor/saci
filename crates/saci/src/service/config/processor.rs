@@ -166,6 +166,8 @@ impl PluginSpec {
 /// - `"interval_join"`: `left`, `right`, `into`, `on`, `left_time_field`, `right_time_field`, `lower_bound_ms`, `upper_bound_ms`
 /// - `"lookup_join"`: `left`, `right`, `into`, `on`, optional `join_type` (`inner|left`), optional `right_key_unique`
 /// - `"deduplicate"`: `keys` (`key_fields`), optional `keep` (`first|last`), `time_field`, `ttl_ms`, `max_keys`, `stateful` (`component`, optional `into`)
+/// - `"window"`: `aggregates` (`component`, optional `into`, `keys`, `window_id_field`, `window_start_field`, `window_end_field`, `emit_bounds`, plus required `window { ... }` child block)
+/// - `"route"` / `"branch"`: `branches` map/list, optional `mode` (`row|first_row|any|all`), `exclusive`, `default` (`component`, optional `into`)
 /// - `"sql"`: `query` SQL `SELECT ...` string (`into` output component, optional `component` hint)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
@@ -175,9 +177,9 @@ pub struct OperatorSpec {
     /// Optional display name. The dashboard shows the id when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Operator kind (`"sql"`, `"filter"`, `"project"`, `"group_by"`, `"sort"`,
-    /// `"top_n"`, `"unnest"`, `"join"`, `"interval_join"`, `"lookup_join"`,
-    /// `"deduplicate"`).
+    /// Operator kind (`"sql"`, `"filter"`, `"project"`, `"group_by"`, `"window"`,
+    /// `"sort"`, `"top_n"`, `"unnest"`, `"join"`, `"interval_join"`,
+    /// `"lookup_join"`, `"deduplicate"`, `"route"`, `"branch"`).
     pub kind: String,
     /// Input component name (or in-place component) for single-input operators.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,11 +233,24 @@ impl OperatorSpec {
 
         let wf_ctx = format!("workflow '{workflow_id}': operator '{}'", self.id);
         match self.kind.as_str() {
-            "filter" | "project" | "group_by" | "sort" | "top_n" | "unnest" | "deduplicate" => {
+            "filter" | "project" | "group_by" | "sort" | "top_n" | "unnest" | "deduplicate"
+            | "route" | "branch" => {
                 if self.component.as_deref().is_none_or(str::is_empty) {
                     return Err(SaciError::configuration(format!(
                         "{wf_ctx} (kind='{}') requires 'component'",
                         self.kind
+                    )));
+                }
+            }
+            "window" => {
+                if self.component.as_deref().is_none_or(str::is_empty) {
+                    return Err(SaciError::configuration(format!(
+                        "{wf_ctx} (kind='window') requires 'component'"
+                    )));
+                }
+                if self.window.is_none() {
+                    return Err(SaciError::configuration(format!(
+                        "{wf_ctx} (kind='window') requires a 'window' block"
                     )));
                 }
             }
@@ -262,7 +277,8 @@ impl OperatorSpec {
             other => {
                 return Err(SaciError::configuration(format!(
                     "{wf_ctx}: unknown operator kind '{other}' (expected sql, filter, project, \
-                     group_by, sort, top_n, unnest, join, interval_join, lookup_join, or deduplicate)"
+                     group_by, window, route, branch, sort, top_n, unnest, join, interval_join, \
+                     lookup_join, or deduplicate)"
                 )));
             }
         }

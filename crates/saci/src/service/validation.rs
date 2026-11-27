@@ -188,7 +188,12 @@ fn validate_window(
             BuiltNodeKind::Processor { .. } => {
                 let up_declared = declared[i].as_ref().expect("processor node");
                 let up_template = templates[i].as_ref().expect("processor node");
+                let idx_is_operator = nodes[idx].connector.starts_with("operator:");
+                let idx_declared = declared[idx].as_ref().expect("processor node");
                 for component in up_declared {
+                    if idx_is_operator && !idx_declared.iter().any(|c| c == component) {
+                        continue;
+                    }
                     let Some(fields) = output_fields_of(up_template, component) else {
                         continue;
                     };
@@ -219,6 +224,17 @@ fn validate_window(
                      tracker reads Int64 milliseconds or an Arrow timestamp type",
                     nodes[idx].id, window.time_field
                 )));
+            }
+        }
+        if nodes[idx].connector.starts_with("operator:") {
+            for key in &window.key_fields {
+                if !fields.iter().any(|f| f.name() == key.as_str()) {
+                    return Err(SaciError::configuration(format!(
+                        "workflow '{workflow_id}': processor '{}' declares window key_field '{key}' \
+                         but component '{component}' delivered by an inbound link has no such field",
+                        nodes[idx].id
+                    )));
+                }
             }
         }
     }

@@ -77,4 +77,38 @@ Cross-run accumulation belongs to the `WindowAccumulator` component, one row per
 
 The accumulator schema is versioned (`version` column, current version 1), so a checkpoint written by a newer binary is refused.
 
+## Cross-batch component aggregation (`WindowAggregateSystem`)
+
+While `WindowedSystem` writes finalized rows for a single batch into the `WindowResults` resource,
+`WindowAggregateSystem` (exported in `saci::operators` and `saci::prelude` behind `windows`)
+writes closed windows directly to a named output `Component` across passes and retains open rows in
+`WindowAggregateState` (checkpointed automatically when registered via
+`Pipeline::state::<WindowAggregateState>()`).
+
+```rust,name=Stateful component-to-component windowed aggregation in Rust
+use saci::prelude::*;
+
+let window_agg = WindowAggregateSystem::new(
+    "Sale",
+    "WindowTotal",
+    "timestamp_ms",
+    WindowSpec::tumbling(30_000),
+    ["symbol"],
+    vec![
+        AggregateSpec::count_all().alias("count"),
+        AggregateSpec::sum("amount").alias("sum"),
+    ],
+)?
+.allowed_lateness_ms(5_000)
+.window_columns(WindowColumns {
+    window_id_field: Some("window_id".to_string()),
+    window_start_field: None,
+    window_end_field: None,
+});
+
+let pipeline = Pipeline::new("windowed_sales")
+    .state::<WindowAggregateState>()
+    .system(window_agg);
+```
+
 Run the windowing example: [Windowing](@/service/processors/windowing/_index.md).

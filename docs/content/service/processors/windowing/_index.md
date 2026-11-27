@@ -12,8 +12,8 @@ aliases = ["/service/windowing/"]
 <dd>An aggregate over a <strong>bounded slice of event time</strong>, cut from an unbounded stream</dd>
 <dt>Reach for it when</dt>
 <dd>You need per key totals, and the rows carry <strong>their own timestamp</strong></dd>
-<dt>Split of work</dt>
-<dd>The host tracks the watermark; the <strong>processor</strong> holds the windows and aggregates</dd>
+<dt>Where it runs</dt>
+<dd>Declaratively in an <code>operator</code> node (<code>kind="window"</code>), or inside a <code>wasm</code> or <code>plugin</code> processor</dd>
 </dl>
 
 A stream has no end, so a total over one is never finished. A window gives it a
@@ -137,8 +137,46 @@ what that kind costs, and carries one runnable example.
 
 ## Every key
 
-The `window` block sits inside a `wasm` or `plugin` node and declares the event-time geometry
-the processor works in.
+The `window` block sits inside a declarative `operator` node (`kind="window"` or
+`kind="group_by"`), a `wasm` node, or a `plugin` node, and declares the event-time geometry the
+node works in.
+
+### Declarative windowing (`operator kind="window"`)
+
+When your aggregation can be expressed with built-in SQL aggregates (`count`, `sum`, `min`, `max`,
+`mean`, `count_distinct`, `variance`, `stddev`, `first`, `last`, `approx_percentile`, `string_agg`,
+`list_agg`), declare an `operator` node with `kind="window"` (or `kind="group_by"` carrying a
+`window` child) instead of compiling a `.wasm` component or plugin.
+
+The host tracks the watermark from `time_field` (and any `WindowWatermark` updates), buffers rows
+belonging to still-open windows across batches in checkpointable state, coalesces merged session
+windows on out-of-order arrivals, and emits finalized rows to `into` when a window closes.
+
+```kdl,name=Declarative 30s tumbling window in KDL without compiled artifacts
+operator "window_totals" kind="window" component="Sale" into="WindowTotal" {
+    window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+        key_fields "symbol"
+    }
+    config window_id_field="window_id" emit_bounds=#false {
+        aggregates "count(*) AS count"
+        aggregates "sum(amount) AS sum"
+    }
+}
+```
+
+#### Config keys for declarative `window`
+
+| Key | Location | Default | What it does |
+|---|---|---|---|
+| `aggregates` / `aggregate` | `config` child or list | required | One or more aggregate expressions (`"count(*) AS count"`, `"sum(amount) AS total"`) |
+| `keys` | `config` property or list | `[]` | Extra grouping keys merged with `window.key_fields` |
+| `emit_bounds` | `config` property | `#true` | `#true` emits inclusive `window_start_ms` and exclusive `window_end_ms`; set `#false` when only `window_id_field` is desired |
+| `window_start_field` | `config` property | `"window_start_ms"` (when `emit_bounds` is `#true`) | Output column name for the inclusive window start (`Int64` ms) |
+| `window_end_field` | `config` property | `"window_end_ms"` (when `emit_bounds` is `#true`) | Output column name for the exclusive window end (`Int64` ms) |
+| `window_id_field` | `config` property | none | Optional `Int64` window bucket index (tumbling/sliding) or session start timestamp column name |
+
+Metadata columns come first in the output schema (optional `window_id_field`, then
+`window_start_field` and `window_end_field`), followed by grouping keys and then aggregate columns.
 
 ### window
 

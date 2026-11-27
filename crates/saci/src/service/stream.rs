@@ -711,6 +711,7 @@ pub(crate) async fn run(
                             deliver_outbound(
                                 i,
                                 &out.routes,
+                                out.branch_batches.as_ref(),
                                 rows_out,
                                 metrics,
                                 &downstream,

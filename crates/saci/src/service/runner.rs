@@ -348,6 +348,7 @@ pub(super) fn advance_watermark(
 pub(super) fn deliver_outbound(
     i: usize,
     routes: &Option<Vec<String>>,
+    branch_batches: Option<&crate::operators::BranchPayloads>,
     rows_out: u64,
     metrics: &ProcessorMetrics,
     downstream: &[Vec<BuiltEdge>],
@@ -385,8 +386,12 @@ pub(super) fn deliver_outbound(
         if !super::builder::edge_selected(routes, &edge.branch) {
             continue;
         }
+        let branch_batch = edge.branch.as_deref().and_then(|branch| {
+            branch_batches.and_then(|bp| bp.batches.get(branch).map(|rb| (bp.component, rb)))
+        });
         if let Some(branch) = &edge.branch {
-            metrics.branch_rows(branch, rows_out);
+            let branch_rows = branch_batch.map_or(rows_out, |(_, rb)| rb.num_rows() as u64);
+            metrics.branch_rows(branch, branch_rows);
         }
         match kinds[d] {
             NodeRunKind::Processor => {
@@ -395,7 +400,12 @@ pub(super) fn deliver_outbound(
                 let dst = right[d - i - 1]
                     .as_mut()
                     .expect("downstream processor dataset");
-                if let Err(_e) = src.forward_into(dst) {
+                let res = if let Some((comp, rb)) = branch_batch {
+                    forward_with_branch_override(src, dst, comp, rb)
+                } else {
+                    src.forward_into(dst)
+                };
+                if let Err(_e) = res {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         parent: log.span,
@@ -409,7 +419,13 @@ pub(super) fn deliver_outbound(
             }
             NodeRunKind::Sink => {
                 let component = components[d].expect("a sink node always declares a component");
-                if let Ok(batch) = datasets[i]
+                if let Some((comp, rb)) = branch_batch
+                    && comp == component
+                {
+                    if rb.num_rows() > 0 {
+                        staged[d].push(rb.clone());
+                    }
+                } else if let Ok(batch) = datasets[i]
                     .as_ref()
                     .expect("processor dataset")
                     .batch_named(component)
@@ -424,6 +440,30 @@ pub(super) fn deliver_outbound(
             }
         }
     }
+}
+
+fn forward_with_branch_override(
+    src: &Dataset,
+    dst: &mut Dataset,
+    override_component: &'static str,
+    override_batch: &RecordBatch,
+) -> Result<usize, crate::error::SaciError> {
+    let names: Vec<&'static str> = dst.schemas().iter().map(|(name, _)| *name).collect();
+    let mut appended = 0usize;
+    for name in names {
+        if name == override_component {
+            appended += override_batch.num_rows();
+            dst.append_record_batch(name, override_batch.clone())?;
+        } else if src.schemas().contains(name) {
+            let batch = src
+                .batch_named(name)
+                .expect("component present in schemas() must have a batch")
+                .clone();
+            appended += batch.num_rows();
+            dst.append_record_batch(name, batch)?;
+        }
+    }
+    Ok(appended)
 }
 
 /// Write every batch staged for one sink, without finalising it.
