@@ -249,9 +249,26 @@ impl WindowedSystem {
                 })?;
                 let sorted_col = take(source_batch.column(col_idx).as_ref(), sorted_indices, None)
                     .map_err(|e| SaciError::generic(format!("WindowedSystem: take error: {e}")))?;
-                let schema =
-                    self.reduce_schema(*aggregate, input_field, sorted_col.data_type().clone());
+                let out_type = match aggregate {
+                    ReduceAggregate::First | ReduceAggregate::Last => {
+                        sorted_col.data_type().clone()
+                    }
+                    _ => DataType::Float64,
+                };
+                let schema = self.reduce_schema(*aggregate, input_field, out_type);
                 Ok((schema, sorted_col, None))
+            }
+            WindowFunction::Multi(specs) => {
+                if specs.is_empty() {
+                    return Err(SaciError::configuration(
+                        "WindowFunction::Multi requires at least one AggregateSpec",
+                    ));
+                }
+                let sorted_source_batch =
+                    take_batch(source_batch, sorted_indices, "WindowedSystem: sorted batch")?;
+                let schema = self.multi_schema(specs, sorted_source_batch.schema_ref())?;
+                let placeholder_col = sorted_source_batch.column(0).clone();
+                Ok((schema, placeholder_col, Some(sorted_source_batch)))
             }
             WindowFunction::Process(_) => {
                 let sorted_source_batch =
@@ -293,6 +310,28 @@ impl WindowedSystem {
         Arc::new(Schema::new(fields))
     }
 
+    fn multi_schema(
+        &self,
+        specs: &[crate::operators::AggregateSpec],
+        input_schema: &Schema,
+    ) -> Result<Arc<Schema>, SaciError> {
+        let mut fields = vec![
+            Field::new("window_id", DataType::Int64, false),
+            Field::new("key_hash", DataType::Int64, false),
+        ];
+        for spec in specs {
+            fields.push(crate::operators::aggregate::aggregate_output_field(
+                spec,
+                input_schema,
+            )?);
+        }
+        if matches!(&self.spec, WindowSpec::Session { .. }) {
+            fields.push(Field::new("session_start_ts", DataType::Int64, false));
+            fields.push(Field::new("session_end_ts", DataType::Int64, false));
+        }
+        Ok(Arc::new(Schema::new(fields)))
+    }
+
     /// Aggregate rows `[group_start, group_end)` from the sorted input column.
     fn aggregate_slice(&self, p: SliceParams<'_>) -> Result<RecordBatch, SaciError> {
         let window_start = p.win_id * p.window_size_ms;
@@ -331,6 +370,32 @@ impl WindowedSystem {
                     SaciError::generic(format!("WindowedSystem: RecordBatch error: {e}"))
                 })
             }
+            WindowFunction::Multi(specs) => {
+                let group_batch = p
+                    .sorted_source_batch
+                    .expect("prepare_aggregate_inputs sorts the batch for Multi")
+                    .slice(p.group_start, p.group_end - p.group_start);
+                let win_id_col: ArrayRef = Arc::new(Int64Array::from(vec![p.win_id]));
+                let key_hash_col: ArrayRef = Arc::new(Int64Array::from(vec![p.key_hash]));
+                let mut columns = vec![win_id_col, key_hash_col];
+                for spec in specs {
+                    columns.push(crate::operators::aggregate::evaluate_aggregate_spec(
+                        spec,
+                        &group_batch,
+                    )?);
+                }
+                if matches!(&self.spec, WindowSpec::Session { .. }) {
+                    let ts_slice = &p.sorted_time_ms.values()[p.group_start..p.group_end];
+                    let start_ts = ts_slice.iter().copied().min().unwrap_or(0);
+                    let end_ts = ts_slice.iter().copied().max().unwrap_or(0);
+                    columns.push(Arc::new(Int64Array::from(vec![start_ts])) as ArrayRef);
+                    columns.push(Arc::new(Int64Array::from(vec![end_ts])) as ArrayRef);
+                }
+                let _ = ctx;
+                RecordBatch::try_new(p.schema.clone(), columns).map_err(|e| {
+                    SaciError::generic(format!("WindowedSystem: Multi RecordBatch error: {e}"))
+                })
+            }
             WindowFunction::Process(f) => {
                 let group_batch = p
                     .sorted_source_batch
@@ -349,6 +414,23 @@ impl WindowedSystem {
                 input_field,
                 aggregate,
             } => self.reduce_schema(*aggregate, input_field, DataType::Float64),
+            WindowFunction::Multi(specs) => {
+                let mut fields = vec![
+                    Field::new("window_id", DataType::Int64, false),
+                    Field::new("key_hash", DataType::Int64, false),
+                ];
+                for spec in specs {
+                    let dt = match &spec.op {
+                        crate::operators::AggregateOp::Count
+                        | crate::operators::AggregateOp::CountAll
+                        | crate::operators::AggregateOp::CountDistinct => DataType::Int64,
+                        crate::operators::AggregateOp::StringAgg { .. } => DataType::Utf8,
+                        _ => DataType::Float64,
+                    };
+                    fields.push(Field::new(spec.output_name(), dt, true));
+                }
+                Arc::new(Schema::new(fields))
+            }
             WindowFunction::Process(_) => Arc::new(Schema::empty()),
         }
     }

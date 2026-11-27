@@ -1,10 +1,6 @@
 //! Time column utilities: casting timestamps to milliseconds since epoch.
 
-use arrow_array::{
-    Array, ArrayRef, Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
-};
-use arrow_schema::DataType;
+use arrow_array::{ArrayRef, Int64Array};
 
 use crate::error::SaciError;
 
@@ -17,77 +13,13 @@ use crate::error::SaciError;
 /// - `TimestampMicrosecond`: divided by 1000 (truncates)
 /// - `TimestampNanosecond`: divided by 1_000_000 (truncates)
 pub fn to_ms_array(col: &ArrayRef) -> Result<Int64Array, SaciError> {
-    let data_type = col.data_type();
-
-    match data_type {
-        DataType::Int64 => Ok(col
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| SaciError::generic("failed to downcast Int64Array"))?
-            .clone()),
-        DataType::Timestamp(unit, _) => {
-            use arrow_schema::TimeUnit;
-            match unit {
-                TimeUnit::Second => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampSecondArray>()
-                        .ok_or_else(|| {
-                            SaciError::generic("failed to downcast TimestampSecondArray")
-                        })?;
-                    let ms: Int64Array = arr
-                        .iter()
-                        .map(|opt_ts| opt_ts.map(|ts| ts * 1000))
-                        .collect();
-                    Ok(ms)
-                }
-                TimeUnit::Millisecond => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampMillisecondArray>()
-                        .ok_or_else(|| {
-                            SaciError::generic("failed to downcast TimestampMillisecondArray")
-                        })?;
-                    let ms: Int64Array = arr.iter().collect();
-                    Ok(ms)
-                }
-                TimeUnit::Microsecond => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampMicrosecondArray>()
-                        .ok_or_else(|| {
-                            SaciError::generic("failed to downcast TimestampMicrosecondArray")
-                        })?;
-                    let ms: Int64Array = arr
-                        .iter()
-                        .map(|opt_ts| opt_ts.map(|ts| ts / 1000))
-                        .collect();
-                    Ok(ms)
-                }
-                TimeUnit::Nanosecond => {
-                    let arr = col
-                        .as_any()
-                        .downcast_ref::<TimestampNanosecondArray>()
-                        .ok_or_else(|| {
-                            SaciError::generic("failed to downcast TimestampNanosecondArray")
-                        })?;
-                    let ms: Int64Array = arr
-                        .iter()
-                        .map(|opt_ts| opt_ts.map(|ts| ts / 1_000_000))
-                        .collect();
-                    Ok(ms)
-                }
-            }
-        }
-        _ => Err(SaciError::generic(format!(
-            "time column must be Int64 or Timestamp variant, got {data_type:?}"
-        ))),
-    }
+    crate::operators::time::to_ms_array(col)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::Array;
     use arrow_array::builder::{Int64Builder, TimestampMillisecondBuilder, TimestampSecondBuilder};
 
     fn arc(arr: impl arrow_array::Array + 'static) -> ArrayRef {

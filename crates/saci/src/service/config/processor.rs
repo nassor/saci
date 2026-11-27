@@ -144,6 +144,132 @@ impl PluginSpec {
     }
 }
 
+/// Declarative relational, analytical, or stream-processing operator node
+/// executed natively on the engine (requires no external `.wasm` or `.so`).
+///
+/// ```kdl
+/// workflow "w" {
+///     operator "filter_high" kind="filter" component="Order" {
+///         config where="amount > 100.0"
+///     }
+/// }
+/// ```
+///
+/// Supported `kind` values:
+/// - `"filter"`: `where` expression string (`component`, optional `into`)
+/// - `"project"`: `select` string or array of `"expr [AS alias]"` (`component`, optional `into`)
+/// - `"group_by"`: `keys` (string or list) + `aggregates` (`component`, optional `into`)
+/// - `"sort"`: `order_by`, optional `limit`, `offset` (`component`, optional `into`)
+/// - `"top_n"`: `order_by`, `limit`, optional `offset` (`component`, optional `into`)
+/// - `"unnest"`: `field`, optional `alias`/`as`, optional `preserve_empty` (`component`, optional `into`)
+/// - `"join"`: `left`, `right`, `into`, `on` (key or list), optional `join_type` (`inner|left|right|full|semi|anti`)
+/// - `"interval_join"`: `left`, `right`, `into`, `on`, `left_time_field`, `right_time_field`, `lower_bound_ms`, `upper_bound_ms`
+/// - `"lookup_join"`: `left`, `right`, `into`, `on`, optional `join_type` (`inner|left`), optional `right_key_unique`
+/// - `"deduplicate"`: `keys` (`key_fields`), optional `keep` (`first|last`), `time_field`, `ttl_ms`, `max_keys`, `stateful` (`component`, optional `into`)
+/// - `"sql"`: `query` SQL `SELECT ...` string (`into` output component, optional `component` hint)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorSpec {
+    /// Mandatory id, from the node's leading argument. Unique workflow-wide.
+    pub id: String,
+    /// Optional display name. The dashboard shows the id when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Operator kind (`"sql"`, `"filter"`, `"project"`, `"group_by"`, `"sort"`,
+    /// `"top_n"`, `"unnest"`, `"join"`, `"interval_join"`, `"lookup_join"`,
+    /// `"deduplicate"`).
+    pub kind: String,
+    /// Input component name (or in-place component) for single-input operators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// Left input component for binary join operators (`join`, `interval_join`,
+    /// `lookup_join`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
+    /// Right input component for binary join operators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<String>,
+    /// Output component name. Defaults to `component` (in-place) for unary
+    /// operators; required for joins and `sql`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    /// Operator-specific configuration (`where`, `select`, `query`, `keys`, etc.).
+    #[serde(
+        default = "super::default_config",
+        skip_serializing_if = "super::is_default_config"
+    )]
+    pub config: crate::config::ConfigValue,
+    /// Optional windowing declaration (host watermark tracking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowConfig>,
+}
+
+impl OperatorSpec {
+    /// Constructs a minimal [`OperatorSpec`] with empty configuration.
+    pub fn new(id: impl Into<String>, kind: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            kind: kind.into(),
+            component: None,
+            left: None,
+            right: None,
+            into: None,
+            config: super::default_config(),
+            window: None,
+        }
+    }
+
+    /// Validates required endpoint attributes and `kind` spelling for this operator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::SaciError::Configuration`] on an unknown `kind`
+    /// or missing endpoint attributes.
+    pub fn validate(&self, workflow_id: &str) -> crate::error::SaciResult<()> {
+        use crate::error::SaciError;
+
+        let wf_ctx = format!("workflow '{workflow_id}': operator '{}'", self.id);
+        match self.kind.as_str() {
+            "filter" | "project" | "group_by" | "sort" | "top_n" | "unnest" | "deduplicate" => {
+                if self.component.as_deref().is_none_or(str::is_empty) {
+                    return Err(SaciError::configuration(format!(
+                        "{wf_ctx} (kind='{}') requires 'component'",
+                        self.kind
+                    )));
+                }
+            }
+            "join" | "interval_join" | "lookup_join" => {
+                if self.left.as_deref().is_none_or(str::is_empty)
+                    || self.right.as_deref().is_none_or(str::is_empty)
+                    || self.into.as_deref().is_none_or(str::is_empty)
+                {
+                    return Err(SaciError::configuration(format!(
+                        "{wf_ctx} (kind='{}') requires 'left', 'right', and 'into'",
+                        self.kind
+                    )));
+                }
+            }
+            "sql" => {
+                if self.into.as_deref().is_none_or(str::is_empty)
+                    && self.component.as_deref().is_none_or(str::is_empty)
+                {
+                    return Err(SaciError::configuration(format!(
+                        "{wf_ctx} (kind='sql') requires 'into' or 'component'"
+                    )));
+                }
+            }
+            other => {
+                return Err(SaciError::configuration(format!(
+                    "{wf_ctx}: unknown operator kind '{other}' (expected sql, filter, project, \
+                     group_by, sort, top_n, unnest, join, interval_join, lookup_join, or deduplicate)"
+                )));
+            }
+        }
+        crate::service::operator_builder::validate_operator_config(self, workflow_id)
+    }
+}
+
 #[cfg(all(test, feature = "service"))]
 mod tests {
     use crate::service::config::test_support::parse;

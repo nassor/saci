@@ -55,6 +55,104 @@ impl Dataset {
         Ok(())
     }
 
+    /// Replace the entire `RecordBatch` for component `C`, allowing its row
+    /// count to differ from the current dataset row count.
+    ///
+    /// Updates [`Dataset::rows`](Self::rows) and the alive bitmap to the
+    /// maximum row count across all registered components so IPC invariants
+    /// hold when an operator grows (for example `Unnest` or `Join`) or shrinks
+    /// (for example `Filter`, `Deduplicate`, `GroupBy`, or `TopN`) a component.
+    ///
+    /// # Errors
+    ///
+    /// - [`SaciError::ComponentNotRegistered`] if `C` is not registered.
+    /// - `SaciError::Generic` if the new batch's schema differs from the
+    ///   registered one.
+    pub fn set_batch<C: Component>(&mut self, new_batch: RecordBatch) -> Result<(), SaciError> {
+        let name = C::name();
+        let registered_schema = self
+            .schemas
+            .get(name)
+            .ok_or_else(|| SaciError::component_not_registered(name))?;
+        if new_batch.schema_ref().fields() != registered_schema.fields() {
+            return Err(SaciError::generic(format!(
+                "Dataset::set_batch: schema mismatch for '{name}': \
+                 got {:?}, expected {:?}",
+                new_batch.schema_ref(),
+                registered_schema
+            )));
+        }
+        self.set_batch_named(name, new_batch)
+    }
+
+    /// Replace the entire `RecordBatch` for the named component, allowing its
+    /// row count (or schema, for dynamic schema-changing operators) to differ
+    /// from the current dataset.
+    ///
+    /// Updates [`Dataset::rows`](Self::rows) and the alive bitmap to the
+    /// maximum row count across all registered components.
+    ///
+    /// # Errors
+    ///
+    /// - [`SaciError::ComponentNotRegistered`] if `component` is not
+    ///   registered.
+    pub fn set_batch_named(
+        &mut self,
+        component: &str,
+        new_batch: RecordBatch,
+    ) -> Result<(), SaciError> {
+        let (&name, _) = self
+            .components
+            .get_key_value(component)
+            .ok_or_else(|| SaciError::component_not_registered(component))?;
+        let schema_changed = self
+            .schemas
+            .get(name)
+            .is_none_or(|s| s.fields() != new_batch.schema_ref().fields());
+        if schema_changed {
+            self.schemas.update_schema(name, new_batch.schema());
+        }
+
+        let chunks = self
+            .components
+            .get_mut(name)
+            .expect("component registered but missing");
+        chunks.clear();
+        chunks.push(new_batch);
+        self.merged_cache.get_mut().unwrap().remove(name);
+
+        let max_rows = self
+            .components
+            .values()
+            .map(|c| c.iter().map(RecordBatch::num_rows).sum::<usize>())
+            .max()
+            .unwrap_or(0);
+        self.row_count = max_rows;
+        self.live_count = max_rows;
+        self.dead_count = 0;
+        self.alive.truncate(0);
+        self.alive.append_n(max_rows, true);
+        Ok(())
+    }
+
+    /// Inserts or replaces the `RecordBatch` for a dynamic component produced by
+    /// an operator, registering the schema first if not yet present.
+    pub(crate) fn put_batch_named(
+        &mut self,
+        component: &'static str,
+        new_batch: RecordBatch,
+    ) -> Result<(), SaciError> {
+        if !self.components.contains_key(component) {
+            let schema = new_batch.schema();
+            self.schemas.register_raw(component, schema.clone(), 1);
+            self.empty_templates
+                .entry(component)
+                .or_insert_with(|| RecordBatch::new_empty(schema));
+            self.components.insert(component, Vec::new());
+        }
+        self.set_batch_named(component, new_batch)
+    }
+
     /// Replace one column of component `C`, without building a
     /// [`WriteSet`].
     ///
@@ -158,7 +256,7 @@ impl Dataset {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Float64Array, UInt64Array};
+    use arrow_array::{ArrayRef, Float64Array, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use serde::{Deserialize, Serialize};
 
@@ -269,5 +367,45 @@ mod tests {
         let col = ds.column(WOrder::ID).unwrap();
         let arr = col.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(arr.value(0), 99u64);
+    }
+
+    #[test]
+    fn test_set_batch_grows_and_shrinks_and_ipc_round_trips() {
+        use arrow_array::RecordBatch as RB;
+        let mut ds = Dataset::new();
+        ds.register::<WOrder>().unwrap();
+        ds.append::<WOrder>(&[WOrder { id: 1, total: 1.0 }, WOrder { id: 2, total: 2.0 }])
+            .unwrap();
+        assert_eq!(ds.rows(), 2);
+
+        let grown = RB::try_new(
+            WOrder::schema(),
+            vec![
+                Arc::new(UInt64Array::from(vec![10u64, 20, 30])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        ds.set_batch::<WOrder>(grown).unwrap();
+        assert_eq!(ds.rows(), 3);
+        assert_eq!(ds.live_rows(), 3);
+
+        let shrunk = RB::try_new(
+            WOrder::schema(),
+            vec![
+                Arc::new(UInt64Array::from(vec![42u64])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![42.0])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        ds.set_batch_named("WOrder", shrunk).unwrap();
+        assert_eq!(ds.rows(), 1);
+        assert_eq!(ds.live_rows(), 1);
+
+        let mut buf = Vec::new();
+        ds.write_ipc(&mut buf).unwrap();
+        let restored = Dataset::read_ipc(&mut &buf[..]).unwrap();
+        assert_eq!(restored.rows(), 1);
+        assert_eq!(restored.live_rows(), 1);
     }
 }

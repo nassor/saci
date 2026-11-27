@@ -90,34 +90,72 @@ pub(super) fn aggregate_output_name(aggregate: ReduceAggregate, field: &str) -> 
         ReduceAggregate::Max => format!("max_{field}"),
         ReduceAggregate::Count => format!("count_{field}"),
         ReduceAggregate::Mean => format!("mean_{field}"),
+        ReduceAggregate::CountDistinct => format!("count_distinct_{field}"),
+        ReduceAggregate::Variance => format!("variance_{field}"),
+        ReduceAggregate::StdDev => format!("stddev_{field}"),
+        ReduceAggregate::First => format!("first_{field}"),
+        ReduceAggregate::Last => format!("last_{field}"),
     }
 }
 
 /// Apply a `ReduceAggregate` to an array slice, returning a single-element `ArrayRef`.
 ///
-/// All aggregates operate on `Float64` columns. Downcast errors return `SaciError::generic`.
+/// Numeric aggregates operate on `Float64` (and widen other numeric types);
+/// `Count`, `CountDistinct`, `First`, and `Last` accept any Arrow column type.
 pub(super) fn apply_reduce_aggregate(
     aggregate: ReduceAggregate,
     col: &ArrayRef,
 ) -> Result<ArrayRef, SaciError> {
-    let arr = downcast_float64(col)?;
-    let result = match aggregate {
-        ReduceAggregate::Sum => sum(arr).unwrap_or(0.0),
-        ReduceAggregate::Min => min(arr).unwrap_or(f64::INFINITY),
-        ReduceAggregate::Max => max(arr).unwrap_or(f64::NEG_INFINITY),
-        ReduceAggregate::Count => arr.len() as f64,
-        ReduceAggregate::Mean => {
-            // Divide by the non-null count so nulls do not bias the mean
-            // downward. All-null input gives NaN.
-            let non_null = arr.len() - arr.null_count();
-            if non_null == 0 {
-                f64::NAN
-            } else {
-                sum(arr).unwrap_or(0.0) / non_null as f64
-            }
+    use crate::operators::aggregate::{count_distinct_non_null, welford_variance};
+    use arrow_array::UInt32Array;
+
+    match aggregate {
+        ReduceAggregate::Count => {
+            Ok(Arc::new(Float64Array::from(vec![col.len() as f64])) as ArrayRef)
         }
-    };
-    Ok(Arc::new(Float64Array::from(vec![result])) as ArrayRef)
+        ReduceAggregate::CountDistinct => {
+            let distinct = count_distinct_non_null(col)?;
+            Ok(Arc::new(Float64Array::from(vec![distinct as f64])) as ArrayRef)
+        }
+        ReduceAggregate::First | ReduceAggregate::Last => {
+            let first = matches!(aggregate, ReduceAggregate::First);
+            let idx = if first {
+                (0..col.len()).find(|&i| col.is_valid(i))
+            } else {
+                (0..col.len()).rev().find(|&i| col.is_valid(i))
+            };
+            let take_idx = UInt32Array::from(vec![idx.map(|i| i as u32)]);
+            take(col.as_ref(), &take_idx, None)
+                .map_err(|e| SaciError::generic(format!("WindowedSystem: first/last take: {e}")))
+        }
+        ReduceAggregate::Sum
+        | ReduceAggregate::Min
+        | ReduceAggregate::Max
+        | ReduceAggregate::Mean
+        | ReduceAggregate::Variance
+        | ReduceAggregate::StdDev => {
+            let arr = downcast_float64(col)?;
+            let result = match aggregate {
+                ReduceAggregate::Sum => sum(arr).unwrap_or(0.0),
+                ReduceAggregate::Min => min(arr).unwrap_or(f64::INFINITY),
+                ReduceAggregate::Max => max(arr).unwrap_or(f64::NEG_INFINITY),
+                ReduceAggregate::Mean => {
+                    // Divide by the non-null count so nulls do not bias the mean
+                    // downward. All-null input gives NaN.
+                    let non_null = arr.len() - arr.null_count();
+                    if non_null == 0 {
+                        f64::NAN
+                    } else {
+                        sum(arr).unwrap_or(0.0) / non_null as f64
+                    }
+                }
+                ReduceAggregate::Variance => welford_variance(arr),
+                ReduceAggregate::StdDev => welford_variance(arr).sqrt(),
+                _ => unreachable!(),
+            };
+            Ok(Arc::new(Float64Array::from(vec![result])) as ArrayRef)
+        }
+    }
 }
 
 fn downcast_float64(col: &ArrayRef) -> Result<&Float64Array, SaciError> {

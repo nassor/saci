@@ -3,6 +3,35 @@
 `saci` and `saci-macros` share one version. The release process is in `AGENTS.md`, under
 "Releases".
 
+## Unreleased
+
+### Added
+
+- `crypto` feature (`saci::crypto`, included in `server`): AES-256-GCM and ChaCha20-Poly1305 AEAD data
+  encryption (`Cipher`, `KeyProvider`, `StaticKeyRing`), `EncryptedCodec` whole-payload stream and
+  message framing, selective field-level and full-batch column encryption (`encrypt_fields`,
+  `decrypt_fields`, `encrypt_batch_payload`, `decrypt_batch_payload`), and `EncryptingSink` /
+  `DecryptingSource` wrappers.
+- `tls` feature (`saci::tls`): shared rustls TLS and mTLS transport helpers (`TlsClientOptions`,
+  `TlsServerOptions`) adopted across `connector::peer`, `connector::tcp`, `connector::http`
+  (`HttpListenSource`), and `connector::otlp`, plus `connector::postgresql` client certificate
+  authentication (`sslcert`, `sslkey`) and `connector::s3` server-side encryption (`sse="s3"|"kms"|"c"`).
+- `service`: declarative `encryption` keyring block (`ServiceEncryptionConfig`), `codec` `encryption`
+  block (`CodecEncryptionConfig`), and `source` `decrypt` / `sink` `encrypt` blocks
+  (`NodeCryptoConfig`), with secret redaction in published topology details.
+- `operators` module (`saci::operators` and `saci::prelude`, Tokio-free and compatible with `wasm32-wasip3`):
+  vectorized Arrow operators `FilterSystem`, `ProjectSystem`, `GroupBySystem`, `SortSystem`, `TopNSystem`,
+  `UnnestSystem`, `JoinSystem` (`Inner`, `Left`, `Right`, `Full`, `Semi`, `Anti`), stateful event-time
+  `IntervalJoinSystem`, stateful `LookupJoinSystem`, stateless and cross-batch `DeduplicateSystem` (with TTL
+  and key bounds), `Expr` parser and evaluator, and embedded `SqlQuery` / `SqlSystem`.
+- `windows`: `WindowFunction::count_distinct`, `variance`, `stddev`, `first`, `last`,
+  `approx_percentile`, `string_agg`, `list_agg`, and `WindowFunction::multi(Vec<AggregateSpec>)`.
+- `dataset`: `Dataset::set_batch` and `Dataset::set_batch_named` for operators whose output row count
+  differs from the input dataset row count.
+- `service`: declarative `operator "<id>" kind="<kind>"` workflow nodes (`OperatorSpec`) executing
+  `sql`, `filter`, `project`, `group_by`, `sort`, `top_n`, `unnest`, `join`, `interval_join`,
+  `lookup_join`, and `deduplicate` natively inside a `saci-service` workflow DAG.
+
 ## 0.3.1 - 2026-11-21
 
 ### Changed

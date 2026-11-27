@@ -203,3 +203,15 @@ lto = "thin"
 [profile.dev.package."*"]
 debug = 0
 
+# Cranelift compiles the 4 MB processor components inside every wasm/workflow
+# integration test process and every `saci-service validate` run. At the dev
+# profile's default `opt-level = 0`, a single component compile takes 35-60s
+# per test on a shared CI runner; optimizing the codegen and register-allocator
+# crates cuts that to ~1s while keeping the rest of the dependency graph at
+# fast dev compile times.
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+
+[profile.dev.package.regalloc2]
+opt-level = 2
+

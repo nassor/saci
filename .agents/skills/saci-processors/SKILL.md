@@ -204,6 +204,11 @@ The xtask commands that build and check a processor:
   build and the one the crate docs hand a processor author. It installs the target first.
 - `cargo xtask processor-ipc-roundtrip`: drive one Arrow IPC round trip through a component.
 
+Built-in relational, analytical, and stream-processing operators (`saci::operators`, re-exported in
+`saci::prelude`: `FilterSystem`, `ProjectSystem`, `GroupBySystem`, `SortSystem`, `TopNSystem`,
+`UnnestSystem`, `JoinSystem`, `IntervalJoinSystem`, `LookupJoinSystem`, `DeduplicateSystem`,
+`Expr`, `SqlSystem`) are Tokio-free and compile on `wasm32-wasip3` with `--features processor`.
+
 ## Examples
 
 - `examples/wasm/order_processing/`: a realistic processor pipeline, built for `wasm32-wasip3`.

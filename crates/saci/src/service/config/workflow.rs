@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::default_config;
 use super::encryption::{CodecEncryptionConfig, NodeCryptoConfig};
 use super::mode::{RunMode, ServiceMode};
-use super::processor::{PluginSpec, WasmSpec};
+use super::processor::{OperatorSpec, PluginSpec, WasmSpec};
 use super::retry::RetryConfig;
 use super::window::WindowConfig;
 use crate::config::{ConfigMap, ConfigValue, one_or_many};
@@ -342,6 +342,15 @@ pub struct WorkflowSpec {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub plugin: Vec<PluginSpec>,
+    /// Declarative relational, analytical, and stream-processing operator nodes,
+    /// one `operator` node each. Runs natively on the engine with no external
+    /// `.wasm` or `.so` artifact.
+    #[serde(
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub operator: Vec<OperatorSpec>,
     /// Data sinks draining the workflow. One `sink` node each.
     #[serde(
         rename = "sink",
@@ -380,6 +389,7 @@ impl WorkflowSpec {
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: None,
@@ -416,6 +426,9 @@ impl WorkflowSpec {
         }
         for p in &self.plugin {
             out.push((p.id.as_str(), NodeKind::Processor));
+        }
+        for o in &self.operator {
+            out.push((o.id.as_str(), NodeKind::Processor));
         }
         for s in &self.sinks {
             out.push((s.id.as_str(), NodeKind::Sink));
@@ -662,7 +675,8 @@ impl WorkflowSpec {
                 .iter()
                 .filter(|&&(_, kind)| kind == NodeKind::Processor)
                 .count();
-            if processor_count != 1
+            if !self.operator.is_empty()
+                || processor_count != 1
                 || !self.sources.is_empty()
                 || !self.sinks.is_empty()
                 || !self.links.is_empty()
@@ -796,6 +810,10 @@ impl WorkflowSpec {
         }
         for p in &self.plugin {
             validate_window_block(wf, "plugin", &p.id, p.window.as_ref())?;
+        }
+        for o in &self.operator {
+            o.validate(wf)?;
+            validate_window_block(wf, "operator", &o.id, o.window.as_ref())?;
         }
 
         // 18. A declared `dlq` block must name a store this crate knows. The

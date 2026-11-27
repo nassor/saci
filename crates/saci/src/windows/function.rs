@@ -49,8 +49,8 @@ pub struct WindowContext {
 
 /// Built-in aggregate operations for [`WindowFunction::Reduce`].
 ///
-/// Each variant reduces all values of a single numeric field within a window
-/// group into one scalar output row.
+/// Each variant reduces all values of a single field within a window group into
+/// one scalar output row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReduceAggregate {
     /// Arithmetic sum of all non-null values.
@@ -63,6 +63,16 @@ pub enum ReduceAggregate {
     Count,
     /// Arithmetic mean of all non-null values.
     Mean,
+    /// Exact count of distinct non-null values.
+    CountDistinct,
+    /// Sample variance of non-null numeric values.
+    Variance,
+    /// Sample standard deviation of non-null numeric values.
+    StdDev,
+    /// First non-null value in the window group.
+    First,
+    /// Last non-null value in the window group.
+    Last,
 }
 
 /// A user-defined function that processes all rows belonging to one window.
@@ -104,6 +114,10 @@ pub enum WindowFunction {
     /// The boxed [`ProcessWindowFn`] receives the full window [`RecordBatch`]
     /// and can return an output with an arbitrary schema.
     Process(Box<dyn ProcessWindowFn>),
+
+    /// Evaluate multiple [`AggregateSpec`](crate::operators::AggregateSpec)s over each window group, producing
+    /// one output column per spec.
+    Multi(Vec<crate::operators::AggregateSpec>),
 }
 
 impl WindowFunction {
@@ -137,6 +151,59 @@ impl WindowFunction {
     /// Mean of the non-null values of `field` per window.
     pub fn mean(field: impl AsRef<str>) -> Self {
         Self::reduce(field, ReduceAggregate::Mean)
+    }
+
+    /// Exact count of distinct non-null values of `field` per window.
+    pub fn count_distinct(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::CountDistinct)
+    }
+
+    /// Sample variance of non-null values of `field` per window.
+    pub fn variance(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::Variance)
+    }
+
+    /// Sample standard deviation of non-null values of `field` per window.
+    pub fn stddev(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::StdDev)
+    }
+
+    /// First non-null value of `field` per window.
+    pub fn first(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::First)
+    }
+
+    /// Last non-null value of `field` per window.
+    pub fn last(field: impl AsRef<str>) -> Self {
+        Self::reduce(field, ReduceAggregate::Last)
+    }
+
+    /// Approximate percentile (`0.0 <= quantile <= 1.0`) of `field` per window.
+    pub fn approx_percentile(field: impl AsRef<str>, quantile: f64) -> Self {
+        Self::Multi(vec![crate::operators::AggregateSpec::approx_percentile(
+            field.as_ref(),
+            quantile,
+        )])
+    }
+
+    /// Concatenate non-null values of `field` with `separator` per window.
+    pub fn string_agg(field: impl AsRef<str>, separator: impl Into<String>) -> Self {
+        Self::Multi(vec![crate::operators::AggregateSpec::string_agg(
+            field.as_ref(),
+            separator,
+        )])
+    }
+
+    /// Collect values of `field` into a list per window.
+    pub fn list_agg(field: impl AsRef<str>) -> Self {
+        Self::Multi(vec![crate::operators::AggregateSpec::list_agg(
+            field.as_ref(),
+        )])
+    }
+
+    /// Evaluate multiple aggregate expressions in one pass per window group.
+    pub fn multi(specs: Vec<crate::operators::AggregateSpec>) -> Self {
+        Self::Multi(specs)
     }
 
     /// Run `f` once per window group.
@@ -185,7 +252,9 @@ mod tests {
                     assert_eq!(input_field, "amount");
                     assert_eq!(aggregate, expected);
                 }
-                WindowFunction::Process(_) => panic!("unexpected variant"),
+                WindowFunction::Process(_) | WindowFunction::Multi(_) => {
+                    panic!("unexpected variant")
+                }
             }
         }
     }

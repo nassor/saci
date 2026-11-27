@@ -59,6 +59,7 @@ fn config(run_mode: RunMode) -> ServiceConfig {
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: None,

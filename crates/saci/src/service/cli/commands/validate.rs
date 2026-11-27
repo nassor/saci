@@ -284,6 +284,7 @@ mod tests {
             sources,
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks,
             links,
             dlq: None,

@@ -2360,6 +2360,7 @@ mod tests {
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: Some(crate::service::config::DlqConfig(block)),

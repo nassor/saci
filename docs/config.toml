@@ -143,6 +143,9 @@ label = "Processors"
 title = "Processors in a workflow"
 path = "@/service/processors/_index.md"
 [[extra.areas.nav.items]]
+title = "Declarative operators"
+path = "@/service/processors/operators.md"
+[[extra.areas.nav.items]]
 title = "Branching"
 path = "@/service/processors/branching.md"
 [[extra.areas.nav.items]]
@@ -252,6 +255,9 @@ path = "@/library/io.md"
 [[extra.areas.nav.items]]
 title = "Windowed aggregation"
 path = "@/library/windowing.md"
+[[extra.areas.nav.items]]
+title = "Relational & stream operators"
+path = "@/library/operators.md"
 [[extra.areas.nav.items]]
 title = "Distributed processing"
 path = "@/library/distributed.md"

@@ -32,6 +32,8 @@
 mod builder;
 #[cfg(feature = "service")]
 pub mod cli;
+#[cfg(feature = "service")]
+mod operator_builder;
 
 /// Install the workspace's `ring` crypto provider for reqwest's rustls.
 ///

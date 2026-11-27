@@ -272,6 +272,21 @@ pub(crate) async fn run(
     // attribute; each node binds its own in `Nodes::from_built`.
     let workflow_metrics = crate::metrics::instruments().workflow(&workflow_id);
 
+    // Declarative stateful `operator` nodes (`interval_join`, `lookup_join`,
+    // stateful `deduplicate`) also carry state across passes in memory without
+    // overriding `batch_resume #false` for `wasm` or `plugin` processors.
+    let operator_stateful: Vec<bool> = nodes
+        .iter()
+        .map(|node| {
+            node.connector.starts_with("operator:")
+                && matches!(
+                    &node.kind,
+                    super::builder::BuiltNodeKind::Processor { runtime, .. }
+                        if runtime.descriptor_info().stateful
+                )
+        })
+        .collect();
+
     // The nodes as parallel per-node vectors, so the borrow checker sees
     // disjoint fields: a processor step borrows `runtimes` and `datasets`
     // side by side, and `datasets.split_at_mut(i + 1)` gives a processor's own
@@ -331,10 +346,12 @@ pub(crate) async fn run(
     // the process and no longer.
     #[cfg(feature = "windows")]
     let state_carry: Vec<bool> = (0..n)
-        .map(|i| batch_resume || trackers[i].is_some())
+        .map(|i| batch_resume || trackers[i].is_some() || operator_stateful[i])
         .collect();
     #[cfg(not(feature = "windows"))]
-    let state_carry: Vec<bool> = vec![batch_resume; n];
+    let state_carry: Vec<bool> = (0..n)
+        .map(|i| batch_resume || operator_stateful[i])
+        .collect();
 
     // One controller per source node, resolved from the config's top-level
     // `flow_control` block and each source's own override.
@@ -1203,6 +1220,7 @@ mod tests {
                 sources: Vec::new(),
                 wasm: Vec::new(),
                 plugin: Vec::new(),
+                operator: Vec::new(),
                 sinks: Vec::new(),
                 links: Vec::new(),
                 dlq: None,
@@ -2436,6 +2454,7 @@ mod tests {
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: Some(crate::service::config::DlqConfig(

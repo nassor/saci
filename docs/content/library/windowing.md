@@ -52,7 +52,7 @@ let sys = WindowedSystem::new_named(
 )?;
 ```
 
-`WindowFunction::sum`, `min`, `max`, `count` and `mean` each apply one built-in columnar aggregate over a single numeric field per window group. `WindowFunction::process` hands the whole window's `RecordBatch` to a `ProcessWindowFn` implementation, which receives a `WindowContext` carrying the window id, the inclusive `window_start`, the exclusive `window_end`, the current watermark, and `is_late_firing`.
+`WindowFunction::sum`, `min`, `max`, `count`, `mean`, `count_distinct`, `variance`, `stddev`, `first`, `last`, `approx_percentile`, `string_agg`, and `list_agg` apply built-in columnar aggregates per window group, and `WindowFunction::multi(Vec<AggregateSpec>)` evaluates multiple aggregates together in one pass. `WindowFunction::process` hands the whole window's `RecordBatch` to a `ProcessWindowFn` implementation, which receives a `WindowContext` carrying the window id, the inclusive `window_start`, the exclusive `window_end`, the current watermark, and `is_late_firing`.
 
 ## Watermarks and the time field
 
