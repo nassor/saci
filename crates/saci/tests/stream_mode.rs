@@ -93,6 +93,7 @@ impl PipelineRuntime for CounterRuntime {
         Ok(RuntimeOutput {
             state: Some((Self::decode(prior) + 1).to_le_bytes().to_vec()),
             routes: None,
+            branch_batches: None,
         })
     }
 
@@ -629,6 +630,7 @@ impl PipelineRuntime for BranchRuntime {
         Ok(RuntimeOutput {
             state: None,
             routes: self.routes.clone(),
+            branch_batches: None,
         })
     }
 

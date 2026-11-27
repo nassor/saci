@@ -1,6 +1,6 @@
 +++
 title = "Workflows and links"
-description = "Seven node kinds inside one workflow block, the links that wire them, and every key each kind takes."
+description = "Eight node kinds inside one workflow block, the links that wire them, and every key each kind takes."
 template = "page.html"
 weight = 1
 +++
@@ -73,11 +73,11 @@ only by a named branch.
 
 ## 1. Declare the nodes
 
-Seven node kinds live inside `workflow`. Each but `link` opens with
+Eight node kinds live inside `workflow`. Each but `link` opens with
 its id as the leading argument. Node ids are unique across the whole process; a
 `schema` id only within its workflow. Every node id,
 workflow id and branch name matches `^[A-Za-z0-9][A-Za-z0-9_-]*$` and is at most
-64 bytes. Six of the seven are in a `server` build. A `plugin` node needs one
+64 bytes. Seven of the eight are in a `server` build. A `plugin` node needs one
 built with `--features server,plugin-host`: a build without it parses the file
 and then refuses it, naming that flag.
 
@@ -86,6 +86,7 @@ and then refuses it, naming that flag.
 | `codec` | `format`, an optional `config` child | none: a source or sink names it |
 | `schema` | `field` children | none: a source or sink whose `component` is its id takes it |
 | `source` | `connector`, `component`, optional `codec`, optional `retry`, a `config` child | outbound only |
+| [`operator`](@/service/processors/operators.md) | `kind`, `component` (or `left` and `right`), optional `into`, `config` and `window` children | inbound and outbound |
 | `wasm` | optional `path`, optional `sha3_256`, `config` and `window` children | inbound and outbound |
 | `plugin` | optional `path`, otherwise the same as `wasm`; needs a build with `--features plugin-host` | inbound and outbound |
 | `sink` | `connector`, `component`, optional `codec`, optional `retry`, a `config` child | inbound only |
@@ -305,6 +306,20 @@ is the runnable example.
 | `encrypt` | child block | none | encrypt fields or whole batches before writing to the sink; see [Encryption and TLS](@/service/config/encryption.md) |
 | `config` | child block | empty | read verbatim by the connector; the keys are on the connector's own page |
 
+### operator
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| leading argument | string | required | the operator node id, unique across `source`, `operator`, `wasm`, `plugin` and `sink` |
+| `kind` | string | required | `"filter"`, `"project"`, `"group_by"`, `"window"`, `"route"`, `"branch"`, `"sort"`, `"top_n"`, `"unnest"`, `"sql"`, `"deduplicate"`, `"join"`, `"interval_join"` or `"lookup_join"` |
+| `name` | string | the id | display name on the dashboard |
+| `component` | string | none | input component for unary operators (or SQL fallback output component); omit for binary joins |
+| `left` | string | none | left input component for `"join"`, `"interval_join"` and `"lookup_join"` |
+| `right` | string | none | right input component for `"join"`, `"interval_join"` and `"lookup_join"` |
+| `into` | string | `component` | output component name written back into the workflow; required for joins and `"sql"` |
+| `config` | child block | empty | operator parameters checked per `kind`; see [Declarative operators](@/service/processors/operators.md) |
+| `window` | child block | none | event-time geometry for `kind="window"` or windowed `kind="group_by"`; see [Windowing](@/service/processors/windowing/_index.md) |
+
 ### wasm and plugin
 
 | Key | Type | Default | What it does |
@@ -323,9 +338,9 @@ instead: [Embedding saci-service](@/library/service/_index.md).
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `from` | string | required | the upstream node id |
-| `to` | string | required | the downstream node id |
-| `branch` | string | none | labels the edge, so the upstream processor can choose it per batch |
+| `from` | string | required | the upstream `source`, `operator`, `wasm` or `plugin` node id |
+| `to` | string | required | the downstream `operator`, `wasm`, `plugin` or `sink` node id |
+| `branch` | string | none | labels the edge, so the upstream processor or router can choose it per batch or row |
 
 ### retry
 

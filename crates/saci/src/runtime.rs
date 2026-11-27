@@ -57,6 +57,9 @@ pub struct RuntimeOutput {
     /// legacy behaviour: the host multicasts to every downstream link.
     /// `Some(vec![])` routes the output nowhere.
     pub routes: Option<Vec<String>>,
+    /// Optional per-branch filtered `RecordBatch` payloads emitted by
+    /// declarative [`RouteSystem`](crate::operators::RouteSystem) in row-split mode.
+    pub branch_batches: Option<crate::operators::BranchPayloads>,
 }
 
 /// Swappable host-side execution backend for a single pipeline.
@@ -254,7 +257,12 @@ impl PipelineRuntime for Pipeline {
         let routes = data
             .take_resource::<RouteDecision>()
             .map(RouteDecision::into_branches);
-        Ok(RuntimeOutput { state, routes })
+        let branch_batches = data.take_resource::<crate::operators::BranchPayloads>();
+        Ok(RuntimeOutput {
+            state,
+            routes,
+            branch_batches,
+        })
     }
 
     fn declared_components(&self) -> Vec<&str> {

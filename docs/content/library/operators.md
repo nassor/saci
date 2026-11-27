@@ -1,6 +1,6 @@
 +++
 title = "Relational & stream operators"
-description = "Tokio-free Arrow operators in saci::operators: FilterSystem, ProjectSystem, GroupBySystem, SortSystem, TopNSystem, UnnestSystem, JoinSystem, IntervalJoinSystem, LookupJoinSystem, DeduplicateSystem, Expr, and SqlSystem."
+description = "Tokio-free Arrow operators in saci::operators: FilterSystem, ProjectSystem, GroupBySystem, WindowAggregateSystem, RouteSystem, SortSystem, TopNSystem, UnnestSystem, JoinSystem, IntervalJoinSystem, LookupJoinSystem, DeduplicateSystem, Expr, and SqlSystem."
 template = "page.html"
 weight = 8
 +++
@@ -94,6 +94,8 @@ The `saci::operators` module (re-exported in `saci::prelude`) provides a Tokio-f
 | `IntervalJoinSystem` | Event-time bounded join (`[ts + lower_bound_ms, ts + upper_bound_ms]`) with watermark eviction | `sdk::State<IntervalJoinState>` |
 | `LookupJoinSystem` | Enriches a fact stream against an upserted dimension table | `sdk::State<LookupJoinState>` |
 | `DeduplicateSystem` | Drops duplicate keys within a batch (`KeepPolicy::{First, Last}`) or across batches with TTL and `max_keys` | Optional `sdk::State<DeduplicateState>` |
+| `WindowAggregateSystem` | Stateful cross-batch tumbling, sliding, and session window aggregations (`windows` feature) | `sdk::State<WindowAggregateState>` |
+| `RouteSystem` | Evaluates boolean predicates to partition rows (`RouteMode::Row`) or route batches (`FirstRow`, `BatchAny`, `BatchAll`) | Stateless |
 | `SqlSystem` | Embedded SQL `SELECT [DISTINCT] ... FROM ... [JOIN ...] [WHERE ...] [GROUP BY ...] [HAVING ...] [ORDER BY ...] [LIMIT ... OFFSET ...]` | Stateless |
 
 ## Composing operators in Rust
@@ -196,6 +198,38 @@ let stream_pipeline = Pipeline::new("stream_enrich")
         .right_prefix("cust_"),
     )
     .system(UnnestSystem::new("EnrichedOrders", "EnrichedTags", "tags", "tag")?.preserve_empty(true));
+```
+
+## Declarative window aggregation & routing in Rust
+
+Use `WindowAggregateSystem` (gated behind `--features windows`) for stateful cross-batch tumbling, sliding, or session window aggregations, and `RouteSystem` for predicate-driven row splitting or batch routing:
+
+```rust,name=WindowAggregateSystem and RouteSystem in Rust
+use saci::prelude::*;
+
+let windowed = WindowAggregateSystem::new(
+    "Sale",
+    "WindowTotal",
+    "timestamp_ms",
+    WindowSpec::tumbling(30_000),
+    ["symbol"],
+    vec![
+        AggregateSpec::count_all().alias("count"),
+        AggregateSpec::sum("amount").alias("sum"),
+    ],
+)?
+.allowed_lateness_ms(5_000);
+
+let router = RouteSystem::new(
+    "Order",
+    vec![
+        BranchRule::parse("vip", "amount >= 10000.0 AND priority = 'high'")?,
+        BranchRule::parse("high", "priority = 'high'")?,
+    ],
+)?
+.mode(RouteMode::Row)
+.exclusive(true)
+.default_branch("standard");
 ```
 
 ## Resizing batches with `set_batch`

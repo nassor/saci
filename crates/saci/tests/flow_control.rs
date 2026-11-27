@@ -963,6 +963,7 @@ mod windowed {
             Ok(RuntimeOutput {
                 state: Some(blob),
                 routes: None,
+                branch_batches: None,
             })
         }
 

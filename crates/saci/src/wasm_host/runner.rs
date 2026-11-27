@@ -346,6 +346,7 @@ impl crate::runtime::PipelineRuntime for WasmPipelineRuntime {
                 Ok(RuntimeOutput {
                     state: result.checkpoint,
                     routes,
+                    branch_batches: None,
                 })
             }
             Err(RunError::Retryable(msg)) => Err(SaciError::SystemExecution(format!(

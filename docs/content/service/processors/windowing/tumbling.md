@@ -204,6 +204,26 @@ window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_
 Every key of the block is listed under
 [Every key](@/service/processors/windowing/_index.md#every-key).
 
+## Declarative tumbling window (no artifact)
+
+To run the same 30-second tumbling window directly in `saci-service` without building
+`windowing-tumbling-wasm` or `windowing-tumbling-plugin`, replace the `wasm` or `plugin` node with
+an `operator` node whose `kind="window"`. Setting `emit_bounds=#false` and
+`window_id_field="window_id"` produces the exact `(window_id, symbol, count, sum)` schema expected
+by the PostgreSQL `WindowTotal` sinks:
+
+```kdl,name=Declarative tumbling operator producing identical WindowTotal rows
+operator "window_declarative" kind="window" component="Sale" into="WindowTotal" {
+    window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+        key_fields "symbol"
+    }
+    config window_id_field="window_id" emit_bounds=#false {
+        aggregates "count(*) AS count"
+        aggregates "sum(amount) AS sum"
+    }
+}
+```
+
 ## Prerequisites
 
 - A clone of the repository, from the root of which every command runs.

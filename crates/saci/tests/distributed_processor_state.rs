@@ -90,6 +90,7 @@ impl PipelineRuntime for MockCounterRuntime {
         Ok(RuntimeOutput {
             state: Some(next.to_le_bytes().to_vec()),
             routes: None,
+            branch_batches: None,
         })
     }
 

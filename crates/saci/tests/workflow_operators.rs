@@ -736,3 +736,349 @@ workflow "rt" {
     reparsed.validate().unwrap();
     assert_eq!(reparsed.workflows[0].operator.len(), 2);
 }
+
+#[cfg(feature = "windows")]
+#[tokio::test]
+async fn kdl_declarative_tumbling_window_fan_in_across_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let sale_schema = Arc::new(Schema::new(vec![
+        Field::new("timestamp_ms", DataType::Int64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("amount", DataType::Float64, false),
+    ]));
+    let out_schema = Arc::new(Schema::new(vec![
+        Field::new("window_id", DataType::Int64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("count", DataType::Int64, false),
+        Field::new("sum", DataType::Float64, true),
+    ]));
+
+    let make_sales = |rows: &[(i64, &str, f64)]| {
+        let ts: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        let sym: Vec<&str> = rows.iter().map(|r| r.1).collect();
+        let amt: Vec<f64> = rows.iter().map(|r| r.2).collect();
+        RecordBatch::try_new(
+            sale_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(ts)),
+                Arc::new(StringArray::from(sym)),
+                Arc::new(Float64Array::from(amt)),
+            ],
+        )
+        .unwrap()
+    };
+
+    let conn = MemConnector::new();
+    conn.add_source(
+        "sales_a",
+        sale_schema.clone(),
+        vec![
+            make_sales(&[(29_000, "AAPL", 10.0)]),
+            make_sales(&[(31_000, "AAPL", 5.0)]),
+        ],
+    );
+    conn.add_source(
+        "sales_b",
+        sale_schema.clone(),
+        vec![
+            make_sales(&[(29_500, "AAPL", 7.0)]),
+            make_sales(&[(61_000, "GOOG", 2.0)]),
+        ],
+    );
+    let captured = conn.add_sink("totals", out_schema);
+
+    let kdl = format!(
+        r#"
+mode "standalone"
+node id=1 data_dir="{dir}"
+run "stream"
+
+workflow "window_fanin" {{
+    source "in_a" connector="mem" component="Sale" {{ config key="sales_a" }}
+    source "in_b" connector="mem" component="Sale" {{ config key="sales_b" }}
+
+    operator "win" kind="window" component="Sale" into="WindowTotal" {{
+        window kind="tumbling" size_ms=30000 time_field="timestamp_ms" allowed_lateness_ms=5000 {{
+            key_fields "symbol"
+        }}
+        config window_id_field="window_id" emit_bounds=#false {{
+            aggregates "count(*) AS count"
+            aggregates "sum(amount) AS sum"
+        }}
+    }}
+
+    sink "out" connector="mem" component="WindowTotal" {{ config key="totals" }}
+
+    link from="in_a" to="win"
+    link from="in_b" to="win"
+    link from="win" to="out"
+}}
+"#,
+        dir = dir.path().display()
+    );
+
+    let cfg = ServiceConfig::from_kdl(&kdl).unwrap();
+    cfg.validate().unwrap();
+    let built = ServiceBuilder::empty().connector(conn).build(&cfg).unwrap();
+    built
+        .into_iter()
+        .next()
+        .unwrap()
+        .run(CancellationToken::new())
+        .await
+        .unwrap();
+
+    let batches = captured.lock().unwrap();
+    let mut rows: Vec<(i64, String, i64, f64)> = Vec::new();
+    for b in batches.iter() {
+        let wid = b.column(0).as_primitive::<Int64Type>();
+        let sym = b.column(1).as_string::<i32>();
+        let cnt = b.column(2).as_primitive::<Int64Type>();
+        let sum = b.column(3).as_primitive::<Float64Type>();
+        for r in 0..b.num_rows() {
+            rows.push((
+                wid.value(r),
+                sym.value(r).to_string(),
+                cnt.value(r),
+                sum.value(r),
+            ));
+        }
+    }
+    // Window 0 receives 29_000 (10.0) from in_a and 29_500 (7.0) from in_b before 31_000 closes it,
+    // and window 1 receives 31_000 (5.0) before 61_000 closes window 1.
+    assert_eq!(rows.len(), 2, "got rows: {rows:?}");
+    assert_eq!(rows[0].0, 0);
+    assert_eq!(rows[0].1, "AAPL");
+    assert_eq!(rows[0].2, 2);
+    assert!((rows[0].3 - 17.0).abs() < 1e-9);
+    assert_eq!(rows[1].0, 1);
+    assert_eq!(rows[1].1, "AAPL");
+    assert_eq!(rows[1].2, 1);
+    assert!((rows[1].3 - 5.0).abs() < 1e-9);
+}
+
+#[cfg(feature = "windows")]
+#[tokio::test]
+async fn kdl_declarative_group_by_with_session_window_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let sale_schema = Arc::new(Schema::new(vec![
+        Field::new("timestamp_ms", DataType::Int64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("amount", DataType::Float64, false),
+    ]));
+    let out_schema = Arc::new(Schema::new(vec![
+        Field::new("session_start_ms", DataType::Int64, false),
+        Field::new("session_end_ms", DataType::Int64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("count", DataType::Int64, false),
+        Field::new("sum", DataType::Float64, true),
+    ]));
+
+    let make_sales = |rows: &[(i64, &str, f64)]| {
+        let ts: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        let sym: Vec<&str> = rows.iter().map(|r| r.1).collect();
+        let amt: Vec<f64> = rows.iter().map(|r| r.2).collect();
+        RecordBatch::try_new(
+            sale_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(ts)),
+                Arc::new(StringArray::from(sym)),
+                Arc::new(Float64Array::from(amt)),
+            ],
+        )
+        .unwrap()
+    };
+
+    let conn = MemConnector::new();
+    conn.add_source(
+        "sales",
+        sale_schema.clone(),
+        vec![
+            make_sales(&[(1_000, "AAPL", 10.0), (6_000, "AAPL", 5.0)]),
+            make_sales(&[(25_000, "GOOG", 1.0)]),
+        ],
+    );
+    let captured = conn.add_sink("sessions", out_schema);
+
+    let kdl = format!(
+        r#"
+mode "standalone"
+node id=1 data_dir="{dir}"
+run "stream"
+
+workflow "session_win" {{
+    source "in" connector="mem" component="Sale" {{ config key="sales" }}
+
+    operator "sess" kind="group_by" component="Sale" into="SessionTotal" {{
+        window kind="session" gap_ms=10000 time_field="timestamp_ms" {{
+            key_fields "symbol"
+        }}
+        config window_start_field="session_start_ms" window_end_field="session_end_ms" {{
+            aggregates "count(*) AS count"
+            aggregates "sum(amount) AS sum"
+        }}
+    }}
+
+    sink "out" connector="mem" component="SessionTotal" {{ config key="sessions" }}
+    link from="in" to="sess"
+    link from="sess" to="out"
+}}
+"#,
+        dir = dir.path().display()
+    );
+
+    let cfg = ServiceConfig::from_kdl(&kdl).unwrap();
+    cfg.validate().unwrap();
+    let built = ServiceBuilder::empty().connector(conn).build(&cfg).unwrap();
+    built
+        .into_iter()
+        .next()
+        .unwrap()
+        .run(CancellationToken::new())
+        .await
+        .unwrap();
+
+    let batches = captured.lock().unwrap();
+    assert_eq!(batches.len(), 1);
+    let b = &batches[0];
+    assert_eq!(b.num_rows(), 1);
+    assert_eq!(b.column(0).as_primitive::<Int64Type>().value(0), 1_000);
+    assert_eq!(b.column(1).as_primitive::<Int64Type>().value(0), 16_000);
+    assert_eq!(b.column(2).as_string::<i32>().value(0), "AAPL");
+    assert_eq!(b.column(3).as_primitive::<Int64Type>().value(0), 2);
+    assert!((b.column(4).as_primitive::<Float64Type>().value(0) - 15.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn kdl_declarative_route_splits_rows_and_feeds_downstream_operators() {
+    let dir = tempfile::tempdir().unwrap();
+    let order_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("priority", DataType::Utf8, false),
+        Field::new("amount", DataType::Float64, false),
+    ]));
+    let high_proj_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("fee", DataType::Float64, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        order_schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+            Arc::new(StringArray::from(vec!["high", "high", "low", "other"])),
+            Arc::new(Float64Array::from(vec![15_000.0, 200.0, 50.0, 10.0])),
+        ],
+    )
+    .unwrap();
+
+    let conn = MemConnector::new();
+    conn.add_source("orders", order_schema.clone(), vec![batch]);
+    let vip_out = conn.add_sink("vip", order_schema.clone());
+    let high_out = conn.add_sink("high", high_proj_schema);
+    let std_out = conn.add_sink("standard", order_schema);
+
+    let kdl = format!(
+        r#"
+mode "standalone"
+node id=1 data_dir="{dir}"
+run "once"
+
+workflow "declarative_branching" {{
+    source "in" connector="mem" component="Order" {{ config key="orders" }}
+
+    operator "router" kind="route" component="Order" {{
+        config mode="row" exclusive=#true default="standard" {{
+            branches {{
+                vip  "amount >= 10000.0 AND priority = 'high'"
+                high "priority = 'high'"
+            }}
+        }}
+    }}
+
+    operator "high_fee" kind="project" component="Order" into="HighFee" {{
+        config {{
+            select "id"
+            select "amount * 0.05 AS fee"
+        }}
+    }}
+
+    sink "out_vip"      connector="mem" component="Order"   {{ config key="vip" }}
+    sink "out_high"     connector="mem" component="HighFee" {{ config key="high" }}
+    sink "out_standard" connector="mem" component="Order"   {{ config key="standard" }}
+
+    link from="in" to="router"
+    link from="router" to="out_vip"      branch="vip"
+    link from="router" to="high_fee"     branch="high"
+    link from="high_fee" to="out_high"
+    link from="router" to="out_standard" branch="standard"
+}}
+"#,
+        dir = dir.path().display()
+    );
+
+    let cfg = ServiceConfig::from_kdl(&kdl).unwrap();
+    cfg.validate().unwrap();
+    let built = ServiceBuilder::empty().connector(conn).build(&cfg).unwrap();
+    built
+        .into_iter()
+        .next()
+        .unwrap()
+        .run(CancellationToken::new())
+        .await
+        .unwrap();
+
+    let vip = vip_out.lock().unwrap();
+    assert_eq!(vip.len(), 1);
+    assert_eq!(vip[0].column(0).as_primitive::<Int64Type>().values(), &[1]);
+
+    let high = high_out.lock().unwrap();
+    assert_eq!(high.len(), 1);
+    assert_eq!(high[0].column(0).as_primitive::<Int64Type>().values(), &[2]);
+    assert!((high[0].column(1).as_primitive::<Float64Type>().value(0) - 10.0).abs() < 1e-9);
+
+    let standard = std_out.lock().unwrap();
+    assert_eq!(standard.len(), 1);
+    assert_eq!(
+        standard[0].column(0).as_primitive::<Int64Type>().values(),
+        &[3, 4]
+    );
+}
+
+#[test]
+fn kdl_window_and_route_validation_rejects_bad_configs_and_roundtrips() {
+    let missing_window_kdl = r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci"
+workflow "w" {
+    operator "win" kind="window" component="Sale" into="Totals" {
+        config aggregates="count(*) AS n"
+    }
+}
+"#;
+    let err = ServiceConfig::from_kdl(missing_window_kdl)
+        .and_then(|c| c.validate())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("window"), "got: {err}");
+
+    let route_kdl = r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci"
+workflow "w" {
+    operator "r" kind="branch" component="Order" {
+        config mode="first_row" default="other" {
+            branches {
+                high "priority = 'high'"
+            }
+        }
+    }
+}
+"#;
+    let cfg = ServiceConfig::from_kdl(route_kdl).unwrap();
+    cfg.validate().unwrap();
+    let serialized = cfg.to_kdl().unwrap();
+    let reparsed = ServiceConfig::from_kdl(&serialized).unwrap();
+    reparsed.validate().unwrap();
+    assert_eq!(reparsed.workflows[0].operator[0].kind, "branch");
+}

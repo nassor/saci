@@ -180,6 +180,25 @@ window kind="session" gap_ms=10000 time_field="timestamp_ms" allowed_lateness_ms
 Every key of the block is listed under
 [Every key](@/service/processors/windowing/_index.md#every-key).
 
+## Declarative session window (no artifact)
+
+An `operator` with `kind="window"` handles session windows natively, including checkpointing open
+sessions across batches and coalescing two earlier bursts when an out-of-order bridge row arrives
+within `allowed_lateness_ms`. Rename the emitted bounds to `session_start_ms` and `session_end_ms`
+to match `SessionTotal`:
+
+```kdl,name=Declarative session operator producing identical SessionTotal rows
+operator "window_session" kind="window" component="Sale" into="SessionTotal" {
+    window kind="session" gap_ms=10000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+        key_fields "symbol"
+    }
+    config window_start_field="session_start_ms" window_end_field="session_end_ms" {
+        aggregates "count(*) AS count"
+        aggregates "sum(amount) AS sum"
+    }
+}
+```
+
 ## Prerequisites
 
 - A clone of the repository, from the root of which every command runs.

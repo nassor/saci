@@ -9,11 +9,11 @@ aliases = ["/service/branching/"]
 
 <dl class="page-facts">
 <dt>What it is</dt>
-<dd>Delivery a processor decides: <strong>one list of branch names per pass</strong></dd>
+<dd>Conditional delivery along labelled <code>link ... branch="..."</code> edges</dd>
 <dt>Reach for it when</dt>
 <dd>One inbound stream has to leave through <strong>different sinks by content</strong></dd>
 <dt>Granularity</dt>
-<dd>The <strong>pass</strong>, not the row: one decision per admitted chunk, whatever row count it carries</dd>
+<dd>Per-row batch splitting with declarative <code>operator kind="route"</code>, or per-pass routing with <code>wasm</code>, <code>plugin</code> or batch-mode <code>route</code></dd>
 </dl>
 
 Every `link` delivers by default: a node's output reaches all of its downstream
@@ -210,6 +210,77 @@ link from="router_plugin" to="out_plugin_standard" branch="standard"
 The source's three links carry no `branch`, so they multicast unconditionally.
 A processor labels every outbound link or none; the load-time rules behind that are in
 [workflows and links](@/service/config/workflows.md).
+
+## Declarative branching (`operator kind="route"`)
+
+You do not need a `.wasm` component or a native plugin to branch a workflow. An `operator` node
+with `kind="route"` (or `"branch"`) evaluates SQL predicate expressions directly against each
+inbound Arrow batch and routes matching rows or batches down labelled `link ... branch="<name>"`
+edges:
+
+- **Row-level batch splitting (`mode="row"`, the default):** Evaluates each branch predicate across
+  every row, slices matching rows into a branch-specific `RecordBatch`, and delivers each slice
+  only to links carrying that `branch` label. When `exclusive=#true` (the default), each row takes
+  the first matching rule in declaration order; set `exclusive=#false` to multicast a row to every
+  rule it matches. Unmatched rows go to `default="<label>"` if declared, or are dropped.
+- **Pass-level routing (`mode="first_row" | "any" | "all"`):** Keeps the batch intact and forwards
+  the whole batch to matching branch labels by inspecting only row 0 (`"first_row"`), whether any
+  row matches (`"any"`), or whether every row matches (`"all"`).
+
+Unlabelled outbound links on a node — or links wired upstream of the router — continue to receive
+the unsplit batch unconditionally.
+
+```kdl,name=Declarative row-level splitting in KDL without compiled artifacts
+workflow "order_routing" {
+    codec "ndjson" format="ndjson"
+
+    source "in" connector="file" component="Order" codec="ndjson" {
+        config path="orders.ndjson" {
+            field "id" type="int64" nullable=#false
+            field "priority" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
+        }
+    }
+
+    operator "router" kind="route" component="Order" {
+        config mode="row" exclusive=#true default="standard" {
+            branches {
+                vip  "amount >= 10000.0 AND priority = 'high'"
+                high "priority = 'high'"
+            }
+        }
+    }
+
+    operator "vip_projection" kind="project" component="Order" into="VipSummary" {
+        config {
+            select "id"
+            select "amount * 0.02 AS fee"
+        }
+    }
+
+    sink "out_vip"      connector="file" component="VipSummary" codec="ndjson" { config path="vip.ndjson" }
+    sink "out_high"     connector="file" component="Order"      codec="ndjson" { config path="high.ndjson" }
+    sink "out_standard" connector="file" component="Order"      codec="ndjson" { config path="standard.ndjson" }
+
+    link from="in"             to="router"
+    link from="router"         to="vip_projection" branch="vip"
+    link from="vip_projection" to="out_vip"
+    link from="router"         to="out_high"       branch="high"
+    link from="router"         to="out_standard"   branch="standard"
+}
+```
+
+### Every key for `route` and `branch`
+
+| Key | Location | Default | What it does |
+|---|---|---|---|
+| `branches` | `config` child block | required | Map of branch names to SQL predicates (`vip "amount >= 1000"`), or a list of `branch` nodes with `name` and `where` |
+| `mode` | `config` property | `"row"` | `"row"` splits matching rows per branch; `"first_row"`, `"any"`, and `"all"` route whole batches |
+| `exclusive` | `config` property | `#true` | `#true` sends each row (or match) to the first matching branch; `#false` multicasts to every matching branch |
+| `default` | `config` property | none | Fallback branch name for rows (or batches) matching no predicate; unmatched rows drop when omitted |
+
+If you need stateful Rust logic or custom I/O to compute branch labels per pass, compile a `wasm`
+or `plugin` router as shown below.
 
 ## Prerequisites
 

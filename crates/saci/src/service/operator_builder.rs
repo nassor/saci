@@ -10,11 +10,13 @@ use crate::connector::{parse_fields, schema_of};
 use crate::dataset::intern_component_name;
 use crate::error::{SaciError, SaciResult};
 use crate::operators::{
-    AggregateOp, AggregateSpec, DeduplicateState, DeduplicateSystem, FilterSystem, GroupBySystem,
-    IntervalJoinState, IntervalJoinSystem, JoinKey, JoinKind, JoinSystem, KeepPolicy,
-    LookupJoinState, LookupJoinSystem, ProjectSystem, SortKey, SortSystem, SqlSystem, TopNSystem,
-    UnnestSystem,
+    AggregateOp, AggregateSpec, BranchRule, DeduplicateState, DeduplicateSystem, FilterSystem,
+    GroupBySystem, IntervalJoinState, IntervalJoinSystem, JoinKey, JoinKind, JoinSystem,
+    KeepPolicy, LookupJoinState, LookupJoinSystem, ProjectSystem, RouteMode, RouteSystem, SortKey,
+    SortSystem, SqlSystem, TopNSystem, UnnestSystem,
 };
+#[cfg(feature = "windows")]
+use crate::operators::{WindowAggregateState, WindowAggregateSystem, WindowColumns};
 use crate::pipeline::Pipeline;
 
 use super::builder::{BuiltNode, BuiltNodeKind};
@@ -104,6 +106,12 @@ fn build_operator_pipeline(
             }
             pipeline = pipeline.system(sys);
         }
+        "window" => {
+            pipeline = build_window_operator_pipeline(pipeline, spec, cfg, &ctx, schemas)?;
+        }
+        "group_by" if spec.window.is_some() => {
+            pipeline = build_window_operator_pipeline(pipeline, spec, cfg, &ctx, schemas)?;
+        }
         "group_by" => {
             check_allowed_keys(cfg, &["keys", "aggregates", "aggregate"], &ctx)?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
@@ -118,6 +126,49 @@ fn build_operator_pipeline(
                     register_if_absent(&mut pipeline, dst, out_schema)?;
                 } else {
                     pipeline.data_mut().set_output_schema(dst, out_schema);
+                }
+            }
+            pipeline = pipeline.system(sys);
+        }
+        "route" | "branch" => {
+            check_allowed_keys(cfg, &["branches", "mode", "exclusive", "default"], &ctx)?;
+            let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
+            let dst = spec.into.as_deref().unwrap_or(src);
+            let rules = parse_branch_rules(cfg, &ctx)?;
+            let mode = match opt_str(cfg, "mode")
+                .map(|m| m.to_ascii_lowercase())
+                .as_deref()
+            {
+                None | Some("row") => RouteMode::Row,
+                Some("first_row") => RouteMode::FirstRow,
+                Some("any") | Some("batch_any") => RouteMode::BatchAny,
+                Some("all") | Some("batch_all") => RouteMode::BatchAll,
+                Some(other) => {
+                    return Err(SaciError::configuration(format!(
+                        "{ctx}: invalid route mode '{other}' (expected row, first_row, any, or all)"
+                    )));
+                }
+            };
+            let exclusive = opt_bool(cfg, "exclusive", &ctx)?.unwrap_or(true);
+            let mut sys = RouteSystem::new(src, rules)?
+                .mode(mode)
+                .exclusive(exclusive);
+            if dst != src {
+                sys = sys.into_component(dst);
+            }
+            if let Some(def) = opt_str(cfg, "default") {
+                if def.is_empty() {
+                    return Err(SaciError::configuration(format!(
+                        "{ctx}: default branch must not be empty"
+                    )));
+                }
+                sys = sys.default_branch(def);
+            }
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
+                sys.validate_schema(in_schema)?;
+                register_if_absent(&mut pipeline, src, in_schema.clone())?;
+                if dst != src {
+                    register_if_absent(&mut pipeline, dst, in_schema.clone())?;
                 }
             }
             pipeline = pipeline.system(sys);
@@ -378,6 +429,161 @@ fn build_operator_pipeline(
     }
 
     Ok(pipeline)
+}
+
+fn build_window_operator_pipeline(
+    #[cfg_attr(not(feature = "windows"), allow(unused_mut))] mut pipeline: Pipeline,
+    spec: &OperatorSpec,
+    cfg: &crate::config::ConfigMap,
+    ctx: &str,
+    #[cfg_attr(not(feature = "windows"), allow(unused_variables))] schemas: Option<
+        &HashMap<String, Arc<Schema>>,
+    >,
+) -> SaciResult<Pipeline> {
+    check_allowed_keys(
+        cfg,
+        &[
+            "keys",
+            "aggregates",
+            "aggregate",
+            "window_id_field",
+            "window_start_field",
+            "window_end_field",
+            "emit_bounds",
+        ],
+        ctx,
+    )?;
+    let win = spec
+        .window
+        .as_ref()
+        .ok_or_else(|| SaciError::configuration(format!("{ctx}: missing 'window' block")))?;
+    let src = req_endpoint(spec.component.as_deref(), "component", ctx)?;
+    let dst = spec.into.as_deref().unwrap_or(src);
+    let mut keys = win.key_fields.clone();
+    for extra in opt_ident_list(cfg, "keys") {
+        if !keys.contains(&extra) {
+            keys.push(extra);
+        }
+    }
+    let aggs = parse_aggregates(cfg, ctx)?;
+    let emit_bounds = opt_bool(cfg, "emit_bounds", ctx)?.unwrap_or(true);
+    let window_id_field = opt_str(cfg, "window_id_field");
+    let window_start_field = if emit_bounds {
+        Some(opt_str(cfg, "window_start_field").unwrap_or_else(|| "window_start_ms".to_string()))
+    } else {
+        opt_str(cfg, "window_start_field")
+    };
+    let window_end_field = if emit_bounds {
+        Some(opt_str(cfg, "window_end_field").unwrap_or_else(|| "window_end_ms".to_string()))
+    } else {
+        opt_str(cfg, "window_end_field")
+    };
+
+    #[cfg(feature = "windows")]
+    {
+        let sys =
+            WindowAggregateSystem::new(src, dst, &win.time_field, win.spec.clone(), keys, aggs)?
+                .allowed_lateness_ms(win.allowed_lateness_ms)
+                .window_columns(WindowColumns {
+                    window_id_field,
+                    window_start_field,
+                    window_end_field,
+                });
+        if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
+            let out_schema = sys.output_schema(in_schema)?;
+            register_if_absent(&mut pipeline, src, in_schema.clone())?;
+            if dst != src {
+                register_if_absent(&mut pipeline, dst, out_schema)?;
+            } else {
+                pipeline.data_mut().set_output_schema(dst, out_schema);
+            }
+        }
+        pipeline = pipeline.state::<WindowAggregateState>().system(sys);
+    }
+    #[cfg(not(feature = "windows"))]
+    let _ = (
+        win,
+        src,
+        dst,
+        keys,
+        aggs,
+        window_id_field,
+        window_start_field,
+        window_end_field,
+    );
+
+    Ok(pipeline)
+}
+
+fn parse_branch_rules(cfg: &crate::config::ConfigMap, ctx: &str) -> SaciResult<Vec<BranchRule>> {
+    let val = cfg
+        .get("branches")
+        .ok_or_else(|| SaciError::configuration(format!("{ctx}: missing 'branches' in config")))?;
+    let mut rules = Vec::new();
+    match val {
+        ConfigValue::Object(map) => {
+            if map.len() == 1
+                && let Some(nested) = map.get("branch")
+            {
+                let items: &[ConfigValue] = match nested {
+                    ConfigValue::Array(arr) => arr.as_slice(),
+                    single => std::slice::from_ref(single),
+                };
+                for item in items {
+                    rules.push(parse_branch_rule_object(item, ctx)?);
+                }
+            } else {
+                for (name, expr_val) in map {
+                    let expr = match expr_val {
+                        ConfigValue::String(s) if !s.is_empty() => s.as_str(),
+                        other => {
+                            return Err(SaciError::configuration(format!(
+                                "{ctx}: branch '{name}' predicate must be a non-empty string, got {other}"
+                            )));
+                        }
+                    };
+                    rules.push(BranchRule::parse(name, expr)?);
+                }
+            }
+        }
+        ConfigValue::Array(arr) => {
+            for item in arr {
+                rules.push(parse_branch_rule_object(item, ctx)?);
+            }
+        }
+        other => {
+            return Err(SaciError::configuration(format!(
+                "{ctx}: invalid 'branches' value {other}"
+            )));
+        }
+    }
+    if rules.is_empty() {
+        return Err(SaciError::configuration(format!(
+            "{ctx}: 'branches' must declare at least one rule"
+        )));
+    }
+    Ok(rules)
+}
+
+fn parse_branch_rule_object(val: &ConfigValue, ctx: &str) -> SaciResult<BranchRule> {
+    let obj = val.as_object().ok_or_else(|| {
+        SaciError::configuration(format!("{ctx}: branch rule entry must be an object"))
+    })?;
+    let name = opt_str(obj, "id")
+        .or_else(|| opt_str(obj, "name"))
+        .or_else(|| opt_str(obj, "branch"))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            SaciError::configuration(format!("{ctx}: branch rule missing 'name' or 'branch'"))
+        })?;
+    let expr = opt_str(obj, "where")
+        .or_else(|| opt_str(obj, "predicate"))
+        .or_else(|| opt_str(obj, "when"))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            SaciError::configuration(format!("{ctx}: branch '{name}' missing 'where' predicate"))
+        })?;
+    BranchRule::parse(name, &expr)
 }
 
 fn check_allowed_keys(

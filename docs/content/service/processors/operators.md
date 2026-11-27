@@ -1,6 +1,6 @@
 +++
 title = "Declarative operators"
-description = "Run SQL, filters, projections, joins, unnest, group_by, sort, top_n, and deduplicate natively inside a saci-service KDL workflow without external artifacts."
+description = "Run SQL, filters, projections, joins, unnest, group_by, windowing, branching, sort, top_n, and deduplicate natively inside a saci-service KDL workflow without external artifacts."
 template = "page.html"
 weight = 1
 +++
@@ -273,19 +273,48 @@ workflow "dedup_and_explode" {
 }
 ```
 
+## Windowing and branching operators
+
+Event-time aggregation and conditional routing also work without compiled artifacts via `kind="window"`
+(or a `group_by` carrying a `window` block) and `kind="route"` (or `"branch"`):
+
+- **Windowing (`kind="window"`):** Declare a `window` child (`tumbling`, `sliding`, or `session`)
+  alongside `aggregates`. The host tracks watermarks, buffers open windows across batches, and emits
+  closed aggregates into `into`. See [Windowing](@/service/processors/windowing/_index.md) and the
+  tumbling, sliding, and session guides for full examples.
+- **Branching (`kind="route"` / `"branch"`):** Evaluate SQL predicates row-by-row (`mode="row"`) or
+  per batch (`mode="first_row" | "any" | "all"`) and forward matching data down labelled
+  `link ... branch="<name>"` edges. See [Branching](@/service/processors/branching.md#declarative-branching-operator-kind-route)
+  for row-splitting rules, fallback branches, and key tables.
+
+```kdl,name=Compact window and route operator examples
+operator "hourly_sales" kind="window" component="Sale" into="HourlyTotal" {
+    window kind="tumbling" size_ms=3600000 time_field="timestamp_ms" allowed_lateness_ms=5000 {
+        key_fields "symbol"
+    }
+    config { aggregates "count(*) AS count" "sum(amount) AS sum" }
+}
+
+operator "priority_split" kind="route" component="Order" {
+    config mode="row" exclusive=#true default="standard" {
+        branches { high "amount >= 1000.0" }
+    }
+}
+```
+
 ## Every key
 
 | Key | Location | Default | What it does |
 |---|---|---|---|
 | `<id>` | leading argument | required | Unique workflow node id referenced by `link from`/`to`. |
-| `kind` | attribute | required | `"sql"`, `"filter"`, `"project"`, `"group_by"`, `"sort"`, `"top_n"`, `"unnest"`, `"join"`, `"interval_join"`, `"lookup_join"`, or `"deduplicate"`. |
+| `kind` | attribute | required | `"sql"`, `"filter"`, `"project"`, `"group_by"`, `"window"`, `"route"`, `"branch"`, `"sort"`, `"top_n"`, `"unnest"`, `"join"`, `"interval_join"`, `"lookup_join"`, or `"deduplicate"`. |
 | `name` | attribute | none | Optional human-readable display name shown in the live dashboard. |
 | `component` | attribute | none | Input component for unary operators (or SQL fallback output component). |
 | `left` | attribute | none | Left input component for binary join kinds (`join`, `interval_join`, `lookup_join`). |
 | `right` | attribute | none | Right input component for binary join kinds. |
 | `into` | attribute | `component` (unary) | Output component name written back into the workflow `Dataset`. Required for joins and `sql`. |
 | `config` | child block / props | empty | Operator-specific parameters summarized by `kind` below; unknown keys fail `validate`. |
-| `window` | child block | none | Optional host-tracked event-time watermark declaration (`windows` feature). |
+| `window` | child block | none | Host-tracked event-time watermark declaration (`windows` feature); required when `kind="window"`. |
 
 ### Config keys per operator kind
 
@@ -294,6 +323,8 @@ workflow "dedup_and_explode" {
 | `filter` | `where` or `predicate` | |
 | `project` | `select` | |
 | `group_by` | `aggregates` (or `aggregate`) | `keys` |
+| `window` | `aggregates` (or `aggregate`), plus `window` block | `keys`, `window_id_field`, `window_start_field`, `window_end_field`, `emit_bounds` |
+| `route` / `branch` | `branches` | `mode` (`row`, `first_row`, `any`, `all`), `exclusive`, `default` |
 | `sort` | `order_by` | `limit`, `offset` |
 | `top_n` | `order_by`, `limit` | `offset` |
 | `unnest` | `field` | `alias` (or `as`), `preserve_empty` |
