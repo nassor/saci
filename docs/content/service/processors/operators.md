@@ -21,33 +21,33 @@ toolchain required.
             in memory for stateful operators. Right: the transformed component reaches the sink.
         </desc>
         <g class="anim anim-1">
-            <rect class="blk blk-data" x="0" y="44" width="140" height="52" rx="8"/>
-            <rect class="hd hd-data" x="0" y="44" width="140" height="20" rx="8"/>
-            <rect class="hd hd-data" x="0" y="56" width="140" height="8"/>
+            <rect class="blk blk-data" x="0" y="44" width="150" height="52" rx="8"/>
+            <rect class="hd hd-data" x="0" y="44" width="150" height="20" rx="8"/>
+            <rect class="hd hd-data" x="0" y="56" width="150" height="8"/>
             <text class="t-lbl" x="12" y="59">orders_in</text>
             <text class="t-sm" x="12" y="81">component Orders</text>
-            <rect class="blk blk-data" x="0" y="112" width="140" height="52" rx="8"/>
-            <rect class="hd hd-data" x="0" y="112" width="140" height="20" rx="8"/>
-            <rect class="hd hd-data" x="0" y="124" width="140" height="8"/>
+            <rect class="blk blk-data" x="0" y="112" width="150" height="52" rx="8"/>
+            <rect class="hd hd-data" x="0" y="112" width="150" height="20" rx="8"/>
+            <rect class="hd hd-data" x="0" y="124" width="150" height="8"/>
             <text class="t-lbl" x="12" y="127">customers_in</text>
             <text class="t-sm" x="12" y="149">component Customers</text>
         </g>
         <g class="anim anim-2">
-            <path class="arw arw-data" d="M140 70 C175 70 175 94 210 94" marker-end="url(#op-d)"/>
-            <path class="arw arw-data" d="M140 138 C175 138 175 114 210 114" marker-end="url(#op-d)"/>
-            <rect class="blk blk-bnd" x="210" y="64" width="210" height="80" rx="8"/>
-            <rect class="hd hd-bnd" x="210" y="64" width="210" height="20" rx="8"/>
-            <rect class="hd hd-bnd" x="210" y="76" width="210" height="8"/>
-            <text class="t-lbl t-bnd" x="222" y="79">operator &quot;enrich&quot;</text>
-            <text class="t-sm" x="222" y="104">kind=&quot;sql&quot; | &quot;filter&quot; | &quot;join&quot; ...</text>
-            <text class="t-sm" x="222" y="124">native Arrow PipelineRuntime</text>
+            <path class="arw arw-data" d="M150 70 C177 70 177 94 205 94" marker-end="url(#op-d)"/>
+            <path class="arw arw-data" d="M150 138 C177 138 177 114 205 114" marker-end="url(#op-d)"/>
+            <rect class="blk blk-bnd" x="205" y="64" width="220" height="80" rx="8"/>
+            <rect class="hd hd-bnd" x="205" y="64" width="220" height="20" rx="8"/>
+            <rect class="hd hd-bnd" x="205" y="76" width="220" height="8"/>
+            <text class="t-lbl t-bnd" x="217" y="79">operator &quot;enrich&quot;</text>
+            <text class="t-sm" x="217" y="104">kind=&quot;sql&quot; | &quot;join&quot; | ...</text>
+            <text class="t-sm" x="217" y="124">native Arrow PipelineRuntime</text>
         </g>
         <g class="anim anim-3">
-            <rect class="blk blk-ctl" x="230" y="0" width="170" height="36" rx="8"/>
-            <text class="t-lbl" x="242" y="23">config</text>
-            <text class="t-sm t-ctl t-end" x="388" y="23">where / query / on</text>
+            <rect class="blk blk-ctl" x="205" y="0" width="220" height="36" rx="8"/>
+            <text class="t-lbl" x="217" y="23">config</text>
+            <text class="t-sm t-ctl t-end" x="413" y="23">where / query / on</text>
             <path class="arw arw-ctl" d="M315 36 V64" marker-end="url(#op-c)"/>
-            <path class="arw arw-data" d="M420 104 H500" marker-end="url(#op-d)"/>
+            <path class="arw arw-data" d="M425 104 H500" marker-end="url(#op-d)"/>
             <rect class="blk blk-data" x="500" y="76" width="160" height="56" rx="8"/>
             <rect class="hd hd-data" x="500" y="76" width="160" height="20" rx="8"/>
             <rect class="hd hd-data" x="500" y="88" width="160" height="8"/>

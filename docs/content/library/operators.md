@@ -33,34 +33,34 @@ The `saci::operators` module (re-exported in `saci::prelude`) provides a Tokio-f
             <text class="t-sm t-data t-end" x="134" y="135">write</text>
         </g>
         <g class="anim anim-2">
-            <path class="arw arw-ctl" d="M150 75 C185 75 185 52 220 52" marker-end="url(#lib-op-c)"/>
-            <rect class="blk blk-data" x="220" y="18" width="210" height="68" rx="8"/>
-            <rect class="hd hd-data" x="220" y="18" width="210" height="20" rx="8"/>
-            <rect class="hd hd-data" x="220" y="30" width="210" height="8"/>
-            <text class="t-lbl" x="232" y="33">stateless operators</text>
-            <text class="t-sm" x="232" y="56">Filter / GroupBy / SqlSystem</text>
-            <text class="t-sm" x="232" y="74">in-batch Arrow transforms</text>
+            <path class="arw arw-ctl" d="M150 75 C180 75 180 52 210 52" marker-end="url(#lib-op-c)"/>
+            <rect class="blk blk-data" x="210" y="18" width="220" height="68" rx="8"/>
+            <rect class="hd hd-data" x="210" y="18" width="220" height="20" rx="8"/>
+            <rect class="hd hd-data" x="210" y="30" width="220" height="8"/>
+            <text class="t-lbl" x="222" y="33">stateless operators</text>
+            <text class="t-sm" x="222" y="56">Filter / GroupBy / SqlSystem</text>
+            <text class="t-sm" x="222" y="74">in-batch Arrow transforms</text>
         </g>
         <g class="anim anim-3">
-            <path class="arw arw-ctl" d="M150 103 C185 103 185 140 220 140" marker-end="url(#lib-op-c)"/>
-            <rect class="blk blk-bnd" x="220" y="104" width="210" height="72" rx="8"/>
-            <rect class="hd hd-bnd" x="220" y="104" width="210" height="20" rx="8"/>
-            <rect class="hd hd-bnd" x="220" y="116" width="210" height="8"/>
-            <text class="t-lbl t-bnd" x="232" y="119">stateful operators</text>
-            <text class="t-sm" x="232" y="142">IntervalJoin / LookupJoin / Dedup</text>
-            <text class="t-sm" x="232" y="160">reads &amp; updates sdk::State&lt;T&gt;</text>
-            <path class="arw arw-bnd" d="M380 176 V202 H270 V176" marker-end="url(#lib-op-b)"/>
-            <text class="t-sm t-bnd t-mid" x="325" y="218">State&lt;T&gt; checkpointed via IPC across calls</text>
+            <path class="arw arw-ctl" d="M150 103 C180 103 180 140 210 140" marker-end="url(#lib-op-c)"/>
+            <rect class="blk blk-bnd" x="210" y="104" width="220" height="72" rx="8"/>
+            <rect class="hd hd-bnd" x="210" y="104" width="220" height="20" rx="8"/>
+            <rect class="hd hd-bnd" x="210" y="116" width="220" height="8"/>
+            <text class="t-lbl t-bnd" x="222" y="119">stateful operators</text>
+            <text class="t-sm" x="222" y="142">IntervalJoin / LookupJoin</text>
+            <text class="t-sm" x="222" y="160">reads &amp; updates sdk::State&lt;T&gt;</text>
+            <path class="arw arw-bnd" d="M375 176 V202 H265 V176" marker-end="url(#lib-op-b)"/>
+            <text class="t-sm t-bnd t-mid" x="320" y="218">State&lt;T&gt; checkpointed via IPC across calls</text>
         </g>
         <g class="anim anim-4">
-            <path class="arw arw-data" d="M430 52 H500" marker-end="url(#lib-op-d)"/>
-            <path class="arw arw-data" d="M430 140 C465 140 465 112 500 112" marker-end="url(#lib-op-d)"/>
-            <rect class="blk blk-data" x="500" y="42" width="160" height="88" rx="8"/>
-            <rect class="hd hd-data" x="500" y="42" width="160" height="20" rx="8"/>
-            <rect class="hd hd-data" x="500" y="54" width="160" height="8"/>
-            <text class="t-lbl" x="512" y="57">target component</text>
-            <text class="t-sm" x="512" y="82">set_batch_named(&hellip;)</text>
-            <text class="t-sm" x="512" y="102">resizes rows &amp; alive bits</text>
+            <path class="arw arw-data" d="M430 52 H490" marker-end="url(#lib-op-d)"/>
+            <path class="arw arw-data" d="M430 140 C460 140 460 112 490 112" marker-end="url(#lib-op-d)"/>
+            <rect class="blk blk-data" x="490" y="42" width="170" height="88" rx="8"/>
+            <rect class="hd hd-data" x="490" y="42" width="170" height="20" rx="8"/>
+            <rect class="hd hd-data" x="490" y="54" width="170" height="8"/>
+            <text class="t-lbl" x="502" y="57">target component</text>
+            <text class="t-sm" x="502" y="82">set_batch_named(&hellip;)</text>
+            <text class="t-sm" x="502" y="102">resizes rows &amp; bitmap</text>
         </g>
         <defs>
             <marker id="lib-op-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
