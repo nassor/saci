@@ -3,6 +3,7 @@
 //! shared `tokio::sync::mpsc` pair.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
@@ -15,22 +16,45 @@ use crate::io::{Sink, Source};
 
 use crate::connector::channel::{ChannelSink, ChannelSource};
 
-/// One channel name's pairing state.
+/// Shared pairing slot for one named channel across workflow restarts.
 ///
-/// Whichever half is built first creates the `mpsc` pair and stores both
-/// ends; the second half `take`s its end out. Once both halves exist, the
-/// registry holds no live endpoint for this name: the sink is the channel's
-/// only `Sender`, so the producer workflow finishing (dropping its
-/// `ChannelSink`) closes the channel and the consumer's `ChannelSource` sees
-/// a legitimate EOF.
-#[derive(Default)]
-struct Entry {
-    sender: Option<mpsc::Sender<RecordBatch>>,
-    receiver: Option<mpsc::Receiver<RecordBatch>>,
-    schema: Option<Arc<Schema>>,
+/// Tracks whether each half is currently alive via [`sink_active`] and
+/// [`source_active`], and exchanges replacement `mpsc` endpoints when either
+/// workflow is rebuilt after dropping its previous half.
+pub(crate) struct ChannelSlot {
+    schema: Arc<Schema>,
     buffer: usize,
-    sink_built: bool,
-    source_built: bool,
+    pub(crate) sink_active: AtomicBool,
+    pub(crate) source_active: AtomicBool,
+    pub(crate) pending_tx: Mutex<Option<mpsc::Sender<RecordBatch>>>,
+    pub(crate) pending_rx: Mutex<Option<mpsc::Receiver<RecordBatch>>>,
+}
+
+impl ChannelSlot {
+    fn new(schema: Arc<Schema>, buffer: usize) -> Self {
+        Self {
+            schema,
+            buffer,
+            sink_active: AtomicBool::new(false),
+            source_active: AtomicBool::new(false),
+            pending_tx: Mutex::new(None),
+            pending_rx: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn take_pending_tx(&self) -> Option<mpsc::Sender<RecordBatch>> {
+        self.pending_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    pub(crate) fn take_pending_rx(&self) -> Option<mpsc::Receiver<RecordBatch>> {
+        self.pending_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
 }
 
 /// Name-keyed registry resolving each channel name's `ChannelSink` and
@@ -44,7 +68,7 @@ struct Entry {
 /// [`ServiceBuilder::channels`]: crate::service::ServiceBuilder::channels
 #[derive(Default)]
 pub struct ChannelRegistry {
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<HashMap<String, Arc<ChannelSlot>>>,
 }
 
 fn schema_mismatch(name: &str) -> SaciError {
@@ -66,38 +90,44 @@ impl ChannelBridge for ChannelRegistry {
         schema: Arc<Schema>,
         buffer: usize,
     ) -> Result<Box<dyn Sink>, SaciError> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = entries.entry(name.to_string()).or_default();
-        if entry.sink_built {
+        let slot = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(ChannelSlot::new(schema.clone(), buffer)))
+                .clone()
+        };
+        if slot.schema != schema {
+            return Err(schema_mismatch(name));
+        }
+        if slot.buffer != buffer {
+            return Err(buffer_mismatch(name, buffer, slot.buffer));
+        }
+        if slot
+            .sink_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err(SaciError::configuration(format!(
                 "channel '{name}': more than one ChannelSink declared"
             )));
         }
-        if entry.sender.is_none() && entry.receiver.is_none() {
-            // Nobody has claimed this name yet: create the pair.
-            let (tx, rx) = mpsc::channel(buffer);
-            entry.sender = Some(tx);
-            entry.receiver = Some(rx);
-            entry.schema = Some(schema.clone());
-            entry.buffer = buffer;
-        } else {
-            // The source half already created the pair.
-            if entry.schema.as_ref() != Some(&schema) {
-                return Err(schema_mismatch(name));
+
+        let tx = match slot.take_pending_tx() {
+            Some(tx) => tx,
+            None => {
+                let (tx, rx) = mpsc::channel(buffer);
+                *slot
+                    .pending_rx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
+                tx
             }
-            if entry.buffer != buffer {
-                return Err(buffer_mismatch(name, buffer, entry.buffer));
-            }
-        }
-        let tx = entry
-            .sender
-            .take()
-            .expect("sender present for the sink half");
-        entry.sink_built = true;
-        Ok(Box::new(ChannelSink::with_sender(schema, buffer, tx)))
+        };
+        Ok(Box::new(ChannelSink::with_slot(schema, buffer, tx, slot)))
     }
 
     fn source(
@@ -106,38 +136,44 @@ impl ChannelBridge for ChannelRegistry {
         schema: Arc<Schema>,
         buffer: usize,
     ) -> Result<Box<dyn Source>, SaciError> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = entries.entry(name.to_string()).or_default();
-        if entry.source_built {
+        let slot = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(ChannelSlot::new(schema.clone(), buffer)))
+                .clone()
+        };
+        if slot.schema != schema {
+            return Err(schema_mismatch(name));
+        }
+        if slot.buffer != buffer {
+            return Err(buffer_mismatch(name, buffer, slot.buffer));
+        }
+        if slot
+            .source_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err(SaciError::configuration(format!(
                 "channel '{name}': more than one ChannelSource declared"
             )));
         }
-        if entry.sender.is_none() && entry.receiver.is_none() {
-            // Nobody has claimed this name yet: create the pair.
-            let (tx, rx) = mpsc::channel(buffer);
-            entry.sender = Some(tx);
-            entry.receiver = Some(rx);
-            entry.schema = Some(schema.clone());
-            entry.buffer = buffer;
-        } else {
-            // The sink half already created the pair.
-            if entry.schema.as_ref() != Some(&schema) {
-                return Err(schema_mismatch(name));
+
+        let rx = match slot.take_pending_rx() {
+            Some(rx) => rx,
+            None => {
+                let (tx, rx) = mpsc::channel(buffer);
+                *slot
+                    .pending_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx);
+                rx
             }
-            if entry.buffer != buffer {
-                return Err(buffer_mismatch(name, buffer, entry.buffer));
-            }
-        }
-        let rx = entry
-            .receiver
-            .take()
-            .expect("receiver present for the source half");
-        entry.source_built = true;
-        Ok(Box::new(ChannelSource::with_receiver(schema, rx)))
+        };
+        Ok(Box::new(ChannelSource::with_slot(schema, rx, slot)))
     }
 }
 

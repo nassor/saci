@@ -13,25 +13,34 @@
 //! applies command-line overrides and calls [`serve`]. An application that
 //! embeds the service calls it directly with its own [`ServiceBuilder`].
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use futures::future::LocalBoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
 use opentelemetry_prometheus::exporter;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::inspector_wire::{ReloadReport, WorkflowTopology};
 use crate::service::RedbStateClient;
-use crate::service::builder::rebuild_blocker;
-use crate::service::config::{ServiceConfig, ServiceMode};
+use crate::service::alert::AlertDispatcher;
+use crate::service::builder::{BuiltWorkflow, WorkflowFactory, rebuild_blocker};
+use crate::service::config::{ServiceConfig, ServiceMode, WorkflowSpec};
 use crate::service::dlq::DlqRegistry;
 use crate::service::http::{ServiceModeLabel, ServiceState};
-use crate::service::lifecycle::{LifecycleRegistryBuilder, SupervisorChannels, run_supervised};
+use crate::service::lifecycle::{
+    LifecycleRegistry, LifecycleRegistryBuilder, ReloadEnvelope, SupervisorChannels, run_supervised,
+};
 use crate::service::standalone::WorkflowStats;
+use crate::service::topology::{update_topology_from_config, workflow_topology};
 use crate::service::{ServiceBuilder, ShutdownCoordinator, serve_http, spawn_watchdog};
 use crate::{SaciError, SaciResult};
 
@@ -151,6 +160,12 @@ pub async fn serve(
     opentelemetry::global::set_meter_provider(provider_builder.build());
     crate::metrics::init();
 
+    // Alert dispatcher shared across self-healing connectors, DLQs, and workflow
+    // supervisors. Updated dynamically when config reloads.
+    let alerts =
+        AlertDispatcher::new_live(config.alerts.clone(), config.node.label(), config.node.id);
+    let builder = builder.alerts(alerts.clone());
+
     // One shared half per declared queue, built before the workflows so the
     // runner and the control plane are two views of the same state.
     let dlq_registry = Arc::new(DlqRegistry::from_config(&config));
@@ -175,6 +190,7 @@ pub async fn serve(
     factory.publish_topology(&config, &built);
 
     let coord = ShutdownCoordinator::new(SHUTDOWN_BUDGET);
+    let coord_root = coord.root();
 
     let liveness = Arc::new(AtomicU64::new(0));
     let ready = Arc::new(AtomicBool::new(false));
@@ -197,21 +213,37 @@ pub async fn serve(
         ServiceMode::Cluster { .. } => None,
     };
 
+    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::unbounded_channel::<ReloadEnvelope>();
+    let reload_tx_keepalive = reload_tx.clone();
+
+    let initial_raw_kdl = config_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok());
+
     // Lifecycle control is standalone-only: `ServiceConfig::validate` allows
     // exactly one workflow in cluster mode and stopping it is stopping the
     // node. With no registry the routes are never mounted.
     let control_enabled =
         matches!(config.mode, ServiceMode::Standalone { .. }) && config.http.control;
-    let mut lifecycle_builder = LifecycleRegistryBuilder::new();
+    let mut lifecycle_builder = LifecycleRegistryBuilder::new()
+        .state_client(state_client.clone())
+        .reload_channel(reload_tx)
+        .alerts(alerts.clone())
+        .raw_kdl(initial_raw_kdl);
     let supervisor_channels: Vec<Option<SupervisorChannels>> = config
         .workflows
         .iter()
-        .map(|workflow| {
+        .enumerate()
+        .map(|(i, workflow)| {
             control_enabled.then(|| {
-                lifecycle_builder.register(
+                lifecycle_builder.register_with_spec(
                     &workflow.id,
                     workflow.name.as_deref(),
                     rebuild_blocker(workflow),
+                    Some(workflow.clone()),
+                    standalone_stats
+                        .as_ref()
+                        .and_then(|s| s.get(i).map(|(_, lock)| Arc::clone(lock))),
                 )
             })
         })
@@ -228,8 +260,8 @@ pub async fn serve(
         ready: ready.clone(),
         standalone_stats: standalone_stats.clone(),
         inspector,
-        lifecycle,
-        dlq: (!dlq_registry.is_empty()).then_some(dlq_registry),
+        lifecycle: lifecycle.clone(),
+        dlq: (!dlq_registry.is_empty()).then_some(dlq_registry.clone()),
     };
 
     let watchdog_handle = spawn_watchdog(state.clone(), coord.child());
@@ -300,46 +332,31 @@ pub async fn serve(
             (b, cancel_child, channels)
         })
         .collect();
-    // Every supervisor shares one factory: they are polled by the one
-    // `join_all` below, on this task, so a shared borrow is enough and the
-    // `borrow_mut` never spans an await.
-    let factory = std::cell::RefCell::new(factory);
-    let runner_config = config.clone();
+    // Every supervisor shares one factory: they are polled on this single task,
+    // so a `RefCell` is enough and the `borrow_mut` never spans an await.
+    let factory = RefCell::new(factory);
+    let initial_config = config.clone();
     let runner_stats = standalone_stats.clone();
+    let runner_config_path = config_path.clone();
 
     let runner_fut = async move {
-        match runner_config.mode {
+        let _reload_tx_keepalive = reload_tx_keepalive;
+        match initial_config.mode {
             ServiceMode::Standalone { .. } => {
-                let cfg = &runner_config;
-                let factory = &factory;
-                let runner_futs =
-                    items
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (b, cancel_child, channels))| {
-                            let stats = runner_stats.as_ref().and_then(|entries| {
-                                entries
-                                    .iter()
-                                    .find(|(id, _)| *id == b.workflow_id)
-                                    .map(|(_, lock)| lock.clone())
-                            });
-                            let state = state_client.clone();
-                            async move {
-                                run_supervised(
-                                    b,
-                                    &cfg.workflows[i],
-                                    cancel_child,
-                                    stats,
-                                    state,
-                                    factory,
-                                    channels,
-                                )
-                                .await
-                                .map(|_| ())
-                            }
-                        });
-                let results = futures::future::join_all(runner_futs).await;
-                results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
+                run_standalone_with_reload(
+                    initial_config,
+                    items,
+                    runner_stats,
+                    state_client,
+                    &factory,
+                    lifecycle,
+                    dlq_registry,
+                    alerts,
+                    coord_root,
+                    runner_config_path,
+                    &mut reload_rx,
+                )
+                .await
             }
             #[cfg(feature = "service-cluster")]
             ServiceMode::Cluster { .. } => {
@@ -347,7 +364,7 @@ pub async fn serve(
                     .into_iter()
                     .next()
                     .expect("cluster mode config validation guarantees exactly one workflow");
-                crate::service::run_cluster(b, &runner_config, cancel_child)
+                crate::service::run_cluster(b, &initial_config, cancel_child)
                     .await
                     .map(|_| ())
             }
@@ -364,6 +381,12 @@ pub async fn serve(
                 drop(items);
                 drop(runner_stats);
                 drop(factory);
+                drop(lifecycle);
+                drop(dlq_registry);
+                drop(alerts);
+                drop(coord_root);
+                drop(runner_config_path);
+                let _ = &mut reload_rx;
                 Err(crate::service::factories::missing_cluster_host_error())
             }
         }
@@ -452,4 +475,537 @@ pub async fn serve(
 
     // Cancellation from a clean shutdown signal is not an error.
     runner_result.map(|()| ServeExit::Clean)
+}
+
+struct ActiveWorkflow {
+    spec: WorkflowSpec,
+    artifact_mtimes: Vec<(String, Option<SystemTime>)>,
+    cancel: CancellationToken,
+}
+
+fn workflow_artifact_mtimes(spec: &WorkflowSpec) -> Vec<(String, Option<SystemTime>)> {
+    let mut out = Vec::new();
+    for w in &spec.wasm {
+        if let Some(path) = &w.path {
+            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            out.push((format!("wasm:{}:{path}", w.id), mtime));
+        }
+    }
+    for p in &spec.plugin {
+        if let Some(path) = &p.path {
+            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            out.push((format!("plugin:{}:{path}", p.id), mtime));
+        }
+    }
+    out
+}
+
+fn global_build_settings_differ(old: &ServiceConfig, new: &ServiceConfig) -> bool {
+    let old_run = match &old.mode {
+        ServiceMode::Standalone { config } => &config.run,
+        ServiceMode::Cluster { .. } => return true,
+    };
+    let new_run = match &new.mode {
+        ServiceMode::Standalone { config } => &config.run,
+        ServiceMode::Cluster { .. } => return true,
+    };
+    old_run != new_run
+        || old.flow_control != new.flow_control
+        || old.heal != new.heal
+        || old.encryption != new.encryption
+        || serde_json::to_value(&old.store).ok() != serde_json::to_value(&new.store).ok()
+}
+
+fn specs_equal(a: &WorkflowSpec, b: &WorkflowSpec) -> bool {
+    serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+}
+
+fn spawn_workflow<'a>(
+    built: BuiltWorkflow,
+    spec: WorkflowSpec,
+    cancel: CancellationToken,
+    stats: Option<Arc<RwLock<WorkflowStats>>>,
+    state: Option<Arc<RedbStateClient>>,
+    factory: &'a RefCell<WorkflowFactory>,
+    channels: Option<SupervisorChannels>,
+) -> LocalBoxFuture<'a, (String, Result<(), SaciError>)> {
+    let id = spec.id.clone();
+    Box::pin(async move {
+        let res = run_supervised(built, &spec, cancel, stats, state, factory, channels)
+            .await
+            .map(|_| ());
+        (id, res)
+    })
+}
+
+async fn next_sighup(
+    #[cfg(unix)] sig: &mut tokio::signal::unix::Signal,
+    #[cfg(not(unix))] _: &mut (),
+) {
+    #[cfg(unix)]
+    {
+        sig.recv().await;
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn drain_workflow_ids<'a>(
+    active_futs: &mut FuturesUnordered<LocalBoxFuture<'a, (String, Result<(), SaciError>)>>,
+    active: &mut HashMap<String, ActiveWorkflow>,
+    mut pending_ids: HashSet<String>,
+) -> Result<(), SaciError> {
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_BUDGET;
+    while !pending_ids.is_empty() {
+        let next_item = tokio::time::timeout_at(deadline, active_futs.next())
+            .await
+            .map_err(|_| {
+                SaciError::generic(format!(
+                    "timed out waiting for workflows {:?} to stop during reload",
+                    pending_ids
+                ))
+            })?;
+        match next_item {
+            Some((id, res)) => {
+                active.remove(&id);
+                if pending_ids.remove(&id) {
+                    let _ = res;
+                } else {
+                    res?;
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+async fn wait_reload_replies<'a>(
+    active_futs: &mut FuturesUnordered<LocalBoxFuture<'a, (String, Result<(), SaciError>)>>,
+    active: &mut HashMap<String, ActiveWorkflow>,
+    pending: Vec<(
+        String,
+        tokio::sync::oneshot::Receiver<Result<crate::inspector_wire::WorkflowStatus, String>>,
+    )>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_BUDGET;
+    for (id, mut rx) in pending {
+        loop {
+            tokio::select! {
+                reply = &mut rx => {
+                    match reply {
+                        Ok(Ok(_status)) => break,
+                        Ok(Err(err)) => return Err(format!("workflow '{id}' reload failed: {err}")),
+                        Err(_) => return Err(format!("workflow '{id}' supervisor channel closed during reload")),
+                    }
+                }
+                finished = active_futs.next(), if !active_futs.is_empty() => {
+                    if let Some((fin_id, res)) = finished {
+                        active.remove(&fin_id);
+                        if fin_id == id {
+                            if let Err(e) = res {
+                                return Err(format!("workflow '{id}' exited during reload: {e}"));
+                            }
+                            return Err(format!("workflow '{id}' exited before confirming reload"));
+                        }
+                        if let Err(e) = res {
+                            return Err(format!("workflow '{fin_id}' failed during reload: {e}"));
+                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(format!("timed out waiting for workflow '{id}' to reload"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_reload<'a>(
+    kdl: Option<String>,
+    config_path: Option<&std::path::Path>,
+    current_config: &mut ServiceConfig,
+    active: &mut HashMap<String, ActiveWorkflow>,
+    active_futs: &mut FuturesUnordered<LocalBoxFuture<'a, (String, Result<(), SaciError>)>>,
+    state_client: &Option<Arc<RedbStateClient>>,
+    factory: &'a RefCell<WorkflowFactory>,
+    lifecycle: &Option<Arc<LifecycleRegistry>>,
+    dlq_registry: &Arc<DlqRegistry>,
+    alerts: &AlertDispatcher,
+    coord_root: &CancellationToken,
+) -> Result<ReloadReport, String> {
+    let raw_kdl = match kdl {
+        Some(text) => text,
+        None => {
+            let path = config_path.ok_or_else(|| {
+                "cannot reload from disk: service started without a config file path".to_string()
+            })?;
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("reading config file {}: {e}", path.display()))?
+        }
+    };
+
+    let mut new_config = ServiceConfig::from_kdl(&raw_kdl).map_err(|e| e.to_string())?;
+    if !matches!(new_config.mode, ServiceMode::Standalone { .. }) {
+        return Err("cannot live-reload a standalone service into cluster mode".to_string());
+    }
+    crate::service::validate_build_capabilities(&new_config).map_err(|e| e.to_string())?;
+    new_config.http.bind = current_config.http.bind.clone();
+
+    let prev_by_id: HashMap<&str, &WorkflowSpec> = current_config
+        .workflows
+        .iter()
+        .map(|w| (w.id.as_str(), w))
+        .collect();
+    let new_ids: HashSet<&str> = new_config.workflows.iter().map(|w| w.id.as_str()).collect();
+    let global_changed = global_build_settings_differ(current_config, &new_config);
+
+    let mut added_specs = Vec::new();
+    let mut updated_specs = Vec::new();
+    let mut unchanged_ids = Vec::new();
+
+    for new_spec in &new_config.workflows {
+        if !prev_by_id.contains_key(new_spec.id.as_str()) {
+            added_specs.push(new_spec.clone());
+            continue;
+        }
+        let mtimes = workflow_artifact_mtimes(new_spec);
+        let is_unchanged = if let Some(entry) = active.get(&new_spec.id) {
+            !global_changed && specs_equal(&entry.spec, new_spec) && entry.artifact_mtimes == mtimes
+        } else if let Some(prev_spec) = prev_by_id.get(new_spec.id.as_str()) {
+            !global_changed && specs_equal(prev_spec, new_spec)
+        } else {
+            false
+        };
+        if is_unchanged {
+            unchanged_ids.push(new_spec.id.clone());
+        } else {
+            updated_specs.push(new_spec.clone());
+        }
+    }
+
+    let removed_ids: Vec<String> = current_config
+        .workflows
+        .iter()
+        .filter(|w| !new_ids.contains(w.id.as_str()))
+        .map(|w| w.id.clone())
+        .collect();
+
+    // Pre-build added workflows before mutating any running workflow.
+    let snap = factory.borrow().snapshot_settings();
+    factory.borrow_mut().update_config(&new_config);
+    let mut built_added: Vec<(WorkflowSpec, BuiltWorkflow, WorkflowTopology)> =
+        Vec::with_capacity(added_specs.len());
+    for spec in &added_specs {
+        let built = match factory.borrow_mut().build(spec) {
+            Ok(b) => b,
+            Err(e) => {
+                factory.borrow_mut().restore_settings(snap);
+                return Err(format!("building added workflow '{}': {e}", spec.id));
+            }
+        };
+        let wf_topo =
+            workflow_topology(&new_config, factory.borrow().registry(), spec, &built.nodes);
+        built_added.push((spec.clone(), built, wf_topo));
+    }
+
+    // Drain and remove deleted workflows cleanly before updating/spawning others
+    // so freed channel slots or ports are available immediately.
+    let mut to_drain = HashSet::new();
+    for id in &removed_ids {
+        if let Some(lc) = lifecycle {
+            lc.remove_workflow(id);
+        }
+        if let Some(entry) = active.get(id) {
+            entry.cancel.cancel();
+            to_drain.insert(id.clone());
+        }
+    }
+    if !to_drain.is_empty() {
+        drain_workflow_ids(active_futs, active, to_drain)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Apply updates: live-reload controlled active workflows, or stop+rebuild
+    // if unsupervised / already exited.
+    let mut reload_waiters = Vec::new();
+    let mut respawn_specs = Vec::new();
+    let mut stop_for_respawn = HashSet::new();
+
+    for spec in &updated_specs {
+        if active.contains_key(&spec.id) {
+            if let Some(lc) = lifecycle {
+                match lc.send_reload_workflow(&spec.id, spec.clone()) {
+                    Ok(rx) => reload_waiters.push((spec.id.clone(), rx)),
+                    Err(e) => {
+                        return Err(format!("sending reload to workflow '{}': {e}", spec.id));
+                    }
+                }
+            } else if let Some(entry) = active.get(&spec.id) {
+                entry.cancel.cancel();
+                stop_for_respawn.insert(spec.id.clone());
+                respawn_specs.push(spec.clone());
+            }
+        } else {
+            if let Some(lc) = lifecycle {
+                lc.remove_workflow(&spec.id);
+            }
+            respawn_specs.push(spec.clone());
+        }
+    }
+
+    if !stop_for_respawn.is_empty() {
+        drain_workflow_ids(active_futs, active, stop_for_respawn)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    if !reload_waiters.is_empty() {
+        wait_reload_replies(active_futs, active, reload_waiters).await?;
+    }
+
+    for spec in &updated_specs {
+        if let Some(entry) = active.get_mut(&spec.id) {
+            entry.spec = spec.clone();
+            entry.artifact_mtimes = workflow_artifact_mtimes(spec);
+        }
+    }
+
+    let mut built_topos: HashMap<String, WorkflowTopology> = HashMap::new();
+    for spec in respawn_specs {
+        let built = factory
+            .borrow_mut()
+            .build(&spec)
+            .map_err(|e| format!("rebuilding workflow '{}': {e}", spec.id))?;
+        let wf_topo = workflow_topology(
+            &new_config,
+            factory.borrow().registry(),
+            &spec,
+            &built.nodes,
+        );
+        built_topos.insert(spec.id.clone(), wf_topo);
+        let live_stats = lifecycle
+            .as_ref()
+            .map(|_| Arc::new(RwLock::new(WorkflowStats::default())));
+        let channels = lifecycle
+            .as_ref()
+            .map(|lc| lc.register_dynamic(&spec, live_stats.clone()));
+        let cancel_child = coord_root.child_token();
+        let mtimes = workflow_artifact_mtimes(&spec);
+        active.insert(
+            spec.id.clone(),
+            ActiveWorkflow {
+                spec: spec.clone(),
+                artifact_mtimes: mtimes,
+                cancel: cancel_child.clone(),
+            },
+        );
+        active_futs.push(spawn_workflow(
+            built,
+            spec,
+            cancel_child,
+            live_stats,
+            state_client.clone(),
+            factory,
+            channels,
+        ));
+    }
+
+    for (spec, built, wf_topo) in built_added {
+        built_topos.insert(spec.id.clone(), wf_topo);
+        let live_stats = lifecycle
+            .as_ref()
+            .map(|_| Arc::new(RwLock::new(WorkflowStats::default())));
+        let channels = lifecycle
+            .as_ref()
+            .map(|lc| lc.register_dynamic(&spec, live_stats.clone()));
+        let cancel_child = coord_root.child_token();
+        let mtimes = workflow_artifact_mtimes(&spec);
+        active.insert(
+            spec.id.clone(),
+            ActiveWorkflow {
+                spec: spec.clone(),
+                artifact_mtimes: mtimes,
+                cancel: cancel_child.clone(),
+            },
+        );
+        active_futs.push(spawn_workflow(
+            built,
+            spec,
+            cancel_child,
+            live_stats,
+            state_client.clone(),
+            factory,
+            channels,
+        ));
+    }
+
+    dlq_registry.sync_with_config(&new_config);
+    alerts.update_config(&new_config.alerts);
+
+    let topology_version = if let Some(inspector) = factory.borrow().inspector() {
+        let existing = inspector.topology();
+        let next = update_topology_from_config(
+            &new_config,
+            factory.borrow().registry(),
+            &existing,
+            &built_topos,
+        );
+        let version = next.version;
+        inspector.set_topology(next);
+        version
+    } else {
+        0
+    };
+
+    if let Some(lc) = lifecycle {
+        lc.set_raw_kdl(raw_kdl.clone());
+    }
+
+    if let Some(client) = state_client {
+        let name = config_path
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "saci.kdl".to_string());
+        if let Err(e) = client.put_config(&name, raw_kdl.as_bytes()).await {
+            tracing::warn!(error = %e, "failed to persist reloaded KDL config");
+        }
+    }
+
+    *current_config = new_config;
+
+    Ok(ReloadReport {
+        added: added_specs.into_iter().map(|s| s.id).collect(),
+        updated: updated_specs.into_iter().map(|s| s.id).collect(),
+        removed: removed_ids,
+        unchanged: unchanged_ids,
+        topology_version,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_standalone_with_reload<'a>(
+    mut current_config: ServiceConfig,
+    items: Vec<(BuiltWorkflow, CancellationToken, Option<SupervisorChannels>)>,
+    runner_stats: Option<Vec<(String, Arc<RwLock<WorkflowStats>>)>>,
+    state_client: Option<Arc<RedbStateClient>>,
+    factory: &'a RefCell<WorkflowFactory>,
+    lifecycle: Option<Arc<LifecycleRegistry>>,
+    dlq_registry: Arc<DlqRegistry>,
+    alerts: AlertDispatcher,
+    coord_root: CancellationToken,
+    config_path: Option<PathBuf>,
+    reload_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReloadEnvelope>,
+) -> Result<(), SaciError> {
+    let mut active: HashMap<String, ActiveWorkflow> = HashMap::with_capacity(items.len());
+    let mut active_futs: FuturesUnordered<LocalBoxFuture<'a, (String, Result<(), SaciError>)>> =
+        FuturesUnordered::new();
+
+    for (i, (built, cancel_child, channels)) in items.into_iter().enumerate() {
+        let spec = current_config.workflows[i].clone();
+        let live_stats = runner_stats.as_ref().and_then(|entries| {
+            entries
+                .iter()
+                .find(|(id, _)| *id == spec.id)
+                .map(|(_, lock)| Arc::clone(lock))
+        });
+        active.insert(
+            spec.id.clone(),
+            ActiveWorkflow {
+                spec: spec.clone(),
+                artifact_mtimes: workflow_artifact_mtimes(&spec),
+                cancel: cancel_child.clone(),
+            },
+        );
+        active_futs.push(spawn_workflow(
+            built,
+            spec,
+            cancel_child,
+            live_stats,
+            state_client.clone(),
+            factory,
+            channels,
+        ));
+    }
+
+    #[cfg(unix)]
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(|e| SaciError::generic(format!("failed to install SIGHUP handler: {e}")))?;
+    #[cfg(not(unix))]
+    let mut sighup = ();
+
+    loop {
+        if active_futs.is_empty() {
+            return Ok(());
+        }
+        tokio::select! {
+            item = active_futs.next() => {
+                match item {
+                    Some((id, Ok(()))) => {
+                        active.remove(&id);
+                    }
+                    Some((id, Err(e))) => {
+                        active.remove(&id);
+                        for entry in active.values() {
+                            entry.cancel.cancel();
+                        }
+                        return Err(e);
+                    }
+                    None => return Ok(()),
+                }
+            }
+            Some(envelope) = reload_rx.recv() => {
+                let res = apply_reload(
+                    envelope.kdl,
+                    config_path.as_deref(),
+                    &mut current_config,
+                    &mut active,
+                    &mut active_futs,
+                    &state_client,
+                    factory,
+                    &lifecycle,
+                    &dlq_registry,
+                    &alerts,
+                    &coord_root,
+                )
+                .await;
+                let _ = envelope.reply.send(res);
+            }
+            _ = next_sighup(&mut sighup) => {
+                match apply_reload(
+                    None,
+                    config_path.as_deref(),
+                    &mut current_config,
+                    &mut active,
+                    &mut active_futs,
+                    &state_client,
+                    factory,
+                    &lifecycle,
+                    &dlq_registry,
+                    &alerts,
+                    &coord_root,
+                )
+                .await {
+                    Ok(report) => {
+                        tracing::info!(
+                            added = ?report.added,
+                            updated = ?report.updated,
+                            removed = ?report.removed,
+                            unchanged = ?report.unchanged,
+                            topology_version = report.topology_version,
+                            "SIGHUP configuration reload applied"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "SIGHUP configuration reload failed; keeping running workflows");
+                    }
+                }
+            }
+        }
+    }
 }

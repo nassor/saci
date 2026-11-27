@@ -15,7 +15,7 @@ description: Use when changing, operating, testing or documenting the saci-servi
 - The `saci-service` binary: `src/bin/saci-service/main.rs` holds the optional mimalloc
   `#[global_allocator]` and `fn main() -> ExitCode { saci::service::cli::main() }`. The CLI lives in
   the library: `src/service/cli.rs` (the `Cli` parser, `main`, `main_with`) and
-  `src/service/cli/commands/{serve,validate,status,cluster}.rs`. `cli/commands/serve.rs` loads the
+  `src/service/cli/commands/{serve,validate,status,cluster,backfill}.rs`. `cli/commands/serve.rs` loads the
   config, checks capabilities, applies the flag overrides and hands off to `saci::service::serve`.
   `main_with(|builder| ...)` hands
   the `ServiceBuilder` that `serve` and `validate` use to the caller after the built-in factories
@@ -26,8 +26,10 @@ description: Use when changing, operating, testing or documenting the saci-servi
   a workspace member. Its committed bundle lives at `crates/saci/assets/ui/`, rebuilt by
   `cargo xtask ui`.
 - `src/inspector_wire.rs` (`saci::inspector_wire`, feature `metrics`): the inspector's JSON
-  contract, `Topology`, `Snapshot`, `SpanRecord` and friends, plus the lifecycle plane's
-  `WorkflowRunState`, `WorkflowStatus` and `ServiceLifecycleReport`, and the dead letter queue's
+  contract, `Topology`, `Snapshot`, `SpanRecord` and friends, the lifecycle plane's
+  `WorkflowRunState`, `WorkflowStatus`, `ServiceLifecycleReport`, `BackfillRequest`,
+  `BackfillReport`, `CursorSnapshot`, `WorkflowCursorsReport`, `CursorResetRequest`,
+  `CursorResetReport`, and `ReloadReport`, plus the dead letter queue's
   `DlqSummary`, `DlqGroup`, `DlqTrigger`, `DlqReplayReport` and `DlqReplayRequest`. serde only, so
   both the host and the browser can compile it: `saci-service-ui` includes the file by
   `#[path = "../../saci/src/inspector_wire.rs"]` instead of depending on `saci`, which cannot
@@ -207,9 +209,11 @@ replicates:
   `.with_lease_ttl_millis(cluster.lease_ttl_ms)`, whose config default is 30000 ms. A propose is
   bounded by `CLUSTER_PROPOSE_TIMEOUT` (30 s)
 - `RedbStateClient` (`src/service/redb_state.rs`, `service` feature): the standalone/stream
-  persistence path. Config bytes, processor priors and source cursors in one local unreplicated
+  persistence path. Config bytes, processor priors and source cursors (plus bounded timestamped
+  snapshot history in `cursor_history` and `prior_history` tables for time-travel rollback via
+  `inspect_workflow`/`reset_workflow`/`delete_source_cursor`) live in one local unreplicated
   redb file declared by `store "redb"`. Stream mode persists cursors and priors whenever a store
-  is configured; `interval`/`once` *persistence* is opt-in via
+  is configured; `interval`/`cron`/`once` *persistence* is opt-in via
   `store "redb" { batch_resume #true }`. In-memory prior threading between passes follows the
   same flag, except for a processor node declaring a `window` block, which threads
   unconditionally: a backlog reaches such a node over several passes, and it accumulates
@@ -226,11 +230,25 @@ Key types:
   `src/service/config.rs`; the section types are in `src/service/config/`: `node.rs`
   (`NodeConfig`), `encryption.rs` (`ServiceEncryptionConfig`, `KeySpec`, `CodecEncryptionConfig`,
   `NodeCryptoConfig`), `mode.rs` (`ServiceMode`, `StandaloneConfig`, `RunMode`, `ClusterConfig`,
-  `PeerSpec`), `store.rs` (`StoreConfig`), `workflow.rs` (`WorkflowSpec`, `SourceSpec`, `SinkSpec`,
+  `PeerSpec`), `cron.rs` (`CronSchedule`, `CronTimezone`, `parse_timestamp_utc_ms`),
+  `store.rs` (`StoreConfig`), `workflow.rs` (`WorkflowSpec`, `SourceSpec`, `SinkSpec`,
   `LinkSpec`, `CodecSpec`, `SchemaSpec`, `NodeKind`, `validate`, `topological_order`),
   `processor.rs` (`WasmSpec`, `PluginSpec`, `OperatorSpec`), `window.rs` (`WindowConfig`), `retry.rs`
   (`RetryConfig`), `http.rs` (`HttpConfig`), `observability.rs` (`ObservabilityConfig`,
-  `LogFormat`) and `flexible.rs`
+  `LogFormat`), `flexible.rs`, and `src/service/alert.rs` (`AlertsConfig`, `AlertDispatcher`,
+  `AlertEvent`, `AlertEventKind`, `WebhookTargetSpec`, `SlackTargetSpec`, `PagerDutyTargetSpec`)
+- `RunMode::Cron { expr, timezone }` and per-workflow `WorkflowSpec.run`: standalone workflows
+  accept 5-field/6-field cron expressions and standard macros (`@hourly`, `@daily`, etc.) with
+  UTC, fixed offsets, or IANA timezones (built-in DST rules plus `/usr/share/zoneinfo` TZif fallback
+  in `cron.rs`). `WorkflowSpec.run: Option<RunMode>` overrides the service-wide `run` node per
+  workflow in standalone mode (refused in cluster mode), letting a single config mix `"stream"`,
+  `"cron"`, `"interval"`, `"continuous"`, and `"once"` workflows; `FlowPlan::from_config` resolves
+  per-workflow `FlowSettings` defaults from `workflow.run.as_ref().or(standalone_run)`
+- `AlertsConfig` & `AlertDispatcher` (`src/service/alert.rs`): optional top-level `alerts` block
+  supporting `webhook`, `slack`, and `pagerduty` targets with `events` filter, per-target/global
+  `cooldown_ms` deduplication, and `timeout_ms`. Non-blocking dispatcher wired into `Healer`
+  (`HealExhausted`), `DeadLetterQueue` (`DlqRecorded`, `DlqLost`), and `run_supervised`
+  (`WorkflowFailed`), and updated live on hot-reload via `AlertDispatcher::update_config`
 - `ServiceEncryptionConfig` (`encryption { active_key "..." key "..." env|file|hex|base64 ... }`):
   optional top-level keyring and default AEAD algorithm (`aes-256-gcm` or `chacha20-poly1305`).
   Consumed by `codec.encryption` (`CodecEncryptionConfig`), `source.decrypt`, and `sink.encrypt`
@@ -291,19 +309,15 @@ Key types:
   inspector, because the builder is the only place that knows every node's concrete kind and
   detail.
 - `WorkflowFactory` and `rebuild_blocker` (`src/service/builder.rs`): `build` consumes the
-  builder, so nothing it produced can be built twice. `into_factory(&config)` keeps both halves
-  instead, and `build` is `into_factory` plus one `WorkflowFactory::build` per declared workflow
-  plus one `publish_topology`. The factory computes `run` (from `config.mode`, `Continuous` in
-  cluster mode), `flow` (`FlowPlan::from_config`) and `batch_resume` (from `config.store`) once
-  and copies them into each workflow it builds. The lifecycle plane keeps the factory, because
-  `start` and `restart` rebuild one workflow at a time.
-  `rebuild_blocker(&WorkflowSpec)` names the two shapes that cannot be built twice, both proven by
-  the code: a `wasm` or `plugin` node with no `path`, whose injected
-  runtime `build_processor_node` **removes** from the builder; and a `ChannelSource` or
-  `ChannelSink`, which `ChannelRegistry` latches per name and refuses a second time. Such a
-  workflow reports `restartable: false` and 409s on `start`, `stop` and `restart`. `stop` is
-  included, because stopping something unstartable is a one-way door. `pause`/`resume`
-  stay available.
+  builder; `into_factory(&config)` retains the factory and exposes `update_config(&ServiceConfig)`,
+  `snapshot_settings()`, and `restore_settings()` for rollback during failed hot-reloads. The
+  factory computes `run` (per-workflow `workflow.run` falling back to standalone `run`, `Continuous`
+  in cluster mode), `flow` (`FlowPlan::from_config`), and `batch_resume` (from `config.store`).
+  Injected runtimes (`ServiceBuilder::runtime`) wrap in cloneable `SharedRuntime`, and `channel`
+  bridges (`ChannelSlot` in `connector/channel/registry.rs`) swap fresh sender/receiver halves on
+  rebuild while freeing slots on `Drop` (still refusing two concurrent live sinks or two
+  concurrent live sources on one name), so `rebuild_blocker(&WorkflowSpec)` returns `None` and
+  all workflows report `restartable: true`.
 - `BuiltWorkflow::builder(id)` and `BuiltWorkflowBuilder`: hand assembly with no config file.
   `name`, `source(id, component, impl Source)`, `processor(id, impl PipelineRuntime)`,
   `sink(id, component, impl Sink)`, `window(processor_id, WindowConfig)`, `link`,
@@ -387,7 +401,10 @@ Key types:
   indexing. A `link` never crosses a workflow, so a `channel` sink/source pair sharing one
   channel `name` is reported separately as a `Topology::bridges` entry (`BridgeEdge`), outside
   either workflow's `edges`.
-- `validate_workflow_graph(workflow_id, &[BuiltNode])` (`src/service/validation.rs`): the load-time
+- `update_topology_from_config(&ServiceConfig, &Registry, &Topology, &HashMap<String, WorkflowTopology>)`
+  (`src/service/topology.rs`): updates `Topology` on live reload, incrementing `version`, using
+  newly built `WorkflowTopology` entries where available, and preserving `RuntimeInfo` for unchanged
+  processor nodes.
   schema-agreement gate `ServiceBuilder::build` runs on every link (matching components and
   field-for-field identical Arrow schemas at both ends), and `validate_schema_fingerprint`: a
   cluster node refuses to start when the runtime's Arrow schema fingerprint differs from the one
@@ -627,9 +644,23 @@ Key types:
   hands to every build, so the control plane and the runner read one summary. A library embedder
   with no registry gets a private `DlqShared`. See
   `docs/content/service/operate/dead-letter-queue.md`.
-- HTTP control plane: `/health`, `/ready`, `/metrics`, `/status` (axum-backed), plus the inspector's
+- Backfill & live hot-reload (`src/service/backfill.rs`, `src/service/serve.rs`, `src/service/lifecycle.rs`):
+  `parameterize_workflow` substitutes `${start_date}`, `${end_date}`, and custom `${KEY}` params
+  into workflow configs while forcing `RunMode::Once`; `apply_time_window` wraps sources with
+  `TimeWindowSource` to filter batches against `time_field` within `[start_date, end_date]`. In
+  standalone mode, `serve` runs `run_standalone_with_reload` with a `FuturesUnordered` supervisor
+  loop, servicing both `POST /api/reload` (`POST /api/service/reload`) and Unix `SIGHUP`:
+  comparing workflow JSON specs + `.wasm`/`.so` artifact mtimes + global settings, pre-building
+  added workflows before mutating running state, draining removed workflows, live-reloading updated
+  workflows while leaving unchanged workflows running uninterrupted, syncing `DlqRegistry`
+  (`sync_with_config`) and `AlertDispatcher` (`update_config`), updating `Topology`, and persisting
+  reloaded KDL bytes to `RedbStateClient`.
+- HTTP control plane: `/health`, `/ready`, `/metrics`, `/status` (axum-backed, prefers dynamic
+  `LifecycleRegistry::standalone_entries()` with fallback to `state.standalone_stats`), plus the inspector's
   `/api/*` and `/ui` when `observability.inspector.enabled` is set, plus `GET /api/workflows`,
-  `GET /api/workflows/{id}`, `POST /api/workflows/{id}/{start,stop,pause,resume,restart}` and
+  `GET /api/workflows/{id}`, `POST /api/workflows/{id}/{start,stop,pause,resume,restart}`,
+  `POST /api/workflows/{id}/backfill`, `GET /api/workflows/{id}/cursors`,
+  `POST /api/workflows/{id}/cursors/reset`, `POST /api/reload`, `POST /api/service/reload`, and
   `POST /api/service/{start,stop,pause,resume,restart}` (`src/service/http/lifecycle.rs`) when
   `ServiceState::lifecycle` is `Some`, which `serve` sets in standalone mode under
   `http { control #true }` (the default). Every one of those groups is
@@ -687,8 +718,9 @@ Key types:
   decision line and the inspector record share one formatted `reason`.
 - `SpanMetricsLayer`: turns each `pipeline.stage` span into a `saci_stage_duration_seconds` sample.
 
-CLI subcommands (`src/service/cli.rs`, one file per command in `src/service/cli/commands/`): `serve`, `validate`, `status`, `cluster init`,
-`cluster status`. `--config`/`-c` (env `SACI_CONFIG`) is the only global option and defaults to `saci.kdl`, so `saci-service serve`
+CLI subcommands (`src/service/cli.rs`, command modules in `src/service/cli/commands/`): `serve`, `validate`, `status`, `cluster init`,
+`cluster status`, `backfill` (`--start`, `--end`, `--time-field`, `--param KEY=VALUE`, `--reset-state`, `--url`, `--local`),
+`cursor list`, `cursor reset` (`--source`, `--to`, `--to-unix-ms`, `--items-processed`, `--keep-priors`), and `reload` (`--file`, `--url`). `--config`/`-c` (env `SACI_CONFIG`) is the only global option and defaults to `saci.kdl`, so `saci-service serve`
 needs no flags; a missing file surfaces as
 `error: Configuration error: reading config file saci.kdl: <os error>` with exit code 1. `serve` takes
 `--node-id` (env `SACI_NODE_ID`), `--bind <ADDR>` (env `SACI_HTTP_BIND`, replaces `http.bind` whole),

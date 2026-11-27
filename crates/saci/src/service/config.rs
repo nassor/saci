@@ -67,6 +67,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ConfigMap, ConfigValue, one_or_many};
 use crate::error::{SaciError, SaciResult};
 
+pub(crate) mod cron;
 pub(super) mod encryption;
 pub(super) mod flexible;
 mod http;
@@ -82,6 +83,7 @@ pub(super) mod test_support;
 mod window;
 mod workflow;
 
+pub use self::cron::{CronSchedule, CronTimezone};
 pub use self::encryption::{
     CodecEncryptionConfig, KeySpec, NodeCryptoConfig, ServiceEncryptionConfig,
 };
@@ -95,6 +97,7 @@ pub use self::store::StoreConfig;
 pub use self::window::WindowConfig;
 pub(crate) use self::workflow::NodeKind;
 pub use self::workflow::{CodecSpec, LinkSpec, SchemaSpec, SinkSpec, SourceSpec, WorkflowSpec};
+pub use super::alert::AlertsConfig;
 pub use super::dlq::{DlqBlock, DlqConfig, DlqReplayPoint};
 pub use super::flow::FlowControlConfig;
 pub use super::heal::HealConfig;
@@ -183,6 +186,8 @@ pub struct ServiceConfig {
     pub heal: HealConfig,
     /// Optional keyring and default AEAD algorithm for pipeline encryption.
     pub encryption: Option<ServiceEncryptionConfig>,
+    /// Outbound alerting targets (webhooks, Slack, PagerDuty).
+    pub alerts: AlertsConfig,
     /// Names usable as `${name}` placeholders anywhere in this file. A
     /// declared name wins over a same-named process env var, so the file is
     /// self-contained.
@@ -221,6 +226,8 @@ struct RawServiceConfig {
     heal: HealConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encryption: Option<ServiceEncryptionConfig>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    alerts: AlertsConfig,
     #[serde(rename = "workflow", deserialize_with = "one_or_many")]
     workflows: Vec<WorkflowSpec>,
 }
@@ -261,6 +268,7 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             flow_control: raw.flow_control,
             heal: raw.heal,
             encryption: raw.encryption,
+            alerts: raw.alerts,
             variables: raw.variables,
         })
     }
@@ -286,6 +294,7 @@ impl From<ServiceConfig> for RawServiceConfig {
             flow_control: config.flow_control,
             heal: config.heal,
             encryption: config.encryption,
+            alerts: config.alerts,
             variables: config.variables,
         }
     }
@@ -333,6 +342,7 @@ impl ServiceConfig {
             flow_control: FlowControlConfig::default(),
             heal: HealConfig::default(),
             encryption: None,
+            alerts: AlertsConfig::default(),
             variables: HashMap::new(),
         }
     }
@@ -369,8 +379,20 @@ impl ServiceConfig {
     /// refused, but the message ends with one `hint:` line per old spelling
     /// naming what replaced it.
     pub fn from_kdl(text: &str) -> SaciResult<Self> {
+        Self::from_kdl_with_overrides(text, &HashMap::new())
+    }
+
+    /// Parse a [`ServiceConfig`] from KDL text while overriding or adding
+    /// variable values (`${KEY}`) before substitution.
+    pub(crate) fn from_kdl_with_overrides(
+        text: &str,
+        overrides: &HashMap<String, String>,
+    ) -> SaciResult<Self> {
         let value_pre = crate::config::from_kdl_str(text)?;
-        let declared = extract_declared_variables(&value_pre)?;
+        let mut declared = extract_declared_variables(&value_pre)?;
+        for (k, v) in overrides {
+            declared.insert(k.clone(), v.clone());
+        }
         let value = crate::config::from_kdl_str_with_vars(text, &declared)?;
         let config = ServiceConfig::deserialize(value).map_err(|e| {
             let mut message = format!("parsing config: {e}");
@@ -425,8 +447,16 @@ impl ServiceConfig {
         }
 
         self.observability.validate()?;
+        self.alerts.validate()?;
         if let Some(encryption) = &self.encryption {
             encryption.validate()?;
+        }
+
+        if let ServiceMode::Standalone { config } = &self.mode
+            && let RunMode::Cron { expr, timezone } = &config.run
+        {
+            CronSchedule::parse(expr, timezone.as_deref())
+                .map_err(|e| SaciError::configuration(format!("run \"cron\": {e}")))?;
         }
 
         if let ServiceMode::Cluster { config } = &self.mode {
@@ -735,6 +765,7 @@ mod tests {
                 }],
                 links: Vec::new(),
                 dlq: None,
+                run: None,
             }],
             store: None,
             http: HttpConfig {
@@ -750,6 +781,7 @@ mod tests {
                 error_sample_ratio: 1.0,
                 inspector: crate::inspector::InspectorConfig::default(),
             },
+            alerts: AlertsConfig::default(),
             variables: HashMap::new(),
         }
     }
@@ -1146,10 +1178,12 @@ node id=1 data_dir="/tmp/saci"
                 sinks: Vec::new(),
                 links: Vec::new(),
                 dlq: None,
+                run: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
+            alerts: AlertsConfig::default(),
             variables: HashMap::new(),
         };
         cfg.validate()

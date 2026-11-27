@@ -288,6 +288,7 @@ mod tests {
             sinks,
             links,
             dlq: None,
+            run: None,
         }
     }
 
@@ -308,6 +309,7 @@ mod tests {
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: std::collections::HashMap::new(),
         }
     }

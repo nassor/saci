@@ -3,12 +3,14 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::connector::channel::registry::ChannelSlot;
 use crate::error::SaciError;
 use crate::io::Sink;
 
@@ -48,6 +50,8 @@ pub struct ChannelSink {
     queued: VecDeque<u64>,
     /// Total rows handed to the channel since construction.
     sent_rows: u64,
+    /// Shared registry slot, cleared on drop so a stopped workflow can rebuild.
+    slot: Option<Arc<ChannelSlot>>,
 }
 
 impl ChannelSink {
@@ -69,6 +73,23 @@ impl ChannelSink {
             buffer_capacity: buffer,
             queued: VecDeque::with_capacity(buffer.min(64)),
             sent_rows: 0,
+            slot: None,
+        }
+    }
+
+    pub(crate) fn with_slot(
+        schema: Arc<Schema>,
+        buffer: usize,
+        tx: mpsc::Sender<RecordBatch>,
+        slot: Arc<ChannelSlot>,
+    ) -> Self {
+        Self {
+            tx,
+            schema,
+            buffer_capacity: buffer,
+            queued: VecDeque::with_capacity(buffer.min(64)),
+            sent_rows: 0,
+            slot: Some(slot),
         }
     }
 
@@ -81,6 +102,15 @@ impl ChannelSink {
     }
 }
 
+impl Drop for ChannelSink {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.slot {
+            let _ = slot.take_pending_tx();
+            slot.sink_active.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 #[async_trait]
 impl Sink for ChannelSink {
     fn schema(&self) -> Arc<Schema> {
@@ -88,10 +118,27 @@ impl Sink for ChannelSink {
     }
 
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
-        self.tx
-            .send(batch.clone())
-            .await
-            .map_err(|e| SaciError::generic(format!("ChannelSink: channel send error: {e}")))?;
+        if let Some(slot) = &self.slot
+            && let Some(new_tx) = slot.take_pending_tx()
+        {
+            self.tx = new_tx;
+            self.queued.clear();
+        }
+        if let Err(err) = self.tx.send(batch.clone()).await {
+            if let Some(slot) = &self.slot
+                && let Some(new_tx) = slot.take_pending_tx()
+            {
+                self.tx = new_tx;
+                self.queued.clear();
+                self.tx.send(err.0).await.map_err(|e| {
+                    SaciError::generic(format!("ChannelSink: channel send error: {e}"))
+                })?;
+            } else {
+                return Err(SaciError::generic(format!(
+                    "ChannelSink: channel send error: {err}"
+                )));
+            }
+        }
         self.queued.push_back(self.sent_rows);
         self.sent_rows += batch.num_rows() as u64;
         // Everything ahead of what is still in flight has been received, so

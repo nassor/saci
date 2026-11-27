@@ -29,6 +29,10 @@
 //!    declared workflow.
 
 #[cfg(feature = "service")]
+mod alert;
+#[cfg(feature = "service")]
+mod backfill;
+#[cfg(feature = "service")]
 mod builder;
 #[cfg(feature = "service")]
 pub mod cli;
@@ -108,6 +112,11 @@ mod windowing;
 #[cfg(feature = "service")]
 pub use crate::connector::{ChannelBridge, ConnectorContext};
 #[cfg(feature = "service")]
+pub use alert::{
+    AlertDispatcher, AlertEvent, AlertEventKind, AlertsConfig, PagerDutyTargetSpec,
+    SlackTargetSpec, WebhookTargetSpec,
+};
+#[cfg(feature = "service")]
 pub use builder::{
     BuiltEdge, BuiltNode, BuiltNodeKind, BuiltWorkflow, BuiltWorkflowBuilder, RunOptions,
     ServiceBuilder, WorkflowFactory, rebuild_blocker,
@@ -116,11 +125,11 @@ pub use builder::{
 pub use cluster::{ClusterStats, run_cluster};
 #[cfg(feature = "service")]
 pub use config::{
-    ClusterConfig, CodecEncryptionConfig, CodecSpec, DlqBlock, DlqConfig, DlqReplayPoint,
-    FlowControlConfig, HealConfig, HttpConfig, KeySpec, LinkSpec, LogFormat, NodeConfig,
-    NodeCryptoConfig, ObservabilityConfig, PeerSpec, PluginSpec, RetryConfig, RunMode, SchemaSpec,
-    ServiceConfig, ServiceEncryptionConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig,
-    StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
+    ClusterConfig, CodecEncryptionConfig, CodecSpec, CronSchedule, CronTimezone, DlqBlock,
+    DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig, HttpConfig, KeySpec, LinkSpec,
+    LogFormat, NodeConfig, NodeCryptoConfig, ObservabilityConfig, PeerSpec, PluginSpec,
+    RetryConfig, RunMode, SchemaSpec, ServiceConfig, ServiceEncryptionConfig, ServiceMode,
+    SinkSpec, SourceSpec, StandaloneConfig, StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
 };
 #[cfg(feature = "service")]
 pub use dlq::{DeadLetterQueue, DlqError, DlqRegistry, DlqShared, ReplayFilter};

@@ -27,6 +27,7 @@ use crate::error::{SaciError, SaciResult};
 use crate::io::{Sink, Source};
 use crate::runtime::PipelineRuntime;
 
+use super::alert::AlertDispatcher;
 #[cfg(feature = "crypto")]
 use super::config::encryption::resolve_cipher;
 use super::config::{
@@ -75,78 +76,77 @@ const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::run
 const RUNTIME_SOURCE_HELP: &str = "no runtime provided: call ServiceBuilder::runtime(id, ..) \
      or set 'path' on the node";
 
-/// Whether a config-driven source is handed to the runner wrapped in
-/// [`RetryingSource`](crate::io::RetryingSource).
-///
-/// Sinks always take their wrapper: a `write_batch` the runner cannot re-drive
-/// is lost rows. A source's answer depends on who owns its error policy.
-///
-/// - Batch modes (`once`, `interval`, `continuous`) pull each source
-///   through `next_batch` themselves, under that source's admission credit: an
-///   error there logs `source drain error (continuing)`, counts one
-///   `iteration_errors`, marks the source failed and ends its drain for that
-///   pass. The wrapper is what turns a transient failure into a retried read
-///   instead of a source contributing nothing to the iteration. Cluster mode
-///   declares no source node at all, so its answer never applies.
-/// - `run "stream"` is itself the retry loop: the stream runner polls the
-///   source once per item, and on an error logs it, counts it in
-///   `iteration_errors` and re-polls after a cancellable
-///   `SOURCE_ERROR_BACKOFF`. Wrapping there nests a second retry loop inside
-///   the first, on the item path, with a first backoff an order of magnitude
-///   longer than the runner's own, so a stream source is handed over
-///   unwrapped and the runner's documented policy is the only one that runs.
-fn sources_take_retry_wrapper(config: &ServiceConfig) -> bool {
-    !matches!(
-        &config.mode,
-        ServiceMode::Standalone { config: sc } if sc.run == RunMode::Stream
-    )
-}
-
-/// Why a declared workflow cannot be torn down and built a second time, or
+/// Whether a declared workflow cannot be torn down and built a second time, or
 /// `None` when it can.
 ///
-/// The lifecycle control plane reports this as
-/// `WorkflowStatus::restart_blocked_reason` and refuses `start`, `stop` and
-/// `restart` for such a workflow, `stop` included, because stopping something
-/// that cannot be started again leaves the operator with no way back.
-/// `pause`/`resume` stay available: they keep the runner and every resource it
-/// holds alive.
-pub fn rebuild_blocker(workflow: &WorkflowSpec) -> Option<&'static str> {
-    if workflow.wasm.iter().any(|spec| spec.path.is_none()) {
-        return Some(INJECTED_RUNTIME_BLOCKER);
-    }
-    if workflow.plugin.iter().any(|spec| spec.path.is_none()) {
-        return Some(INJECTED_RUNTIME_BLOCKER);
-    }
-    let channel_source = workflow
-        .sources
-        .iter()
-        .any(|spec| spec.connector == "channel");
-    let channel_sink = workflow
-        .sinks
-        .iter()
-        .any(|spec| spec.connector == "channel");
-    if channel_source || channel_sink {
-        return Some(CHANNEL_BLOCKER);
-    }
+/// Channel bridges and injected runtimes are both rebuildable across
+/// lifecycle restarts and live configuration reloads, so this now always returns
+/// `None`.
+pub fn rebuild_blocker(_workflow: &WorkflowSpec) -> Option<&'static str> {
     None
 }
 
-/// A processor node with no artifact took its runtime from
-/// [`ServiceBuilder::runtime`], and `build_processor_node` *removes* it
-/// from the builder, so the second build of that workflow has nothing to give
-/// it.
-///
-/// Unconditional because `rebuild_blocker` reads both processor vectors in
-/// every build, the same way the config declares them.
-const INJECTED_RUNTIME_BLOCKER: &str = "a processor node declares no path, so its \
-     runtime was supplied through ServiceBuilder::runtime and exists only once";
+/// Clonable wrapper around a caller-injected [`PipelineRuntime`] so workflows
+/// registered via [`ServiceBuilder::runtime`] can be stopped, started,
+/// restarted, and hot-reloaded without losing their runtime instance.
+#[derive(Clone)]
+struct SharedRuntime {
+    name: String,
+    components: Vec<String>,
+    descriptor: crate::runtime::RuntimeDescriptorInfo,
+    template: Arc<std::sync::Mutex<crate::dataset::Dataset>>,
+    inner: Arc<tokio::sync::Mutex<Box<dyn PipelineRuntime>>>,
+}
 
-/// `ChannelRegistry` latches each named half as it is built and refuses a
-/// second one, and the sink being the channel's only `Sender` is what gives
-/// the consumer a real EOF.
-const CHANNEL_BLOCKER: &str =
-    "a `channel` source or sink is bound to one mpsc pair created once per process";
+impl SharedRuntime {
+    fn new(runtime: Box<dyn PipelineRuntime>) -> Self {
+        let name = runtime.name().to_string();
+        let components = runtime
+            .declared_components()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let descriptor = runtime.descriptor_info();
+        let template = runtime.template_dataset();
+        Self {
+            name,
+            components,
+            descriptor,
+            template: Arc::new(std::sync::Mutex::new(template)),
+            inner: Arc::new(tokio::sync::Mutex::new(runtime)),
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl PipelineRuntime for SharedRuntime {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn run_batch(
+        &self,
+        data: &mut crate::dataset::Dataset,
+        prior: Option<&[u8]>,
+    ) -> SaciResult<crate::runtime::RuntimeOutput> {
+        self.inner.lock().await.run_batch(data, prior).await
+    }
+
+    fn declared_components(&self) -> Vec<&str> {
+        self.components.iter().map(String::as_str).collect()
+    }
+
+    fn descriptor_info(&self) -> crate::runtime::RuntimeDescriptorInfo {
+        self.descriptor.clone()
+    }
+
+    fn template_dataset(&self) -> crate::dataset::Dataset {
+        self.template
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_empty()
+    }
+}
 
 /// The self-healing policy one node runs under, or `None` when it is not
 /// wrapped at all.
@@ -261,7 +261,6 @@ impl NodeBuild<'_> {
 pub struct WorkflowFactory {
     builder: ServiceBuilder,
     registry: Arc<Registry>,
-    retry_sources: bool,
     heal: HealConfig,
     /// `node.data_dir`, where a store that writes to local disk (today, a
     /// `dlq "redb"` block) puts its file.
@@ -280,6 +279,72 @@ pub struct WorkflowFactory {
 }
 
 impl WorkflowFactory {
+    /// Update factory settings from a newly reloaded [`ServiceConfig`].
+    pub(crate) fn update_config(&mut self, config: &ServiceConfig) {
+        self.heal = config.heal.clone();
+        self.data_dir = config.node.data_dir.clone();
+        self.service = config.node.label();
+        self.run = match &config.mode {
+            ServiceMode::Standalone { config: standalone } => standalone.run.clone(),
+            ServiceMode::Cluster { .. } => RunMode::Continuous,
+        };
+        self.flow = FlowPlan::from_config(config);
+        self.batch_resume = matches!(
+            &config.store,
+            Some(StoreConfig::Redb {
+                batch_resume: true,
+                ..
+            })
+        );
+        self.encryption = config.encryption.clone();
+        self.builder.alerts.update_config(&config.alerts);
+    }
+
+    /// Snapshot current factory settings so a failed hot-reload can roll back.
+    pub(crate) fn snapshot_settings(
+        &self,
+    ) -> (
+        HealConfig,
+        std::path::PathBuf,
+        String,
+        RunMode,
+        FlowPlan,
+        bool,
+        Option<ServiceEncryptionConfig>,
+    ) {
+        (
+            self.heal.clone(),
+            self.data_dir.clone(),
+            self.service.clone(),
+            self.run.clone(),
+            self.flow.clone(),
+            self.batch_resume,
+            self.encryption.clone(),
+        )
+    }
+
+    /// Restore factory settings from a snapshot after a failed hot-reload.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn restore_settings(
+        &mut self,
+        snap: (
+            HealConfig,
+            std::path::PathBuf,
+            String,
+            RunMode,
+            FlowPlan,
+            bool,
+            Option<ServiceEncryptionConfig>,
+        ),
+    ) {
+        self.heal = snap.0;
+        self.data_dir = snap.1;
+        self.service = snap.2;
+        self.run = snap.3;
+        self.flow = snap.4;
+        self.batch_resume = snap.5;
+        self.encryption = snap.6;
+    }
     /// Build one declared workflow.
     ///
     /// Calling this twice for the same workflow is only sound once the
@@ -291,17 +356,19 @@ impl WorkflowFactory {
     ///
     /// Whatever [`ServiceBuilder::build`] would return for this workflow.
     pub fn build(&mut self, workflow: &WorkflowSpec) -> Result<BuiltWorkflow, SaciError> {
-        refuse_live_sources(&self.registry, workflow, &self.run)?;
+        let effective_run = workflow.run.as_ref().unwrap_or(&self.run).clone();
+        refuse_live_sources(&self.registry, workflow, &effective_run)?;
+        let retry_sources = effective_run != RunMode::Stream;
         let mut built = self.builder.build_one(
             &self.registry,
             workflow,
-            self.retry_sources,
+            retry_sources,
             &self.heal,
             &self.data_dir,
             &self.service,
             self.encryption.as_ref(),
         )?;
-        built.run = self.run.clone();
+        built.run = effective_run;
         built.flow = self.flow.clone();
         built.batch_resume = self.batch_resume;
         Ok(built)
@@ -323,6 +390,11 @@ impl WorkflowFactory {
     /// The frozen registry every build shares.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// The inspector attached to the inner builder, if any.
+    pub(crate) fn inspector(&self) -> Option<&Inspector> {
+        self.builder.inspector.as_ref()
     }
 }
 
@@ -837,10 +909,9 @@ impl BuiltWorkflowBuilder {
 /// ```
 pub struct ServiceBuilder {
     registry: Registry,
-    /// Native runtimes keyed by the processor node id they back. Consumed by
-    /// [`build`](Self::build) for a `wasm`/`plugin` node declared with
-    /// no artifact.
-    runtimes: HashMap<String, Box<dyn PipelineRuntime>>,
+    /// Native runtimes keyed by the processor node id they back. Reused across
+    /// builds/restarts via [`SharedRuntime`].
+    runtimes: HashMap<String, SharedRuntime>,
     #[cfg(feature = "wasm-host")]
     wasm_engine: Option<WasmEngine>,
     inspector: Option<Inspector>,
@@ -852,6 +923,8 @@ pub struct ServiceBuilder {
     dlq_registry: Option<Arc<DlqRegistry>>,
     #[cfg(feature = "crypto")]
     key_provider: Option<Arc<dyn KeyProvider>>,
+    /// Outbound alert dispatcher shared with healed connectors and DLQs.
+    alerts: AlertDispatcher,
 }
 
 impl ServiceBuilder {
@@ -873,7 +946,14 @@ impl ServiceBuilder {
             dlq_registry: None,
             #[cfg(feature = "crypto")]
             key_provider: None,
+            alerts: AlertDispatcher::noop(),
         }
+    }
+
+    /// Attach an outbound [`AlertDispatcher`] for connector heal-exhaustion and DLQ alerts.
+    pub fn alerts(mut self, alerts: AlertDispatcher) -> Self {
+        self.alerts = alerts;
+        self
     }
 
     /// Supply a key provider for declarative `encryption`, `encrypt`, and
@@ -904,7 +984,8 @@ impl ServiceBuilder {
         processor_id: impl Into<String>,
         runtime: impl PipelineRuntime + 'static,
     ) -> Self {
-        self.runtimes.insert(processor_id.into(), Box::new(runtime));
+        self.runtimes
+            .insert(processor_id.into(), SharedRuntime::new(Box::new(runtime)));
         self
     }
 
@@ -1003,7 +1084,6 @@ impl ServiceBuilder {
     /// time.
     pub fn into_factory(mut self, config: &ServiceConfig) -> WorkflowFactory {
         let registry = Arc::new(std::mem::replace(&mut self.registry, Registry::new()));
-        let retry_sources = sources_take_retry_wrapper(config);
         let run = match &config.mode {
             ServiceMode::Standalone { config: standalone } => standalone.run.clone(),
             ServiceMode::Cluster { .. } => RunMode::Continuous,
@@ -1018,7 +1098,6 @@ impl ServiceBuilder {
         WorkflowFactory {
             builder: self,
             registry,
-            retry_sources,
             heal: config.heal.clone(),
             data_dir: config.node.data_dir.clone(),
             service: config.node.label(),
@@ -1221,10 +1300,11 @@ impl ServiceBuilder {
             return Ok(None);
         };
         let shared = match self.dlq_registry.as_ref().and_then(|r| r.get(&workflow.id)) {
-            Some(shared) => Arc::clone(shared),
+            Some(shared) => shared,
             None => Arc::new(DlqShared::new(&workflow.id, &dlq.0)),
         };
-        DeadLetterQueue::build(workflow, data_dir, registry, shared).map(Some)
+        DeadLetterQueue::build(workflow, data_dir, registry, shared)
+            .map(|q| Some(q.with_alerts(self.alerts.clone())))
     }
 
     fn build_source_node(
@@ -1296,13 +1376,10 @@ impl ServiceBuilder {
         .with_identity(build.identity(workflow, &spec.id));
         let built = rebuilder.build_source()?;
         let source: Box<dyn Source> = match settings {
-            Some(settings) => Box::new(HealingSource::new(
-                built,
-                rebuilder,
-                settings,
-                &workflow.id,
-                &spec.id,
-            )),
+            Some(settings) => Box::new(
+                HealingSource::new(built, rebuilder, settings, &workflow.id, &spec.id)
+                    .with_alerts(self.alerts.clone()),
+            ),
             None => built,
         };
         #[cfg(feature = "crypto")]
@@ -1394,7 +1471,8 @@ impl ServiceBuilder {
         let built = rebuilder.build_sink()?;
         let (sink, heal_recovered): (Box<dyn Sink>, _) = match settings {
             Some(settings) => {
-                let healing = HealingSink::new(built, rebuilder, settings, &workflow.id, &spec.id);
+                let healing = HealingSink::new(built, rebuilder, settings, &workflow.id, &spec.id)
+                    .with_alerts(self.alerts.clone());
                 let recovered = healing.recovered_flag();
                 (Box::new(healing), Some(recovered))
             }
@@ -1539,13 +1617,13 @@ impl ServiceBuilder {
                     (Box::new(runtime), "wasm", Some(module.clone()))
                 }
                 None => {
-                    let runtime = self.runtimes.remove(&spec.id).ok_or_else(|| {
+                    let runtime = self.runtimes.get(&spec.id).cloned().ok_or_else(|| {
                         SaciError::configuration(format!(
                             "processor '{}': {RUNTIME_SOURCE_HELP}",
                             spec.id
                         ))
                     })?;
-                    (runtime, "native", None)
+                    (Box::new(runtime), "native", None)
                 }
             };
         Ok(BuiltNode {
@@ -1587,13 +1665,13 @@ impl ServiceBuilder {
                     (Box::new(runtime), "plugin", Some(library.clone()))
                 }
                 None => {
-                    let runtime = self.runtimes.remove(&spec.id).ok_or_else(|| {
+                    let runtime = self.runtimes.get(&spec.id).cloned().ok_or_else(|| {
                         SaciError::configuration(format!(
                             "processor '{}': {RUNTIME_SOURCE_HELP}",
                             spec.id
                         ))
                     })?;
-                    (runtime, "native", None)
+                    (Box::new(runtime), "native", None)
                 }
             };
         Ok(BuiltNode {
@@ -1930,6 +2008,7 @@ mod tests {
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -1947,6 +2026,7 @@ mod tests {
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: None,
+            run: None,
         }
     }
 
@@ -2441,6 +2521,7 @@ workflow "w" {
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: HashMap::new(),
         };
 

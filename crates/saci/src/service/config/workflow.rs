@@ -372,11 +372,17 @@ pub struct WorkflowSpec {
     /// block at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dlq: Option<DlqConfig>,
+    /// Optional per-workflow run mode override in standalone mode.
+    ///
+    /// Absent inherits the top-level standalone `run` node. Cluster mode
+    /// refuses a per-workflow `run` node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunMode>,
 }
 
 impl WorkflowSpec {
-    /// An empty workflow `id`: no name, codecs, schemas, nodes, links or
-    /// `dlq`.
+    /// An empty workflow `id`: no name, codecs, schemas, nodes, links,
+    /// `dlq`, or per-workflow `run`.
     ///
     /// Push the declarations onto the public fields, in the order they are
     /// written in the file.
@@ -393,6 +399,7 @@ impl WorkflowSpec {
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: None,
+            run: None,
         }
     }
 }
@@ -710,12 +717,28 @@ impl WorkflowSpec {
             }
         }
 
+        // 10b. Per-workflow `run` is standalone-only, and any cron expression
+        //      is validated even if constructed programmatically.
+        if let Some(wf_run) = &self.run {
+            if matches!(mode, ServiceMode::Cluster { .. }) {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{wf}': mode \"cluster\" does not take a per-workflow `run` node"
+                )));
+            }
+            if let RunMode::Cron { expr, timezone } = wf_run {
+                super::cron::CronSchedule::parse(expr, timezone.as_deref()).map_err(|e| {
+                    SaciError::configuration(format!("workflow '{wf}': run \"cron\": {e}"))
+                })?;
+            }
+        }
+
         // 11. `run "stream"`: at least one source in the whole
         //     workflow.
-        let stream_mode = matches!(
-            mode,
-            ServiceMode::Standalone { config } if config.run == RunMode::Stream
-        );
+        let effective_run = match mode {
+            ServiceMode::Standalone { config } => self.run.as_ref().unwrap_or(&config.run),
+            ServiceMode::Cluster { .. } => &RunMode::Continuous,
+        };
+        let stream_mode = *effective_run == RunMode::Stream;
         if stream_mode && self.sources.is_empty() {
             return Err(SaciError::configuration(format!(
                 "stream run mode requires at least one 'source' node ({}) declared",

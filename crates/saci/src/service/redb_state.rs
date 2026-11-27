@@ -23,12 +23,14 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use crate::SaciResult;
 use crate::error::SaciError;
+use crate::inspector_wire::{CursorResetReport, CursorSnapshot, WorkflowCursorsReport};
 
 /// Config name to the raw KDL bytes it was loaded from.
 const CONFIG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("saci_config");
@@ -36,6 +38,22 @@ const CONFIG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("saci_co
 const PRIORS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("saci_priors");
 /// `"{workflow_id}/{source_id}"` to a postcard-encoded [`SourceCursorMeta`].
 const CURSORS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("saci_cursors");
+/// `"{workflow_id}/{source_id}/{ts_ms:020}"` to a historical postcard-encoded [`SourceCursorMeta`].
+const CURSOR_HISTORY_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("saci_cursor_history");
+/// `"{workflow_id}/{node_id}/{ts_ms:020}"` to a historical processor state blob.
+const PRIOR_HISTORY_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("saci_prior_history");
+
+/// Maximum retained historical snapshots per `(workflow_id, node_id)`.
+const MAX_HISTORY_PER_NODE: usize = 64;
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// How many items a source delivered and when, persisted per workflow/source
 /// so a restarted service can resume from its last save point.
@@ -101,7 +119,7 @@ impl RedbStateClient {
             .await
     }
 
-    /// Persist a processor's state blob.
+    /// Persist a processor's state blob and record a timestamped history entry.
     ///
     /// # Errors
     ///
@@ -112,12 +130,36 @@ impl RedbStateClient {
         node_id: &str,
         blob: &[u8],
     ) -> SaciResult<()> {
-        self.put(
-            PRIORS_TABLE,
-            join(workflow_id, node_id),
-            blob.to_vec(),
-            "prior",
-        )
+        let db = Arc::clone(&self.db);
+        let key = join(workflow_id, node_id);
+        let hist_prefix = format!("{key}/");
+        let hist_key = format!("{hist_prefix}{:020}", now_unix_ms());
+        let value = blob.to_vec();
+        blocking("prior", move || {
+            let db = lock(&db)?;
+            let txn = db
+                .begin_write()
+                .map_err(|e| SaciError::store(format!("redb begin_write: {e}")))?;
+            {
+                let mut table = txn
+                    .open_table(PRIORS_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open prior table: {e}")))?;
+                table
+                    .insert(key.as_str(), value.as_slice())
+                    .map_err(|e| SaciError::store(format!("redb put prior {key}: {e}")))?;
+            }
+            {
+                let mut htable = txn
+                    .open_table(PRIOR_HISTORY_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open prior history: {e}")))?;
+                htable
+                    .insert(hist_key.as_str(), value.as_slice())
+                    .map_err(|e| SaciError::store(format!("redb put prior history: {e}")))?;
+                prune_prefix(&mut htable, &hist_prefix)?;
+            }
+            txn.commit()
+                .map_err(|e| SaciError::store(format!("redb commit: {e}")))
+        })
         .await
     }
 
@@ -170,7 +212,7 @@ impl RedbStateClient {
         Ok(Some(meta))
     }
 
-    /// Persist a source's cursor.
+    /// Persist a source's cursor and record a timestamped history entry.
     ///
     /// # Errors
     ///
@@ -183,8 +225,308 @@ impl RedbStateClient {
     ) -> SaciResult<()> {
         let bytes = postcard::to_allocvec(&meta)
             .map_err(|e| SaciError::store(format!("redb encode cursor: {e}")))?;
-        self.put(CURSORS_TABLE, join(workflow_id, source_id), bytes, "cursor")
-            .await
+        let db = Arc::clone(&self.db);
+        let key = join(workflow_id, source_id);
+        let hist_prefix = format!("{key}/");
+        let hist_key = format!("{hist_prefix}{:020}", meta.last_batch_at_ms);
+        blocking("cursor", move || {
+            let db = lock(&db)?;
+            let txn = db
+                .begin_write()
+                .map_err(|e| SaciError::store(format!("redb begin_write: {e}")))?;
+            {
+                let mut table = txn
+                    .open_table(CURSORS_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open cursor table: {e}")))?;
+                table
+                    .insert(key.as_str(), bytes.as_slice())
+                    .map_err(|e| SaciError::store(format!("redb put cursor {key}: {e}")))?;
+            }
+            {
+                let mut htable = txn
+                    .open_table(CURSOR_HISTORY_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open cursor history: {e}")))?;
+                htable
+                    .insert(hist_key.as_str(), bytes.as_slice())
+                    .map_err(|e| SaciError::store(format!("redb put cursor history: {e}")))?;
+                prune_prefix(&mut htable, &hist_prefix)?;
+            }
+            txn.commit()
+                .map_err(|e| SaciError::store(format!("redb commit: {e}")))
+        })
+        .await
+    }
+
+    /// Remove a source's persisted cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Store`] on a redb failure.
+    pub async fn delete_source_cursor(&self, workflow_id: &str, source_id: &str) -> SaciResult<()> {
+        let db = Arc::clone(&self.db);
+        let key = join(workflow_id, source_id);
+        blocking("delete cursor", move || {
+            let db = lock(&db)?;
+            let txn = db
+                .begin_write()
+                .map_err(|e| SaciError::store(format!("redb begin_write: {e}")))?;
+            {
+                let mut table = txn
+                    .open_table(CURSORS_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open cursor table: {e}")))?;
+                table
+                    .remove(key.as_str())
+                    .map_err(|e| SaciError::store(format!("redb delete cursor {key}: {e}")))?;
+            }
+            txn.commit()
+                .map_err(|e| SaciError::store(format!("redb commit: {e}")))
+        })
+        .await
+    }
+
+    /// Inspect current source cursors, persisted processor state IDs, and
+    /// available historical checkpoint timestamps for `workflow_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Store`] on a redb or decode failure.
+    pub async fn inspect_workflow(
+        &self,
+        workflow_id: &str,
+        source_ids: &[String],
+        processor_ids: &[String],
+    ) -> SaciResult<WorkflowCursorsReport> {
+        let db = Arc::clone(&self.db);
+        let wf = workflow_id.to_string();
+        let sources = source_ids.to_vec();
+        let processors = processor_ids.to_vec();
+        blocking("inspect workflow state", move || {
+            let db = lock(&db)?;
+            let txn = db
+                .begin_read()
+                .map_err(|e| SaciError::store(format!("redb begin_read: {e}")))?;
+
+            let mut cursors = Vec::new();
+            match txn.open_table(CURSORS_TABLE) {
+                Ok(table) => {
+                    for sid in &sources {
+                        let key = join(&wf, sid);
+                        if let Some(val) = table
+                            .get(key.as_str())
+                            .map_err(|e| SaciError::store(format!("redb get cursor: {e}")))?
+                        {
+                            let meta: SourceCursorMeta = postcard::from_bytes(val.value())
+                                .map_err(|e| {
+                                    SaciError::store(format!("redb decode cursor: {e}"))
+                                })?;
+                            cursors.push(CursorSnapshot {
+                                source: sid.clone(),
+                                items_processed: meta.items_processed,
+                                last_batch_at_ms: meta.last_batch_at_ms,
+                            });
+                        }
+                    }
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(e) => return Err(SaciError::store(format!("redb open cursor table: {e}"))),
+            }
+
+            let mut processors_with_state = Vec::new();
+            match txn.open_table(PRIORS_TABLE) {
+                Ok(table) => {
+                    for pid in &processors {
+                        let key = join(&wf, pid);
+                        if table
+                            .get(key.as_str())
+                            .map_err(|e| SaciError::store(format!("redb get prior: {e}")))?
+                            .is_some()
+                        {
+                            processors_with_state.push(pid.clone());
+                        }
+                    }
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(e) => return Err(SaciError::store(format!("redb open prior table: {e}"))),
+            }
+
+            let mut checkpoints = std::collections::BTreeSet::new();
+            for table_def in [CURSOR_HISTORY_TABLE, PRIOR_HISTORY_TABLE] {
+                match txn.open_table(table_def) {
+                    Ok(table) => {
+                        let wf_prefix = format!("{wf}/");
+                        for entry in table
+                            .range(wf_prefix.as_str()..)
+                            .map_err(|e| SaciError::store(format!("redb range history: {e}")))?
+                        {
+                            let (k, _) = entry
+                                .map_err(|e| SaciError::store(format!("redb iter history: {e}")))?;
+                            let ks = k.value();
+                            if !ks.starts_with(&wf_prefix) {
+                                break;
+                            }
+                            if let Some((_, ts_str)) = ks.rsplit_once('/')
+                                && let Ok(ts) = ts_str.parse::<u64>()
+                            {
+                                checkpoints.insert(ts);
+                            }
+                        }
+                    }
+                    Err(redb::TableError::TableDoesNotExist(_)) => {}
+                    Err(e) => {
+                        return Err(SaciError::store(format!("redb open history table: {e}")));
+                    }
+                }
+            }
+
+            Ok(WorkflowCursorsReport {
+                workflow: wf,
+                cursors,
+                processors_with_state,
+                checkpoints_unix_ms: checkpoints.into_iter().collect(),
+            })
+        })
+        .await
+    }
+
+    /// Reset or time-travel source cursors and processor priors for `workflow_id`.
+    ///
+    /// - If `items_processed` is `Some(n)`, sets each target source's cursor to `n`.
+    /// - Else if `to_unix_ms` is `Some(ts)`, restores the latest historical snapshot
+    ///   at or before `ts` (or resets to `0` at `ts` when no snapshot precedes `ts`).
+    /// - Else clears the cursor(s) to origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError::Store`] on a redb or codec failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reset_workflow(
+        &self,
+        workflow_id: &str,
+        target_sources: &[String],
+        processor_ids: &[String],
+        to_unix_ms: Option<u64>,
+        items_processed: Option<u64>,
+        reset_priors: bool,
+    ) -> SaciResult<CursorResetReport> {
+        let db = Arc::clone(&self.db);
+        let wf = workflow_id.to_string();
+        let targets = target_sources.to_vec();
+        let processors = processor_ids.to_vec();
+
+        blocking("reset workflow cursors", move || {
+            let db = lock(&db)?;
+            let txn = db
+                .begin_write()
+                .map_err(|e| SaciError::store(format!("redb begin_write: {e}")))?;
+
+            let mut restored_checkpoint: Option<u64> = None;
+            let mut result_cursors = Vec::new();
+            let mut priors_reset = Vec::new();
+
+            {
+                let mut ctable = txn
+                    .open_table(CURSORS_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open cursor table: {e}")))?;
+                let chist = txn
+                    .open_table(CURSOR_HISTORY_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open cursor history: {e}")))?;
+
+                for sid in &targets {
+                    let key = join(&wf, sid);
+                    if let Some(items) = items_processed {
+                        let meta = SourceCursorMeta {
+                            items_processed: items,
+                            last_batch_at_ms: to_unix_ms.unwrap_or_else(now_unix_ms),
+                        };
+                        let bytes = postcard::to_allocvec(&meta)
+                            .map_err(|e| SaciError::store(format!("redb encode cursor: {e}")))?;
+                        ctable
+                            .insert(key.as_str(), bytes.as_slice())
+                            .map_err(|e| SaciError::store(format!("redb put cursor: {e}")))?;
+                        result_cursors.push(CursorSnapshot {
+                            source: sid.clone(),
+                            items_processed: meta.items_processed,
+                            last_batch_at_ms: meta.last_batch_at_ms,
+                        });
+                    } else if let Some(target_ts) = to_unix_ms {
+                        let prefix = format!("{key}/");
+                        let best = find_latest_before(&chist, &prefix, target_ts)?;
+                        let meta = match best {
+                            Some((ts, bytes)) => {
+                                restored_checkpoint =
+                                    Some(restored_checkpoint.map_or(ts, |prev| prev.max(ts)));
+                                postcard::from_bytes::<SourceCursorMeta>(&bytes).map_err(|e| {
+                                    SaciError::store(format!("redb decode cursor: {e}"))
+                                })?
+                            }
+                            None => SourceCursorMeta {
+                                items_processed: 0,
+                                last_batch_at_ms: target_ts,
+                            },
+                        };
+                        let bytes = postcard::to_allocvec(&meta)
+                            .map_err(|e| SaciError::store(format!("redb encode cursor: {e}")))?;
+                        ctable
+                            .insert(key.as_str(), bytes.as_slice())
+                            .map_err(|e| SaciError::store(format!("redb put cursor: {e}")))?;
+                        result_cursors.push(CursorSnapshot {
+                            source: sid.clone(),
+                            items_processed: meta.items_processed,
+                            last_batch_at_ms: meta.last_batch_at_ms,
+                        });
+                    } else {
+                        ctable
+                            .remove(key.as_str())
+                            .map_err(|e| SaciError::store(format!("redb delete cursor: {e}")))?;
+                    }
+                }
+            }
+
+            if reset_priors {
+                let mut ptable = txn
+                    .open_table(PRIORS_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open prior table: {e}")))?;
+                let phist = txn
+                    .open_table(PRIOR_HISTORY_TABLE)
+                    .map_err(|e| SaciError::store(format!("redb open prior history: {e}")))?;
+
+                for pid in &processors {
+                    let key = join(&wf, pid);
+                    if let Some(target_ts) = to_unix_ms
+                        && items_processed.is_none()
+                    {
+                        let prefix = format!("{key}/");
+                        if let Some((ts, blob)) = find_latest_before(&phist, &prefix, target_ts)? {
+                            restored_checkpoint =
+                                Some(restored_checkpoint.map_or(ts, |prev| prev.max(ts)));
+                            ptable
+                                .insert(key.as_str(), blob.as_slice())
+                                .map_err(|e| SaciError::store(format!("redb put prior: {e}")))?;
+                            priors_reset.push(pid.clone());
+                            continue;
+                        }
+                    }
+                    if ptable
+                        .remove(key.as_str())
+                        .map_err(|e| SaciError::store(format!("redb delete prior: {e}")))?
+                        .is_some()
+                    {
+                        priors_reset.push(pid.clone());
+                    }
+                }
+            }
+
+            txn.commit()
+                .map_err(|e| SaciError::store(format!("redb commit: {e}")))?;
+
+            Ok(CursorResetReport {
+                workflow: wf,
+                cursors: result_cursors,
+                priors_reset,
+                restored_checkpoint_unix_ms: restored_checkpoint,
+            })
+        })
+        .await
     }
 
     async fn put(
@@ -247,6 +589,65 @@ impl RedbStateClient {
 /// Compose the two-segment key both the priors and the cursors table use.
 fn join(workflow_id: &str, node_id: &str) -> String {
     format!("{workflow_id}/{node_id}")
+}
+
+/// Keep at most `MAX_HISTORY_PER_NODE` entries under `prefix`.
+fn prune_prefix(
+    table: &mut redb::Table<'_, &'static str, &'static [u8]>,
+    prefix: &str,
+) -> SaciResult<()> {
+    let mut keys = Vec::new();
+    for entry in table
+        .range(prefix..)
+        .map_err(|e| SaciError::store(format!("redb range history: {e}")))?
+    {
+        let (k, _) = entry.map_err(|e| SaciError::store(format!("redb iter history: {e}")))?;
+        let ks = k.value();
+        if !ks.starts_with(prefix) {
+            break;
+        }
+        keys.push(ks.to_string());
+    }
+    if keys.len() > MAX_HISTORY_PER_NODE {
+        let excess = keys.len() - MAX_HISTORY_PER_NODE;
+        for k in keys.into_iter().take(excess) {
+            table
+                .remove(k.as_str())
+                .map_err(|e| SaciError::store(format!("redb prune history: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+/// Find the newest `(timestamp_ms, value)` under `prefix` with `ts <= target_ts`.
+fn find_latest_before(
+    table: &redb::Table<'_, &'static str, &'static [u8]>,
+    prefix: &str,
+    target_ts: u64,
+) -> SaciResult<Option<(u64, Vec<u8>)>> {
+    let mut best: Option<(u64, Vec<u8>)> = None;
+    for entry in table
+        .range(prefix..)
+        .map_err(|e| SaciError::store(format!("redb range history: {e}")))?
+    {
+        let (k, v) = entry.map_err(|e| SaciError::store(format!("redb iter history: {e}")))?;
+        let ks = k.value();
+        if !ks.starts_with(prefix) {
+            break;
+        }
+        let Some(ts_str) = ks.strip_prefix(prefix) else {
+            continue;
+        };
+        let Ok(ts) = ts_str.parse::<u64>() else {
+            continue;
+        };
+        if ts <= target_ts {
+            best = Some((ts, v.value().to_vec()));
+        } else {
+            break;
+        }
+    }
+    Ok(best)
 }
 
 fn lock(db: &Mutex<Database>) -> SaciResult<std::sync::MutexGuard<'_, Database>> {

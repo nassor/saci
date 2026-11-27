@@ -106,9 +106,9 @@ processor's `host-io::log` lines in the trace. Processor code reaches `tracing` 
 `host-io::log` import, so field content is untrusted: values are truncated at `MAX_FIELD_BYTES`
 (512), records capped at `MAX_FIELDS` (32), and `("truncated","true")` appended when either bites.
 
-A `wasm` node with no `path` takes its runtime from `ServiceBuilder::runtime(id, ..)`, and
-`build_processor_node` **removes** that injected runtime from the builder, so `rebuild_blocker`
-reports such a workflow as `restartable: false`.
+A `wasm` node with no `path` takes its runtime from `ServiceBuilder::runtime(id, ..)`, wrapped in
+a cloneable handle (`SharedRuntime` in `src/service/builder.rs`), so `build_processor_node` retains
+it across rebuilds and `rebuild_blocker` reports `restartable: true`.
 
 A host that loads a component from code calls `WasmEngine::new()` (`SaciResult`, needs a tokio
 runtime for the epoch ticker) and

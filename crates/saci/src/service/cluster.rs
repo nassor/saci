@@ -632,11 +632,13 @@ mod tests {
                 sinks: Vec::new(),
                 links: Vec::new(),
                 dlq: None,
+                run: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -917,11 +919,13 @@ mod tests {
                 sinks: Vec::new(),
                 links: Vec::new(),
                 dlq: None,
+                run: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: HashMap::new(),
         };
 

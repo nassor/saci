@@ -414,17 +414,23 @@ async fn handle_status(State(state): State<ServiceState>) -> impl IntoResponse {
     let uptime_seconds = state.started_at.elapsed().as_secs();
 
     let standalone = if state.mode == ServiceModeLabel::Standalone {
-        match &state.standalone_stats {
-            Some(entries) => {
+        match &state.lifecycle {
+            Some(registry) => {
+                let entries = registry.standalone_entries();
                 let mut body = Vec::with_capacity(entries.len());
-                for (workflow_id, stats_lock) in entries {
-                    let stats = stats_lock.read().await;
+                for (workflow_id, wf_state, stats_lock) in entries {
+                    let fallback_lock = state.standalone_stats.as_ref().and_then(|s| {
+                        s.iter()
+                            .find(|(id, _)| *id == workflow_id)
+                            .map(|(_, lock)| Arc::clone(lock))
+                    });
+                    let stats = match stats_lock.or(fallback_lock) {
+                        Some(lock) => lock.read().await.clone(),
+                        None => WorkflowStats::default(),
+                    };
                     body.push(StandaloneStatusBody {
-                        workflow_id: workflow_id.clone(),
-                        state: state
-                            .lifecycle
-                            .as_ref()
-                            .and_then(|registry| registry.state_of(workflow_id)),
+                        workflow_id,
+                        state: Some(wf_state),
                         iterations: stats.iterations,
                         rows_processed: stats.rows_processed,
                         source_batches_drained: stats.source_batches_drained,
@@ -436,11 +442,31 @@ async fn handle_status(State(state): State<ServiceState>) -> impl IntoResponse {
                 }
                 Some(body)
             }
-            // Standalone mode but the runner has not supplied per-workflow
-            // stats yet (e.g. a `ServiceState` built without going through
-            // `serve.rs`): report no entries rather than guessing a
-            // workflow id.
-            None => Some(Vec::new()),
+            None => match &state.standalone_stats {
+                Some(entries) => {
+                    let mut body = Vec::with_capacity(entries.len());
+                    for (workflow_id, stats_lock) in entries {
+                        let stats = stats_lock.read().await;
+                        body.push(StandaloneStatusBody {
+                            workflow_id: workflow_id.clone(),
+                            state: None,
+                            iterations: stats.iterations,
+                            rows_processed: stats.rows_processed,
+                            source_batches_drained: stats.source_batches_drained,
+                            sink_batches_written: stats.sink_batches_written,
+                            iteration_errors: stats.iteration_errors,
+                            total_busy_micros: stats.total_busy_micros,
+                            max_item_micros: stats.max_item_micros,
+                        });
+                    }
+                    Some(body)
+                }
+                // Standalone mode but the runner has not supplied per-workflow
+                // stats yet (e.g. a `ServiceState` built without going through
+                // `serve.rs`): report no entries rather than guessing a
+                // workflow id.
+                None => Some(Vec::new()),
+            },
         }
     } else {
         None

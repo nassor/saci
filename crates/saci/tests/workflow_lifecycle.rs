@@ -255,10 +255,14 @@ impl Harness {
     /// Must be called inside a [`LocalSet`]: a supervisor owns a
     /// `BuiltWorkflow`, so its future is not `Send`.
     async fn start(config_path: &std::path::Path) -> Self {
+        Self::start_with_builder(config_path, ServiceBuilder::new()).await
+    }
+
+    async fn start_with_builder(config_path: &std::path::Path, builder: ServiceBuilder) -> Self {
         saci::service::install_ring_provider();
         let config = ServiceConfig::load(config_path).expect("config loads");
 
-        let mut factory = ServiceBuilder::new().into_factory(&config);
+        let mut factory = builder.into_factory(&config);
         let mut built = Vec::with_capacity(config.workflows.len());
         for workflow in &config.workflows {
             built.push(factory.build(workflow).expect("workflow builds"));
@@ -752,7 +756,7 @@ async fn unknown_workflow_and_illegal_transition_are_refused() {
 
 #[cfg(feature = "connector-channel")]
 #[tokio::test]
-async fn a_channel_workflow_refuses_the_rebuild_verbs_but_still_pauses() {
+async fn a_channel_workflow_is_restartable_and_supports_rebuild_verbs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("orders_out.csv");
     let out_text = path_text(&output);
@@ -764,28 +768,13 @@ async fn a_channel_workflow_refuses_the_rebuild_verbs_but_still_pauses() {
         .run_until(async {
             let harness = Harness::start(&config_path).await;
             let status = harness.await_state("bridged", &["running"]).await;
-            assert_eq!(status["restartable"], false);
+            assert_eq!(status["restartable"], true);
             assert!(
-                status["restart_blocked_reason"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("`channel` source or sink"),
-                "the reason names the channel halves: {status}"
+                status["restart_blocked_reason"].is_null(),
+                "channel workflow is restartable: {status}"
             );
 
-            for verb in ["start", "stop", "restart"] {
-                let response = harness
-                    .post(&format!("/api/workflows/bridged/{verb}"))
-                    .await;
-                assert_eq!(
-                    response.status(),
-                    409,
-                    "{verb} on a non-rebuildable workflow"
-                );
-            }
-
-            // Pause keeps the runner and every resource it holds alive, so it
-            // stays available.
+            // Pause keeps the runner and every resource it holds alive.
             let response = harness.post("/api/workflows/bridged/pause").await;
             assert!(
                 matches!(response.status().as_u16(), 200 | 202),
@@ -793,6 +782,40 @@ async fn a_channel_workflow_refuses_the_rebuild_verbs_but_still_pauses() {
                 response.status()
             );
             harness.await_state("bridged", &["paused"]).await;
+
+            // Stop + start rebuilds the channel sink slot cleanly without 409.
+            let response = harness.post("/api/workflows/bridged/stop").await;
+            assert!(
+                matches!(response.status().as_u16(), 200 | 202),
+                "stop is accepted: {}",
+                response.status()
+            );
+            harness.await_state("bridged", &["stopped"]).await;
+
+            let response = harness.post("/api/workflows/bridged/start").await;
+            assert!(
+                matches!(response.status().as_u16(), 200 | 202),
+                "start is accepted: {}",
+                response.status()
+            );
+            let status = harness.await_state("bridged", &["running"]).await;
+            assert!(
+                status["runs"].as_u64().unwrap_or(0) >= 2,
+                "bridged rebuilt and incremented runs: {status}"
+            );
+
+            // Also restart the downstream source half of the channel.
+            let response = harness.post("/api/workflows/drain/restart").await;
+            assert!(
+                matches!(response.status().as_u16(), 200 | 202),
+                "restart is accepted: {}",
+                response.status()
+            );
+            let drain = harness.await_state("drain", &["running"]).await;
+            assert!(
+                drain["runs"].as_u64().unwrap_or(0) >= 2,
+                "drain rebuilt and incremented runs: {drain}"
+            );
 
             harness.stop();
         })
@@ -886,9 +909,9 @@ async fn a_service_wide_verb_moves_every_workflow() {
         .await;
 }
 
-/// A verb no workflow can take is the one case that fails the request. Both
-/// workflows here are bound to one in-process channel, so neither can be torn
-/// down and built again.
+/// A verb no workflow can take fails the request with 409 (here pausing when
+/// every workflow is already stopped), while service-wide stop/start now
+/// reaches `channel` bridge workflows cleanly.
 #[cfg(feature = "connector-channel")]
 #[tokio::test]
 async fn a_service_wide_verb_reports_the_workflows_it_cannot_reach() {
@@ -903,28 +926,136 @@ async fn a_service_wide_verb_reports_the_workflows_it_cannot_reach() {
         .run_until(async {
             let harness = Harness::start(&config_path).await;
             harness.await_state("bridged", &["running"]).await;
+            harness.await_state("drain", &["running"]).await;
 
-            let response = harness.post("/api/service/stop").await;
+            let stop_all = harness.post("/api/service/stop").await;
+            assert!(
+                matches!(stop_all.status().as_u16(), 200 | 202),
+                "service-wide stop reaches both channel workflows: {}",
+                stop_all.status()
+            );
+            harness.await_state("bridged", &["stopped"]).await;
+            harness.await_state("drain", &["stopped"]).await;
+
+            // Pausing when every workflow is stopped refuses all workflows with 409.
+            let response = harness.post("/api/service/pause").await;
             assert_eq!(
                 response.status(),
                 409,
-                "not one workflow could take the verb"
+                "not one workflow could take pause while stopped"
             );
             let report: serde_json::Value = response.json().await.expect("a report is JSON");
             assert_eq!(report["applied"].as_array().map(Vec::len), Some(0));
             assert_eq!(
                 report["refused"].as_array().map(Vec::len),
                 Some(2),
-                "both halves of the channel are named: {report}"
-            );
-            assert!(
-                report["refused"][0]["error"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("`channel` source or sink"),
-                "the refusal carries the reason: {report}"
+                "both workflows refused pause while stopped: {report}"
             );
 
+            harness.stop();
+        })
+        .await;
+}
+
+/// A workflow whose processor uses an injected runtime via
+/// [`ServiceBuilder::runtime`] is now restartable (`restartable: true`)
+/// and rebuilds cleanly across `stop`/`start` and `restart`.
+#[cfg(feature = "wasm-host")]
+#[tokio::test]
+async fn injected_runtime_workflow_is_restartable_and_rebuilds_cleanly() {
+    use saci::component::Component;
+    use saci::pipeline::Pipeline;
+
+    struct Order;
+    impl Component for Order {
+        fn name() -> &'static str {
+            "Order"
+        }
+        fn schema() -> Arc<arrow_schema::Schema> {
+            Arc::new(arrow_schema::Schema::new(vec![
+                arrow_schema::Field::new("id", arrow_schema::DataType::Int64, false),
+                arrow_schema::Field::new("total", arrow_schema::DataType::Float64, false),
+            ]))
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("orders_out.csv");
+    let out_text = path_text(&output);
+    let config_path = fixture(dir.path(), |input, data_dir| {
+        format!(
+            r#"
+mode "standalone"
+node id=1 name="saci-injected-runtime" data_dir="{data_dir}"
+run "continuous"
+
+workflow "orders" name="Injected Orders" {{
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
+    }}
+    source "orders_in" connector="file" component="Order" codec="csv_fmt" {{
+        config {{
+            path "{input}"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    wasm "custom_proc" {{ }}
+    sink "orders_out" connector="file" component="Order" codec="csv_fmt" {{
+        config {{
+            path "{out_text}"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="orders_in" to="custom_proc"
+    link from="custom_proc" to="orders_out"
+}}
+
+http bind="127.0.0.1:0"
+observability log_level="warn"
+"#
+        )
+    });
+
+    let mut pipeline = Pipeline::new("custom_proc");
+    pipeline.data_mut().register::<Order>().expect("register");
+    let builder = ServiceBuilder::new().runtime("custom_proc", pipeline);
+
+    LocalSet::new()
+        .run_until(async {
+            let harness = Harness::start_with_builder(&config_path, builder).await;
+            let status = harness.await_state("orders", &["running"]).await;
+            assert_eq!(status["restartable"], true);
+            assert!(
+                status["restart_blocked_reason"].is_null(),
+                "injected runtime must be restartable: {status}"
+            );
+
+            let resp = harness.post("/api/workflows/orders/restart").await;
+            assert!(
+                matches!(resp.status().as_u16(), 200 | 202),
+                "restart succeeds: {}",
+                resp.status()
+            );
+            let deadline = Instant::now() + SETTLE_BUDGET;
+            loop {
+                let s = harness.status("orders").await;
+                if s["state"] == "running" && s["runs"].as_u64().unwrap_or(0) >= 2 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for injected runtime workflow runs >= 2: {s}"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            let out = std::fs::read_to_string(&output).expect("output csv");
+            assert!(
+                out.contains("1,10.5"),
+                "injected runtime processed CSV rows: {out}"
+            );
             harness.stop();
         })
         .await;

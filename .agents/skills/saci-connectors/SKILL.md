@@ -84,9 +84,11 @@ A `Rebuild::No` on a node that declares its **own** `heal` block is a load-time 
 an inherited policy silently skips the node, because a channel half appears in most
 multi-workflow configs and an inherited policy is not a request by name.
 
-The other shape the host cannot build twice is a `ChannelSource` or `ChannelSink`, which
-`ChannelRegistry` latches per name and refuses a second time, so `rebuild_blocker` reports the
-workflow holding one as `restartable: false`.
+`ChannelSource` and `ChannelSink` are rebuildable on workflow restart and reload: `ChannelRegistry`
+tracks active flags per named slot (`ChannelSlot`) and installs fresh sender/receiver halves on
+rebuild while freeing slots on `Drop` (still refusing two concurrent live sinks or two concurrent
+live sources for the same channel name), so `rebuild_blocker` reports `channel` workflows as
+`restartable: true`.
 
 ## Connectors
 

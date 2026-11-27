@@ -1137,19 +1137,28 @@ impl FlowPlan {
     /// refuses a `flow_control` block there rather than resolving one that
     /// nothing would read.
     pub fn from_config(config: &ServiceConfig) -> Self {
-        let defaults = match &config.mode {
-            ServiceMode::Standalone { config: standalone } if standalone.run == RunMode::Stream => {
-                FlowSettings::stream_defaults()
-            }
+        let standalone_run = match &config.mode {
+            ServiceMode::Standalone { config: standalone } => Some(&standalone.run),
+            ServiceMode::Cluster { .. } => None,
+        };
+        let defaults = match standalone_run {
+            Some(RunMode::Stream) => FlowSettings::stream_defaults(),
             _ => FlowSettings::default(),
         };
         let fallback = config.flow_control.resolve(&Default::default(), defaults);
         let mut by_source = HashMap::new();
         for workflow in &config.workflows {
+            let wf_defaults = match workflow.run.as_ref().or(standalone_run) {
+                Some(RunMode::Stream) => FlowSettings::stream_defaults(),
+                _ => FlowSettings::default(),
+            };
+            let wf_fallback = config
+                .flow_control
+                .resolve(&Default::default(), wf_defaults);
             for source in &workflow.sources {
                 let settings = match &source.flow_control {
-                    Some(local) => local.resolve(&config.flow_control, defaults),
-                    None => fallback,
+                    Some(local) => local.resolve(&config.flow_control, wf_defaults),
+                    None => wf_fallback,
                 };
                 by_source.insert(source.id.clone(), settings);
             }

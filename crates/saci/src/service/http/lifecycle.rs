@@ -44,6 +44,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use super::{ServiceState, refuse};
+use crate::inspector_wire::{BackfillRequest, CursorResetRequest};
 use crate::service::lifecycle::{LifecycleError, WorkflowCommand};
 
 /// The lifecycle routes, sharing the control plane's [`ServiceState`].
@@ -56,11 +57,19 @@ pub fn routes() -> Router<ServiceState> {
         .route("/api/workflows/{id}/pause", post(handle_pause))
         .route("/api/workflows/{id}/resume", post(handle_resume))
         .route("/api/workflows/{id}/restart", post(handle_restart))
+        .route("/api/workflows/{id}/backfill", post(handle_backfill))
+        .route("/api/workflows/{id}/cursors", get(handle_cursors))
+        .route(
+            "/api/workflows/{id}/cursors/reset",
+            post(handle_cursors_reset),
+        )
         .route("/api/service/start", post(handle_start_all))
         .route("/api/service/stop", post(handle_stop_all))
         .route("/api/service/pause", post(handle_pause_all))
         .route("/api/service/resume", post(handle_resume_all))
         .route("/api/service/restart", post(handle_restart_all))
+        .route("/api/service/reload", post(handle_reload))
+        .route("/api/reload", post(handle_reload))
 }
 
 /// `GET /api/workflows`
@@ -122,7 +131,85 @@ async fn control(
         Err(
             e @ (LifecycleError::NotRestartable { .. } | LifecycleError::IllegalTransition { .. }),
         ) => refuse(StatusCode::CONFLICT, e.to_string()),
+        Err(e @ (LifecycleError::Gone(_) | LifecycleError::Unavailable(_))) => {
+            refuse(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+        }
+        Err(
+            e @ (LifecycleError::BackfillFailed(_)
+            | LifecycleError::CursorError(_)
+            | LifecycleError::ReloadFailed(_)),
+        ) => refuse(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// `POST /api/workflows/{id}/backfill`
+async fn handle_backfill(
+    State(state): State<ServiceState>,
+    Path(id): Path<String>,
+    body: Option<Json<BackfillRequest>>,
+) -> Response {
+    let Some(registry) = &state.lifecycle else {
+        return unmounted();
+    };
+    let request = body.map(|Json(r)| r).unwrap_or_default();
+    match registry.backfill(&id, request).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        Err(e @ LifecycleError::UnknownWorkflow(_)) => refuse(StatusCode::NOT_FOUND, e.to_string()),
         Err(e @ LifecycleError::Gone(_)) => refuse(StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        Err(e) => refuse(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// `GET /api/workflows/{id}/cursors`
+async fn handle_cursors(State(state): State<ServiceState>, Path(id): Path<String>) -> Response {
+    let Some(registry) = &state.lifecycle else {
+        return unmounted();
+    };
+    match registry.cursors(&id).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        Err(e @ LifecycleError::UnknownWorkflow(_)) => refuse(StatusCode::NOT_FOUND, e.to_string()),
+        Err(e @ LifecycleError::Unavailable(_)) => {
+            refuse(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+        }
+        Err(e) => refuse(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// `POST /api/workflows/{id}/cursors/reset`
+async fn handle_cursors_reset(
+    State(state): State<ServiceState>,
+    Path(id): Path<String>,
+    body: Option<Json<CursorResetRequest>>,
+) -> Response {
+    let Some(registry) = &state.lifecycle else {
+        return unmounted();
+    };
+    let request = body.map(|Json(r)| r).unwrap_or_default();
+    match registry.reset_cursors(&id, request).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        Err(e @ LifecycleError::UnknownWorkflow(_)) => refuse(StatusCode::NOT_FOUND, e.to_string()),
+        Err(e @ LifecycleError::Unavailable(_)) => {
+            refuse(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+        }
+        Err(e) => refuse(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// `POST /api/reload` and `POST /api/service/reload`
+///
+/// Accepts either an empty body (reload from the configured `config_path` on
+/// disk) or a raw KDL configuration body.
+async fn handle_reload(State(state): State<ServiceState>, body: String) -> Response {
+    let Some(registry) = &state.lifecycle else {
+        return unmounted();
+    };
+    let kdl = (!body.trim().is_empty()).then_some(body);
+    match registry.reload(kdl).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        Err(e @ LifecycleError::Unavailable(_)) => {
+            refuse(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+        }
+        Err(e) => refuse(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 

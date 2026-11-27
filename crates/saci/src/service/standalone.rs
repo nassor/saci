@@ -396,6 +396,17 @@ pub(crate) async fn run(
     // that can still finish them for that exit.
     let mut sinks_finished = false;
 
+    let cron_schedule = match &run_mode {
+        RunMode::Cron { expr, timezone } => Some(
+            super::config::CronSchedule::parse(expr, timezone.as_deref())
+                .map_err(SaciError::configuration)?,
+        ),
+        _ => None,
+    };
+    let anchor_wall = std::time::SystemTime::now();
+    let anchor_instant = tokio::time::Instant::now();
+    let mut await_cron_tick = cron_schedule.is_some();
+
     // Labelled for the interval pacing arm, which sits inside a second loop
     // and has to leave this one to reach the shutdown bookkeeping below.
     'passes: loop {
@@ -407,6 +418,41 @@ pub(crate) async fn run(
         // the runner is parked, and a cancel arriving meanwhile releases the
         // gate straight into the drain below.
         pause.park_while_paused(&cancel).await;
+
+        if await_cron_tick && let Some(schedule) = &cron_schedule {
+            let now_wall =
+                anchor_wall + tokio::time::Instant::now().saturating_duration_since(anchor_instant);
+            if let Some(delay) = schedule.delay_from(now_wall) {
+                let deadline = tokio::time::Instant::now() + delay;
+                loop {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if pause.is_paused() {
+                        pause.park_while_paused(&cancel).await;
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        // Recompute delay from current wall-clock after unpausing.
+                        continue 'passes;
+                    }
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let slice = remaining.min(tokio::time::Duration::from_millis(100));
+                    tokio::select! {
+                        _ = tokio::time::sleep(slice) => {}
+                        _ = cancel.cancelled() => {
+                            #[cfg(feature = "tracing")]
+                            tracing::info!("standalone runner cancelled during cron wait");
+                            break 'passes;
+                        }
+                    }
+                }
+            }
+            await_cron_tick = false;
+        }
 
         // One root span per iteration, which is the trace the dashboard draws.
         // Children are created inside `batch_span.in_scope(...)`, so the batch
@@ -1109,6 +1155,12 @@ pub(crate) async fn run(
                 }
             }
 
+            RunMode::Cron { .. } => {
+                if !backlogged {
+                    await_cron_tick = true;
+                }
+            }
+
             // Dispatched to the stream runner by `BuiltWorkflow::run`.
             RunMode::Stream => unreachable!("stream mode never reaches the batch loop"),
         }
@@ -1225,11 +1277,13 @@ mod tests {
                 sinks: Vec::new(),
                 links: Vec::new(),
                 dlq: None,
+                run: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -2462,6 +2516,7 @@ mod tests {
             dlq: Some(crate::service::config::DlqConfig(
                 crate::service::config::DlqBlock::default(),
             )),
+            run: None,
         };
         let mut registry = Registry::new();
         registry.register(crate::connector::redb::RedbConnector);
@@ -2884,5 +2939,164 @@ mod tests {
             .find(|n| &*n.id == "src")
             .expect("the source node has stats");
         assert_eq!(src_stats.errors, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cron_schedule_executes_on_virtual_ticks_under_paused_clock() {
+        struct PerPassSource {
+            served_this_pass: bool,
+            passes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl crate::io::Source for PerPassSource {
+            fn schema(&self) -> Arc<Schema> {
+                schema()
+            }
+
+            async fn next_batch(&mut self) -> crate::SaciResult<Option<RecordBatch>> {
+                if self.served_this_pass {
+                    self.served_this_pass = false;
+                    return Ok(None);
+                }
+                self.served_this_pass = true;
+                self.passes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let batch = RecordBatch::try_new(
+                    schema(),
+                    vec![Arc::new(arrow_array::Int32Array::from(vec![42]))],
+                )?;
+                Ok(Some(batch))
+            }
+
+            async fn finish(&mut self) -> crate::SaciResult<()> {
+                self.served_this_pass = false;
+                Ok(())
+            }
+        }
+
+        let passes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (sink, _delivered) = ProbeSink::new(SinkBehaviour::Quiet);
+        let built = BuiltWorkflow::builder("cron-w")
+            .source(
+                "src",
+                "V",
+                PerPassSource {
+                    served_this_pass: false,
+                    passes: Arc::clone(&passes),
+                },
+            )
+            .sink("out", "V", sink)
+            .link("src", "out")
+            .run_mode(RunMode::Cron {
+                expr: "0 * * * * *".to_string(),
+                timezone: Some("UTC".to_string()),
+            })
+            .build()
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        let driver_cancel = cancel.clone();
+        let driver = async {
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+                tokio::time::advance(tokio::time::Duration::from_secs(60)).await;
+                tokio::task::yield_now().await;
+            }
+            driver_cancel.cancel();
+        };
+
+        let (stats, ()) = tokio::join!(built.run(cancel), driver);
+        let stats = stats.expect("cron run succeeds cleanly on cancel");
+        assert!(
+            stats.iterations >= 3,
+            "expected at least 3 cron passes under paused clock, got {}",
+            stats.iterations
+        );
+        assert!(
+            passes.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+            "source must be drained at least once per cron tick"
+        );
+    }
+
+    #[cfg(all(feature = "connector-file", feature = "codec-csv"))]
+    #[test]
+    fn per_workflow_run_overrides_service_wide_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["a.csv", "b.csv", "c.csv"] {
+            std::fs::write(dir.path().join(name), "id\n1\n").expect("write csv fixture");
+        }
+        let p = dir.path().to_string_lossy().replace('\\', "/");
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="{p}"
+run "once"
+
+workflow "cron_wf" {{
+    run "cron" expr="0 * * * * *" timezone="America/New_York"
+    codec "c1" format="csv"
+    source "in1" connector="file" component="X" codec="c1" {{
+        config path="{p}/a.csv" {{
+            field "id" type="int64" nullable=#false
+        }}
+    }}
+    sink "out1" connector="file" component="X" codec="c1" {{
+        config path="{p}/a_out.csv" {{
+            field "id" type="int64" nullable=#false
+        }}
+    }}
+    link from="in1" to="out1"
+}}
+
+workflow "interval_wf" {{
+    run "interval" every_ms=250
+    codec "c2" format="csv"
+    source "in2" connector="file" component="X" codec="c2" {{
+        config path="{p}/b.csv" {{
+            field "id" type="int64" nullable=#false
+        }}
+    }}
+    sink "out2" connector="file" component="X" codec="c2" {{
+        config path="{p}/b_out.csv" {{
+            field "id" type="int64" nullable=#false
+        }}
+    }}
+    link from="in2" to="out2"
+}}
+
+workflow "inherited_wf" {{
+    codec "c3" format="csv"
+    source "in3" connector="file" component="X" codec="c3" {{
+        config path="{p}/c.csv" {{
+            field "id" type="int64" nullable=#false
+        }}
+    }}
+    sink "out3" connector="file" component="X" codec="c3" {{
+        config path="{p}/c_out.csv" {{
+            field "id" type="int64" nullable=#false
+        }}
+    }}
+    link from="in3" to="out3"
+}}
+"#
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("per-workflow run config parses");
+        let mut factory = crate::service::ServiceBuilder::new().into_factory(&cfg);
+        let b0 = factory.build(&cfg.workflows[0]).expect("build cron_wf");
+        let b1 = factory.build(&cfg.workflows[1]).expect("build interval_wf");
+        let b2 = factory
+            .build(&cfg.workflows[2])
+            .expect("build inherited_wf");
+
+        assert_eq!(
+            b0.run,
+            RunMode::Cron {
+                expr: "0 * * * * *".to_string(),
+                timezone: Some("America/New_York".to_string())
+            }
+        );
+        assert_eq!(b1.run, RunMode::Interval { every_ms: 250 });
+        assert_eq!(b2.run, RunMode::Once);
     }
 }

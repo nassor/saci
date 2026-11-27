@@ -29,14 +29,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::inspector_wire::{
-    ServiceLifecycleReport, WorkflowRefusal, WorkflowRunState, WorkflowStatus,
+    BackfillReport, BackfillRequest, CursorResetReport, CursorResetRequest, ReloadReport,
+    ServiceLifecycleReport, WorkflowCursorsReport, WorkflowRefusal, WorkflowRunState,
+    WorkflowStatus,
 };
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SaciError;
-use crate::service::builder::{BuiltWorkflow, RunOptions, WorkflowFactory};
+use crate::service::alert::{AlertDispatcher, AlertEvent};
+use crate::service::backfill::{apply_time_window, parameterize_workflow};
+use crate::service::builder::{BuiltWorkflow, RunOptions, WorkflowFactory, rebuild_blocker};
 use crate::service::config::WorkflowSpec;
+use crate::service::config::cron::parse_timestamp_utc_ms;
 use crate::service::redb_state::RedbStateClient;
 use crate::service::standalone::WorkflowStats;
 
@@ -270,6 +275,14 @@ pub enum LifecycleError {
     /// The supervisor is gone: its runner finished, or the process is
     /// shutting down.
     Gone(String),
+    /// A parameterized backfill run failed.
+    BackfillFailed(String),
+    /// Inspecting or resetting source cursors failed.
+    CursorError(String),
+    /// Hot-reloading the service configuration failed.
+    ReloadFailed(String),
+    /// The requested capability is not available on this service (e.g. no store).
+    Unavailable(String),
 }
 
 impl std::fmt::Display for LifecycleError {
@@ -285,16 +298,46 @@ impl std::fmt::Display for LifecycleError {
                 state.as_str()
             ),
             Self::Gone(id) => write!(f, "workflow '{id}' no longer has a supervisor"),
+            Self::BackfillFailed(msg) => write!(f, "backfill failed: {msg}"),
+            Self::CursorError(msg) => write!(f, "cursor operation failed: {msg}"),
+            Self::ReloadFailed(msg) => write!(f, "reload failed: {msg}"),
+            Self::Unavailable(msg) => write!(f, "{msg}"),
         }
     }
 }
 
 impl std::error::Error for LifecycleError {}
 
+type PendingBackfill = (
+    Box<(BackfillRequest, Option<WorkflowSpec>)>,
+    oneshot::Sender<Result<BackfillReport, String>>,
+);
+
+/// Entry returned by [`LifecycleRegistry::standalone_entries`].
+pub(crate) type StandaloneEntry = (String, WorkflowRunState, Option<Arc<RwLock<WorkflowStats>>>);
+
+/// Live reload request delivered from the HTTP control plane to the service loop.
+pub(crate) struct ReloadEnvelope {
+    pub(crate) kdl: Option<String>,
+    pub(crate) reply: oneshot::Sender<Result<ReloadReport, String>>,
+}
+
+/// Internal supervisor message: lifecycle verb, hot reload, or ad-hoc backfill.
+enum SupervisorAction {
+    Command(WorkflowCommand, oneshot::Sender<WorkflowStatus>),
+    Reload(
+        Box<WorkflowSpec>,
+        oneshot::Sender<Result<WorkflowStatus, String>>,
+    ),
+    Backfill(
+        Box<(BackfillRequest, Option<WorkflowSpec>)>,
+        oneshot::Sender<Result<BackfillReport, String>>,
+    ),
+}
+
 /// One command plus the channel its reply goes back on.
 struct Envelope {
-    command: WorkflowCommand,
-    reply: oneshot::Sender<WorkflowStatus>,
+    action: SupervisorAction,
 }
 
 /// The supervisor's end of one workflow's control channels.
@@ -304,6 +347,7 @@ struct Envelope {
 pub struct SupervisorChannels {
     commands: mpsc::UnboundedReceiver<Envelope>,
     status: watch::Sender<WorkflowStatus>,
+    alerts: AlertDispatcher,
 }
 
 // ── Registry ─────────────────────────────────────────────────────────────────
@@ -312,6 +356,8 @@ struct Entry {
     id: String,
     status: watch::Receiver<WorkflowStatus>,
     commands: mpsc::UnboundedSender<Envelope>,
+    spec: Option<WorkflowSpec>,
+    live_stats: Option<Arc<RwLock<WorkflowStats>>>,
 }
 
 /// Builds a [`LifecycleRegistry`], one workflow at a time.
@@ -322,12 +368,40 @@ struct Entry {
 #[derive(Default)]
 pub struct LifecycleRegistryBuilder {
     entries: Vec<Entry>,
+    state_client: Option<Arc<RedbStateClient>>,
+    reload_tx: Option<mpsc::UnboundedSender<ReloadEnvelope>>,
+    alerts: AlertDispatcher,
+    raw_kdl: Option<String>,
 }
 
 impl LifecycleRegistryBuilder {
     /// An empty builder.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the persistent state client used by cursor inspect/reset routes.
+    pub(crate) fn state_client(mut self, client: Option<Arc<RedbStateClient>>) -> Self {
+        self.state_client = client;
+        self
+    }
+
+    /// Attach the raw (pre-substitution) KDL configuration text for parameterized backfills.
+    pub(crate) fn raw_kdl(mut self, raw: Option<String>) -> Self {
+        self.raw_kdl = raw;
+        self
+    }
+
+    /// Attach the live config reload channel handled by `serve`.
+    pub(crate) fn reload_channel(mut self, tx: mpsc::UnboundedSender<ReloadEnvelope>) -> Self {
+        self.reload_tx = Some(tx);
+        self
+    }
+
+    /// Attach the outbound alert dispatcher shared with workflow supervisors.
+    pub(crate) fn alerts(mut self, alerts: AlertDispatcher) -> Self {
+        self.alerts = alerts;
+        self
     }
 
     /// Register one workflow and return its supervisor's channels.
@@ -339,6 +413,19 @@ impl LifecycleRegistryBuilder {
         id: &str,
         name: Option<&str>,
         blocker: Option<&'static str>,
+    ) -> SupervisorChannels {
+        self.register_with_spec(id, name, blocker, None, None)
+    }
+
+    /// Register one workflow together with its declared [`WorkflowSpec`] and
+    /// live stats handle.
+    pub(crate) fn register_with_spec(
+        &mut self,
+        id: &str,
+        name: Option<&str>,
+        blocker: Option<&'static str>,
+        spec: Option<WorkflowSpec>,
+        live_stats: Option<Arc<RwLock<WorkflowStats>>>,
     ) -> SupervisorChannels {
         let initial = WorkflowStatus {
             id: id.to_string(),
@@ -356,30 +443,50 @@ impl LifecycleRegistryBuilder {
             id: id.to_string(),
             status: status_rx,
             commands: command_tx,
+            spec,
+            live_stats,
         });
         SupervisorChannels {
             commands: command_rx,
             status: status_tx,
+            alerts: self.alerts.clone(),
         }
     }
 
     /// Freeze the registry.
     pub fn build(self) -> LifecycleRegistry {
         LifecycleRegistry {
-            entries: self.entries,
+            entries: std::sync::RwLock::new(self.entries),
+            state_client: self.state_client,
+            reload_tx: self.reload_tx,
+            alerts: self.alerts,
+            raw_kdl: std::sync::RwLock::new(self.raw_kdl),
         }
     }
 }
 
 /// Every controllable workflow in this process, in declaration order.
 pub struct LifecycleRegistry {
-    entries: Vec<Entry>,
+    entries: std::sync::RwLock<Vec<Entry>>,
+    state_client: Option<Arc<RedbStateClient>>,
+    reload_tx: Option<mpsc::UnboundedSender<ReloadEnvelope>>,
+    alerts: AlertDispatcher,
+    raw_kdl: std::sync::RwLock<Option<String>>,
 }
 
 impl LifecycleRegistry {
+    /// Replace the cached raw KDL text after a successful hot-reload.
+    pub(crate) fn set_raw_kdl(&self, raw: String) {
+        *self
+            .raw_kdl
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(raw);
+    }
     /// Every workflow's status, in declaration order.
     pub fn list(&self) -> Vec<WorkflowStatus> {
         self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .map(|entry| entry.status.borrow().clone())
             .collect()
@@ -387,16 +494,107 @@ impl LifecycleRegistry {
 
     /// One workflow's status.
     pub fn get(&self, id: &str) -> Option<WorkflowStatus> {
-        self.entry(id).map(|entry| entry.status.borrow().clone())
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.status.borrow().clone())
     }
 
     /// One workflow's state, for `GET /status`.
     pub fn state_of(&self, id: &str) -> Option<WorkflowRunState> {
-        self.entry(id).map(|entry| entry.status.borrow().state)
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.status.borrow().state)
     }
 
-    fn entry(&self, id: &str) -> Option<&Entry> {
-        self.entries.iter().find(|entry| entry.id == id)
+    /// Live stats handles and states for every registered workflow, in current order.
+    pub(crate) fn standalone_entries(&self) -> Vec<StandaloneEntry> {
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.clone(),
+                    entry.status.borrow().state,
+                    entry.live_stats.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Dynamically register a workflow added during live hot reload.
+    pub(crate) fn register_dynamic(
+        &self,
+        spec: &WorkflowSpec,
+        live_stats: Option<Arc<RwLock<WorkflowStats>>>,
+    ) -> SupervisorChannels {
+        let blocker = rebuild_blocker(spec);
+        let initial = WorkflowStatus {
+            id: spec.id.clone(),
+            name: spec.name.clone(),
+            state: WorkflowRunState::Starting,
+            since_unix_ms: now_unix_ms(),
+            runs: 0,
+            restartable: blocker.is_none(),
+            error: None,
+            restart_blocked_reason: blocker.map(str::to_string),
+        };
+        let (status_tx, status_rx) = watch::channel(initial);
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        self.entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Entry {
+                id: spec.id.clone(),
+                status: status_rx,
+                commands: command_tx,
+                spec: Some(spec.clone()),
+                live_stats,
+            });
+        SupervisorChannels {
+            commands: command_rx,
+            status: status_tx,
+            alerts: self.alerts.clone(),
+        }
+    }
+
+    /// Remove a workflow deleted during live hot reload.
+    pub(crate) fn remove_workflow(&self, id: &str) {
+        self.entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|entry| entry.id != id);
+    }
+
+    /// Update the stored [`WorkflowSpec`] and send a live reload message to `id`'s supervisor.
+    pub(crate) fn send_reload_workflow(
+        &self,
+        id: &str,
+        spec: WorkflowSpec,
+    ) -> Result<oneshot::Receiver<Result<WorkflowStatus, String>>, LifecycleError> {
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| LifecycleError::UnknownWorkflow(id.to_string()))?;
+        entry.spec = Some(spec.clone());
+        let (reply_tx, reply_rx) = oneshot::channel();
+        entry
+            .commands
+            .send(Envelope {
+                action: SupervisorAction::Reload(Box::new(spec), reply_tx),
+            })
+            .map_err(|_| LifecycleError::Gone(id.to_string()))?;
+        Ok(reply_rx)
     }
 
     /// Validate a verb against the workflow's current state, dispatch it, and
@@ -416,10 +614,21 @@ impl LifecycleRegistry {
         id: &str,
         command: WorkflowCommand,
     ) -> Result<(WorkflowStatus, bool), LifecycleError> {
-        let entry = self
-            .entry(id)
-            .ok_or_else(|| LifecycleError::UnknownWorkflow(id.to_string()))?;
-        let current = entry.status.borrow().clone();
+        let (current, commands_tx, status_rx) = {
+            let entries = self
+                .entries
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| LifecycleError::UnknownWorkflow(id.to_string()))?;
+            (
+                entry.status.borrow().clone(),
+                entry.commands.clone(),
+                entry.status.clone(),
+            )
+        };
 
         if !current.restartable
             && matches!(
@@ -448,11 +657,9 @@ impl LifecycleRegistry {
         }
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        entry
-            .commands
+        commands_tx
             .send(Envelope {
-                command,
-                reply: reply_tx,
+                action: SupervisorAction::Command(command, reply_tx),
             })
             .map_err(|_| LifecycleError::Gone(id.to_string()))?;
 
@@ -460,7 +667,7 @@ impl LifecycleRegistry {
             Ok(Ok(status)) => Ok((status, true)),
             // The supervisor dropped the reply without answering: it returned.
             Ok(Err(_)) => Err(LifecycleError::Gone(id.to_string())),
-            Err(_) => Ok((entry.status.borrow().clone(), false)),
+            Err(_) => Ok((status_rx.borrow().clone(), false)),
         }
     }
 
@@ -477,8 +684,16 @@ impl LifecycleRegistry {
     /// [`LIFECYCLE_ACK_BUDGET`]; done in sequence, a service of ten workflows
     /// could take fifty seconds to answer.
     pub async fn command_all(&self, command: WorkflowCommand) -> ServiceLifecycleReport {
-        let outcomes = futures::future::join_all(self.entries.iter().map(|entry| async move {
-            (entry.id.clone(), self.command(&entry.id, command).await)
+        let ids: Vec<String> = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let outcomes = futures::future::join_all(ids.into_iter().map(|id| async move {
+            let outcome = self.command(&id, command).await;
+            (id, outcome)
         }))
         .await;
 
@@ -503,6 +718,233 @@ impl LifecycleRegistry {
             settled,
         }
     }
+
+    /// Trigger a parameterized ad-hoc one-shot backfill for workflow `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::UnknownWorkflow`], [`LifecycleError::Gone`],
+    /// or [`LifecycleError::BackfillFailed`].
+    pub async fn backfill(
+        &self,
+        id: &str,
+        request: BackfillRequest,
+    ) -> Result<BackfillReport, LifecycleError> {
+        let commands_tx = {
+            let entries = self
+                .entries
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| LifecycleError::UnknownWorkflow(id.to_string()))?;
+            entry.commands.clone()
+        };
+        let override_spec = {
+            let mut overrides: std::collections::HashMap<String, String> = request
+                .params
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if let Some(start) = &request.start_date {
+                overrides.insert("start_date".to_string(), start.clone());
+            }
+            if let Some(end) = &request.end_date {
+                overrides.insert("end_date".to_string(), end.clone());
+            }
+            let raw = self
+                .raw_kdl
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if !overrides.is_empty()
+                && let Some(raw_text) = raw
+            {
+                let cfg =
+                    super::config::ServiceConfig::from_kdl_with_overrides(&raw_text, &overrides)
+                        .map_err(|e| LifecycleError::BackfillFailed(e.to_string()))?;
+                cfg.workflows.into_iter().find(|w| w.id == id)
+            } else {
+                None
+            }
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        commands_tx
+            .send(Envelope {
+                action: SupervisorAction::Backfill(Box::new((request, override_spec)), reply_tx),
+            })
+            .map_err(|_| LifecycleError::Gone(id.to_string()))?;
+
+        match reply_rx.await {
+            Ok(Ok(report)) => Ok(report),
+            Ok(Err(msg)) => Err(LifecycleError::BackfillFailed(msg)),
+            Err(_) => Err(LifecycleError::Gone(id.to_string())),
+        }
+    }
+
+    /// Inspect persisted source cursors, processor priors, and checkpoint history
+    /// for workflow `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::UnknownWorkflow`], [`LifecycleError::Unavailable`],
+    /// or [`LifecycleError::CursorError`].
+    pub async fn cursors(&self, id: &str) -> Result<WorkflowCursorsReport, LifecycleError> {
+        let spec = {
+            let entries = self
+                .entries
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| LifecycleError::UnknownWorkflow(id.to_string()))?;
+            entry.spec.clone().ok_or_else(|| {
+                LifecycleError::Unavailable(format!(
+                    "workflow '{id}' metadata is not available for cursor inspection"
+                ))
+            })?
+        };
+        let Some(client) = &self.state_client else {
+            return Ok(WorkflowCursorsReport {
+                workflow: id.to_string(),
+                cursors: Vec::new(),
+                processors_with_state: Vec::new(),
+                checkpoints_unix_ms: Vec::new(),
+            });
+        };
+        let source_ids: Vec<String> = spec.sources.iter().map(|s| s.id.clone()).collect();
+        let processor_ids: Vec<String> = processor_ids_of(&spec);
+        client
+            .inspect_workflow(id, &source_ids, &processor_ids)
+            .await
+            .map_err(|e| LifecycleError::CursorError(e.to_string()))
+    }
+
+    /// Reset or roll back source cursors and processor priors for workflow `id`.
+    ///
+    /// Restarts the workflow if it is currently `Running` or `Paused` so the
+    /// reset offsets/priors take effect immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::UnknownWorkflow`], [`LifecycleError::Unavailable`],
+    /// or [`LifecycleError::CursorError`].
+    pub async fn reset_cursors(
+        &self,
+        id: &str,
+        request: CursorResetRequest,
+    ) -> Result<CursorResetReport, LifecycleError> {
+        let (spec, current_state) = {
+            let entries = self
+                .entries
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| LifecycleError::UnknownWorkflow(id.to_string()))?;
+            let spec = entry.spec.clone().ok_or_else(|| {
+                LifecycleError::Unavailable(format!(
+                    "workflow '{id}' metadata is not available for cursor reset"
+                ))
+            })?;
+            (spec, entry.status.borrow().state)
+        };
+        let Some(client) = &self.state_client else {
+            return Err(LifecycleError::Unavailable(
+                "cursor reset requires a configured `store \"redb\"` block".to_string(),
+            ));
+        };
+
+        let all_sources: Vec<String> = spec.sources.iter().map(|s| s.id.clone()).collect();
+        let target_sources = match &request.source {
+            Some(s) => {
+                if !all_sources.iter().any(|known| known == s) {
+                    return Err(LifecycleError::CursorError(format!(
+                        "workflow '{id}' declares no source '{s}'"
+                    )));
+                }
+                vec![s.clone()]
+            }
+            None => all_sources,
+        };
+
+        let to_unix_ms = match (request.to_unix_ms, request.timestamp.as_deref()) {
+            (Some(ms), _) => Some(ms),
+            (None, Some(ts)) => {
+                let signed =
+                    parse_timestamp_utc_ms(ts, false).map_err(LifecycleError::CursorError)?;
+                let unsigned = u64::try_from(signed).map_err(|_| {
+                    LifecycleError::CursorError(format!("timestamp '{ts}' is before Unix epoch"))
+                })?;
+                Some(unsigned)
+            }
+            (None, None) => None,
+        };
+
+        let processor_ids = processor_ids_of(&spec);
+        let reset_priors = request.reset_priors.unwrap_or(true);
+        let report = client
+            .reset_workflow(
+                id,
+                &target_sources,
+                &processor_ids,
+                to_unix_ms,
+                request.items_processed,
+                reset_priors,
+            )
+            .await
+            .map_err(|e| LifecycleError::CursorError(e.to_string()))?;
+
+        if matches!(
+            current_state,
+            WorkflowRunState::Running | WorkflowRunState::Paused | WorkflowRunState::Pausing
+        ) {
+            let _ = self.command(id, WorkflowCommand::Restart).await;
+        }
+        Ok(report)
+    }
+
+    /// Trigger a live configuration and processor reload in `serve`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::Unavailable`] if the service is not running
+    /// with reload support, or [`LifecycleError::ReloadFailed`] if parsing,
+    /// validation, or build fails.
+    pub async fn reload(&self, kdl: Option<String>) -> Result<ReloadReport, LifecycleError> {
+        let Some(tx) = &self.reload_tx else {
+            return Err(LifecycleError::Unavailable(
+                "live configuration reload is not mounted on this registry".to_string(),
+            ));
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(ReloadEnvelope {
+            kdl,
+            reply: reply_tx,
+        })
+        .map_err(|_| LifecycleError::ReloadFailed("service reload loop has stopped".to_string()))?;
+
+        match reply_rx.await {
+            Ok(Ok(report)) => Ok(report),
+            Ok(Err(msg)) => Err(LifecycleError::ReloadFailed(msg)),
+            Err(_) => Err(LifecycleError::ReloadFailed(
+                "reload handler dropped without answering".to_string(),
+            )),
+        }
+    }
+}
+
+fn processor_ids_of(spec: &WorkflowSpec) -> Vec<String> {
+    spec.wasm
+        .iter()
+        .map(|w| w.id.clone())
+        .chain(spec.plugin.iter().map(|p| p.id.clone()))
+        .chain(spec.operator.iter().map(|o| o.id.clone()))
+        .collect()
 }
 
 /// What [`LifecycleRegistry::command`] does with one verb.
@@ -656,6 +1098,52 @@ async fn next_command(
     }
 }
 
+/// Execute a single parameterized one-shot backfill pass and fold its counters
+/// into `total` and `live_stats`.
+pub(crate) async fn execute_backfill(
+    workflow: &WorkflowSpec,
+    request: &BackfillRequest,
+    factory: &RefCell<WorkflowFactory>,
+    state: &Option<Arc<RedbStateClient>>,
+    live_stats: &Option<Arc<RwLock<WorkflowStats>>>,
+    total: &mut WorkflowStats,
+    cancel: &CancellationToken,
+) -> Result<BackfillReport, String> {
+    let started_at_unix_ms = now_unix_ms();
+    let started = std::time::Instant::now();
+    let param_spec = parameterize_workflow(workflow, request).map_err(|e| e.to_string())?;
+    let mut built = factory
+        .borrow_mut()
+        .build(&param_spec)
+        .map_err(|e| e.to_string())?;
+    apply_time_window(&mut built, request).map_err(|e| e.to_string())?;
+
+    let mut options = RunOptions::new(cancel.child_token());
+    if !request.reset_state
+        && let Some(client) = state
+    {
+        options = options.state(Arc::clone(client));
+    }
+    let stats = built.run(options).await.map_err(|e| e.to_string())?;
+    let report = BackfillReport {
+        workflow: workflow.id.clone(),
+        started_at_unix_ms,
+        duration_ms: started.elapsed().as_millis() as u64,
+        iterations: stats.iterations,
+        rows_processed: stats.rows_processed,
+        source_batches_drained: stats.source_batches_drained,
+        sink_batches_written: stats.sink_batches_written,
+        iteration_errors: stats.iteration_errors,
+        start_date: request.start_date.clone(),
+        end_date: request.end_date.clone(),
+    };
+    accumulate(total, stats);
+    if let Some(shared) = live_stats {
+        *shared.write().await = total.clone();
+    }
+    Ok(report)
+}
+
 /// Drive one workflow's runner, honouring lifecycle commands.
 ///
 /// With `control` `None` this is exactly today's behaviour: run `initial`
@@ -665,8 +1153,8 @@ async fn next_command(
 /// it fails with no way to restart it.
 ///
 /// `factory` is shared by every supervisor in the process: they are polled by
-/// one `join_all` on one task, so a `RefCell` is enough and the borrow is held
-/// only across the synchronous [`WorkflowFactory::build`] call.
+/// one task, so a `RefCell` is enough and the borrow is held only across the
+/// synchronous [`WorkflowFactory::build`] call.
 ///
 /// # Errors
 ///
@@ -683,10 +1171,15 @@ pub async fn run_supervised(
     factory: &RefCell<WorkflowFactory>,
     control: Option<SupervisorChannels>,
 ) -> Result<WorkflowStats, SaciError> {
-    let (mut commands, status) = match control {
-        Some(channels) => (Some(channels.commands), Some(channels.status)),
-        None => (None, None),
+    let (mut commands, status, alerts) = match control {
+        Some(channels) => (
+            Some(channels.commands),
+            Some(channels.status),
+            channels.alerts,
+        ),
+        None => (None, None, AlertDispatcher::noop()),
     };
+    let mut workflow = workflow.clone();
     let controlled = commands.is_some();
     let current = match &status {
         Some(tx) => tx.borrow().clone(),
@@ -711,23 +1204,55 @@ pub async fn run_supervised(
     let mut initial = Some(initial);
     let mut run_now = true;
     let mut cancelled = false;
+    let mut pending_reload: Option<oneshot::Sender<Result<WorkflowStatus, String>>> = None;
+    let mut pending_backfill: Option<PendingBackfill> = None;
 
     loop {
         if !run_now {
             // Parked with no runner: only a command or shutdown moves us.
             tokio::select! {
-                _ = cancel.cancelled() => return Ok(total),
+                _ = cancel.cancelled() => {
+                    if let Some(reply) = pending_reload.take() {
+                        let _ = reply.send(Err("service shutting down".to_string()));
+                    }
+                    return Ok(total);
+                }
                 envelope = next_command(&mut commands) => match envelope {
-                    Some(envelope) => match envelope.command {
-                        WorkflowCommand::Start | WorkflowCommand::Restart => {
+                    Some(envelope) => match envelope.action {
+                        SupervisorAction::Command(
+                            cmd @ (WorkflowCommand::Start | WorkflowCommand::Restart),
+                            reply,
+                        ) => {
                             publisher.publish(WorkflowRunState::Starting, None);
-                            publisher.accept(envelope.command, envelope.reply);
+                            publisher.accept(cmd, reply);
                             run_now = true;
                         }
-                        // The registry's transition table refuses these from a
-                        // parked state; answer rather than drop the reply.
-                        _ => {
-                            let _ = envelope.reply.send(publisher.current.clone());
+                        SupervisorAction::Command(_, reply) => {
+                            // The registry's transition table refuses these from a
+                            // parked state; answer rather than drop the reply.
+                            let _ = reply.send(publisher.current.clone());
+                        }
+                        SupervisorAction::Reload(new_spec, reply) => {
+                            workflow = *new_spec;
+                            publisher.current.name = workflow.name.clone();
+                            publisher.publish(WorkflowRunState::Starting, None);
+                            pending_reload = Some(reply);
+                            run_now = true;
+                        }
+                        SupervisorAction::Backfill(payload, reply) => {
+                            let (request, override_spec) = *payload;
+                            let target_spec = override_spec.as_ref().unwrap_or(&workflow);
+                            let res = execute_backfill(
+                                target_spec,
+                                &request,
+                                factory,
+                                &state,
+                                &live_stats,
+                                &mut total,
+                                &cancel,
+                            )
+                            .await;
+                            let _ = reply.send(res);
                         }
                     },
                     // Every sender is gone: nothing can start us again.
@@ -740,15 +1265,46 @@ pub async fn run_supervised(
             continue;
         }
 
+        if let Some((payload, reply)) = pending_backfill.take() {
+            let (request, override_spec) = *payload;
+            let target_spec = override_spec.as_ref().unwrap_or(&workflow);
+            let res = execute_backfill(
+                target_spec,
+                &request,
+                factory,
+                &state,
+                &live_stats,
+                &mut total,
+                &cancel,
+            )
+            .await;
+            let _ = reply.send(res);
+            if cancel.is_cancelled() {
+                if let Some(reload_reply) = pending_reload.take() {
+                    let _ = reload_reply.send(Err("service shutting down".to_string()));
+                }
+                return Ok(total);
+            }
+        }
+
         let built = match initial.take() {
             Some(built) => built,
             None => {
                 publisher.publish(WorkflowRunState::Starting, None);
-                let result = factory.borrow_mut().build(workflow);
+                let result = factory.borrow_mut().build(&workflow);
                 match result {
                     Ok(built) => built,
                     Err(e) => {
-                        publisher.publish(WorkflowRunState::Failed, Some(e.to_string()));
+                        let err_msg = e.to_string();
+                        publisher.publish(WorkflowRunState::Failed, Some(err_msg.clone()));
+                        alerts.emit(AlertEvent::workflow_failed(
+                            &workflow.id,
+                            &err_msg,
+                            publisher.current.runs,
+                        ));
+                        if let Some(reply) = pending_reload.take() {
+                            let _ = reply.send(Err(err_msg));
+                        }
                         if controlled && publisher.current.restartable && !cancelled {
                             run_now = false;
                             continue;
@@ -761,6 +1317,9 @@ pub async fn run_supervised(
 
         publisher.current.runs += 1;
         publisher.publish(WorkflowRunState::Running, None);
+        if let Some(reply) = pending_reload.take() {
+            let _ = reply.send(Ok(publisher.current.clone()));
+        }
 
         let run_token = cancel.child_token();
         let (pause_handle, gate) = PauseHandle::new();
@@ -816,8 +1375,8 @@ pub async fn run_supervised(
                     envelope = next_command(&mut commands), if commands_open => {
                         match envelope {
                             None => commands_open = false,
-                            Some(envelope) => match envelope.command {
-                                WorkflowCommand::Pause => {
+                            Some(envelope) => match envelope.action {
+                                SupervisorAction::Command(WorkflowCommand::Pause, reply) => {
                                     if !matches!(
                                         publisher.current.state,
                                         WorkflowRunState::Pausing | WorkflowRunState::Paused
@@ -825,9 +1384,9 @@ pub async fn run_supervised(
                                         pause_handle.request_pause();
                                         publisher.publish(WorkflowRunState::Pausing, None);
                                     }
-                                    publisher.accept(envelope.command, envelope.reply);
+                                    publisher.accept(WorkflowCommand::Pause, reply);
                                 }
-                                WorkflowCommand::Resume => {
+                                SupervisorAction::Command(WorkflowCommand::Resume, reply) => {
                                     pause_handle.request_resume();
                                     // A runner that never reached its pause
                                     // point will never report unparking, so
@@ -841,21 +1400,40 @@ pub async fn run_supervised(
                                     {
                                         publisher.publish(WorkflowRunState::Running, None);
                                     }
-                                    publisher.accept(envelope.command, envelope.reply);
+                                    publisher.accept(WorkflowCommand::Resume, reply);
                                 }
-                                WorkflowCommand::Stop | WorkflowCommand::Restart => {
-                                    after = Some(if envelope.command == WorkflowCommand::Stop {
+                                SupervisorAction::Command(
+                                    cmd @ (WorkflowCommand::Stop | WorkflowCommand::Restart),
+                                    reply,
+                                ) => {
+                                    after = Some(if cmd == WorkflowCommand::Stop {
                                         AfterRun::Stop
                                     } else {
                                         AfterRun::Restart
                                     });
                                     publisher.publish(WorkflowRunState::Stopping, None);
-                                    publisher.accept(envelope.command, envelope.reply);
+                                    publisher.accept(cmd, reply);
                                     pause_handle.request_resume();
                                     run_token.cancel();
                                 }
-                                WorkflowCommand::Start => {
-                                    let _ = envelope.reply.send(publisher.current.clone());
+                                SupervisorAction::Command(WorkflowCommand::Start, reply) => {
+                                    let _ = reply.send(publisher.current.clone());
+                                }
+                                SupervisorAction::Reload(new_spec, reply) => {
+                                    workflow = *new_spec;
+                                    publisher.current.name = workflow.name.clone();
+                                    after = Some(AfterRun::Restart);
+                                    pending_reload = Some(reply);
+                                    publisher.publish(WorkflowRunState::Stopping, None);
+                                    pause_handle.request_resume();
+                                    run_token.cancel();
+                                }
+                                SupervisorAction::Backfill(payload, reply) => {
+                                    after = Some(AfterRun::Restart);
+                                    pending_backfill = Some((payload, reply));
+                                    publisher.publish(WorkflowRunState::Stopping, None);
+                                    pause_handle.request_resume();
+                                    run_token.cancel();
                                 }
                             },
                         }
@@ -873,6 +1451,13 @@ pub async fn run_supervised(
             Ok(stats) => {
                 accumulate(&mut total, stats);
                 if cancelled {
+                    if let Some((payload, reply)) = pending_backfill.take() {
+                        let _ = reply.send(Err("service shutting down".to_string()));
+                        let _ = payload;
+                    }
+                    if let Some(reply) = pending_reload.take() {
+                        let _ = reply.send(Err("service shutting down".to_string()));
+                    }
                     publisher.publish(WorkflowRunState::Stopped, None);
                     return Ok(total);
                 }
@@ -891,7 +1476,16 @@ pub async fn run_supervised(
                 }
             }
             Err(e) => {
-                publisher.publish(WorkflowRunState::Failed, Some(e.to_string()));
+                let err_msg = e.to_string();
+                publisher.publish(WorkflowRunState::Failed, Some(err_msg.clone()));
+                alerts.emit(AlertEvent::workflow_failed(
+                    &workflow.id,
+                    &err_msg,
+                    publisher.current.runs,
+                ));
+                if let Some(reply) = pending_reload.take() {
+                    let _ = reply.send(Err(err_msg));
+                }
                 if cancelled || !controlled || !publisher.current.restartable {
                     return Err(e);
                 }
@@ -1034,7 +1628,9 @@ mod tests {
     #[tokio::test]
     async fn a_dispatched_command_with_no_supervisor_is_gone() {
         let mut builder = LifecycleRegistryBuilder::new();
-        let SupervisorChannels { commands, status } = builder.register("w", None, None);
+        let SupervisorChannels {
+            commands, status, ..
+        } = builder.register("w", None, None);
         // Publish `Running` so `pause` dispatches, then drop the receiver: a
         // supervisor that returned is exactly this shape.
         status.send_replace(WorkflowStatus {

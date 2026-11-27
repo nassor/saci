@@ -90,6 +90,11 @@ where
             }
             Command::Status(args) => commands::status::run(&parsed.global, args).await,
             Command::Cluster { cmd } => commands::cluster::run(&parsed.global, cmd).await,
+            Command::Backfill(args) => {
+                commands::backfill::run_backfill(&parsed.global, args, &customize).await
+            }
+            Command::Cursor { cmd } => commands::backfill::run_cursor(&parsed.global, cmd).await,
+            Command::Reload(args) => commands::backfill::run_reload(&parsed.global, args).await,
         };
         match result {
             Ok(()) => ExitCode::SUCCESS,
@@ -147,6 +152,15 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ClusterCmd,
     },
+    /// Trigger a parameterized historical backfill for one workflow.
+    Backfill(BackfillArgs),
+    /// Inspect or reset persisted source cursors and processor state priors.
+    Cursor {
+        #[command(subcommand)]
+        cmd: CursorCmd,
+    },
+    /// Live-reload workflow and service configuration without restarting.
+    Reload(ReloadArgs),
 }
 
 /// Arguments for the `serve` subcommand.
@@ -235,4 +249,84 @@ pub enum ClusterCmd {
 pub enum LogFormatArg {
     Pretty,
     Json,
+}
+
+/// Arguments for the `backfill` subcommand.
+#[derive(clap::Args, Debug)]
+pub struct BackfillArgs {
+    /// Target workflow identifier.
+    pub workflow: String,
+    /// Optional inclusive start timestamp (`YYYY-MM-DD`, RFC3339, or unix_ms).
+    #[arg(long)]
+    pub start: Option<String>,
+    /// Optional inclusive end timestamp (`YYYY-MM-DD`, RFC3339, or unix_ms).
+    #[arg(long)]
+    pub end: Option<String>,
+    /// Event-time column used to filter records to `[--start, --end]`.
+    #[arg(long)]
+    pub time_field: Option<String>,
+    /// Custom `KEY=VALUE` substitution parameter (repeatable).
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    pub params: Vec<String>,
+    /// Start with fresh processor state instead of loading persisted priors.
+    #[arg(long)]
+    pub reset_state: bool,
+    /// Base URL of a running service node (for example `http://localhost:8080`).
+    ///
+    /// Defaults to `http://{http.bind}` from `--config`. Ignored with `--local`.
+    #[arg(long, env = "SACI_URL")]
+    pub url: Option<String>,
+    /// Execute one local backfill pass directly from `--config` instead of
+    /// calling a running service HTTP endpoint.
+    #[arg(long)]
+    pub local: bool,
+}
+
+/// Cursor inspection and time-travel reset subcommands.
+#[derive(Subcommand, Debug)]
+pub enum CursorCmd {
+    /// Show current cursors and historical checkpoint timestamps for a workflow.
+    List {
+        /// Target workflow identifier.
+        workflow: String,
+        /// Base URL of the running service node.
+        #[arg(long, env = "SACI_URL")]
+        url: Option<String>,
+    },
+    /// Roll back cursors/priors to a historical checkpoint or reset to origin.
+    Reset {
+        /// Target workflow identifier.
+        workflow: String,
+        /// Reset only this source node ID (default: all sources in workflow).
+        #[arg(long)]
+        source: Option<String>,
+        /// Roll back to the newest checkpoint at or before this timestamp
+        /// (`YYYY-MM-DD`, RFC3339, or unix_ms).
+        #[arg(long, value_name = "TIMESTAMP")]
+        to: Option<String>,
+        /// Explicit Unix millisecond checkpoint timestamp.
+        #[arg(long, value_name = "UNIX_MS")]
+        to_unix_ms: Option<u64>,
+        /// Explicit `items_processed` value to set on the reset cursor(s).
+        #[arg(long)]
+        items_processed: Option<u64>,
+        /// Keep existing processor state priors rather than rolling them back or clearing them.
+        #[arg(long)]
+        keep_priors: bool,
+        /// Base URL of the running service node.
+        #[arg(long, env = "SACI_URL")]
+        url: Option<String>,
+    },
+}
+
+/// Arguments for the `reload` subcommand.
+#[derive(clap::Args, Debug)]
+pub struct ReloadArgs {
+    /// Path to a replacement KDL config file to upload (default: ask the service
+    /// to reload from its startup `--config` path on disk).
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+    /// Base URL of the running service node.
+    #[arg(long, env = "SACI_URL")]
+    pub url: Option<String>,
 }

@@ -50,8 +50,7 @@ use crate::window::WindowSpec;
 #[cfg(all(test, feature = "connector-channel"))]
 use super::builder::BuiltEdge;
 use super::builder::{BuiltNode, BuiltNodeKind};
-use super::config::ServiceConfig;
-use super::config::ServiceMode;
+use super::config::{NodeKind, ServiceConfig, ServiceMode, WorkflowSpec};
 use super::registry::Registry;
 
 /// Read a dotted key out of a config table, rendering only scalars.
@@ -310,6 +309,22 @@ fn channel_bridge_edges(config: &ServiceConfig) -> Vec<BridgeEdge> {
     out
 }
 
+/// Build the topology for one workflow from its [`WorkflowSpec`] and [`BuiltNode`]s.
+pub(crate) fn workflow_topology(
+    config: &ServiceConfig,
+    registry: &Registry,
+    spec: &WorkflowSpec,
+    nodes: &[BuiltNode],
+) -> WorkflowTopology {
+    let (nodes, edges) = workflow_topo_parts(config, registry, nodes);
+    WorkflowTopology {
+        id: spec.id.clone(),
+        name: spec.name.clone(),
+        nodes,
+        edges,
+    }
+}
+
 /// Build the topology for every workflow this process runs.
 ///
 /// `registry` is the one the workflows were built from: each node's
@@ -332,15 +347,7 @@ pub fn build_topology(
         .workflows
         .iter()
         .zip(workflow_nodes)
-        .map(|(spec, nodes)| {
-            let (nodes, edges) = workflow_topo_parts(config, registry, nodes);
-            WorkflowTopology {
-                id: spec.id.clone(),
-                name: spec.name.clone(),
-                nodes,
-                edges,
-            }
-        })
+        .map(|(spec, nodes)| workflow_topology(config, registry, spec, nodes))
         .collect();
 
     Topology {
@@ -352,6 +359,212 @@ pub fn build_topology(
         },
         workflows,
         bridges: channel_bridge_edges(config),
+    }
+}
+
+/// Rebuild [`Topology`] after a live configuration reload, bumping `version`
+/// and preserving existing [`RuntimeInfo`] for processor nodes not supplied in
+/// `built_updates`.
+pub(crate) fn update_topology_from_config(
+    config: &ServiceConfig,
+    registry: &Registry,
+    existing: &Topology,
+    built_updates: &HashMap<String, WorkflowTopology>,
+) -> Topology {
+    let existing_by_wf: HashMap<&str, &WorkflowTopology> = existing
+        .workflows
+        .iter()
+        .map(|w| (w.id.as_str(), w))
+        .collect();
+
+    let workflows = config
+        .workflows
+        .iter()
+        .map(|spec| {
+            if let Some(fresh) = built_updates.get(&spec.id) {
+                return fresh.clone();
+            }
+            let prev_nodes: HashMap<&str, &TopoNode> = existing_by_wf
+                .get(spec.id.as_str())
+                .map(|w| w.nodes.iter().map(|n| (n.id.as_str(), n)).collect())
+                .unwrap_or_default();
+            workflow_topology_from_spec(registry, spec, &prev_nodes)
+        })
+        .collect();
+
+    Topology {
+        version: existing.version.saturating_add(1),
+        node_id: config.node.id.to_string(),
+        mode: match config.mode {
+            ServiceMode::Standalone { .. } => "standalone".to_string(),
+            ServiceMode::Cluster { .. } => "cluster".to_string(),
+        },
+        workflows,
+        bridges: channel_bridge_edges(config),
+    }
+}
+
+fn workflow_topology_from_spec(
+    registry: &Registry,
+    spec: &WorkflowSpec,
+    prev_nodes: &HashMap<&str, &TopoNode>,
+) -> WorkflowTopology {
+    let meta = spec.nodes();
+    let order = spec
+        .topological_order()
+        .unwrap_or_else(|_| (0..meta.len()).collect());
+
+    let mut topo_nodes = Vec::with_capacity(order.len());
+    for nat_idx in order {
+        let Some(&(id, kind)) = meta.get(nat_idx) else {
+            continue;
+        };
+        let prev = prev_nodes.get(id).copied();
+        let node = match kind {
+            NodeKind::Source => {
+                let source = spec.sources.iter().find(|s| s.id == id);
+                let (name, connector, component, detail) = match source {
+                    Some(s) => (
+                        s.name.clone(),
+                        s.connector.clone(),
+                        Some(s.component.clone()),
+                        detail_for(registry, &s.connector, Role::Source, &s.config),
+                    ),
+                    None => (None, String::new(), None, Vec::new()),
+                };
+                TopoNode {
+                    id: id.to_string(),
+                    kind: "source".to_string(),
+                    name,
+                    type_name: connector,
+                    component,
+                    runtime: None,
+                    window: None,
+                    detail,
+                }
+            }
+            NodeKind::Sink => {
+                let sink = spec.sinks.iter().find(|s| s.id == id);
+                let (name, connector, component, detail) = match sink {
+                    Some(s) => (
+                        s.name.clone(),
+                        s.connector.clone(),
+                        Some(s.component.clone()),
+                        detail_for(registry, &s.connector, Role::Sink, &s.config),
+                    ),
+                    None => (None, String::new(), None, Vec::new()),
+                };
+                TopoNode {
+                    id: id.to_string(),
+                    kind: "sink".to_string(),
+                    name,
+                    type_name: connector,
+                    component,
+                    runtime: None,
+                    window: None,
+                    detail,
+                }
+            }
+            NodeKind::Processor => processor_topo_node_from_spec(spec, id, prev),
+        };
+        topo_nodes.push(node);
+    }
+
+    let edges = spec
+        .links
+        .iter()
+        .map(|l| TopoEdge {
+            from: l.from.clone(),
+            to: l.to.clone(),
+            branch: l.branch.clone(),
+        })
+        .collect();
+
+    WorkflowTopology {
+        id: spec.id.clone(),
+        name: spec.name.clone(),
+        nodes: topo_nodes,
+        edges,
+    }
+}
+
+fn processor_topo_node_from_spec(
+    spec: &WorkflowSpec,
+    id: &str,
+    prev: Option<&TopoNode>,
+) -> TopoNode {
+    #[cfg(feature = "windows")]
+    let mut win_cfg: Option<&crate::service::config::WindowConfig> = None;
+
+    let (name, type_name, component, artifact): (
+        Option<String>,
+        &str,
+        Option<String>,
+        Option<&str>,
+    ) = if let Some(w) = spec.wasm.iter().find(|w| w.id == id) {
+        #[cfg(feature = "windows")]
+        {
+            win_cfg = w.window.as_ref();
+        }
+        (w.name.clone(), "wasm", None, w.path.as_deref())
+    } else if let Some(p) = spec.plugin.iter().find(|p| p.id == id) {
+        #[cfg(feature = "windows")]
+        {
+            win_cfg = p.window.as_ref();
+        }
+        (p.name.clone(), "plugin", None, p.path.as_deref())
+    } else if let Some(o) = spec.operator.iter().find(|o| o.id == id) {
+        #[cfg(feature = "windows")]
+        {
+            win_cfg = o.window.as_ref();
+        }
+        (o.name.clone(), "operator", o.component.clone(), None)
+    } else {
+        (None, "processor", None, None)
+    };
+
+    let runtime = prev.and_then(|n| n.runtime.clone());
+    let mut detail = Vec::new();
+    if let Some(info) = &runtime {
+        if !info.version.is_empty() {
+            detail.push(("version".to_string(), info.version.clone()));
+        }
+        detail.push(("stateful".to_string(), info.stateful.to_string()));
+    }
+    if let Some(path) = artifact {
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path);
+        detail.push(("artifact".to_string(), file_name.to_string()));
+    }
+    #[cfg(feature = "windows")]
+    let window = if let Some(win) = win_cfg {
+        detail.push(("window".to_string(), format_window_spec(&win.spec)));
+        detail.push(("window.time_field".to_string(), win.time_field.clone()));
+        if !win.key_fields.is_empty() {
+            detail.push(("window.key_fields".to_string(), win.key_fields.join(", ")));
+        }
+        detail.push((
+            "window.allowed_lateness_ms".to_string(),
+            win.allowed_lateness_ms.to_string(),
+        ));
+        Some(window_info(win))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "windows"))]
+    let window = None;
+
+    TopoNode {
+        id: id.to_string(),
+        kind: "processor".to_string(),
+        name,
+        type_name: type_name.to_string(),
+        component,
+        runtime,
+        window,
+        detail,
     }
 }
 
@@ -530,6 +743,7 @@ connection url="nats://localhost:4222" password="hunter2"
                 branch: None,
             }],
             dlq: None,
+            run: None,
         }
     }
 
@@ -550,6 +764,7 @@ connection url="nats://localhost:4222" password="hunter2"
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -570,6 +785,7 @@ connection url="nats://localhost:4222" password="hunter2"
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
+            alerts: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -897,6 +1113,7 @@ field "v" type="int64" nullable=#false
                 branch: None,
             }],
             dlq: None,
+            run: None,
         };
         let consumer = WorkflowSpec {
             id: "consumer".to_string(),
@@ -935,6 +1152,7 @@ field "v" type="int64" nullable=#false
                 branch: None,
             }],
             dlq: None,
+            run: None,
         };
         let config = service_config_many(vec![producer, consumer]);
 
