@@ -5,55 +5,58 @@ template = "page.html"
 weight = 1
 +++
 
+# Declarative operators
+
 An `operator` node runs relational, analytical, and stream-processing transforms directly on
-SACI's columnar Arrow engine inside `saci-service` — no `.wasm` module, shared library, or compiler
+SACI's columnar Arrow engine inside `saci-service`: no `.wasm` module, shared library, or compiler
 toolchain required.
 
 <div class="dgm animate-in">
-    <div class="dgm-scroll"><svg viewBox="0 0 660 208" role="img" aria-labelledby="op-title op-desc">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 226" role="img" aria-labelledby="op-title op-desc">
         <title id="op-title">Declarative operator nodes execute native Arrow pipelines between sources and sinks</title>
         <desc id="op-desc">
-            Left: two sources, orders and customers, deliver typed RecordBatches over component edges.
-            Center: a declarative operator node with kind sql or join runs inside a native PipelineRuntime,
-            optionally keeping cross-batch state in memory for stateful operators such as deduplicate,
-            interval_join, and lookup_join. Right: the transformed component reaches the sink.
+            Left: two sources, orders_in and customers_in, deliver typed RecordBatches over component edges.
+            Top: inline config supplies parameters such as where, select, query, or on.
+            Center: an operator node runs inside a native PipelineRuntime, optionally keeping cross-batch state
+            in memory for stateful operators. Right: the transformed component reaches the sink.
         </desc>
         <g class="anim anim-1">
-            <rect class="blk blk-data" x="0" y="20" width="140" height="56" rx="8"/>
-            <rect class="hd hd-data" x="0" y="20" width="140" height="20" rx="8"/>
-            <rect class="hd hd-data" x="0" y="32" width="140" height="8"/>
-            <text class="t-lbl" x="12" y="35">orders_in</text>
-            <text class="t-sm" x="12" y="58">component Orders</text>
-
-            <rect class="blk blk-data" x="0" y="112" width="140" height="56" rx="8"/>
+            <rect class="blk blk-data" x="0" y="44" width="140" height="52" rx="8"/>
+            <rect class="hd hd-data" x="0" y="44" width="140" height="20" rx="8"/>
+            <rect class="hd hd-data" x="0" y="56" width="140" height="8"/>
+            <text class="t-lbl" x="12" y="59">orders_in</text>
+            <text class="t-sm" x="12" y="81">component Orders</text>
+            <rect class="blk blk-data" x="0" y="112" width="140" height="52" rx="8"/>
             <rect class="hd hd-data" x="0" y="112" width="140" height="20" rx="8"/>
             <rect class="hd hd-data" x="0" y="124" width="140" height="8"/>
             <text class="t-lbl" x="12" y="127">customers_in</text>
-            <text class="t-sm" x="12" y="150">component Customers</text>
+            <text class="t-sm" x="12" y="149">component Customers</text>
         </g>
         <g class="anim anim-2">
-            <path class="arw arw-data" d="M140 48 L210 82" marker-end="url(#op-d)"/>
-            <path class="arw arw-data" d="M140 140 L210 106" marker-end="url(#op-d)"/>
-            <rect class="blk blk-bnd" x="210" y="54" width="210" height="80" rx="8"/>
-            <rect class="hd hd-bnd" x="210" y="54" width="210" height="20" rx="8"/>
-            <rect class="hd hd-bnd" x="210" y="66" width="210" height="8"/>
-            <text class="t-lbl t-bnd" x="222" y="69">operator &quot;enrich&quot;</text>
-            <text class="t-sm" x="222" y="94">kind=&quot;sql&quot; | &quot;filter&quot; | &quot;join&quot; ...</text>
-            <text class="t-sm" x="222" y="114">native Arrow PipelineRuntime</text>
+            <path class="arw arw-data" d="M140 70 C175 70 175 94 210 94" marker-end="url(#op-d)"/>
+            <path class="arw arw-data" d="M140 138 C175 138 175 114 210 114" marker-end="url(#op-d)"/>
+            <rect class="blk blk-bnd" x="210" y="64" width="210" height="80" rx="8"/>
+            <rect class="hd hd-bnd" x="210" y="64" width="210" height="20" rx="8"/>
+            <rect class="hd hd-bnd" x="210" y="76" width="210" height="8"/>
+            <text class="t-lbl t-bnd" x="222" y="79">operator &quot;enrich&quot;</text>
+            <text class="t-sm" x="222" y="104">kind=&quot;sql&quot; | &quot;filter&quot; | &quot;join&quot; ...</text>
+            <text class="t-sm" x="222" y="124">native Arrow PipelineRuntime</text>
         </g>
         <g class="anim anim-3">
-            <path class="arw arw-ctl" d="M315 16 V54" marker-end="url(#op-c)"/>
-            <text class="t-sm t-ctl t-mid" x="315" y="12">config { where / select / query / on ... }</text>
-            <path class="arw arw-data" d="M420 94 H500" marker-end="url(#op-d)"/>
-            <rect class="blk blk-data" x="500" y="66" width="150" height="56" rx="8"/>
-            <rect class="hd hd-data" x="500" y="66" width="150" height="20" rx="8"/>
-            <rect class="hd hd-data" x="500" y="78" width="150" height="8"/>
-            <text class="t-lbl" x="512" y="81">summary_out</text>
-            <text class="t-sm" x="512" y="104">sink (into component)</text>
+            <rect class="blk blk-ctl" x="230" y="0" width="170" height="36" rx="8"/>
+            <text class="t-lbl" x="242" y="23">config</text>
+            <text class="t-sm t-ctl t-end" x="388" y="23">where / query / on</text>
+            <path class="arw arw-ctl" d="M315 36 V64" marker-end="url(#op-c)"/>
+            <path class="arw arw-data" d="M420 104 H500" marker-end="url(#op-d)"/>
+            <rect class="blk blk-data" x="500" y="76" width="160" height="56" rx="8"/>
+            <rect class="hd hd-data" x="500" y="76" width="160" height="20" rx="8"/>
+            <rect class="hd hd-data" x="500" y="88" width="160" height="8"/>
+            <text class="t-lbl" x="512" y="91">summary_out</text>
+            <text class="t-sm" x="512" y="114">sink (into component)</text>
         </g>
         <g class="anim anim-4">
-            <path class="arw arw-bnd" d="M380 134 V170 H250 V134" marker-end="url(#op-b)"/>
-            <text class="t-sm t-bnd t-mid" x="315" y="186">stateful operators retain buffer / seen keys across batches</text>
+            <path class="arw arw-bnd" d="M380 144 V182 H250 V144" marker-end="url(#op-b)"/>
+            <text class="t-sm t-bnd t-mid" x="315" y="200">stateful operators retain buffer / seen keys across batches</text>
         </g>
         <defs>
             <marker id="op-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
@@ -79,7 +82,7 @@ toolchain required.
 Every `operator` node behaves as a workflow processor in `link` graphs. Unary operators default to
 modifying `component` in place, or write to a new component when `into` is set.
 
-```kdl,name=Filter, project, group, and sort in KDL
+```kdl,name=Chaining filter project group_by and top_n in KDL
 workflow "order_analytics" {
     source "in" connector="file" component="Orders" codec="ndjson" {
         config path="orders.ndjson" {
@@ -152,5 +155,5 @@ Streaming stateful operators retain their checkpoint state across passes automat
 | `left` | attribute | none | Left input component for binary join kinds (`join`, `interval_join`, `lookup_join`). |
 | `right` | attribute | none | Right input component for binary join kinds. |
 | `into` | attribute | `component` (unary) | Output component name written back into the workflow `Dataset`. Required for joins and `sql`. |
-| `config` | child block / props | empty | Operator-specific parameters (`where`, `select`, `keys`, `aggregates`, `order_by`, `limit`, `offset`, `field`, `alias`, `preserve_empty`, `on`, `join_type`, `left_time_field`, `right_time_field`, `lower_bound_ms`, `upper_bound_ms`, `allowed_lateness_ms`, `right_prefix`, `keep`, `time_field`, `ttl_ms`, `max_keys`, `stateful`, `query`). |
+| `config` | child block / props | empty | Operator-specific parameters (`where`, `predicate`, `select`, `keys`, `aggregates`, `order_by`, `limit`, `offset`, `field`, `alias`, `preserve_empty`, `on`, `join_type`, `left_time_field`, `right_time_field`, `lower_bound_ms`, `upper_bound_ms`, `allowed_lateness_ms`, `max_buffered_rows`, `right_prefix`, `keep`, `time_field`, `ttl_ms`, `max_keys`, `stateful`, `query`). |
 | `window` | child block | none | Optional host-tracked event-time watermark declaration (`windows` feature). |

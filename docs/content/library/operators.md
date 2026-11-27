@@ -8,6 +8,79 @@ weight = 8
 
 The `saci::operators` module (re-exported in `saci::prelude`) provides a Tokio-free suite of relational, analytical, and streaming Arrow operators. Every operator implements [`System`](@/library/systems.md) so pipelines compose identically in native binaries, `wasm32-wasip3` WebAssembly processors, and native plugins.
 
+<div class="dgm animate-in">
+    <div class="dgm-scroll"><svg viewBox="0 0 660 226" role="img" aria-labelledby="lib-op-title lib-op-desc">
+        <title id="lib-op-title">Stateless and stateful Arrow operators reading and writing Dataset components</title>
+        <desc id="lib-op-desc">
+            On the left, a Dataset holds Orders and Customers components and a TierSummary output component.
+            In the center top, stateless operators (FilterSystem, GroupBySystem, SqlSystem) transform batches
+            via set_batch_named into output components on the right. In the center bottom, stateful operators
+            (IntervalJoinSystem, LookupJoinSystem, DeduplicateSystem) read and update sdk::State across runs.
+        </desc>
+        <g class="anim anim-1">
+            <rect class="blk blk-data" x="0" y="34" width="150" height="114" rx="8"/>
+            <rect class="hd hd-data" x="0" y="34" width="150" height="22" rx="8"/>
+            <rect class="hd hd-data" x="0" y="48" width="150" height="8"/>
+            <text class="t-lbl t-data" x="12" y="49">Dataset</text>
+            <rect class="row-r" x="8" y="64" width="134" height="22" rx="3"/>
+            <text class="t-sm" x="16" y="79">Orders</text>
+            <text class="t-sm t-ctl t-end" x="134" y="79">read</text>
+            <rect class="row-r" x="8" y="92" width="134" height="22" rx="3"/>
+            <text class="t-sm" x="16" y="107">Customers</text>
+            <text class="t-sm t-ctl t-end" x="134" y="107">read</text>
+            <rect class="row-w" x="8" y="120" width="134" height="22" rx="3"/>
+            <text class="t-sm" x="16" y="135">TierSummary</text>
+            <text class="t-sm t-data t-end" x="134" y="135">write</text>
+        </g>
+        <g class="anim anim-2">
+            <path class="arw arw-ctl" d="M150 75 C185 75 185 52 220 52" marker-end="url(#lib-op-c)"/>
+            <rect class="blk blk-data" x="220" y="18" width="210" height="68" rx="8"/>
+            <rect class="hd hd-data" x="220" y="18" width="210" height="20" rx="8"/>
+            <rect class="hd hd-data" x="220" y="30" width="210" height="8"/>
+            <text class="t-lbl" x="232" y="33">stateless operators</text>
+            <text class="t-sm" x="232" y="56">Filter / GroupBy / SqlSystem</text>
+            <text class="t-sm" x="232" y="74">in-batch Arrow transforms</text>
+        </g>
+        <g class="anim anim-3">
+            <path class="arw arw-ctl" d="M150 103 C185 103 185 140 220 140" marker-end="url(#lib-op-c)"/>
+            <rect class="blk blk-bnd" x="220" y="104" width="210" height="72" rx="8"/>
+            <rect class="hd hd-bnd" x="220" y="104" width="210" height="20" rx="8"/>
+            <rect class="hd hd-bnd" x="220" y="116" width="210" height="8"/>
+            <text class="t-lbl t-bnd" x="232" y="119">stateful operators</text>
+            <text class="t-sm" x="232" y="142">IntervalJoin / LookupJoin / Dedup</text>
+            <text class="t-sm" x="232" y="160">reads &amp; updates sdk::State&lt;T&gt;</text>
+            <path class="arw arw-bnd" d="M380 176 V202 H270 V176" marker-end="url(#lib-op-b)"/>
+            <text class="t-sm t-bnd t-mid" x="325" y="218">State&lt;T&gt; checkpointed via IPC across calls</text>
+        </g>
+        <g class="anim anim-4">
+            <path class="arw arw-data" d="M430 52 H500" marker-end="url(#lib-op-d)"/>
+            <path class="arw arw-data" d="M430 140 C465 140 465 112 500 112" marker-end="url(#lib-op-d)"/>
+            <rect class="blk blk-data" x="500" y="42" width="160" height="88" rx="8"/>
+            <rect class="hd hd-data" x="500" y="42" width="160" height="20" rx="8"/>
+            <rect class="hd hd-data" x="500" y="54" width="160" height="8"/>
+            <text class="t-lbl" x="512" y="57">target component</text>
+            <text class="t-sm" x="512" y="82">set_batch_named(&hellip;)</text>
+            <text class="t-sm" x="512" y="102">resizes rows &amp; alive bits</text>
+        </g>
+        <defs>
+            <marker id="lib-op-d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--data-ink)"/>
+            </marker>
+            <marker id="lib-op-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--control-ink)"/>
+            </marker>
+            <marker id="lib-op-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0 0 L8 4 L0 8 z" fill="var(--boundary-ink)"/>
+            </marker>
+        </defs>
+    </svg></div>
+    <div class="dgm-key">
+        <span class="k-control"><i></i> component columns read into operators</span>
+        <span class="k-data"><i></i> resized RecordBatches written back to Dataset</span>
+        <span class="k-boundary"><i></i> stateful checkpoint boundary (sdk::State&lt;T&gt;)</span>
+    </div>
+</div>
+
 ## Operator overview
 
 | Operator | Semantics | State across batches |
