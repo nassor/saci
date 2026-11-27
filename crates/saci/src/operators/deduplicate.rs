@@ -237,23 +237,28 @@ impl DeduplicateSystem {
             state.timestamps_ms = next_ts;
         }
 
-        let row_ts: Vec<i64> = if let Some(tf) = &self.time_field {
+        let row_ts: Vec<Option<i64>> = if let Some(tf) = &self.time_field {
             let idx = batch
                 .schema_ref()
                 .index_of(tf)
                 .map_err(|_| SaciError::field_not_found(self.source_component, tf))?;
             let ms = to_ms_array(batch.column(idx))?;
             (0..n)
-                .map(|i| if ms.is_valid(i) { ms.value(i) } else { 0 })
+                .map(|i| ms.is_valid(i).then(|| ms.value(i)))
                 .collect()
         } else {
-            vec![0; n]
+            vec![None; n]
         };
 
-        let previously_seen: HashSet<&str> = if persist_state {
-            state.keys.iter().map(String::as_str).collect()
+        let seen_idx: HashMap<&str, usize> = if persist_state {
+            state
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(idx, k)| (k.as_str(), idx))
+                .collect()
         } else {
-            HashSet::new()
+            HashMap::new()
         };
 
         let mut keep_mask = vec![false; n];
@@ -261,7 +266,14 @@ impl DeduplicateSystem {
             KeepPolicy::First => {
                 let mut batch_seen = HashSet::with_capacity(n);
                 for (i, (_h, key)) in row_keys.iter().enumerate() {
-                    if !previously_seen.contains(key.as_str()) && batch_seen.insert(key.as_str()) {
+                    if let Some(&pos) = seen_idx.get(key.as_str()) {
+                        if persist_state
+                            && let Some(ts) = row_ts[i]
+                            && ts > state.timestamps_ms[pos]
+                        {
+                            state.timestamps_ms[pos] = ts;
+                        }
+                    } else if batch_seen.insert(key.as_str()) {
                         keep_mask[i] = true;
                     }
                 }
@@ -269,7 +281,14 @@ impl DeduplicateSystem {
             KeepPolicy::Last => {
                 let mut last_idx: HashMap<&str, usize> = HashMap::with_capacity(n);
                 for (i, (_h, key)) in row_keys.iter().enumerate() {
-                    if !previously_seen.contains(key.as_str()) {
+                    if let Some(&pos) = seen_idx.get(key.as_str()) {
+                        if persist_state
+                            && let Some(ts) = row_ts[i]
+                            && ts > state.timestamps_ms[pos]
+                        {
+                            state.timestamps_ms[pos] = ts;
+                        }
+                    } else {
                         last_idx.insert(key.as_str(), i);
                     }
                 }
@@ -278,34 +297,43 @@ impl DeduplicateSystem {
                 }
             }
         }
+        drop(seen_idx);
 
         if persist_state {
-            for (i, ((_h, key), ts)) in row_keys.into_iter().zip(row_ts.iter().copied()).enumerate()
-            {
-                if keep_mask[i] {
-                    state.keys.push(key);
-                    state.timestamps_ms.push(ts);
-                }
-            }
             if self.time_field.is_some() {
-                for ts in row_ts {
+                for ts in row_ts.iter().copied().flatten() {
                     if ts > state.watermark_ms {
                         state.watermark_ms = ts;
                     }
                 }
-                if let Some(ttl) = self.ttl_ms {
-                    let cutoff = state.watermark_ms.saturating_sub(ttl);
-                    let mut next_keys = Vec::with_capacity(state.keys.len());
-                    let mut next_ts = Vec::with_capacity(state.timestamps_ms.len());
-                    for (k, ts) in state.keys.drain(..).zip(state.timestamps_ms.drain(..)) {
-                        if ts >= cutoff {
-                            next_keys.push(k);
-                            next_ts.push(ts);
-                        }
-                    }
-                    state.keys = next_keys;
-                    state.timestamps_ms = next_ts;
+            }
+            let fallback_ts = if state.watermark_ms == i64::MIN {
+                0
+            } else {
+                state.watermark_ms
+            };
+            for (i, ((_h, key), ts)) in row_keys.into_iter().zip(row_ts.iter().copied()).enumerate()
+            {
+                if keep_mask[i] {
+                    state.keys.push(key);
+                    state.timestamps_ms.push(ts.unwrap_or(fallback_ts));
                 }
+            }
+            if self.time_field.is_some()
+                && let Some(ttl) = self.ttl_ms
+                && state.watermark_ms != i64::MIN
+            {
+                let cutoff = state.watermark_ms.saturating_sub(ttl);
+                let mut next_keys = Vec::with_capacity(state.keys.len());
+                let mut next_ts = Vec::with_capacity(state.timestamps_ms.len());
+                for (k, ts) in state.keys.drain(..).zip(state.timestamps_ms.drain(..)) {
+                    if ts >= cutoff {
+                        next_keys.push(k);
+                        next_ts.push(ts);
+                    }
+                }
+                state.keys = next_keys;
+                state.timestamps_ms = next_ts;
             }
             if state.keys.len() > self.max_keys {
                 let excess = state.keys.len() - self.max_keys;
@@ -434,5 +462,93 @@ mod tests {
         sys.run(&mut ds).await.unwrap();
         let b3 = ds.batch_named("Event").unwrap();
         assert_eq!(b3.num_rows(), 1);
+    }
+
+    fn nullable_event_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("ts", DataType::Int64, true),
+            Field::new("val", DataType::Int64, false),
+        ]))
+    }
+
+    #[cfg(feature = "engine")]
+    #[tokio::test]
+    async fn deduplicate_null_timestamps_negative_timestamps_and_checkpoint_roundtrip() {
+        use crate::pipeline::Pipeline;
+        use crate::runtime::PipelineRuntime;
+
+        let build_pipeline = || {
+            let sys = DeduplicateSystem::in_place("Event", ["id"])
+                .unwrap()
+                .keep(KeepPolicy::Last)
+                .time_field("ts")
+                .ttl_ms(1_000);
+            Pipeline::new("dedup_ckpt")
+                .state::<DeduplicateState>()
+                .system(sys)
+        };
+
+        let make_nullable = |rows: &[(&str, Option<i64>, i64)]| {
+            RecordBatch::try_new(
+                nullable_event_schema(),
+                vec![
+                    Arc::new(StringArray::from(
+                        rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                    Arc::new(Int64Array::from(
+                        rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                    Arc::new(Int64Array::from(
+                        rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                ],
+            )
+            .unwrap()
+        };
+
+        // Pass 1: negative epoch ts (-5000) and a NULL ts row must keep watermark at -5000 (not 0).
+        let p1 = build_pipeline();
+        let mut ds1 = Dataset::new();
+        ds1.register_schema("Event", nullable_event_schema())
+            .unwrap();
+        ds1.set_batch_named(
+            "Event",
+            make_nullable(&[("neg", Some(-5_000), 1), ("null_k", None, 2)]),
+        )
+        .unwrap();
+        let out1 = p1.run_batch(&mut ds1, None).await.unwrap();
+        assert_eq!(ds1.batch_named("Event").unwrap().num_rows(), 2);
+        let blob1 = out1.state.expect("dedup checkpoint blob");
+
+        // Pass 2 on fresh Pipeline 2 with restored state: duplicate null_k is suppressed,
+        // and positive ts=1_700_000_000_000 + null_pos keeps null_pos at fallback watermark (not 0).
+        let p2 = build_pipeline();
+        let mut ds2 = Dataset::new();
+        ds2.register_schema("Event", nullable_event_schema())
+            .unwrap();
+        ds2.set_batch_named(
+            "Event",
+            make_nullable(&[
+                ("null_k", None, 9),
+                ("pos", Some(1_700_000_000_000), 3),
+                ("null_pos", None, 4),
+            ]),
+        )
+        .unwrap();
+        let out2 = p2.run_batch(&mut ds2, Some(&blob1)).await.unwrap();
+        let b2 = ds2.batch_named("Event").unwrap();
+        assert_eq!(b2.num_rows(), 2);
+        let blob2 = out2.state.expect("dedup checkpoint blob 2");
+
+        // Pass 3: duplicate null_pos must still be recognized as already seen (did not self-evict at ts=0).
+        let p3 = build_pipeline();
+        let mut ds3 = Dataset::new();
+        ds3.register_schema("Event", nullable_event_schema())
+            .unwrap();
+        ds3.set_batch_named("Event", make_nullable(&[("null_pos", None, 5)]))
+            .unwrap();
+        let _ = p3.run_batch(&mut ds3, Some(&blob2)).await.unwrap();
+        assert_eq!(ds3.batch_named("Event").unwrap().num_rows(), 0);
     }
 }

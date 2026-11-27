@@ -588,3 +588,151 @@ workflow "interval" {{
     assert_eq!(total_rows, 1);
     assert_eq!(batches[0].column(4).as_string::<i32>().value(0), "paid");
 }
+
+#[tokio::test]
+async fn workflow_in_place_project_and_sql_operators_validate_and_run_across_multiple_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("amount", DataType::Float64, false),
+        Field::new("region", DataType::Utf8, false),
+    ]));
+    let final_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("doubled", DataType::Float64, true),
+    ]));
+
+    let make_in = |id: i64, amount: f64, region: &str| {
+        RecordBatch::try_new(
+            in_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![id])),
+                Arc::new(Float64Array::from(vec![amount])),
+                Arc::new(StringArray::from(vec![region])),
+            ],
+        )
+        .unwrap()
+    };
+
+    let conn = MemConnector::new();
+    let in_batches = vec![make_in(1, 10.0, "us"), make_in(2, 25.0, "eu")];
+    conn.add_source("orders", in_schema, in_batches);
+    let captured = conn.add_sink("projected", final_schema);
+
+    // `p` transforms Orders in place (3 cols -> 2 cols) and `q` also writes Orders in place across 2 passes.
+    let kdl = format!(
+        r#"
+mode "standalone"
+node id=1 data_dir="{dir}"
+run "stream"
+
+workflow "in_place_ops" {{
+    source "in" connector="mem" component="Orders" {{ config key="orders" }}
+    operator "p" kind="project" component="Orders" {{
+        config {{
+            select "id"
+            select "amount * 2 AS doubled"
+        }}
+    }}
+    operator "q" kind="sql" into="Orders" {{
+        config query="SELECT id, doubled FROM Orders WHERE doubled >= 20.0"
+    }}
+    sink "out" connector="mem" component="Orders" {{ config key="projected" }}
+    link from="in" to="p"
+    link from="p" to="q"
+    link from="q" to="out"
+}}
+"#,
+        dir = dir.path().display()
+    );
+
+    let cfg = ServiceConfig::from_kdl(&kdl).unwrap();
+    cfg.validate().unwrap();
+    let built = ServiceBuilder::empty().connector(conn).build(&cfg).unwrap();
+    built
+        .into_iter()
+        .next()
+        .unwrap()
+        .run(CancellationToken::new())
+        .await
+        .unwrap();
+
+    let batches = captured.lock().unwrap();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0].column(0).as_primitive::<Int64Type>().value(0), 1);
+    assert!((batches[0].column(1).as_primitive::<Float64Type>().value(0) - 20.0).abs() < 1e-9);
+    assert_eq!(batches[1].column(0).as_primitive::<Int64Type>().value(0), 2);
+    assert!((batches[1].column(1).as_primitive::<Float64Type>().value(0) - 50.0).abs() < 1e-9);
+}
+
+#[test]
+fn workflow_validate_rejects_unknown_operator_config_keys_and_invalid_sql() {
+    let bad_key_kdl = r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci"
+workflow "w" {
+    operator "f" kind="filter" component="Orders" {
+        config wher="amount > 0"
+    }
+}
+"#;
+    let err_key = ServiceConfig::from_kdl(bad_key_kdl)
+        .and_then(|c| c.validate())
+        .unwrap_err()
+        .to_string();
+    assert!(err_key.contains("wher"), "unexpected error: {err_key}");
+
+    let bad_sql_kdl = r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci"
+workflow "w" {
+    operator "q" kind="sql" into="Out" {
+        config query="SELECT FROM"
+    }
+}
+"#;
+    let err_sql = ServiceConfig::from_kdl(bad_sql_kdl)
+        .and_then(|c| c.validate())
+        .unwrap_err();
+    assert_eq!(err_sql.category(), "configuration");
+}
+
+#[test]
+fn workflow_operator_to_kdl_roundtrip() {
+    let kdl = r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci"
+run "once"
+
+workflow "rt" {
+    codec "ndjson" format="ndjson"
+    source "src" connector="file" component="Orders" codec="ndjson" {
+        config path="/tmp/orders_in.ndjson" {
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#false
+        }
+    }
+    operator "f" kind="filter" component="Orders" {
+        config where="amount > 10.0"
+    }
+    operator "q" kind="sql" into="Totals" {
+        config query="SELECT COUNT(*) AS n, SUM(amount) AS total FROM Orders"
+    }
+    sink "out" connector="file" component="Totals" codec="ndjson" {
+        config path="/tmp/totals_out.ndjson" {
+            field "n" type="int64" nullable=#true
+            field "total" type="float64" nullable=#true
+        }
+    }
+    link from="src" to="f"
+    link from="f" to="q"
+    link from="q" to="out"
+}
+"#;
+    let cfg = ServiceConfig::from_kdl(kdl).unwrap();
+    cfg.validate().unwrap();
+    let serialized = cfg.to_kdl().unwrap();
+    let reparsed = ServiceConfig::from_kdl(&serialized).unwrap();
+    reparsed.validate().unwrap();
+    assert_eq!(reparsed.workflows[0].operator.len(), 2);
+}

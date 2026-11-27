@@ -266,7 +266,7 @@ impl OperatorSpec {
                 )));
             }
         }
-        Ok(())
+        crate::service::operator_builder::validate_operator_config(self, workflow_id)
     }
 }
 

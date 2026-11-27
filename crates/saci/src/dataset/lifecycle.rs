@@ -110,6 +110,7 @@ impl Dataset {
             new_dataset.empty_templates.insert(name, empty.clone());
             new_dataset.components.insert(name, vec![empty]);
         }
+        new_dataset.output_schemas = self.output_schemas.clone();
         new_dataset
     }
 
@@ -118,17 +119,21 @@ impl Dataset {
     /// Schemas remain registered so the dataset can be re-used with the same
     /// component types without calling `register` again.
     pub fn clear(&mut self) {
-        // Disjoint field borrows: `components` mutably, `empty_templates`
-        // shared. Cloning a prebuilt zero-row batch is a few `Arc` bumps
-        // instead of an empty Arrow array per column.
+        // Disjoint field borrows: `components` and `schemas` mutably,
+        // `empty_templates` shared. Cloning a prebuilt zero-row batch is a few
+        // `Arc` bumps instead of an empty Arrow array per column, and
+        // restoring `schemas` from `template.schema()` ensures an in-place
+        // schema-changing operator resets to its input schema on the next pass.
         let Self {
             components,
             empty_templates,
+            schemas,
             ..
         } = self;
         for (name, chunks) in components.iter_mut() {
             match empty_templates.get(name) {
                 Some(template) => {
+                    schemas.update_schema(name, template.schema());
                     chunks.clear();
                     chunks.push(template.clone());
                 }

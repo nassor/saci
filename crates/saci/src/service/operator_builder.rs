@@ -20,6 +20,10 @@ use crate::pipeline::Pipeline;
 use super::builder::{BuiltNode, BuiltNodeKind};
 use super::config::{OperatorSpec, WorkflowSpec};
 
+pub(super) fn validate_operator_config(spec: &OperatorSpec, workflow_id: &str) -> SaciResult<()> {
+    build_operator_pipeline(spec, workflow_id, None).map(|_| ())
+}
+
 pub(super) fn build_operator_node(
     spec: &OperatorSpec,
     workflow: &WorkflowSpec,
@@ -34,14 +38,37 @@ pub(super) fn build_operator_node(
     }
     spec.validate(&workflow.id)?;
 
-    let ctx = format!("workflow '{}' operator '{}'", workflow.id, spec.id);
-    let cfg = config_map(&spec.config, &ctx)?;
     let schemas = collect_known_schemas(workflow, built_nodes)?;
+    let pipeline = build_operator_pipeline(spec, &workflow.id, Some(&schemas))?;
 
+    Ok(BuiltNode {
+        id: spec.id.clone(),
+        name: spec.name.clone(),
+        connector: format!("operator:{}", spec.kind),
+        component: None,
+        kind: BuiltNodeKind::Processor {
+            runtime: Box::new(pipeline),
+            kind: "native",
+        },
+        downstream: Vec::new(),
+        artifact: None,
+        heal_recovered: None,
+        window: spec.window.clone(),
+    })
+}
+
+fn build_operator_pipeline(
+    spec: &OperatorSpec,
+    workflow_id: &str,
+    schemas: Option<&HashMap<String, Arc<Schema>>>,
+) -> SaciResult<Pipeline> {
+    let ctx = format!("workflow '{workflow_id}' operator '{}'", spec.id);
+    let cfg = config_map(&spec.config, &ctx)?;
     let mut pipeline = Pipeline::new(spec.id.clone());
 
     match spec.kind.as_str() {
         "filter" => {
+            check_allowed_keys(cfg, &["where", "predicate"], &ctx)?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
             let dst = spec.into.as_deref().unwrap_or(src);
             let pred = req_str(cfg, "where", &ctx).or_else(|_| req_str(cfg, "predicate", &ctx))?;
@@ -49,7 +76,7 @@ pub(super) fn build_operator_node(
             if dst != src {
                 sys = sys.into_component(dst);
             }
-            if let Some(in_schema) = schemas.get(src) {
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
                 register_if_absent(&mut pipeline, src, in_schema.clone())?;
                 if dst != src {
                     register_if_absent(&mut pipeline, dst, in_schema.clone())?;
@@ -58,6 +85,7 @@ pub(super) fn build_operator_node(
             pipeline = pipeline.system(sys);
         }
         "project" => {
+            check_allowed_keys(cfg, &["select"], &ctx)?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
             let dst = spec.into.as_deref().unwrap_or(src);
             let clauses = req_expr_list(cfg, "select", &ctx)?;
@@ -65,31 +93,37 @@ pub(super) fn build_operator_node(
             if dst != src {
                 sys = sys.into_component(dst);
             }
-            if let Some(in_schema) = schemas.get(src) {
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
                 let out_schema = sys.output_schema(in_schema)?;
                 register_if_absent(&mut pipeline, src, in_schema.clone())?;
                 if dst != src {
                     register_if_absent(&mut pipeline, dst, out_schema)?;
+                } else {
+                    pipeline.data_mut().set_output_schema(dst, out_schema);
                 }
             }
             pipeline = pipeline.system(sys);
         }
         "group_by" => {
+            check_allowed_keys(cfg, &["keys", "aggregates", "aggregate"], &ctx)?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
             let dst = spec.into.as_deref().unwrap_or(src);
             let keys = opt_ident_list(cfg, "keys");
             let aggs = parse_aggregates(cfg, &ctx)?;
             let sys = GroupBySystem::new(src, dst, keys, aggs)?;
-            if let Some(in_schema) = schemas.get(src) {
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
                 let out_schema = sys.output_schema(in_schema)?;
                 register_if_absent(&mut pipeline, src, in_schema.clone())?;
                 if dst != src {
                     register_if_absent(&mut pipeline, dst, out_schema)?;
+                } else {
+                    pipeline.data_mut().set_output_schema(dst, out_schema);
                 }
             }
             pipeline = pipeline.system(sys);
         }
         "sort" => {
+            check_allowed_keys(cfg, &["order_by", "limit", "offset"], &ctx)?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
             let dst = spec.into.as_deref().unwrap_or(src);
             let keys = parse_sort_keys(cfg, &ctx)?;
@@ -100,7 +134,7 @@ pub(super) fn build_operator_node(
             if let Some(offset) = opt_usize(cfg, "offset", &ctx)? {
                 sys = sys.offset(offset);
             }
-            if let Some(in_schema) = schemas.get(src) {
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
                 register_if_absent(&mut pipeline, src, in_schema.clone())?;
                 if dst != src {
                     register_if_absent(&mut pipeline, dst, in_schema.clone())?;
@@ -109,6 +143,7 @@ pub(super) fn build_operator_node(
             pipeline = pipeline.system(sys);
         }
         "top_n" => {
+            check_allowed_keys(cfg, &["order_by", "limit", "offset"], &ctx)?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
             let dst = spec.into.as_deref().unwrap_or(src);
             let keys = parse_sort_keys(cfg, &ctx)?;
@@ -117,7 +152,7 @@ pub(super) fn build_operator_node(
             if let Some(offset) = opt_usize(cfg, "offset", &ctx)? {
                 sys = sys.offset(offset);
             }
-            if let Some(in_schema) = schemas.get(src) {
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
                 register_if_absent(&mut pipeline, src, in_schema.clone())?;
                 if dst != src {
                     register_if_absent(&mut pipeline, dst, in_schema.clone())?;
@@ -126,6 +161,7 @@ pub(super) fn build_operator_node(
             pipeline = pipeline.system(sys);
         }
         "unnest" => {
+            check_allowed_keys(cfg, &["field", "alias", "as", "preserve_empty"], &ctx)?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
             let dst = spec.into.as_deref().unwrap_or(src);
             let field = req_str(cfg, "field", &ctx)?;
@@ -136,23 +172,31 @@ pub(super) fn build_operator_node(
             if let Some(preserve) = opt_bool(cfg, "preserve_empty", &ctx)? {
                 sys = sys.preserve_empty(preserve);
             }
-            if let Some(in_schema) = schemas.get(src) {
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
                 let out_schema = sys.output_schema(in_schema)?;
                 register_if_absent(&mut pipeline, src, in_schema.clone())?;
                 if dst != src {
                     register_if_absent(&mut pipeline, dst, out_schema)?;
+                } else {
+                    pipeline.data_mut().set_output_schema(dst, out_schema);
                 }
             }
             pipeline = pipeline.system(sys);
         }
         "join" => {
+            check_allowed_keys(cfg, &["on", "join_type", "right_prefix"], &ctx)?;
             let left = req_endpoint(spec.left.as_deref(), "left", &ctx)?;
             let right = req_endpoint(spec.right.as_deref(), "right", &ctx)?;
             let into = req_endpoint(spec.into.as_deref(), "into", &ctx)?;
             let keys = parse_join_keys(cfg, &ctx)?;
             let kind = parse_join_kind(opt_str(cfg, "join_type").as_deref(), &ctx)?;
-            let sys = JoinSystem::new(left, right, into, kind, keys)?;
-            if let (Some(ls), Some(rs)) = (schemas.get(left), schemas.get(right)) {
+            let mut sys = JoinSystem::new(left, right, into, kind, keys)?;
+            if let Some(prefix) = opt_str(cfg, "right_prefix") {
+                sys = sys.right_prefix(prefix);
+            }
+            if let Some(map) = schemas
+                && let (Some(ls), Some(rs)) = (map.get(left), map.get(right))
+            {
                 let out_schema = sys.output_schema(ls, rs)?;
                 register_if_absent(&mut pipeline, left, ls.clone())?;
                 register_if_absent(&mut pipeline, right, rs.clone())?;
@@ -161,6 +205,22 @@ pub(super) fn build_operator_node(
             pipeline = pipeline.system(sys);
         }
         "interval_join" => {
+            check_allowed_keys(
+                cfg,
+                &[
+                    "on",
+                    "time_field",
+                    "left_time_field",
+                    "right_time_field",
+                    "lower_bound_ms",
+                    "upper_bound_ms",
+                    "allowed_lateness_ms",
+                    "watermark_delay_ms",
+                    "max_buffered_rows",
+                    "right_prefix",
+                ],
+                &ctx,
+            )?;
             let left = req_endpoint(spec.left.as_deref(), "left", &ctx)?;
             let right = req_endpoint(spec.right.as_deref(), "right", &ctx)?;
             let into = req_endpoint(spec.into.as_deref(), "into", &ctx)?;
@@ -192,9 +252,16 @@ pub(super) fn build_operator_node(
             )?) {
                 sys = sys.allowed_lateness_ms(lateness);
             }
-            if let (Some(ls), Some(rs)) = (schemas.get(left), schemas.get(right)) {
-                let out_schema =
-                    crate::operators::join::build_joined_schema(ls, rs, JoinKind::Inner, "right_");
+            if let Some(max_rows) = opt_usize(cfg, "max_buffered_rows", &ctx)? {
+                sys = sys.max_buffered_rows(max_rows);
+            }
+            if let Some(prefix) = opt_str(cfg, "right_prefix") {
+                sys = sys.right_prefix(prefix);
+            }
+            if let Some(map) = schemas
+                && let (Some(ls), Some(rs)) = (map.get(left), map.get(right))
+            {
+                let out_schema = sys.output_schema(ls, rs)?;
                 register_if_absent(&mut pipeline, left, ls.clone())?;
                 register_if_absent(&mut pipeline, right, rs.clone())?;
                 register_if_absent(&mut pipeline, into, out_schema)?;
@@ -202,6 +269,7 @@ pub(super) fn build_operator_node(
             pipeline = pipeline.state::<IntervalJoinState>().system(sys);
         }
         "lookup_join" => {
+            check_allowed_keys(cfg, &["on", "join_type", "right_prefix"], &ctx)?;
             let left = req_endpoint(spec.left.as_deref(), "left", &ctx)?;
             let right = req_endpoint(spec.right.as_deref(), "right", &ctx)?;
             let into = req_endpoint(spec.into.as_deref(), "into", &ctx)?;
@@ -211,7 +279,9 @@ pub(super) fn build_operator_node(
             if let Some(prefix) = opt_str(cfg, "right_prefix") {
                 sys = sys.right_prefix(prefix);
             }
-            if let (Some(ls), Some(rs)) = (schemas.get(left), schemas.get(right)) {
+            if let Some(map) = schemas
+                && let (Some(ls), Some(rs)) = (map.get(left), map.get(right))
+            {
                 let out_schema = sys.output_schema(ls, rs)?;
                 register_if_absent(&mut pipeline, left, ls.clone())?;
                 register_if_absent(&mut pipeline, right, rs.clone())?;
@@ -220,6 +290,18 @@ pub(super) fn build_operator_node(
             pipeline = pipeline.state::<LookupJoinState>().system(sys);
         }
         "deduplicate" => {
+            check_allowed_keys(
+                cfg,
+                &[
+                    "keys",
+                    "keep",
+                    "time_field",
+                    "ttl_ms",
+                    "max_keys",
+                    "stateful",
+                ],
+                &ctx,
+            )?;
             let src = req_endpoint(spec.component.as_deref(), "component", &ctx)?;
             let dst = spec.into.as_deref().unwrap_or(src);
             let keys = opt_ident_list(cfg, "keys");
@@ -247,7 +329,7 @@ pub(super) fn build_operator_node(
             }
             let stateful = opt_bool(cfg, "stateful", &ctx)?.unwrap_or(true);
             sys = sys.stateful(stateful);
-            if let Some(in_schema) = schemas.get(src) {
+            if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
                 register_if_absent(&mut pipeline, src, in_schema.clone())?;
                 if dst != src {
                     register_if_absent(&mut pipeline, dst, in_schema.clone())?;
@@ -259,6 +341,7 @@ pub(super) fn build_operator_node(
             pipeline = pipeline.system(sys);
         }
         "sql" => {
+            check_allowed_keys(cfg, &["query"], &ctx)?;
             let dst = spec
                 .into
                 .as_deref()
@@ -268,17 +351,21 @@ pub(super) fn build_operator_node(
                 })?;
             let query = req_str(cfg, "query", &ctx)?;
             let sys = SqlSystem::parse(dst, &query)?;
-            let mut source_pairs: Vec<(&str, &Schema)> = Vec::new();
-            for &src in sys.source_components() {
-                if let Some(s) = schemas.get(src) {
-                    source_pairs.push((src, s.as_ref()));
-                    register_if_absent(&mut pipeline, src, s.clone())?;
+            if let Some(map) = schemas {
+                let mut source_pairs: Vec<(&str, &Schema)> = Vec::new();
+                for &src in sys.source_components() {
+                    if let Some(s) = map.get(src) {
+                        source_pairs.push((src, s.as_ref()));
+                        register_if_absent(&mut pipeline, src, s.clone())?;
+                    }
                 }
-            }
-            if source_pairs.len() == sys.source_components().len() {
-                let out_schema = sys.infer_output_schema(&source_pairs)?;
-                if !sys.source_components().contains(&dst) {
-                    register_if_absent(&mut pipeline, dst, out_schema)?;
+                if source_pairs.len() == sys.source_components().len() {
+                    let out_schema = sys.infer_output_schema(&source_pairs)?;
+                    if !sys.source_components().contains(&dst) {
+                        register_if_absent(&mut pipeline, dst, out_schema)?;
+                    } else {
+                        pipeline.data_mut().set_output_schema(dst, out_schema);
+                    }
                 }
             }
             pipeline = pipeline.system(sys);
@@ -290,20 +377,23 @@ pub(super) fn build_operator_node(
         }
     }
 
-    Ok(BuiltNode {
-        id: spec.id.clone(),
-        name: spec.name.clone(),
-        connector: format!("operator:{}", spec.kind),
-        component: None,
-        kind: BuiltNodeKind::Processor {
-            runtime: Box::new(pipeline),
-            kind: "native",
-        },
-        downstream: Vec::new(),
-        artifact: None,
-        heal_recovered: None,
-        window: spec.window.clone(),
-    })
+    Ok(pipeline)
+}
+
+fn check_allowed_keys(
+    cfg: &crate::config::ConfigMap,
+    allowed: &[&str],
+    ctx: &str,
+) -> SaciResult<()> {
+    for key in cfg.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(SaciError::configuration(format!(
+                "{ctx}: unknown config key '{key}' (expected one of: {})",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn register_if_absent(
@@ -344,7 +434,10 @@ fn collect_known_schemas(
             BuiltNodeKind::Processor { runtime, .. } => {
                 let tmpl = runtime.template_dataset();
                 for (comp, entry) in tmpl.schemas().iter() {
-                    map.insert((*comp).to_string(), entry.schema.clone());
+                    let schema = tmpl
+                        .output_schema(comp)
+                        .unwrap_or_else(|| entry.schema.clone());
+                    map.insert((*comp).to_string(), schema);
                 }
             }
             BuiltNodeKind::Sink(_) => {}

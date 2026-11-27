@@ -146,7 +146,8 @@ impl Dataset {
             let schema = new_batch.schema();
             self.schemas.register_raw(component, schema.clone(), 1);
             self.empty_templates
-                .insert(component, RecordBatch::new_empty(schema));
+                .entry(component)
+                .or_insert_with(|| RecordBatch::new_empty(schema));
             self.components.insert(component, Vec::new());
         }
         self.set_batch_named(component, new_batch)

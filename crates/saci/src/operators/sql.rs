@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch};
-use arrow_schema::{Field, Schema, SchemaRef};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 
 use crate::dataset::{Dataset, intern_component_name};
@@ -26,7 +26,7 @@ use crate::system::{System, SystemMeta};
 
 use super::aggregate::{AggregateOp, AggregateSpec, aggregate_output_field};
 use super::deduplicate::DeduplicateSystem;
-use super::expr::{BinaryOp, Expr, ExprParser, ScalarValue, Token, tokenize};
+use super::expr::{BinaryOp, Expr, ExprParser, ScalarFunc, ScalarValue, Token, UnaryOp, tokenize};
 use super::group_by::GroupBySystem;
 use super::join::{JoinKey, JoinKind, JoinSystem};
 use super::sort::{SortKey, SortSystem};
@@ -80,6 +80,13 @@ pub enum SqlExpr {
         /// Input expression (`None` for `COUNT(*)`).
         arg: Option<Box<Expr>>,
     },
+    /// Unary operation (`NOT`, `-`, `IS NULL`, `IS NOT NULL`).
+    Unary {
+        /// Unary operator.
+        op: UnaryOp,
+        /// Operand expression.
+        expr: Box<SqlExpr>,
+    },
     /// Binary combination of two SQL expressions (e.g. `SUM(a) / COUNT(*)`).
     Binary {
         /// Left sub-expression.
@@ -88,6 +95,49 @@ pub enum SqlExpr {
         op: BinaryOp,
         /// Right sub-expression.
         right: Box<SqlExpr>,
+    },
+    /// Explicit type cast (`CAST(expr AS type)` or `expr::type`).
+    Cast {
+        /// Expression being cast.
+        expr: Box<SqlExpr>,
+        /// Target Arrow data type.
+        data_type: DataType,
+    },
+    /// Built-in scalar function call wrapping SQL sub-expressions.
+    Call {
+        /// Scalar function.
+        func: ScalarFunc,
+        /// Argument expressions.
+        args: Vec<SqlExpr>,
+    },
+    /// Conditional `CASE [operand] WHEN cond THEN val ... [ELSE val] END`.
+    Case {
+        /// Optional switch operand.
+        operand: Option<Box<SqlExpr>>,
+        /// Ordered `(when, then)` pairs.
+        when_then: Vec<(SqlExpr, SqlExpr)>,
+        /// Optional fallback expression.
+        else_expr: Option<Box<SqlExpr>>,
+    },
+    /// `[NOT] IN (v1, v2, ...)` membership test.
+    InList {
+        /// Left-hand expression.
+        expr: Box<SqlExpr>,
+        /// Candidate expressions.
+        list: Vec<SqlExpr>,
+        /// `true` for `NOT IN`.
+        negated: bool,
+    },
+    /// `[NOT] BETWEEN low AND high` inclusive range check.
+    Between {
+        /// Tested expression.
+        expr: Box<SqlExpr>,
+        /// Lower bound expression.
+        low: Box<SqlExpr>,
+        /// Upper bound expression.
+        high: Box<SqlExpr>,
+        /// `true` for `NOT BETWEEN`.
+        negated: bool,
     },
 }
 
@@ -173,9 +223,28 @@ impl SqlExpr {
         match self {
             Self::Scalar(_) => false,
             Self::Aggregate { .. } => true,
+            Self::Unary { expr, .. } | Self::Cast { expr, .. } => expr.contains_aggregate(),
             Self::Binary { left, right, .. } => {
                 left.contains_aggregate() || right.contains_aggregate()
             }
+            Self::Call { args, .. } => args.iter().any(Self::contains_aggregate),
+            Self::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                operand.as_deref().is_some_and(Self::contains_aggregate)
+                    || when_then
+                        .iter()
+                        .any(|(w, t)| w.contains_aggregate() || t.contains_aggregate())
+                    || else_expr.as_deref().is_some_and(Self::contains_aggregate)
+            }
+            Self::InList { expr, list, .. } => {
+                expr.contains_aggregate() || list.iter().any(Self::contains_aggregate)
+            }
+            Self::Between {
+                expr, low, high, ..
+            } => expr.contains_aggregate() || low.contains_aggregate() || high.contains_aggregate(),
         }
     }
 
@@ -188,21 +257,99 @@ impl SqlExpr {
                     .map_or_else(|| "all".to_string(), |e| e.default_alias());
                 AggregateSpec::new(col, op.clone()).output_name()
             }
-            Self::Binary { .. } => "expr".to_string(),
+            _ => "expr".to_string(),
         }
     }
 
     fn to_pure_scalar(&self) -> SaciResult<Expr> {
+        self.map_to_expr(&mut |op, _arg| {
+            Err(SaciError::configuration(format!(
+                "aggregate function '{op:?}' cannot appear in this clause"
+            )))
+        })
+    }
+
+    fn map_to_expr<F>(&self, on_agg: &mut F) -> SaciResult<Expr>
+    where
+        F: FnMut(&AggregateOp, Option<&Expr>) -> SaciResult<Expr>,
+    {
         match self {
             Self::Scalar(e) => Ok(e.clone()),
+            Self::Aggregate { op, arg } => on_agg(op, arg.as_deref()),
+            Self::Unary { op, expr } => Ok(Expr::Unary {
+                op: *op,
+                expr: Box::new(expr.map_to_expr(on_agg)?),
+            }),
             Self::Binary { left, op, right } => Ok(Expr::binary(
-                left.to_pure_scalar()?,
+                left.map_to_expr(on_agg)?,
                 *op,
-                right.to_pure_scalar()?,
+                right.map_to_expr(on_agg)?,
             )),
-            Self::Aggregate { op, .. } => Err(SaciError::configuration(format!(
-                "aggregate function '{op:?}' cannot appear in this clause"
-            ))),
+            Self::Cast { expr, data_type } => Ok(Expr::Cast {
+                expr: Box::new(expr.map_to_expr(on_agg)?),
+                data_type: data_type.clone(),
+            }),
+            Self::Call { func, args } => {
+                let mut out = Vec::with_capacity(args.len());
+                for a in args {
+                    out.push(a.map_to_expr(on_agg)?);
+                }
+                Ok(Expr::Call {
+                    func: *func,
+                    args: out,
+                })
+            }
+            Self::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                let op = operand
+                    .as_deref()
+                    .map(|e| e.map_to_expr(on_agg))
+                    .transpose()?
+                    .map(Box::new);
+                let mut wt = Vec::with_capacity(when_then.len());
+                for (w, t) in when_then {
+                    wt.push((w.map_to_expr(on_agg)?, t.map_to_expr(on_agg)?));
+                }
+                let el = else_expr
+                    .as_deref()
+                    .map(|e| e.map_to_expr(on_agg))
+                    .transpose()?
+                    .map(Box::new);
+                Ok(Expr::Case {
+                    operand: op,
+                    when_then: wt,
+                    else_expr: el,
+                })
+            }
+            Self::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                let mut out = Vec::with_capacity(list.len());
+                for item in list {
+                    out.push(item.map_to_expr(on_agg)?);
+                }
+                Ok(Expr::InList {
+                    expr: Box::new(expr.map_to_expr(on_agg)?),
+                    list: out,
+                    negated: *negated,
+                })
+            }
+            Self::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => Ok(Expr::Between {
+                expr: Box::new(expr.map_to_expr(on_agg)?),
+                low: Box::new(low.map_to_expr(on_agg)?),
+                high: Box::new(high.map_to_expr(on_agg)?),
+                negated: *negated,
+            }),
         }
     }
 }
@@ -891,72 +1038,54 @@ fn rewrite_sql_expr_for_grouped(
     agg_specs: &mut Vec<AggregateSpec>,
     agg_counter: &mut usize,
 ) -> SaciResult<Expr> {
-    match sql_expr {
-        SqlExpr::Aggregate { op, arg } => {
-            let alias = format!("__sql_agg_{}", *agg_counter);
-            *agg_counter += 1;
+    let raw = sql_expr.map_to_expr(&mut |op, arg| {
+        let alias = format!("__sql_agg_{}", *agg_counter);
+        *agg_counter += 1;
 
-            let spec = match arg {
-                None => {
-                    if *op != AggregateOp::CountAll {
-                        return Err(SaciError::configuration(format!(
-                            "{op:?}(*) is only valid for COUNT(*)"
-                        )));
-                    }
-                    AggregateSpec::count_all().alias(&alias)
+        let spec = match arg {
+            None => {
+                if *op != AggregateOp::CountAll {
+                    return Err(SaciError::configuration(format!(
+                        "{op:?}(*) is only valid for COUNT(*)"
+                    )));
                 }
-                Some(inner) => {
-                    let q_inner = qualify_expr_refs(inner, origins)?;
-                    let input_col = format!("__sql_agg_in_{}", *agg_counter);
-                    let arr = q_inner.evaluate(pre_batch)?;
-                    pre_fields.push(Field::new(&input_col, arr.data_type().clone(), true));
-                    pre_cols.push(arr);
-                    AggregateSpec::new(&input_col, op.clone()).alias(&alias)
-                }
-            };
-            spec.validate()?;
-            // Validate output type compatibility against pre_batch schema early.
-            let tmp_schema = Schema::new(pre_fields.clone());
-            let _ = aggregate_output_field(&spec, &tmp_schema)?;
-            agg_specs.push(spec);
-            Ok(Expr::Column(alias))
-        }
-        SqlExpr::Binary { left, op, right } => Ok(Expr::binary(
-            rewrite_sql_expr_for_grouped(
-                left,
-                origins,
-                group_exprs,
-                pre_batch,
-                pre_fields,
-                pre_cols,
-                agg_specs,
-                agg_counter,
-            )?,
-            *op,
-            rewrite_sql_expr_for_grouped(
-                right,
-                origins,
-                group_exprs,
-                pre_batch,
-                pre_fields,
-                pre_cols,
-                agg_specs,
-                agg_counter,
-            )?,
-        )),
-        SqlExpr::Scalar(scalar) => rewrite_scalar_against_groups(scalar, origins, group_exprs),
-    }
+                AggregateSpec::count_all().alias(&alias)
+            }
+            Some(inner) => {
+                let q_inner = qualify_expr_refs(inner, origins)?;
+                let input_col = format!("__sql_agg_in_{}", *agg_counter);
+                let arr = q_inner.evaluate(pre_batch)?;
+                pre_fields.push(Field::new(&input_col, arr.data_type().clone(), true));
+                pre_cols.push(arr);
+                AggregateSpec::new(&input_col, op.clone()).alias(&alias)
+            }
+        };
+        spec.validate()?;
+        let tmp_schema = Schema::new(pre_fields.clone());
+        let _ = aggregate_output_field(&spec, &tmp_schema)?;
+        agg_specs.push(spec);
+        // Synthetic placeholder column referencing the emitted aggregate column.
+        Ok(Expr::Column(alias))
+    })?;
+
+    rewrite_expr_against_groups(&raw, origins, group_exprs)
 }
 
-fn rewrite_scalar_against_groups(
+fn rewrite_expr_against_groups(
     expr: &Expr,
     origins: &[ColumnOrigin],
     group_exprs: &[(Expr, String)],
 ) -> SaciResult<Expr> {
-    let q_expr = qualify_expr_refs(expr, origins)?;
-    for (g_expr, g_col) in group_exprs {
-        if *g_expr == q_expr {
-            return Ok(Expr::Column(g_col.clone()));
+    if let Expr::Column(name) = expr
+        && name.starts_with("__sql_agg_")
+    {
+        return Ok(expr.clone());
+    }
+    if let Ok(q_expr) = qualify_expr_refs(expr, origins) {
+        for (g_expr, g_col) in group_exprs {
+            if *g_expr == q_expr {
+                return Ok(Expr::Column(g_col.clone()));
+            }
         }
     }
     match expr {
@@ -965,22 +1094,22 @@ fn rewrite_scalar_against_groups(
         ))),
         Expr::Literal(v) => Ok(Expr::Literal(v.clone())),
         Expr::Binary { left, op, right } => Ok(Expr::Binary {
-            left: Box::new(rewrite_scalar_against_groups(left, origins, group_exprs)?),
+            left: Box::new(rewrite_expr_against_groups(left, origins, group_exprs)?),
             op: *op,
-            right: Box::new(rewrite_scalar_against_groups(right, origins, group_exprs)?),
+            right: Box::new(rewrite_expr_against_groups(right, origins, group_exprs)?),
         }),
         Expr::Unary { op, expr } => Ok(Expr::Unary {
             op: *op,
-            expr: Box::new(rewrite_scalar_against_groups(expr, origins, group_exprs)?),
+            expr: Box::new(rewrite_expr_against_groups(expr, origins, group_exprs)?),
         }),
         Expr::Cast { expr, data_type } => Ok(Expr::Cast {
-            expr: Box::new(rewrite_scalar_against_groups(expr, origins, group_exprs)?),
+            expr: Box::new(rewrite_expr_against_groups(expr, origins, group_exprs)?),
             data_type: data_type.clone(),
         }),
         Expr::Call { func, args } => {
             let mut out = Vec::with_capacity(args.len());
             for a in args {
-                out.push(rewrite_scalar_against_groups(a, origins, group_exprs)?);
+                out.push(rewrite_expr_against_groups(a, origins, group_exprs)?);
             }
             Ok(Expr::Call {
                 func: *func,
@@ -994,19 +1123,19 @@ fn rewrite_scalar_against_groups(
         } => {
             let op = operand
                 .as_deref()
-                .map(|e| rewrite_scalar_against_groups(e, origins, group_exprs))
+                .map(|e| rewrite_expr_against_groups(e, origins, group_exprs))
                 .transpose()?
                 .map(Box::new);
             let mut wt = Vec::with_capacity(when_then.len());
             for (w, t) in when_then {
                 wt.push((
-                    rewrite_scalar_against_groups(w, origins, group_exprs)?,
-                    rewrite_scalar_against_groups(t, origins, group_exprs)?,
+                    rewrite_expr_against_groups(w, origins, group_exprs)?,
+                    rewrite_expr_against_groups(t, origins, group_exprs)?,
                 ));
             }
             let el = else_expr
                 .as_deref()
-                .map(|e| rewrite_scalar_against_groups(e, origins, group_exprs))
+                .map(|e| rewrite_expr_against_groups(e, origins, group_exprs))
                 .transpose()?
                 .map(Box::new);
             Ok(Expr::Case {
@@ -1022,10 +1151,10 @@ fn rewrite_scalar_against_groups(
         } => {
             let mut out_list = Vec::with_capacity(list.len());
             for i in list {
-                out_list.push(rewrite_scalar_against_groups(i, origins, group_exprs)?);
+                out_list.push(rewrite_expr_against_groups(i, origins, group_exprs)?);
             }
             Ok(Expr::InList {
-                expr: Box::new(rewrite_scalar_against_groups(expr, origins, group_exprs)?),
+                expr: Box::new(rewrite_expr_against_groups(expr, origins, group_exprs)?),
                 list: out_list,
                 negated: *negated,
             })
@@ -1036,9 +1165,9 @@ fn rewrite_scalar_against_groups(
             high,
             negated,
         } => Ok(Expr::Between {
-            expr: Box::new(rewrite_scalar_against_groups(expr, origins, group_exprs)?),
-            low: Box::new(rewrite_scalar_against_groups(low, origins, group_exprs)?),
-            high: Box::new(rewrite_scalar_against_groups(high, origins, group_exprs)?),
+            expr: Box::new(rewrite_expr_against_groups(expr, origins, group_exprs)?),
+            low: Box::new(rewrite_expr_against_groups(low, origins, group_exprs)?),
+            high: Box::new(rewrite_expr_against_groups(high, origins, group_exprs)?),
             negated: *negated,
         }),
     }
@@ -1381,9 +1510,9 @@ impl<'a> SqlParser<'a> {
     }
 
     fn parse_sql_and(&mut self) -> SaciResult<SqlExpr> {
-        let mut left = self.parse_sql_cmp()?;
+        let mut left = self.parse_sql_not()?;
         while self.inner.eat_keyword("AND") {
-            let right = self.parse_sql_cmp()?;
+            let right = self.parse_sql_not()?;
             left = SqlExpr::Binary {
                 left: Box::new(left),
                 op: BinaryOp::And,
@@ -1393,34 +1522,182 @@ impl<'a> SqlParser<'a> {
         Ok(left)
     }
 
+    fn parse_sql_not(&mut self) -> SaciResult<SqlExpr> {
+        if self.inner.eat_keyword("NOT") {
+            let inner = self.parse_sql_not()?;
+            return Ok(SqlExpr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(inner),
+            });
+        }
+        self.parse_sql_cmp()
+    }
+
     fn parse_sql_cmp(&mut self) -> SaciResult<SqlExpr> {
-        let mut left = self.parse_sql_add()?;
+        let mut left = self.parse_sql_concat()?;
         loop {
-            let op = if self.inner.eat(&Token::Eq) {
-                Some(BinaryOp::Eq)
-            } else if self.inner.eat(&Token::Ne) {
-                Some(BinaryOp::Ne)
-            } else if self.inner.eat(&Token::Lt) {
-                Some(BinaryOp::Lt)
-            } else if self.inner.eat(&Token::Le) {
-                Some(BinaryOp::Le)
-            } else if self.inner.eat(&Token::Gt) {
-                Some(BinaryOp::Gt)
-            } else if self.inner.eat(&Token::Ge) {
-                Some(BinaryOp::Ge)
-            } else {
-                None
-            };
-            if let Some(op) = op {
-                let right = self.parse_sql_add()?;
+            if self.inner.eat(&Token::Eq) {
+                let right = self.parse_sql_concat()?;
                 left = SqlExpr::Binary {
                     left: Box::new(left),
-                    op,
+                    op: BinaryOp::Eq,
+                    right: Box::new(right),
+                };
+            } else if self.inner.eat(&Token::Ne) {
+                let right = self.parse_sql_concat()?;
+                left = SqlExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Ne,
+                    right: Box::new(right),
+                };
+            } else if self.inner.eat(&Token::Lt) {
+                let right = self.parse_sql_concat()?;
+                left = SqlExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Lt,
+                    right: Box::new(right),
+                };
+            } else if self.inner.eat(&Token::Le) {
+                let right = self.parse_sql_concat()?;
+                left = SqlExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Le,
+                    right: Box::new(right),
+                };
+            } else if self.inner.eat(&Token::Gt) {
+                let right = self.parse_sql_concat()?;
+                left = SqlExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Gt,
+                    right: Box::new(right),
+                };
+            } else if self.inner.eat(&Token::Ge) {
+                let right = self.parse_sql_concat()?;
+                left = SqlExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Ge,
+                    right: Box::new(right),
+                };
+            } else if self.inner.eat_keyword("IS") {
+                let negated = self.inner.eat_keyword("NOT");
+                if self.inner.eat_keyword("NULL") {
+                    left = SqlExpr::Unary {
+                        op: if negated {
+                            UnaryOp::IsNotNull
+                        } else {
+                            UnaryOp::IsNull
+                        },
+                        expr: Box::new(left),
+                    };
+                } else if self.inner.eat_keyword("DISTINCT") {
+                    self.inner.expect_keyword("FROM")?;
+                    let right = self.parse_sql_concat()?;
+                    left = SqlExpr::Binary {
+                        left: Box::new(left),
+                        op: if negated {
+                            BinaryOp::IsNotDistinctFrom
+                        } else {
+                            BinaryOp::IsDistinctFrom
+                        },
+                        right: Box::new(right),
+                    };
+                } else {
+                    return Err(SaciError::configuration(format!(
+                        "expected NULL or DISTINCT FROM after IS, found '{}'",
+                        self.inner.peek_display()
+                    )));
+                }
+            } else if self.inner.peek_keyword("NOT") {
+                let saved = self.inner.pos();
+                self.inner.set_pos(saved + 1);
+                if self.inner.eat_keyword("IN") {
+                    left = self.parse_sql_in_list(left, true)?;
+                } else if self.inner.eat_keyword("BETWEEN") {
+                    left = self.parse_sql_between(left, true)?;
+                } else if self.inner.eat_keyword("LIKE") {
+                    let right = self.parse_sql_concat()?;
+                    left = SqlExpr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::NotLike,
+                        right: Box::new(right),
+                    };
+                } else if self.inner.eat_keyword("ILIKE") {
+                    let right = self.parse_sql_concat()?;
+                    left = SqlExpr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::NotILike,
+                        right: Box::new(right),
+                    };
+                } else {
+                    self.inner.set_pos(saved);
+                    break;
+                }
+            } else if self.inner.eat_keyword("IN") {
+                left = self.parse_sql_in_list(left, false)?;
+            } else if self.inner.eat_keyword("BETWEEN") {
+                left = self.parse_sql_between(left, false)?;
+            } else if self.inner.eat_keyword("LIKE") {
+                let right = self.parse_sql_concat()?;
+                left = SqlExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Like,
+                    right: Box::new(right),
+                };
+            } else if self.inner.eat_keyword("ILIKE") {
+                let right = self.parse_sql_concat()?;
+                left = SqlExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::ILike,
                     right: Box::new(right),
                 };
             } else {
                 break;
             }
+        }
+        Ok(left)
+    }
+
+    fn parse_sql_in_list(&mut self, expr: SqlExpr, negated: bool) -> SaciResult<SqlExpr> {
+        self.inner.expect(&Token::LParen)?;
+        let mut list = Vec::new();
+        if !self.inner.eat(&Token::RParen) {
+            loop {
+                list.push(self.parse_sql_expr()?);
+                if self.inner.eat(&Token::Comma) {
+                    continue;
+                }
+                self.inner.expect(&Token::RParen)?;
+                break;
+            }
+        }
+        Ok(SqlExpr::InList {
+            expr: Box::new(expr),
+            list,
+            negated,
+        })
+    }
+
+    fn parse_sql_between(&mut self, expr: SqlExpr, negated: bool) -> SaciResult<SqlExpr> {
+        let low = self.parse_sql_concat()?;
+        self.inner.expect_keyword("AND")?;
+        let high = self.parse_sql_concat()?;
+        Ok(SqlExpr::Between {
+            expr: Box::new(expr),
+            low: Box::new(low),
+            high: Box::new(high),
+            negated,
+        })
+    }
+
+    fn parse_sql_concat(&mut self) -> SaciResult<SqlExpr> {
+        let mut left = self.parse_sql_add()?;
+        while self.inner.eat(&Token::Concat) {
+            let right = self.parse_sql_add()?;
+            left = SqlExpr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Concat,
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -1450,24 +1727,24 @@ impl<'a> SqlParser<'a> {
     }
 
     fn parse_sql_mul(&mut self) -> SaciResult<SqlExpr> {
-        let mut left = self.parse_sql_atom()?;
+        let mut left = self.parse_sql_unary()?;
         loop {
             if self.inner.eat(&Token::Star) {
-                let right = self.parse_sql_atom()?;
+                let right = self.parse_sql_unary()?;
                 left = SqlExpr::Binary {
                     left: Box::new(left),
                     op: BinaryOp::Mul,
                     right: Box::new(right),
                 };
             } else if self.inner.eat(&Token::Slash) {
-                let right = self.parse_sql_atom()?;
+                let right = self.parse_sql_unary()?;
                 left = SqlExpr::Binary {
                     left: Box::new(left),
                     op: BinaryOp::Div,
                     right: Box::new(right),
                 };
             } else if self.inner.eat(&Token::Percent) {
-                let right = self.parse_sql_atom()?;
+                let right = self.parse_sql_unary()?;
                 left = SqlExpr::Binary {
                     left: Box::new(left),
                     op: BinaryOp::Mod,
@@ -1480,20 +1757,163 @@ impl<'a> SqlParser<'a> {
         Ok(left)
     }
 
+    fn parse_sql_unary(&mut self) -> SaciResult<SqlExpr> {
+        if self.inner.eat(&Token::Minus) {
+            if let Some(&Token::Int(v)) = self.inner.peek() {
+                self.inner.set_pos(self.inner.pos() + 1);
+                return self
+                    .parse_sql_postfix(SqlExpr::Scalar(Expr::Literal(ScalarValue::Int64(-v))));
+            }
+            if let Some(&Token::Float(v)) = self.inner.peek() {
+                self.inner.set_pos(self.inner.pos() + 1);
+                return self
+                    .parse_sql_postfix(SqlExpr::Scalar(Expr::Literal(ScalarValue::Float64(-v))));
+            }
+            let inner = self.parse_sql_unary()?;
+            return Ok(SqlExpr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(inner),
+            });
+        }
+        if self.inner.eat(&Token::Plus) {
+            return self.parse_sql_unary();
+        }
+        let primary = self.parse_sql_atom()?;
+        self.parse_sql_postfix(primary)
+    }
+
+    fn parse_sql_postfix(&mut self, mut expr: SqlExpr) -> SaciResult<SqlExpr> {
+        while self.inner.eat(&Token::DoubleColon) {
+            let dt = self.inner.parse_type_name()?;
+            expr = SqlExpr::Cast {
+                expr: Box::new(expr),
+                data_type: dt,
+            };
+        }
+        Ok(expr)
+    }
+
     fn parse_sql_atom(&mut self) -> SaciResult<SqlExpr> {
-        if let Some(Token::Ident(name)) = self.inner.peek().cloned()
-            && matches!(self.tokens.get(self.inner.pos() + 1), Some(Token::LParen))
-            && is_aggregate_func_name(&name)
-        {
-            return self.parse_aggregate_call(&name);
+        match self.inner.peek().cloned() {
+            Some(Token::LParen) => {
+                self.inner.set_pos(self.inner.pos() + 1);
+                let inner = self.parse_sql_expr()?;
+                self.inner.expect(&Token::RParen)?;
+                Ok(inner)
+            }
+            Some(Token::Int(v)) => {
+                self.inner.set_pos(self.inner.pos() + 1);
+                Ok(SqlExpr::Scalar(Expr::Literal(ScalarValue::Int64(v))))
+            }
+            Some(Token::Float(v)) => {
+                self.inner.set_pos(self.inner.pos() + 1);
+                Ok(SqlExpr::Scalar(Expr::Literal(ScalarValue::Float64(v))))
+            }
+            Some(Token::String(s)) => {
+                self.inner.set_pos(self.inner.pos() + 1);
+                Ok(SqlExpr::Scalar(Expr::Literal(ScalarValue::Utf8(s))))
+            }
+            Some(Token::QuotedIdent(name)) => {
+                self.inner.set_pos(self.inner.pos() + 1);
+                if self.inner.eat(&Token::Dot) {
+                    let col = self.inner.expect_ident_name()?;
+                    Ok(SqlExpr::Scalar(Expr::Column(format!("{name}.{col}"))))
+                } else {
+                    Ok(SqlExpr::Scalar(Expr::Column(name)))
+                }
+            }
+            Some(Token::Ident(word)) => {
+                if word.eq_ignore_ascii_case("NULL") {
+                    self.inner.set_pos(self.inner.pos() + 1);
+                    return Ok(SqlExpr::Scalar(Expr::Literal(ScalarValue::Null)));
+                }
+                if word.eq_ignore_ascii_case("TRUE") {
+                    self.inner.set_pos(self.inner.pos() + 1);
+                    return Ok(SqlExpr::Scalar(Expr::Literal(ScalarValue::Bool(true))));
+                }
+                if word.eq_ignore_ascii_case("FALSE") {
+                    self.inner.set_pos(self.inner.pos() + 1);
+                    return Ok(SqlExpr::Scalar(Expr::Literal(ScalarValue::Bool(false))));
+                }
+                if word.eq_ignore_ascii_case("CASE") {
+                    self.inner.set_pos(self.inner.pos() + 1);
+                    return self.parse_sql_case();
+                }
+                if word.eq_ignore_ascii_case("CAST")
+                    && matches!(self.tokens.get(self.inner.pos() + 1), Some(Token::LParen))
+                {
+                    self.inner.set_pos(self.inner.pos() + 2);
+                    let inner = self.parse_sql_expr()?;
+                    self.inner.expect_keyword("AS")?;
+                    let dt = self.inner.parse_type_name()?;
+                    self.inner.expect(&Token::RParen)?;
+                    return Ok(SqlExpr::Cast {
+                        expr: Box::new(inner),
+                        data_type: dt,
+                    });
+                }
+                if matches!(self.tokens.get(self.inner.pos() + 1), Some(Token::LParen))
+                    && is_aggregate_func_name(&word)
+                {
+                    return self.parse_aggregate_call(&word);
+                }
+
+                self.inner.set_pos(self.inner.pos() + 1);
+                if self.inner.eat(&Token::LParen) {
+                    let mut args = Vec::new();
+                    if !self.inner.eat(&Token::RParen) {
+                        loop {
+                            args.push(self.parse_sql_expr()?);
+                            if self.inner.eat(&Token::Comma) {
+                                continue;
+                            }
+                            self.inner.expect(&Token::RParen)?;
+                            break;
+                        }
+                    }
+                    let func = ScalarFunc::from_name(&word)?;
+                    return Ok(SqlExpr::Call { func, args });
+                }
+                if self.inner.eat(&Token::Dot) {
+                    let col = self.inner.expect_ident_name()?;
+                    return Ok(SqlExpr::Scalar(Expr::Column(format!("{word}.{col}"))));
+                }
+                Ok(SqlExpr::Scalar(Expr::Column(word)))
+            }
+            _ => Err(SaciError::configuration(format!(
+                "unexpected token '{}' in SQL expression",
+                self.inner.peek_display()
+            ))),
         }
-        // Only fall back to pure scalar expression if it does not contain an aggregate call inside parens.
-        if self.inner.eat(&Token::LParen) {
-            let inner = self.parse_sql_expr()?;
-            self.inner.expect(&Token::RParen)?;
-            return Ok(inner);
+    }
+
+    fn parse_sql_case(&mut self) -> SaciResult<SqlExpr> {
+        let operand = if self.inner.peek_keyword("WHEN") {
+            None
+        } else {
+            Some(Box::new(self.parse_sql_expr()?))
+        };
+        let mut when_then = Vec::new();
+        while self.inner.eat_keyword("WHEN") {
+            let cond = self.parse_sql_expr()?;
+            self.inner.expect_keyword("THEN")?;
+            let val = self.parse_sql_expr()?;
+            when_then.push((cond, val));
         }
-        Ok(SqlExpr::Scalar(self.inner.parse_expr()?))
+        if when_then.is_empty() {
+            return Err(SaciError::configuration("CASE requires at least one WHEN"));
+        }
+        let else_expr = if self.inner.eat_keyword("ELSE") {
+            Some(Box::new(self.parse_sql_expr()?))
+        } else {
+            None
+        };
+        self.inner.expect_keyword("END")?;
+        Ok(SqlExpr::Case {
+            operand,
+            when_then,
+            else_expr,
+        })
     }
 
     fn parse_aggregate_call(&mut self, name: &str) -> SaciResult<SqlExpr> {
@@ -1717,5 +2137,129 @@ mod tests {
             out.column(2).as_primitive::<Float64Type>().values(),
             &[100.0, 240.0]
         );
+    }
+
+    #[test]
+    fn sql_rich_aggregate_expressions_in_select_and_having() {
+        let orders = orders_batch();
+        let mut ds = Dataset::new();
+        ds.register_schema("orders", orders.schema()).unwrap();
+        ds.set_batch_named("orders", orders).unwrap();
+
+        let sql = SqlSystem::parse(
+            "rich",
+            "SELECT region, \
+                    COALESCE(SUM(amount), 0.0) AS total, \
+                    CASE WHEN COUNT(*) > 1 THEN 'multi' ELSE 'single' END AS kind, \
+                    CAST(SUM(amount) AS BIGINT) AS total_int, \
+                    -SUM(amount) AS neg_sum \
+             FROM orders \
+             GROUP BY region \
+             HAVING SUM(amount) BETWEEN 100.0 AND 200.0 \
+             ORDER BY total DESC",
+        )
+        .unwrap();
+
+        sql.run_sync(&mut ds).unwrap().unwrap();
+        let out = ds.batch_named("rich").unwrap();
+        assert_eq!(out.num_rows(), 2);
+        assert_eq!(out.column(0).as_string::<i32>().value(0), "us");
+        assert!((out.column(1).as_primitive::<Float64Type>().value(0) - 170.0).abs() < 1e-9);
+        assert_eq!(out.column(2).as_string::<i32>().value(0), "multi");
+        assert_eq!(out.column(3).as_primitive::<Int64Type>().value(0), 170);
+        assert!((out.column(4).as_primitive::<Float64Type>().value(0) + 170.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sql_global_aggregate_on_empty_and_filtered_out_batch() {
+        let orders = orders_batch();
+        let mut ds = Dataset::new();
+        ds.register_schema("orders", orders.schema()).unwrap();
+        ds.set_batch_named("orders", orders).unwrap();
+
+        let sql = SqlSystem::parse(
+            "empty_agg",
+            "SELECT COUNT(*) AS cnt, SUM(amount) AS total FROM orders WHERE amount > 999999",
+        )
+        .unwrap();
+        sql.run_sync(&mut ds).unwrap().unwrap();
+        let out = ds.batch_named("empty_agg").unwrap();
+        assert_eq!(out.num_rows(), 1);
+        assert_eq!(out.column(0).as_primitive::<Int64Type>().value(0), 0);
+        assert!(out.column(1).is_null(0));
+
+        // Also when input batch itself is 0 rows:
+        ds.set_batch_named("orders", RecordBatch::new_empty(orders_batch().schema()))
+            .unwrap();
+        sql.run_sync(&mut ds).unwrap().unwrap();
+        let out_empty = ds.batch_named("empty_agg").unwrap();
+        assert_eq!(out_empty.num_rows(), 1);
+        assert_eq!(out_empty.column(0).as_primitive::<Int64Type>().value(0), 0);
+        assert!(out_empty.column(1).is_null(0));
+    }
+
+    #[test]
+    fn sql_three_way_join_and_cross_type_join_keys() {
+        let o_schema = Arc::new(Schema::new(vec![
+            Field::new("oid", DataType::Int64, false),
+            Field::new("cid", DataType::Int32, false),
+            Field::new("region", DataType::Utf8, false),
+        ]));
+        let orders = RecordBatch::try_new(
+            o_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+                Arc::new(arrow_array::Int32Array::from(vec![10, 20])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["us", "xx"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let customers = customers_batch(); // id: Int64 ([1, 2])
+        let c2_schema = customers.schema();
+        let cust2 = RecordBatch::try_new(
+            c2_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![10, 20])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["gold", "silver"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let r_schema = Arc::new(Schema::new(vec![
+            Field::new("code", DataType::Utf8, false),
+            Field::new("country", DataType::Utf8, false),
+        ]));
+        let regions = RecordBatch::try_new(
+            r_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["us"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["United States"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let mut ds = Dataset::new();
+        ds.register_schema("orders", o_schema).unwrap();
+        ds.register_schema("customers", cust2.schema()).unwrap();
+        ds.register_schema("regions", r_schema).unwrap();
+        ds.set_batch_named("orders", orders).unwrap();
+        ds.set_batch_named("customers", cust2).unwrap();
+        ds.set_batch_named("regions", regions).unwrap();
+
+        let sql = SqlSystem::parse(
+            "out",
+            "SELECT o.oid, c.tier, r.country \
+             FROM orders o \
+             JOIN customers c ON o.cid = c.id \
+             LEFT JOIN regions r ON o.region = r.code \
+             ORDER BY o.oid ASC",
+        )
+        .unwrap();
+        sql.run_sync(&mut ds).unwrap().unwrap();
+
+        let out = ds.batch_named("out").unwrap();
+        assert_eq!(out.num_rows(), 2);
+        assert_eq!(out.column(0).as_primitive::<Int64Type>().values(), &[1, 2]);
+        assert_eq!(out.column(2).as_string::<i32>().value(0), "United States");
+        assert!(out.column(2).is_null(1));
     }
 }

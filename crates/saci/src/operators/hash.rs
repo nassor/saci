@@ -3,9 +3,11 @@
 
 use arrow_array::{Array, ArrayRef, Int64Array, StringArray};
 use arrow_cast::cast;
-use arrow_schema::DataType;
+use arrow_schema::{DataType, TimeUnit};
 
-use crate::error::SaciError;
+use crate::error::{SaciError, SaciResult};
+
+use super::expr::coerce_arithmetic_type;
 
 fn fnv1a(data: &[u8]) -> i64 {
     use std::hash::Hasher as _;
@@ -14,8 +16,30 @@ fn fnv1a(data: &[u8]) -> i64 {
     h.finish() as i64
 }
 
-/// Cast each key column to `Utf8` once per column, then invoke `on_row` with
-/// each row's canonical null-safe key string.
+/// Returns the common Arrow type to which two join key columns can be coerced
+/// before hashing/comparing, or `None` when their types are incompatible.
+pub(crate) fn common_join_key_type(left: &DataType, right: &DataType) -> Option<DataType> {
+    if left == right {
+        return Some(left.clone());
+    }
+    if left.is_numeric() && right.is_numeric() {
+        return coerce_arithmetic_type(left, right).ok();
+    }
+    match (left, right) {
+        (DataType::Utf8 | DataType::LargeUtf8, DataType::Utf8 | DataType::LargeUtf8) => {
+            Some(DataType::Utf8)
+        }
+        (
+            DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64,
+            DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64,
+        ) => Some(DataType::Timestamp(TimeUnit::Millisecond, None)),
+        _ => None,
+    }
+}
+
+/// Cast each key column to `Utf8` once per column (borrowing `Utf8` arrays
+/// directly), then invoke `on_row` with each row's canonical null-safe key
+/// string.
 ///
 /// Null values encode as `\x01` and present values as `\x02` followed by their
 /// UTF-8 representation, separated by `\x00`. A null key therefore never
@@ -23,6 +47,14 @@ fn fnv1a(data: &[u8]) -> i64 {
 /// never collides with `("a", "bc")`.
 pub(crate) fn for_each_row_key(
     cols: &[&ArrayRef],
+    on_row: impl FnMut(usize, &str),
+) -> Result<(), SaciError> {
+    for_each_row_key_with_targets(cols, None, on_row)
+}
+
+fn for_each_row_key_with_targets(
+    cols: &[&ArrayRef],
+    targets: Option<&[DataType]>,
     mut on_row: impl FnMut(usize, &str),
 ) -> Result<(), SaciError> {
     if cols.is_empty() {
@@ -31,8 +63,28 @@ pub(crate) fn for_each_row_key(
     let n_rows = cols[0].len();
     let string_cols: Vec<StringArray> = cols
         .iter()
-        .map(|col| {
-            let casted = cast(col.as_ref(), &DataType::Utf8).map_err(|e| {
+        .enumerate()
+        .map(|(idx, col)| {
+            let coerced;
+            let src: &ArrayRef = match targets.and_then(|t| t.get(idx)) {
+                Some(target) if col.data_type() != target => {
+                    coerced = cast(col.as_ref(), target).map_err(|e| {
+                        SaciError::generic(format!(
+                            "failed to coerce key column to {target:?}: {e}"
+                        ))
+                    })?;
+                    &coerced
+                }
+                _ => col,
+            };
+            if src.data_type() == &DataType::Utf8 {
+                return src
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| SaciError::generic("downcast to StringArray failed"))
+                    .cloned();
+            }
+            let casted = cast(src.as_ref(), &DataType::Utf8).map_err(|e| {
                 SaciError::generic(format!("failed to cast key column to Utf8: {e}"))
             })?;
             casted
@@ -98,6 +150,22 @@ pub(crate) fn compute_row_keys(cols: &[&ArrayRef]) -> Result<Vec<(i64, String)>,
     }
     let mut out = Vec::with_capacity(cols[0].len());
     for_each_row_key(cols, |_row_idx, key| {
+        out.push((fnv1a(key.as_bytes()), key.to_string()));
+    })?;
+    Ok(out)
+}
+
+/// Coerce each key column in `cols` to the corresponding `target_types[i]` and
+/// materialize `(hash, canonical_key)` pairs per row.
+pub(crate) fn compute_coerced_row_keys(
+    cols: &[&ArrayRef],
+    target_types: &[DataType],
+) -> SaciResult<Vec<(i64, String)>> {
+    if cols.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(cols[0].len());
+    for_each_row_key_with_targets(cols, Some(target_types), |_row_idx, key| {
         out.push((fnv1a(key.as_bytes()), key.to_string()));
     })?;
     Ok(out)

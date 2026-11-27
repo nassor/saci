@@ -313,6 +313,42 @@ pub(crate) fn evaluate_aggregate_spec(
     }
 }
 
+/// Evaluate `spec` across all row-index groups in `batch`, returning a
+/// [`ArrayRef`] of length `groups.len()`.
+pub(crate) fn evaluate_aggregate_spec_for_groups(
+    spec: &AggregateSpec,
+    batch: &RecordBatch,
+    groups: &[Vec<u32>],
+) -> SaciResult<ArrayRef> {
+    spec.validate()?;
+    match &spec.op {
+        AggregateOp::CountAll => Ok(Arc::new(Int64Array::from_iter_values(
+            groups.iter().map(|g| g.len() as i64),
+        )) as ArrayRef),
+        op => {
+            let idx = batch
+                .schema_ref()
+                .index_of(&spec.field)
+                .map_err(|_| SaciError::field_not_found("aggregate", &spec.field))?;
+            let col = batch.column(idx);
+            let mut per_group = Vec::with_capacity(groups.len());
+            for indices in groups {
+                let slice = if indices.len() == batch.num_rows() {
+                    col.clone()
+                } else {
+                    let idx_arr = UInt32Array::from(indices.clone());
+                    take(col.as_ref(), &idx_arr, None)
+                        .map_err(|e| SaciError::generic(format!("aggregate group take: {e}")))?
+                };
+                per_group.push(evaluate_column_aggregate(op, &slice, &spec.field)?);
+            }
+            let refs: Vec<&dyn Array> = per_group.iter().map(ArrayRef::as_ref).collect();
+            arrow_select::concat::concat(&refs)
+                .map_err(|e| SaciError::generic(format!("aggregate group concat: {e}")))
+        }
+    }
+}
+
 /// Evaluate an [`AggregateOp`] on a single column slice `col`, returning a 1-element [`ArrayRef`].
 pub(crate) fn evaluate_column_aggregate(
     op: &AggregateOp,
@@ -331,40 +367,44 @@ pub(crate) fn evaluate_column_aggregate(
         }
         AggregateOp::Sum => {
             let arr = cast_to_f64(col, field)?;
-            let val = sum(&arr).unwrap_or(0.0);
+            let val = (arr.len() > arr.null_count()).then(|| sum(&arr).unwrap_or(0.0));
             Ok(Arc::new(Float64Array::from(vec![val])) as ArrayRef)
         }
         AggregateOp::Min => {
             let arr = cast_to_f64(col, field)?;
-            let val = min(&arr).unwrap_or(f64::INFINITY);
+            let val = min(&arr);
             Ok(Arc::new(Float64Array::from(vec![val])) as ArrayRef)
         }
         AggregateOp::Max => {
             let arr = cast_to_f64(col, field)?;
-            let val = max(&arr).unwrap_or(f64::NEG_INFINITY);
+            let val = max(&arr);
             Ok(Arc::new(Float64Array::from(vec![val])) as ArrayRef)
         }
         AggregateOp::Mean => {
             let arr = cast_to_f64(col, field)?;
             let non_null = arr.len() - arr.null_count();
-            let val = if non_null == 0 {
-                f64::NAN
-            } else {
-                sum(&arr).unwrap_or(0.0) / non_null as f64
-            };
+            let val = (non_null > 0).then(|| sum(&arr).unwrap_or(0.0) / non_null as f64);
             Ok(Arc::new(Float64Array::from(vec![val])) as ArrayRef)
         }
         AggregateOp::Variance => {
             let arr = cast_to_f64(col, field)?;
-            Ok(Arc::new(Float64Array::from(vec![welford_variance(&arr)])) as ArrayRef)
+            let non_null = arr.len() - arr.null_count();
+            let val = (non_null >= 2).then(|| welford_variance(&arr));
+            Ok(Arc::new(Float64Array::from(vec![val])) as ArrayRef)
         }
         AggregateOp::StdDev => {
             let arr = cast_to_f64(col, field)?;
-            Ok(Arc::new(Float64Array::from(vec![welford_variance(&arr).sqrt()])) as ArrayRef)
+            let non_null = arr.len() - arr.null_count();
+            let val = (non_null >= 2).then(|| welford_variance(&arr).sqrt());
+            Ok(Arc::new(Float64Array::from(vec![val])) as ArrayRef)
         }
         AggregateOp::ApproxPercentile(q) => {
             let arr = cast_to_f64(col, field)?;
-            Ok(Arc::new(Float64Array::from(vec![percentile(&arr, *q)])) as ArrayRef)
+            let non_null = arr.len() - arr.null_count();
+            let val = (non_null > 0)
+                .then(|| percentile(&arr, *q))
+                .filter(|v| !v.is_nan());
+            Ok(Arc::new(Float64Array::from(vec![val])) as ArrayRef)
         }
         AggregateOp::First => pick_non_null(col, true),
         AggregateOp::Last => pick_non_null(col, false),
@@ -403,6 +443,17 @@ pub(crate) fn evaluate_column_aggregate(
 }
 
 pub(crate) fn count_distinct_non_null(col: &ArrayRef) -> SaciResult<i64> {
+    if col.data_type() == &DataType::Utf8 {
+        let arr = col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| SaciError::generic("count_distinct downcast StringArray failed"))?;
+        let mut set = HashSet::new();
+        for v in arr.iter().flatten() {
+            set.insert(v);
+        }
+        return Ok(set.len() as i64);
+    }
     let casted = cast(col.as_ref(), &DataType::Utf8)
         .map_err(|e| SaciError::generic(format!("count_distinct cast to Utf8: {e}")))?;
     let arr = casted
@@ -559,5 +610,89 @@ mod tests {
             .validate()
             .unwrap_err();
         assert_eq!(err.category(), "configuration");
+    }
+
+    #[test]
+    fn all_null_and_single_row_aggregates_return_sql_null_or_zero() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("s", DataType::Utf8, true),
+        ]));
+        let all_null = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![None, None])) as ArrayRef,
+                Arc::new(StringArray::from(vec![None::<&str>, None])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        for spec in [
+            AggregateSpec::sum("v"),
+            AggregateSpec::min("v"),
+            AggregateSpec::max("v"),
+            AggregateSpec::mean("v"),
+            AggregateSpec::variance("v"),
+            AggregateSpec::stddev("v"),
+            AggregateSpec::approx_percentile("v", 0.5),
+        ] {
+            let out = evaluate_aggregate_spec(&spec, &all_null).unwrap();
+            assert!(
+                out.is_null(0),
+                "expected NULL for {spec:?} on all-null group"
+            );
+        }
+        assert_eq!(
+            evaluate_aggregate_spec(&AggregateSpec::count("v"), &all_null)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            0
+        );
+        assert_eq!(
+            evaluate_aggregate_spec(&AggregateSpec::count_distinct("s"), &all_null)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            0
+        );
+        assert!(
+            evaluate_aggregate_spec(&AggregateSpec::first("s"), &all_null)
+                .unwrap()
+                .is_null(0)
+        );
+        assert!(
+            evaluate_aggregate_spec(&AggregateSpec::last("s"), &all_null)
+                .unwrap()
+                .is_null(0)
+        );
+        assert!(
+            evaluate_aggregate_spec(&AggregateSpec::string_agg("s", ","), &all_null)
+                .unwrap()
+                .is_null(0)
+        );
+
+        let single = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(42.0)])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("ok")])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        assert!(
+            evaluate_aggregate_spec(&AggregateSpec::variance("v"), &single)
+                .unwrap()
+                .is_null(0)
+        );
+        assert!(
+            evaluate_aggregate_spec(&AggregateSpec::stddev("v"), &single)
+                .unwrap()
+                .is_null(0)
+        );
     }
 }

@@ -7,12 +7,9 @@ use std::sync::Arc;
 use arrow_arith::boolean::{and_kleene, is_not_null, is_null, not, or_kleene};
 use arrow_arith::numeric::{add, div, mul, neg, rem, sub};
 use arrow_array::cast::AsArray;
-use arrow_array::types::{
-    Date32Type, Float64Type, Int64Type, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType,
-};
+use arrow_array::types::{Date32Type, Float64Type, Int64Type};
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array,
     new_null_array,
 };
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
@@ -670,7 +667,7 @@ fn cast_array(arr: &ArrayRef, target: &DataType) -> SaciResult<ArrayRef> {
         .map_err(|e| SaciError::generic(format!("cast {:?} to {:?}: {e}", arr.data_type(), target)))
 }
 
-fn coerce_arithmetic_type(left: &DataType, right: &DataType) -> SaciResult<DataType> {
+pub(crate) fn coerce_arithmetic_type(left: &DataType, right: &DataType) -> SaciResult<DataType> {
     if *left == DataType::Null {
         return Ok(right.clone());
     }
@@ -880,9 +877,35 @@ fn eval_case(
     let len = batch.num_rows();
     let op_arr = operand.map(|o| o.evaluate(batch)).transpose()?;
 
-    let mut then_arrays = Vec::with_capacity(when_then.len());
-    let mut cond_arrays = Vec::with_capacity(when_then.len());
+    if len == 0 {
+        let mut types = Vec::with_capacity(when_then.len() + 1);
+        for (_, then_expr) in when_then {
+            types.push(then_expr.evaluate(batch)?.data_type().clone());
+        }
+        if let Some(el) = else_expr {
+            types.push(el.evaluate(batch)?.data_type().clone());
+        }
+        let target_dt = infer_common_type(&types)?;
+        return Ok(new_null_array(&target_dt, 0));
+    }
+
+    let empty_batch = batch.slice(0, 0);
+    let mut remaining = vec![true; len];
+    let mut branch_results: Vec<(Vec<usize>, ArrayRef)> = Vec::with_capacity(when_then.len() + 1);
     let mut result_types = Vec::with_capacity(when_then.len() + 1);
+
+    let eval_masked =
+        |target_expr: &Expr, indices: &[usize], mask: &BooleanArray| -> SaciResult<ArrayRef> {
+            if indices.is_empty() {
+                target_expr.evaluate(&empty_batch)
+            } else if indices.len() == len {
+                target_expr.evaluate(batch)
+            } else {
+                let sub_batch = filter_record_batch(batch, mask)
+                    .map_err(|e| SaciError::generic(format!("CASE filter batch: {e}")))?;
+                target_expr.evaluate(&sub_batch)
+            }
+        };
 
     for (when_expr, then_expr) in when_then {
         let cond = if let Some(ref lhs) = op_arr {
@@ -892,33 +915,75 @@ fn eval_case(
         } else {
             when_expr.evaluate_predicate(batch)?
         };
-        let then_arr = then_expr.evaluate(batch)?;
-        result_types.push(then_arr.data_type().clone());
-        cond_arrays.push(cond);
-        then_arrays.push(then_arr);
+        let mut active_indices = Vec::new();
+        let active_mask: BooleanArray = (0..len)
+            .map(|i| {
+                let take_row = remaining[i] && cond.is_valid(i) && cond.value(i);
+                if take_row {
+                    remaining[i] = false;
+                    active_indices.push(i);
+                }
+                take_row
+            })
+            .collect();
+
+        let arr = eval_masked(then_expr, &active_indices, &active_mask)?;
+        result_types.push(arr.data_type().clone());
+        branch_results.push((active_indices, arr));
     }
 
-    let else_arr = match else_expr {
-        Some(el) => {
-            let arr = el.evaluate(batch)?;
-            result_types.push(arr.data_type().clone());
-            Some(arr)
-        }
-        None => None,
-    };
+    if let Some(el) = else_expr {
+        let mut else_indices = Vec::new();
+        let else_mask: BooleanArray = (0..len)
+            .map(|i| {
+                if remaining[i] {
+                    else_indices.push(i);
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
+        let arr = eval_masked(el, &else_indices, &else_mask)?;
+        result_types.push(arr.data_type().clone());
+        branch_results.push((else_indices, arr));
+    }
 
     let target_dt = infer_common_type(&result_types)?;
-    let mut acc: ArrayRef = match else_arr {
-        Some(arr) => cast_array(&arr, &target_dt)?,
-        None => new_null_array(&target_dt, len),
-    };
-
-    for (cond, then_arr) in cond_arrays.into_iter().zip(then_arrays).rev() {
-        let then_cast = cast_array(&then_arr, &target_dt)?;
-        acc = zip(&cond, &then_cast, &acc)
-            .map_err(|e| SaciError::generic(format!("CASE zip: {e}")))?;
+    if let Some((_, sole_arr)) = branch_results
+        .iter()
+        .find(|(indices, _)| indices.len() == len)
+    {
+        return cast_array(sole_arr, &target_dt);
     }
-    Ok(acc)
+
+    let mut chunks: Vec<ArrayRef> = Vec::with_capacity(branch_results.len() + 1);
+    chunks.push(new_null_array(&target_dt, 1));
+    let mut scatter = vec![0u32; len];
+    let mut offset = 1u32;
+
+    for (indices, arr) in branch_results {
+        if indices.is_empty() {
+            continue;
+        }
+        let casted = cast_array(&arr, &target_dt)?;
+        for (local_idx, row_idx) in indices.into_iter().enumerate() {
+            scatter[row_idx] = offset + local_idx as u32;
+        }
+        offset += casted.len() as u32;
+        chunks.push(casted);
+    }
+
+    if chunks.len() == 1 {
+        return Ok(new_null_array(&target_dt, len));
+    }
+
+    let refs: Vec<&dyn Array> = chunks.iter().map(ArrayRef::as_ref).collect();
+    let pool = arrow_select::concat::concat(&refs)
+        .map_err(|e| SaciError::generic(format!("CASE concat: {e}")))?;
+    let take_idx = UInt32Array::from(scatter);
+    arrow_select::take::take(pool.as_ref(), &take_idx, None)
+        .map_err(|e| SaciError::generic(format!("CASE scatter take: {e}")))
 }
 
 fn eval_in_list(
@@ -1367,29 +1432,7 @@ fn epoch_ms_array(arr: &ArrayRef) -> SaciResult<ArrayRef> {
     let len = arr.len();
     match arr.data_type() {
         DataType::Null => Ok(new_null_array(&DataType::Int64, len)),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            let a = arr.as_primitive::<TimestampMillisecondType>();
-            let out: Int64Array = a.iter().collect();
-            Ok(Arc::new(out))
-        }
-        DataType::Timestamp(TimeUnit::Second, _) => {
-            let a = arr.as_primitive::<TimestampSecondType>();
-            let out: Int64Array = a.iter().map(|v| v.map(|s| s * 1_000)).collect();
-            Ok(Arc::new(out))
-        }
-        DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            let a = arr.as_primitive::<TimestampMicrosecondType>();
-            let out: Int64Array = a.iter().map(|v| v.map(|u| u.div_euclid(1_000))).collect();
-            Ok(Arc::new(out))
-        }
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-            let a = arr.as_primitive::<TimestampNanosecondType>();
-            let out: Int64Array = a
-                .iter()
-                .map(|v| v.map(|n| n.div_euclid(1_000_000)))
-                .collect();
-            Ok(Arc::new(out))
-        }
+        DataType::Int64 | DataType::Timestamp(_, _) => Ok(Arc::new(super::time::to_ms_array(arr)?)),
         DataType::Date32 => {
             let a = arr.as_primitive::<Date32Type>();
             let out: Int64Array = a
@@ -1398,7 +1441,6 @@ fn epoch_ms_array(arr: &ArrayRef) -> SaciResult<ArrayRef> {
                 .collect();
             Ok(Arc::new(out))
         }
-        DataType::Int64 => Ok(arr.clone()),
         DataType::Int32
         | DataType::Int16
         | DataType::Int8
@@ -1410,9 +1452,7 @@ fn epoch_ms_array(arr: &ArrayRef) -> SaciResult<ArrayRef> {
         | DataType::Float32 => cast_array(arr, &DataType::Int64),
         DataType::Utf8 | DataType::LargeUtf8 => {
             let ts = cast_array(arr, &DataType::Timestamp(TimeUnit::Millisecond, None))?;
-            let a = ts.as_primitive::<TimestampMillisecondType>();
-            let out: Int64Array = a.iter().collect();
-            Ok(Arc::new(out))
+            Ok(Arc::new(super::time::to_ms_array(&ts)?))
         }
         other => Err(SaciError::configuration(format!(
             "EPOCH_MS cannot convert {other:?}"
@@ -1738,6 +1778,10 @@ impl<'a> ExprParser<'a> {
         self.pos
     }
 
+    pub(crate) fn set_pos(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+
     pub(crate) fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
     }
@@ -2018,7 +2062,7 @@ impl<'a> ExprParser<'a> {
         Ok(expr)
     }
 
-    fn parse_type_name(&mut self) -> SaciResult<DataType> {
+    pub(crate) fn parse_type_name(&mut self) -> SaciResult<DataType> {
         match self.peek().cloned() {
             Some(Token::Ident(name)) => {
                 self.pos += 1;
@@ -2596,5 +2640,71 @@ mod tests {
             out.column(2).as_string::<i32>().iter().collect::<Vec<_>>(),
             vec![Some("WIDGET A"), Some("GADGET B")]
         );
+    }
+
+    #[test]
+    fn case_when_short_circuits_division_by_zero_and_invalid_cast() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("n", DataType::Int64, false),
+            Field::new("d", DataType::Int64, false),
+            Field::new("raw", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![10, 20, 30])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![2, 0, 5])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["12", "not_a_num", "19"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let div_case = Expr::parse("CASE WHEN d != 0 THEN n / d ELSE 0 END").unwrap();
+        let div_out = div_case.evaluate(&batch).unwrap();
+        assert_eq!(div_out.as_primitive::<Int64Type>().values(), &[5, 0, 6]);
+
+        let cast_case =
+            Expr::parse("CASE WHEN raw LIKE '1%' THEN CAST(raw AS INT) ELSE -1 END").unwrap();
+        let cast_out = cast_case.evaluate(&batch).unwrap();
+        let cast_vals: Vec<i64> = (0..cast_out.len())
+            .map(|i| {
+                cast_array(&cast_out, &DataType::Int64)
+                    .unwrap()
+                    .as_primitive::<Int64Type>()
+                    .value(i)
+            })
+            .collect();
+        assert_eq!(cast_vals, vec![12, -1, 19]);
+    }
+
+    #[test]
+    fn kleene_three_valued_logic_truth_tables() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![None, Some(1)])) as ArrayRef],
+        )
+        .unwrap();
+
+        let eval_bool = |s: &str| -> Vec<Option<bool>> {
+            Expr::parse(s)
+                .unwrap()
+                .evaluate_predicate(&batch)
+                .unwrap()
+                .iter()
+                .collect()
+        };
+
+        assert_eq!(eval_bool("NULL AND FALSE"), vec![Some(false), Some(false)]);
+        assert_eq!(eval_bool("NULL AND TRUE"), vec![None, None]);
+        assert_eq!(eval_bool("NULL OR TRUE"), vec![Some(true), Some(true)]);
+        assert_eq!(eval_bool("NULL OR FALSE"), vec![None, None]);
+        assert_eq!(eval_bool("NOT (x = 1)"), vec![None, Some(false)]);
+        assert_eq!(
+            eval_bool("x IS DISTINCT FROM NULL"),
+            vec![Some(false), Some(true)]
+        );
+        assert_eq!(eval_bool("x IN (1, NULL)"), vec![None, Some(true)]);
+        assert_eq!(eval_bool("x IN (2, NULL)"), vec![None, None]);
     }
 }

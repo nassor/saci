@@ -67,6 +67,15 @@ impl UnnestSystem {
         let list_idx = input_schema
             .index_of(&self.list_field)
             .map_err(|_| SaciError::field_not_found(self.source_component, &self.list_field))?;
+        if self.output_field != self.list_field
+            && let Ok(existing_idx) = input_schema.index_of(&self.output_field)
+            && existing_idx != list_idx
+        {
+            return Err(SaciError::configuration(format!(
+                "UnnestSystem: output_field '{}' collides with an existing column in component '{}'",
+                self.output_field, self.source_component
+            )));
+        }
         let item_field = match input_schema.field(list_idx).data_type() {
             DataType::List(inner) | DataType::LargeList(inner) => inner.clone(),
             other => {
@@ -271,5 +280,13 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert!(tags_outer.is_null(2));
+    }
+
+    #[test]
+    fn unnest_rejects_output_field_colliding_with_existing_column() {
+        let batch = make_list_batch();
+        let sys = UnnestSystem::new("Src", "Src", "tags", "id").unwrap();
+        let err = sys.output_schema(batch.schema_ref()).unwrap_err();
+        assert_eq!(err.category(), "configuration");
     }
 }

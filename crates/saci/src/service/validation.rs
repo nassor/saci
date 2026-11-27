@@ -189,7 +189,7 @@ fn validate_window(
                 let up_declared = declared[i].as_ref().expect("processor node");
                 let up_template = templates[i].as_ref().expect("processor node");
                 for component in up_declared {
-                    let Some(fields) = fields_of(up_template, component) else {
+                    let Some(fields) = output_fields_of(up_template, component) else {
                         continue;
                     };
                     delivered.push((component.clone(), fields));
@@ -234,6 +234,12 @@ fn validate_window(
 /// component.
 fn fields_of(dataset: &Dataset, component: &str) -> Option<Fields> {
     dataset.schemas().get(component).map(|s| s.fields().clone())
+}
+
+/// Output fields an upstream processor emits for `component` (honouring
+/// in-place schema mutations recorded via `set_output_schema`).
+fn output_fields_of(dataset: &Dataset, component: &str) -> Option<Fields> {
+    dataset.output_schema(component).map(|s| s.fields().clone())
 }
 
 fn validate_edge(
@@ -305,7 +311,7 @@ fn validate_edge(
                         from_node.id, to_node.id, to_node.id, from_node.id
                     )));
                 }
-                let up_fields = fields_of(up_template, component);
+                let up_fields = output_fields_of(up_template, component);
                 let down_fields = fields_of(down_template, component);
                 if up_fields != down_fields {
                     return Err(SaciError::configuration(format!(
@@ -332,7 +338,7 @@ fn validate_edge(
                 )));
             }
             let up_template = templates[from].as_ref().expect("processor node");
-            if let Some(up_fields) = fields_of(up_template, component)
+            if let Some(up_fields) = output_fields_of(up_template, component)
                 && sink.schema().fields() != &up_fields
             {
                 return Err(SaciError::configuration(format!(

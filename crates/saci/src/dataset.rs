@@ -82,6 +82,9 @@ pub struct Dataset {
     /// few `Arc` bumps instead of building an empty Arrow array per column.
     empty_templates: HashMap<&'static str, RecordBatch>,
     schemas: SchemaRegistry,
+    /// Optional post-execution output schema override per component, for
+    /// operators that transform a component's schema in place (`dst == src`).
+    output_schemas: HashMap<&'static str, std::sync::Arc<arrow_schema::Schema>>,
     row_count: usize,
     alive: BooleanBufferBuilder,
     live_count: usize,
@@ -115,12 +118,29 @@ impl Dataset {
             merged_cache: RwLock::new(HashMap::new()),
             empty_templates: HashMap::new(),
             schemas: SchemaRegistry::new(),
+            output_schemas: HashMap::new(),
             row_count: 0,
             alive: BooleanBufferBuilder::new(0),
             live_count: 0,
             dead_count: 0,
             resources: ResourceMap::new(),
         }
+    }
+
+    /// Records the schema produced for `name` when an operator transforms that
+    /// component in place.
+    pub fn set_output_schema(&mut self, name: &str, schema: std::sync::Arc<arrow_schema::Schema>) {
+        self.output_schemas
+            .insert(intern_component_name(name), schema);
+    }
+
+    /// Returns the output schema produced for `name`, falling back to its
+    /// registered input schema when no in-place override exists.
+    pub fn output_schema(&self, name: &str) -> Option<std::sync::Arc<arrow_schema::Schema>> {
+        self.output_schemas
+            .get(name)
+            .cloned()
+            .or_else(|| self.schemas.get(name))
     }
 }
 

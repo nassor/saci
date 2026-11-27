@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch, UInt32Array};
 use arrow_schema::Schema;
-use arrow_select::concat::concat_batches;
 use arrow_select::take::take;
 use async_trait::async_trait;
 
@@ -13,15 +12,19 @@ use crate::dataset::{Dataset, intern_component_name};
 use crate::error::{SaciError, SaciResult};
 use crate::system::{System, SystemMeta};
 
-use super::aggregate::{AggregateSpec, aggregate_output_field, evaluate_aggregate_spec};
+use super::aggregate::{
+    AggregateSpec, aggregate_output_field, evaluate_aggregate_spec,
+    evaluate_aggregate_spec_for_groups,
+};
 use super::hash::compute_row_keys;
 
 /// Groups rows of `source_component` by `key_fields`, evaluates one or more
 /// [`AggregateSpec`]s per group, and writes the aggregated rows to
 /// `target_component`.
 ///
-/// When `key_fields` is empty, all rows collapse into a single global group (or
-/// zero rows when the input batch is empty).
+/// When `key_fields` is empty, all rows collapse into a single global group
+/// (returning one row even when the input batch is empty, matching SQL
+/// ungrouped aggregate semantics).
 #[derive(Debug, Clone)]
 pub struct GroupBySystem {
     source_component: &'static str,
@@ -110,55 +113,40 @@ impl GroupBySystem {
     pub fn execute_batch(&self, batch: &RecordBatch) -> SaciResult<RecordBatch> {
         let out_schema = self.output_schema(batch.schema_ref())?;
         if batch.num_rows() == 0 {
-            return Ok(RecordBatch::new_empty(out_schema));
+            if !self.key_fields.is_empty() {
+                return Ok(RecordBatch::new_empty(out_schema));
+            }
+            let mut cols = Vec::with_capacity(self.aggregates.len());
+            for spec in &self.aggregates {
+                cols.push(evaluate_aggregate_spec(spec, batch)?);
+            }
+            return RecordBatch::try_new(out_schema, cols)
+                .map_err(|e| SaciError::generic(format!("GroupBySystem global empty batch: {e}")));
         }
 
         let groups = build_groups(batch, &self.key_fields)?;
-        let mut group_batches = Vec::with_capacity(groups.len());
+        let mut cols: Vec<ArrayRef> =
+            Vec::with_capacity(self.key_fields.len() + self.aggregates.len());
 
-        for indices in groups {
-            let first_idx = UInt32Array::from(vec![indices[0]]);
-            let mut cols: Vec<ArrayRef> =
-                Vec::with_capacity(self.key_fields.len() + self.aggregates.len());
-
+        if !self.key_fields.is_empty() {
+            let first_rows = UInt32Array::from_iter_values(groups.iter().map(|g| g[0]));
             for key in &self.key_fields {
                 let col_idx = batch
                     .schema_ref()
                     .index_of(key)
                     .map_err(|_| SaciError::field_not_found(self.source_component, key))?;
-                let taken = take(batch.column(col_idx).as_ref(), &first_idx, None)
+                let taken = take(batch.column(col_idx).as_ref(), &first_rows, None)
                     .map_err(|e| SaciError::generic(format!("GroupBySystem key take: {e}")))?;
                 cols.push(taken);
             }
-
-            let group_slice = if indices.len() == batch.num_rows() {
-                batch.clone()
-            } else {
-                let idx_arr = UInt32Array::from(indices);
-                let taken_cols: SaciResult<Vec<ArrayRef>> = batch
-                    .columns()
-                    .iter()
-                    .map(|c| {
-                        take(c.as_ref(), &idx_arr, None).map_err(|e| {
-                            SaciError::generic(format!("GroupBySystem group take: {e}"))
-                        })
-                    })
-                    .collect();
-                RecordBatch::try_new(batch.schema(), taken_cols?)
-                    .map_err(|e| SaciError::generic(format!("GroupBySystem group batch: {e}")))?
-            };
-
-            for spec in &self.aggregates {
-                cols.push(evaluate_aggregate_spec(spec, &group_slice)?);
-            }
-
-            let row_batch = RecordBatch::try_new(out_schema.clone(), cols)
-                .map_err(|e| SaciError::generic(format!("GroupBySystem output batch: {e}")))?;
-            group_batches.push(row_batch);
         }
 
-        concat_batches(&out_schema, group_batches.iter())
-            .map_err(|e| SaciError::generic(format!("GroupBySystem concat: {e}")))
+        for spec in &self.aggregates {
+            cols.push(evaluate_aggregate_spec_for_groups(spec, batch, &groups)?);
+        }
+
+        RecordBatch::try_new(out_schema, cols)
+            .map_err(|e| SaciError::generic(format!("GroupBySystem output batch: {e}")))
     }
 
     fn run_impl(&self, data: &mut Dataset) -> SaciResult<()> {
@@ -222,7 +210,7 @@ impl System for GroupBySystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Float64Array, Int64Array, StringArray};
+    use arrow_array::{Array, Float64Array, Int64Array, StringArray};
     use arrow_schema::{DataType, Field};
 
     fn sample_dataset() -> Dataset {
@@ -296,23 +284,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_group_by_empty_batch_returns_zero_rows() {
+    async fn global_group_by_empty_batch_returns_one_row_and_keyed_returns_zero() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("region", DataType::Utf8, false),
             Field::new("amount", DataType::Float64, false),
         ]));
         let mut ds = Dataset::new();
         ds.register_schema("Order", schema.clone()).unwrap();
-        let sys = GroupBySystem::new(
+
+        let global_sys = GroupBySystem::new(
             "Order",
-            "Out",
+            "GlobalOut",
             Vec::<&str>::new(),
+            vec![AggregateSpec::count_all(), AggregateSpec::sum("amount")],
+        )
+        .unwrap();
+        ds.register_schema("GlobalOut", global_sys.output_schema(&schema).unwrap())
+            .unwrap();
+        global_sys.run(&mut ds).await.unwrap();
+        let out = ds.batch_named("GlobalOut").unwrap();
+        assert_eq!(out.num_rows(), 1);
+        assert_eq!(
+            out.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            0
+        );
+        assert!(
+            out.column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .is_null(0)
+        );
+
+        let keyed_sys = GroupBySystem::new(
+            "Order",
+            "KeyedOut",
+            ["region"],
             vec![AggregateSpec::sum("amount")],
         )
         .unwrap();
-        ds.register_schema("Out", sys.output_schema(&schema).unwrap())
+        let mut ds_keyed = Dataset::new();
+        ds_keyed.register_schema("Order", schema.clone()).unwrap();
+        ds_keyed
+            .register_schema("KeyedOut", keyed_sys.output_schema(&schema).unwrap())
             .unwrap();
-        sys.run(&mut ds).await.unwrap();
-        assert_eq!(ds.batch_named("Out").unwrap().num_rows(), 0);
+        keyed_sys.run(&mut ds_keyed).await.unwrap();
+        assert_eq!(ds_keyed.batch_named("KeyedOut").unwrap().num_rows(), 0);
     }
 }

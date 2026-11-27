@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array};
-use arrow_schema::{Field, Schema};
+use arrow_schema::{DataType, Field, Schema};
 use arrow_select::take::take;
 use async_trait::async_trait;
 use fnv::FnvHashMap;
@@ -20,7 +20,7 @@ use crate::sdk::State;
 use crate::system::{System, SystemMeta};
 
 use super::deduplicate::{DeduplicateSystem, KeepPolicy};
-use super::hash::compute_row_keys;
+use super::hash::{common_join_key_type, compute_coerced_row_keys};
 use super::time::{RecordBatchWrap, batch_to_ipc, concat_non_empty, ipc_to_batch, to_ms_array};
 
 /// Relational join strategy.
@@ -130,6 +130,26 @@ fn row_has_null(cols: &[&ArrayRef], row: usize) -> bool {
     cols.iter().any(|c| c.is_null(row))
 }
 
+fn resolve_coerced_key_types(
+    left_cols: &[&ArrayRef],
+    right_cols: &[&ArrayRef],
+    op_name: &str,
+) -> SaciResult<Vec<DataType>> {
+    left_cols
+        .iter()
+        .zip(right_cols.iter())
+        .map(|(l, r)| {
+            common_join_key_type(l.data_type(), r.data_type()).ok_or_else(|| {
+                SaciError::configuration(format!(
+                    "{op_name}: incompatible key types {:?} vs {:?}",
+                    l.data_type(),
+                    r.data_type()
+                ))
+            })
+        })
+        .collect()
+}
+
 fn materialize_join_pairs(
     left: &RecordBatch,
     right: &RecordBatch,
@@ -214,12 +234,21 @@ impl JoinSystem {
         right_schema: &Schema,
     ) -> SaciResult<Arc<Schema>> {
         for k in &self.keys {
-            left_schema
+            let lf = left_schema
                 .field_with_name(&k.left)
                 .map_err(|_| SaciError::field_not_found(self.left_component, &k.left))?;
-            right_schema
+            let rf = right_schema
                 .field_with_name(&k.right)
                 .map_err(|_| SaciError::field_not_found(self.right_component, &k.right))?;
+            if super::hash::common_join_key_type(lf.data_type(), rf.data_type()).is_none() {
+                return Err(SaciError::configuration(format!(
+                    "JoinSystem: incompatible key types for '{} = {}' ({:?} vs {:?})",
+                    k.left,
+                    k.right,
+                    lf.data_type(),
+                    rf.data_type()
+                )));
+            }
         }
         Ok(build_joined_schema(
             left_schema,
@@ -237,9 +266,10 @@ impl JoinSystem {
         let right_key_names: Vec<&str> = self.keys.iter().map(|k| k.right.as_str()).collect();
         let left_cols = extract_key_arrays(left, &left_key_names, self.left_component)?;
         let right_cols = extract_key_arrays(right, &right_key_names, self.right_component)?;
+        let target_types = resolve_coerced_key_types(&left_cols, &right_cols, "JoinSystem")?;
 
-        let left_keys = compute_row_keys(&left_cols)?;
-        let right_keys = compute_row_keys(&right_cols)?;
+        let left_keys = super::hash::compute_coerced_row_keys(&left_cols, &target_types)?;
+        let right_keys = super::hash::compute_coerced_row_keys(&right_cols, &target_types)?;
 
         let mut right_table: FnvHashMap<i64, Vec<u32>> =
             FnvHashMap::with_capacity_and_hasher(right.num_rows(), Default::default());
@@ -396,6 +426,7 @@ pub struct IntervalJoinSystem {
     lower_bound_ms: i64,
     upper_bound_ms: i64,
     allowed_lateness_ms: i64,
+    max_buffered_rows: Option<usize>,
     right_prefix: String,
     fallback_state: Mutex<IntervalJoinState>,
 }
@@ -416,6 +447,7 @@ impl Clone for IntervalJoinSystem {
             lower_bound_ms: self.lower_bound_ms,
             upper_bound_ms: self.upper_bound_ms,
             allowed_lateness_ms: self.allowed_lateness_ms,
+            max_buffered_rows: self.max_buffered_rows,
             right_prefix: self.right_prefix.clone(),
             fallback_state: Mutex::new(guard.clone()),
         }
@@ -462,6 +494,7 @@ impl IntervalJoinSystem {
             lower_bound_ms,
             upper_bound_ms,
             allowed_lateness_ms: 0,
+            max_buffered_rows: None,
             right_prefix: "right_".to_string(),
             fallback_state: Mutex::new(IntervalJoinState::default()),
         })
@@ -470,6 +503,12 @@ impl IntervalJoinSystem {
     /// Set the lateness budget (ms) before buffered rows are evicted.
     pub fn allowed_lateness_ms(mut self, ms: i64) -> Self {
         self.allowed_lateness_ms = ms.max(0);
+        self
+    }
+
+    /// Cap the number of retained buffered rows per side after watermark eviction.
+    pub fn max_buffered_rows(mut self, max_rows: usize) -> Self {
+        self.max_buffered_rows = Some(max_rows.max(1));
         self
     }
 
@@ -486,12 +525,21 @@ impl IntervalJoinSystem {
         right_schema: &Schema,
     ) -> SaciResult<Arc<Schema>> {
         for k in &self.keys {
-            left_schema
+            let lf = left_schema
                 .field_with_name(&k.left)
                 .map_err(|_| SaciError::field_not_found(self.left_component, &k.left))?;
-            right_schema
+            let rf = right_schema
                 .field_with_name(&k.right)
                 .map_err(|_| SaciError::field_not_found(self.right_component, &k.right))?;
+            if common_join_key_type(lf.data_type(), rf.data_type()).is_none() {
+                return Err(SaciError::configuration(format!(
+                    "IntervalJoinSystem: incompatible key types for '{} = {}' ({:?} vs {:?})",
+                    k.left,
+                    k.right,
+                    lf.data_type(),
+                    rf.data_type()
+                )));
+            }
         }
         left_schema
             .field_with_name(&self.left_time_field)
@@ -522,9 +570,11 @@ impl IntervalJoinSystem {
         let right_key_names: Vec<&str> = self.keys.iter().map(|k| k.right.as_str()).collect();
         let left_cols = extract_key_arrays(left, &left_key_names, self.left_component)?;
         let right_cols = extract_key_arrays(right, &right_key_names, self.right_component)?;
+        let target_types =
+            resolve_coerced_key_types(&left_cols, &right_cols, "IntervalJoinSystem")?;
 
-        let left_keys = compute_row_keys(&left_cols)?;
-        let right_keys = compute_row_keys(&right_cols)?;
+        let left_keys = compute_coerced_row_keys(&left_cols, &target_types)?;
+        let right_keys = compute_coerced_row_keys(&right_cols, &target_types)?;
 
         let l_ts_idx = left
             .schema_ref()
@@ -621,6 +671,8 @@ impl IntervalJoinSystem {
 
         if state.watermark_ms != i64::MIN {
             let cutoff = state.watermark_ms.saturating_sub(self.allowed_lateness_ms);
+            let left_horizon = self.upper_bound_ms.max(0);
+            let right_horizon = self.lower_bound_ms.min(0);
             if merged_left.num_rows() > 0 {
                 let l_idx = merged_left
                     .schema_ref()
@@ -631,7 +683,7 @@ impl IntervalJoinSystem {
                 let ts_arr = to_ms_array(merged_left.column(l_idx))?;
                 let keep: arrow_array::BooleanArray = ts_arr
                     .iter()
-                    .map(|v| v.is_some_and(|t| t.saturating_add(self.upper_bound_ms) >= cutoff))
+                    .map(|v| v.is_some_and(|t| t.saturating_add(left_horizon) >= cutoff))
                     .collect();
                 merged_left = arrow_select::filter::filter_record_batch(&merged_left, &keep)
                     .map_err(|e| SaciError::generic(format!("IntervalJoin left evict: {e}")))?;
@@ -646,10 +698,19 @@ impl IntervalJoinSystem {
                 let ts_arr = to_ms_array(merged_right.column(r_idx))?;
                 let keep: arrow_array::BooleanArray = ts_arr
                     .iter()
-                    .map(|v| v.is_some_and(|t| t.saturating_sub(self.lower_bound_ms) >= cutoff))
+                    .map(|v| v.is_some_and(|t| t.saturating_sub(right_horizon) >= cutoff))
                     .collect();
                 merged_right = arrow_select::filter::filter_record_batch(&merged_right, &keep)
                     .map_err(|e| SaciError::generic(format!("IntervalJoin right evict: {e}")))?;
+            }
+        }
+
+        if let Some(max_rows) = self.max_buffered_rows {
+            if merged_left.num_rows() > max_rows {
+                merged_left = merged_left.slice(merged_left.num_rows() - max_rows, max_rows);
+            }
+            if merged_right.num_rows() > max_rows {
+                merged_right = merged_right.slice(merged_right.num_rows() - max_rows, max_rows);
             }
         }
 
@@ -1099,5 +1160,246 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(tier.value(0), "platinum");
+    }
+
+    #[test]
+    fn join_coerces_compatible_numeric_and_timestamp_keys_and_rejects_incompatible() {
+        use arrow_array::{TimestampMillisecondArray, TimestampSecondArray};
+        use arrow_schema::TimeUnit;
+
+        let l_schema = Arc::new(Schema::new(vec![
+            Field::new("id32", DataType::Int32, false),
+            Field::new("ts_sec", DataType::Timestamp(TimeUnit::Second, None), false),
+        ]));
+        let r_schema = Arc::new(Schema::new(vec![
+            Field::new("id_f64", DataType::Float64, false),
+            Field::new(
+                "ts_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("flag", DataType::Boolean, false),
+        ]));
+
+        let left = RecordBatch::try_new(
+            l_schema.clone(),
+            vec![
+                Arc::new(arrow_array::Int32Array::from(vec![1, 2])) as ArrayRef,
+                Arc::new(TimestampSecondArray::from(vec![10, 20])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let right = RecordBatch::try_new(
+            r_schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 3.0])) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from(vec![10_000, 30_000])) as ArrayRef,
+                Arc::new(arrow_array::BooleanArray::from(vec![true, false])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let sys = JoinSystem::new(
+            "L",
+            "R",
+            "Out",
+            JoinKind::Inner,
+            vec![
+                JoinKey::new("id32", "id_f64"),
+                JoinKey::new("ts_sec", "ts_ms"),
+            ],
+        )
+        .unwrap();
+        let joined = sys.join_batches(&left, &right).unwrap();
+        assert_eq!(joined.num_rows(), 1);
+        assert_eq!(
+            joined
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::Int32Array>()
+                .unwrap()
+                .values(),
+            &[1]
+        );
+
+        let bad = JoinSystem::new(
+            "L",
+            "R",
+            "Out",
+            JoinKind::Inner,
+            vec![JoinKey::new("id32", "flag")],
+        )
+        .unwrap();
+        let err = bad.output_schema(&l_schema, &r_schema).unwrap_err();
+        assert_eq!(err.category(), "configuration");
+    }
+
+    #[cfg(feature = "engine")]
+    #[tokio::test]
+    async fn interval_join_positive_lower_bound_out_of_order_and_checkpoint_roundtrip() {
+        use crate::pipeline::Pipeline;
+        use crate::runtime::PipelineRuntime;
+
+        let l_schema = Arc::new(Schema::new(vec![
+            Field::new("oid", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
+        ]));
+        let r_schema = Arc::new(Schema::new(vec![
+            Field::new("oid", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
+            Field::new("tag", DataType::Utf8, false),
+        ]));
+
+        let build_pipeline = || {
+            let ij = IntervalJoinSystem::new(
+                "Order",
+                "Payment",
+                "Joined",
+                "ts",
+                "ts",
+                vec![JoinKey::new("oid", "oid")],
+                10,
+                100,
+            )
+            .unwrap()
+            .max_buffered_rows(2);
+            Pipeline::new("ij_ckpt")
+                .state::<IntervalJoinState>()
+                .system(ij)
+        };
+
+        let out_schema = build_joined_schema(&l_schema, &r_schema, JoinKind::Inner, "right_");
+
+        // Pass 1 on pipeline1: out-of-order right row at ts=1050 arrives first (positive lower_bound_ms=10).
+        let p1 = build_pipeline();
+        let mut ds1 = Dataset::new();
+        ds1.register_schema("Order", l_schema.clone()).unwrap();
+        ds1.register_schema("Payment", r_schema.clone()).unwrap();
+        ds1.register_schema("Joined", out_schema.clone()).unwrap();
+        ds1.set_batch_named("Order", RecordBatch::new_empty(l_schema.clone()))
+            .unwrap();
+        ds1.set_batch_named(
+            "Payment",
+            RecordBatch::try_new(
+                r_schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(vec![7])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![1050])) as ArrayRef,
+                    Arc::new(StringArray::from(vec!["ok"])) as ArrayRef,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let out1 = p1.run_batch(&mut ds1, None).await.unwrap();
+        assert_eq!(ds1.batch_named("Joined").unwrap().num_rows(), 0);
+        let blob1 = out1.state.expect("checkpoint blob must be emitted");
+
+        // Pass 2 on a brand-new pipeline2 seeded only via serialized `blob1`:
+        let p2 = build_pipeline();
+        let mut ds2 = Dataset::new();
+        ds2.register_schema("Order", l_schema).unwrap();
+        ds2.register_schema("Payment", r_schema.clone()).unwrap();
+        ds2.register_schema("Joined", out_schema).unwrap();
+        ds2.set_batch_named(
+            "Order",
+            RecordBatch::try_new(
+                ds2.schemas().get("Order").unwrap(),
+                vec![
+                    Arc::new(Int64Array::from(vec![7])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![1040])) as ArrayRef,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ds2.set_batch_named("Payment", RecordBatch::new_empty(r_schema))
+            .unwrap();
+        let _out2 = p2.run_batch(&mut ds2, Some(&blob1)).await.unwrap();
+        let joined = ds2.batch_named("Joined").unwrap();
+        assert_eq!(joined.num_rows(), 1);
+    }
+
+    #[cfg(feature = "engine")]
+    #[tokio::test]
+    async fn lookup_join_checkpoint_roundtrip_across_fresh_pipelines() {
+        use crate::pipeline::Pipeline;
+        use crate::runtime::PipelineRuntime;
+
+        let build_pipeline = || {
+            let lj = LookupJoinSystem::new(
+                "Order",
+                "Customer",
+                "Enriched",
+                JoinKind::Inner,
+                vec![JoinKey::new("cust_id", "id")],
+            )
+            .unwrap();
+            Pipeline::new("lj_ckpt")
+                .state::<LookupJoinState>()
+                .system(lj)
+        };
+
+        let out_schema =
+            build_joined_schema(&order_schema(), &cust_schema(), JoinKind::Inner, "right_");
+
+        let p1 = build_pipeline();
+        let mut ds1 = Dataset::new();
+        ds1.register_schema("Order", order_schema()).unwrap();
+        ds1.register_schema("Customer", cust_schema()).unwrap();
+        ds1.register_schema("Enriched", out_schema.clone()).unwrap();
+        ds1.set_batch_named("Order", RecordBatch::new_empty(order_schema()))
+            .unwrap();
+        ds1.set_batch_named(
+            "Customer",
+            RecordBatch::try_new(
+                cust_schema(),
+                vec![
+                    Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+                    Arc::new(StringArray::from(vec!["vip"])) as ArrayRef,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let out1 = p1.run_batch(&mut ds1, None).await.unwrap();
+        let blob1 = out1.state.expect("dimension checkpoint bytes");
+
+        // Fresh Pipeline 2 with empty dimension batch matches via restored checkpoint blob.
+        let p2 = build_pipeline();
+        let mut ds2 = Dataset::new();
+        ds2.register_schema("Order", order_schema()).unwrap();
+        ds2.register_schema("Customer", cust_schema()).unwrap();
+        ds2.register_schema("Enriched", out_schema).unwrap();
+        ds2.set_batch_named(
+            "Order",
+            RecordBatch::try_new(
+                order_schema(),
+                vec![
+                    Arc::new(Int64Array::from(vec![55])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![Some(10)])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![200])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![19.5])) as ArrayRef,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        ds2.set_batch_named("Customer", RecordBatch::new_empty(cust_schema()))
+            .unwrap();
+        let _ = p2.run_batch(&mut ds2, Some(&blob1)).await.unwrap();
+        let enriched = ds2.batch_named("Enriched").unwrap();
+        assert_eq!(enriched.num_rows(), 1);
+        let tier_idx = enriched.schema_ref().index_of("tier").unwrap();
+        assert_eq!(
+            enriched
+                .column(tier_idx)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "vip"
+        );
     }
 }
