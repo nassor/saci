@@ -145,6 +145,59 @@ let sql = SqlSystem::parse(
 )?;
 ```
 
+## Joins, deduplication, and unnesting in Rust
+
+Use `JoinSystem` for in-batch joins, `IntervalJoinSystem` / `LookupJoinSystem` / `DeduplicateSystem` (paired with `Pipeline::state::<S>()` for checkpoint persistence across `run_batch` calls), and `UnnestSystem` to explode nested list columns:
+
+```rust,name=Relational joins and stateful stream operators in Rust
+use saci::prelude::*;
+
+let batch_join = JoinSystem::new(
+    "Orders",
+    "Customers",
+    "JoinedOrders",
+    JoinKind::Left,
+    vec![JoinKey::new("customer_id", "id")],
+)?;
+
+let stream_pipeline = Pipeline::new("stream_enrich")
+    .state::<DeduplicateState>()
+    .state::<IntervalJoinState>()
+    .state::<LookupJoinState>()
+    .system(
+        DeduplicateSystem::in_place("Orders", ["order_id"])?
+            .keep(KeepPolicy::Last)
+            .time_field("created_at")
+            .ttl_ms(600_000)
+            .max_keys(100_000),
+    )
+    .system(
+        IntervalJoinSystem::new(
+            "Orders",
+            "Payments",
+            "PaidOrders",
+            "created_at",
+            "paid_at",
+            vec![JoinKey::same("order_id")],
+            0,
+            300_000,
+        )?
+        .allowed_lateness_ms(5_000)
+        .max_buffered_rows(10_000),
+    )
+    .system(
+        LookupJoinSystem::new(
+            "PaidOrders",
+            "CustomerDim",
+            "EnrichedOrders",
+            JoinKind::Left,
+            vec![JoinKey::new("customer_id", "id")],
+        )?
+        .right_prefix("cust_"),
+    )
+    .system(UnnestSystem::new("EnrichedOrders", "EnrichedTags", "tags", "tag")?.preserve_empty(true));
+```
+
 ## Resizing batches with `set_batch`
 
 Operators that change a component's row count (`FilterSystem`, `GroupBySystem`, `UnnestSystem`, `JoinSystem`, `DeduplicateSystem`, `TopNSystem`) write their output using `Dataset::set_batch` / `Dataset::set_batch_named`, which updates `Dataset::rows()` and keeps the alive bitmap consistent across IPC round trips.

@@ -129,20 +129,149 @@ workflow "order_analytics" {
 
 ## SQL, joins, and stateful deduplication
 
-An `sql` operator reads one or more upstream components by name, executes filters, joins,
-aggregations, ordering, and limits, and writes its result to `into`:
+An `sql` operator reads one or more upstream components by name, executes filters, multi-way joins,
+aggregations, expressions, ordering, and limits, and writes its result to `into` (or updates
+`component` in place when `into` is omitted).
 
-```kdl,name=SQL join and aggregation
-operator "enrich_and_sum" kind="sql" into="TierSummary" {
-    config query="SELECT c.tier, SUM(o.amount) AS total FROM Orders o JOIN Customers c ON o.cust_id = c.id GROUP BY c.tier ORDER BY total DESC"
+### SQL across one or more components
+
+```kdl,name=SQL join with CASE COALESCE HAVING and ORDER BY
+workflow "tier_summary" {
+    source "orders_in" connector="file" component="Orders" codec="ndjson" {
+        config path="orders.ndjson"
+    }
+    source "customers_in" connector="file" component="Customers" codec="ndjson" {
+        config path="customers.ndjson"
+    }
+
+    operator "enrich_and_sum" kind="sql" into="TierSummary" {
+        config query="""
+            SELECT c.tier,
+                   COALESCE(SUM(o.amount), 0.0) AS total,
+                   COUNT(DISTINCT o.order_id) AS orders,
+                   CASE WHEN COUNT(*) > 10 THEN 'high' ELSE 'normal' END AS volume
+            FROM Orders o
+            JOIN Customers c ON o.cust_id = c.id
+            WHERE o.amount >= 25.0
+            GROUP BY c.tier
+            HAVING SUM(o.amount) BETWEEN 100.0 AND 100000.0
+            ORDER BY total DESC
+            LIMIT 20
+        """
+    }
+
+    sink "out" connector="file" component="TierSummary" codec="ndjson" {
+        config path="tier_summary.ndjson"
+    }
+
+    link from="orders_in" to="enrich_and_sum"
+    link from="customers_in" to="enrich_and_sum"
+    link from="enrich_and_sum" to="out"
 }
 ```
 
-Streaming stateful operators retain their checkpoint state across passes automatically inside standalone continuous/interval/stream runners:
+### Batch relational joins (`join`)
 
-- `interval_join`: matches `left` and `right` events on key `on` where `right_time - left_time` lies within `[lower_bound_ms, upper_bound_ms]`, evicting expired buffers via watermark.
-- `lookup_join`: maintains an upserted dimension table on `right` and enriches `left` batches.
-- `deduplicate`: drops duplicate `keys` within a batch and across batches (with optional `time_field`, `ttl_ms`, and `max_keys`).
+Use `kind="join"` for in-batch equi-joins (`inner`, `left`, `right`, `full`, `semi`, `anti`). Key pairs accept `"left_col=right_col"`, matching column names like `"id"`, or an array of keys for composite joins:
+
+```kdl,name=In-batch left join with collision prefix
+operator "attach_customer" kind="join" left="Orders" right="Customers" into="EnrichedOrders" {
+    config on="cust_id=id" join_type="left" right_prefix="cust_"
+}
+```
+
+### Event-time interval joins (`interval_join`)
+
+`interval_join` correlates two event streams where `right_ts` lies within `[left_ts + lower_bound_ms, left_ts + upper_bound_ms]`. Buffered rows remain in memory (or in `store "redb"` when `batch_resume #true` is set) until the watermark advances past their horizon, bounded optionally by `max_buffered_rows`:
+
+```kdl,name=Bounded stream-stream interval join in continuous mode
+workflow "match_payments" {
+    source "orders_in" connector="kafka" component="Orders" codec="ndjson" {
+        config topic="orders"
+    }
+    source "payments_in" connector="kafka" component="Payments" codec="ndjson" {
+        config topic="payments"
+    }
+
+    operator "order_payments" kind="interval_join" left="Orders" right="Payments" into="MatchedOrders" {
+        config on="order_id" \
+               left_time_field="created_at" \
+               right_time_field="paid_at" \
+               lower_bound_ms=0 \
+               upper_bound_ms=300000 \
+               allowed_lateness_ms=5000 \
+               max_buffered_rows=10000
+    }
+
+    sink "matched_out" connector="file" component="MatchedOrders" codec="ndjson" {
+        config path="matched.ndjson"
+    }
+
+    link from="orders_in" to="order_payments"
+    link from="payments_in" to="order_payments"
+    link from="order_payments" to="matched_out"
+}
+```
+
+### Dimension table enrichment (`lookup_join`)
+
+`lookup_join` upserts batches arriving on `right` into a keyed dimension table and joins every `left` batch against the latest snapshot (`inner` or `left`):
+
+```kdl,name=Stateful dimension lookup join
+workflow "enrich_orders" {
+    source "orders_in" connector="nats" component="Orders" codec="ndjson" {
+        config subject="orders.created"
+    }
+    source "dim_in" connector="nats" component="CustomerDim" codec="ndjson" {
+        config subject="customers.updates"
+    }
+
+    operator "enrich" kind="lookup_join" left="Orders" right="CustomerDim" into="EnrichedOrders" {
+        config on="customer_id=id" join_type="left" right_prefix="cust_"
+    }
+
+    sink "out" connector="file" component="EnrichedOrders" codec="ndjson" {
+        config path="enriched.ndjson"
+    }
+
+    link from="orders_in" to="enrich"
+    link from="dim_in" to="enrich"
+    link from="enrich" to="out"
+}
+```
+
+### Stateful deduplication and list unnesting (`deduplicate` and `unnest`)
+
+`deduplicate` drops duplicate keys within a batch and across passes (`keep="first"` or `"last"`), optionally expiring old keys via `time_field` and `ttl_ms` or bounding state size via `max_keys`. Chain `unnest` to explode `List` / `LargeList` columns into one row per element:
+
+```kdl,name=Stateful TTL deduplication followed by outer unnest
+workflow "dedup_and_explode" {
+    source "events_in" connector="kafka" component="Events" codec="ndjson" {
+        config topic="events"
+    }
+
+    operator "dedup_events" kind="deduplicate" component="Events" {
+        config keys="event_id" \
+               keep="last" \
+               time_field="event_ts" \
+               ttl_ms=600000 \
+               max_keys=100000 \
+               stateful=#true
+    }
+
+    operator "explode_tags" kind="unnest" component="Events" into="EventTags" {
+        config field="tags" alias="tag" preserve_empty=#true
+    }
+
+    sink "out" connector="file" component="EventTags" codec="ndjson" {
+        config path="event_tags.ndjson"
+    }
+
+    link from="events_in" to="dedup_events"
+    link from="dedup_events" to="explode_tags"
+    link from="explode_tags" to="out"
+}
+```
 
 ## Every key
 
@@ -155,5 +284,21 @@ Streaming stateful operators retain their checkpoint state across passes automat
 | `left` | attribute | none | Left input component for binary join kinds (`join`, `interval_join`, `lookup_join`). |
 | `right` | attribute | none | Right input component for binary join kinds. |
 | `into` | attribute | `component` (unary) | Output component name written back into the workflow `Dataset`. Required for joins and `sql`. |
-| `config` | child block / props | empty | Operator-specific parameters (`where`, `predicate`, `select`, `keys`, `aggregates`, `order_by`, `limit`, `offset`, `field`, `alias`, `preserve_empty`, `on`, `join_type`, `left_time_field`, `right_time_field`, `lower_bound_ms`, `upper_bound_ms`, `allowed_lateness_ms`, `max_buffered_rows`, `right_prefix`, `keep`, `time_field`, `ttl_ms`, `max_keys`, `stateful`, `query`). |
+| `config` | child block / props | empty | Operator-specific parameters summarized by `kind` below; unknown keys fail `validate`. |
 | `window` | child block | none | Optional host-tracked event-time watermark declaration (`windows` feature). |
+
+### Config keys per operator kind
+
+| `kind` | Required `config` keys | Optional `config` keys |
+|---|---|---|
+| `filter` | `where` or `predicate` | |
+| `project` | `select` | |
+| `group_by` | `aggregates` (or `aggregate`) | `keys` |
+| `sort` | `order_by` | `limit`, `offset` |
+| `top_n` | `order_by`, `limit` | `offset` |
+| `unnest` | `field` | `alias` (or `as`), `preserve_empty` |
+| `join` | `on` | `join_type`, `right_prefix` |
+| `interval_join` | `on`, `lower_bound_ms`, `upper_bound_ms`, `left_time_field` & `right_time_field` (or `time_field`) | `allowed_lateness_ms` (`watermark_delay_ms`), `max_buffered_rows`, `right_prefix` |
+| `lookup_join` | `on` | `join_type`, `right_prefix` |
+| `deduplicate` | `keys` | `keep`, `time_field`, `ttl_ms`, `max_keys`, `stateful` |
+| `sql` | `query` | |
