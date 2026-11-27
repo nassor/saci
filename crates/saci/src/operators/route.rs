@@ -1,7 +1,7 @@
 //! Declarative conditional branching / row-splitting operator ([`RouteSystem`]).
 //!
 //! Evaluates SQL-style boolean [`Expr`] predicates on an input component batch
-//! and emits both a [`RouteDecision`](crate::sdk::RouteDecision) (the active
+//! and emits both a [`RouteDecision`] (the active
 //! branch names for downstream `link branch="..."` edges) and, in
 //! [`RouteMode::Row`], [`BranchPayloads`] holding per-branch filtered
 //! [`RecordBatch`] slices so each downstream branch receives only its matching
@@ -80,7 +80,7 @@ pub enum RouteMode {
 /// Per-branch filtered batches produced by [`RouteSystem`] in [`RouteMode::Row`].
 ///
 /// Inserted into [`Dataset`] as a resource and extracted by [`PipelineRuntime`](crate::PipelineRuntime)
-/// so [`deliver_outbound`](crate::service::runner) can stage per-branch rows onto
+/// so `deliver_outbound` can stage per-branch rows onto
 /// each labelled edge.
 #[derive(Debug, Clone, Default)]
 pub struct BranchPayloads {
