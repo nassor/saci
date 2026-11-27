@@ -512,6 +512,7 @@ connection url="nats://localhost:4222" password="hunter2"
             }],
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: vec![SinkSpec {
                 heal: None,
                 id: "settlements".to_string(),
@@ -878,6 +879,7 @@ field "v" type="int64" nullable=#false
             }],
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: vec![SinkSpec {
                 heal: None,
                 id: "bridge_out".to_string(),
@@ -915,6 +917,7 @@ field "v" type="int64" nullable=#false
             }],
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: vec![SinkSpec {
                 heal: None,
                 id: "orders_out".to_string(),

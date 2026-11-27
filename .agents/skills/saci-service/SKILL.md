@@ -228,7 +228,7 @@ Key types:
   `NodeCryptoConfig`), `mode.rs` (`ServiceMode`, `StandaloneConfig`, `RunMode`, `ClusterConfig`,
   `PeerSpec`), `store.rs` (`StoreConfig`), `workflow.rs` (`WorkflowSpec`, `SourceSpec`, `SinkSpec`,
   `LinkSpec`, `CodecSpec`, `SchemaSpec`, `NodeKind`, `validate`, `topological_order`),
-  `processor.rs` (`WasmSpec`, `PluginSpec`), `window.rs` (`WindowConfig`), `retry.rs`
+  `processor.rs` (`WasmSpec`, `PluginSpec`, `OperatorSpec`), `window.rs` (`WindowConfig`), `retry.rs`
   (`RetryConfig`), `http.rs` (`HttpConfig`), `observability.rs` (`ObservabilityConfig`,
   `LogFormat`) and `flexible.rs`
 - `ServiceEncryptionConfig` (`encryption { active_key "..." key "..." env|file|hex|base64 ... }`):
@@ -246,9 +246,12 @@ Key types:
   a `store` block, because a cluster node's state is the raft-replicated `cluster-app.redb` under
   `node.data_dir`
 - `WorkflowSpec`: one declared workflow (standalone may declare several; cluster mode takes
-  exactly one). Declared `codec`, `source`, `wasm`, `plugin` and `sink` nodes, each with a
-  mandatory id and an optional name, plus `link` nodes carrying `from`, `to` and an optional
-  `branch`. `#[serde(deny_unknown_fields)]` means a key the service cannot honour is a parse
+  exactly one). Declares `codec`, `source`, `wasm`, `plugin`, `operator` (`OperatorSpec`), and
+  `sink` nodes, each with a mandatory id and an optional name, plus `link` nodes carrying `from`,
+  `to` and an optional `branch`. `operator` nodes run native Arrow operators (`sql`, `filter`,
+  `project`, `group_by`, `sort`, `top_n`, `unnest`, `join`, `interval_join`, `lookup_join`,
+  `deduplicate`) built by `src/service/operator_builder.rs` (`connector = "operator:<kind>"`) with
+  automatic in-memory state carry in standalone runs for stateful kinds. `#[serde(deny_unknown_fields)]` means a key the service cannot honour is a parse error, not a silently dropped section.
   error, not a silently dropped section. The `wasm` and `plugin` fields, and the `window`
   block either carries, are declared unconditionally, like `ServiceMode::Cluster`: the schema
   is the same in every build, so a node whose host is compiled out, or a `window` block in a

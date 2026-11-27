@@ -40,6 +40,7 @@ use super::heal::{HealSettings, HealingSink, HealingSource, Rebuilder};
 use super::lifecycle::RunControl;
 #[cfg(feature = "wasm-host")]
 use super::loader::{LocalModuleResolver, PipelineRuntimeLoader};
+use super::operator_builder::build_operator_node;
 #[cfg(feature = "plugin-host")]
 use super::plugin_loader::load_plugin_runtime;
 use super::redb_state::RedbStateClient;
@@ -1153,7 +1154,7 @@ impl ServiceBuilder {
             let built = match kind {
                 NodeKind::Source => self.build_source_node(id, workflow, &build, retry_sources)?,
                 NodeKind::Sink => self.build_sink_node(id, workflow, &build)?,
-                NodeKind::Processor => self.build_processor_node(id, workflow)?,
+                NodeKind::Processor => self.build_processor_node(id, workflow, &nodes)?,
             };
             nodes.push(built);
         }
@@ -1441,7 +1442,15 @@ impl ServiceBuilder {
     /// The final error is left for an id that is in neither vector, which
     /// `nodes()` makes unreachable through `build_one` and is a caller error
     /// through any other path.
-    fn build_processor_node(&mut self, id: &str, workflow: &WorkflowSpec) -> SaciResult<BuiltNode> {
+    fn build_processor_node(
+        &mut self,
+        id: &str,
+        workflow: &WorkflowSpec,
+        built_nodes: &[BuiltNode],
+    ) -> SaciResult<BuiltNode> {
+        if let Some(spec) = workflow.operator.iter().find(|o| o.id == id) {
+            return build_operator_node(spec, workflow, built_nodes);
+        }
         #[cfg(feature = "wasm-host")]
         if let Some(spec) = workflow.wasm.iter().find(|w| w.id == id) {
             return self.build_wasm_node(spec, &workflow.id);
@@ -1465,7 +1474,7 @@ impl ServiceBuilder {
             ));
         }
         Err(SaciError::configuration(format!(
-            "workflow '{}': processor '{id}' names neither a wasm nor a plugin node",
+            "workflow '{}': processor '{id}' names neither a wasm, plugin, nor operator node",
             workflow.id
         )))
     }
@@ -1934,6 +1943,7 @@ mod tests {
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: None,

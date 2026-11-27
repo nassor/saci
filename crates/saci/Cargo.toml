@@ -66,12 +66,12 @@ all = [
 # The columnar engine: Dataset, Pipeline, System, Scheduler, Component, the
 # Source/Sink traits and the schema cast helpers, with tokio and rayon stage
 # parallelism. Cannot target wasm32-wasip3.
-engine = ["dep:tokio", "dep:rayon", "dep:num_cpus", "dep:arrow-cast", "derive"]
+engine = ["dep:tokio", "dep:rayon", "dep:num_cpus", "derive"]
 # `#[derive(Component)]`, `#[transform]` and `#[fold]`. Needs no tokio, so a
 # wasm32-wasip3 processor carries it.
 derive = ["dep:saci-macros"]
 # Beam-style windowed aggregation.
-windows = ["dep:arrow-arith", "dep:arrow-cast", "dep:fnv"]
+windows = []
 tracing = ["dep:tracing"]
 # OpenTelemetry instruments: the service's own series and the connectors'.
 metrics = ["dep:opentelemetry"]
@@ -162,7 +162,7 @@ connector-peer = ["connector-api", "tls", "tokio/net", "tokio/io-util"]
 inspector = ["engine", "tracing", "metrics", "dep:tracing-subscriber", "dep:opentelemetry_sdk"]
 distributed = [
     "engine", "dep:redb", "dep:uuid", "dep:serde_json", "dep:serde_bytes", "dep:hex",
-    "tokio/net", "tokio/io-util", "dep:tokio-util", "dep:fnv",
+    "tokio/net", "tokio/io-util", "dep:tokio-util",
 ]
 distributed-raft = ["distributed", "dep:openraft", "dep:futures-util", "dep:postcard"]
 # Archival Parquet checkpoint store.
@@ -195,15 +195,15 @@ arrow-array   = { workspace = true }
 arrow-schema  = { workspace = true }
 arrow-buffer  = { workspace = true }
 arrow-select  = { workspace = true }
-arrow-cast    = { workspace = true, optional = true }
-arrow-arith   = { workspace = true, optional = true }
+arrow-cast    = { workspace = true }
+arrow-arith   = { workspace = true }
 arrow-ord     = { workspace = true }
 arrow-ipc     = { workspace = true }
 serde_arrow   = { workspace = true }
 async-trait   = { workspace = true }
 futures       = { workspace = true, optional = true }
 serde         = { workspace = true }
-fnv           = { workspace = true, optional = true }
+fnv           = { workspace = true }
 rand          = { workspace = true }
 
 # Engine and SDKs

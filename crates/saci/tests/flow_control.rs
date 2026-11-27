@@ -181,6 +181,7 @@ fn config_with(run_mode: RunMode, flow: FlowControlConfig) -> ServiceConfig {
             sources: Vec::new(),
             wasm: Vec::new(),
             plugin: Vec::new(),
+            operator: Vec::new(),
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: None,

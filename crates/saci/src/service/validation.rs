@@ -291,8 +291,12 @@ fn validate_edge(
             }
             let up_template = templates[from].as_ref().expect("processor node");
             let down_template = templates[to].as_ref().expect("processor node");
+            let to_is_operator = to_node.connector.starts_with("operator:");
             for component in down {
                 if !up.iter().any(|c| c == component) {
+                    if to_is_operator {
+                        continue;
+                    }
                     return Err(SaciError::configuration(format!(
                         "workflow '{workflow_id}': link '{}' -> '{}': processor '{}' declares \
                          component '{component}', which upstream processor '{}' does not; a \
@@ -373,15 +377,31 @@ fn validate_processor_coverage(
 
     // A processor inbound edge already delivers the whole declared set (the
     // superset rule in `validate_edge` guarantees it), so only an
-    // all-sources fan-in needs its union checked against the declared set.
+    // all-sources fan-in (or an `operator:` node) needs its union checked against
+    // the declared set.
     let has_processor_inbound = ins
         .iter()
         .any(|&i| matches!(nodes[i].kind, BuiltNodeKind::Processor { .. }));
-    if has_processor_inbound {
+    if has_processor_inbound && !nodes[idx].connector.starts_with("operator:") {
         return Ok(());
     }
 
-    let delivered: HashSet<&str> = ins.iter().filter_map(|&i| nodes[i].component).collect();
+    let mut delivered: HashSet<&str> = HashSet::new();
+    for &i in ins {
+        match &nodes[i].kind {
+            BuiltNodeKind::Source(_) => {
+                if let Some(component) = nodes[i].component {
+                    delivered.insert(component);
+                }
+            }
+            BuiltNodeKind::Processor { .. } => {
+                if let Some(names) = declared[i].as_ref() {
+                    delivered.extend(names.iter().map(String::as_str));
+                }
+            }
+            BuiltNodeKind::Sink(_) => {}
+        }
+    }
     // A declared component is covered when a source delivers it *or* when the
     // processor itself produces it: a windowing processor declares the result
     // component its outbound sinks read (`WindowTotal`), which no inbound
@@ -488,6 +508,13 @@ pub fn validate_build_capabilities(config: &ServiceConfig) -> SaciResult<()> {
             if let Some(spec) = workflow.plugin.iter().find(|s| s.window.is_some()) {
                 return Err(missing_windows_engine_error(
                     "plugin",
+                    &spec.id,
+                    &workflow.id,
+                ));
+            }
+            if let Some(spec) = workflow.operator.iter().find(|s| s.window.is_some()) {
+                return Err(missing_windows_engine_error(
+                    "operator",
                     &spec.id,
                     &workflow.id,
                 ));

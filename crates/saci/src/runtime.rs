@@ -264,6 +264,13 @@ impl PipelineRuntime for Pipeline {
     fn template_dataset(&self) -> Dataset {
         self.data().clone_empty()
     }
+
+    fn descriptor_info(&self) -> RuntimeDescriptorInfo {
+        RuntimeDescriptorInfo {
+            stateful: self.is_stateful(),
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

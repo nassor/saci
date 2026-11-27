@@ -55,6 +55,7 @@ pub mod retry;
 pub mod column;
 pub mod component;
 pub mod dataset;
+pub mod operators;
 mod partition;
 pub mod pipeline;
 mod resource;
@@ -193,6 +194,12 @@ pub mod service;
 /// enabled `processor`, `connector-*` and `codec-*` features add.
 pub mod prelude {
     pub use crate::column::ComponentView;
+    pub use crate::operators::{
+        AggregateOp, AggregateSpec, BinaryOp, DeduplicateState, DeduplicateSystem, Expr,
+        FilterSystem, GroupBySystem, IntervalJoinState, IntervalJoinSystem, JoinKey, JoinKind,
+        JoinSystem, KeepPolicy, LookupJoinState, LookupJoinSystem, ProjectItem, ProjectSystem,
+        ScalarFunc, ScalarValue, SortKey, SortSystem, SqlSystem, TopNSystem, UnaryOp, UnnestSystem,
+    };
     #[cfg(feature = "plugin")]
     pub use crate::plugin;
     #[cfg(feature = "processor")]

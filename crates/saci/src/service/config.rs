@@ -89,7 +89,7 @@ pub use self::http::HttpConfig;
 pub use self::mode::{ClusterConfig, PeerSpec, RunMode, ServiceMode, StandaloneConfig};
 pub use self::node::NodeConfig;
 pub use self::observability::{LogFormat, ObservabilityConfig};
-pub use self::processor::{PluginSpec, WasmSpec};
+pub use self::processor::{OperatorSpec, PluginSpec, WasmSpec};
 pub use self::retry::RetryConfig;
 pub use self::store::StoreConfig;
 pub use self::window::WindowConfig;
@@ -721,6 +721,7 @@ mod tests {
                 }],
                 wasm: Vec::new(),
                 plugin: Vec::new(),
+                operator: Vec::new(),
                 sinks: vec![SinkSpec {
                     heal: None,
                     id: "pg_out".to_string(),
@@ -1141,6 +1142,7 @@ node id=1 data_dir="/tmp/saci"
                     window: None,
                 }],
                 plugin: Vec::new(),
+                operator: Vec::new(),
                 sinks: Vec::new(),
                 links: Vec::new(),
                 dlq: None,

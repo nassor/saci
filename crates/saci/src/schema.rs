@@ -85,6 +85,15 @@ impl SchemaRegistry {
         });
     }
 
+    /// Updates an already-registered dynamic schema in place, or inserts it.
+    pub(crate) fn update_schema(&mut self, name: &'static str, schema: Arc<Schema>) {
+        if let Some(entry) = self.schemas.get_mut(name) {
+            entry.schema = schema;
+        } else {
+            self.register_raw(name, schema, 1);
+        }
+    }
+
     /// Retrieve the schema for the named component, if registered.
     pub fn get(&self, name: &str) -> Option<Arc<Schema>> {
         self.schemas.get(name).map(|e| e.schema.clone())

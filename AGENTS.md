@@ -229,6 +229,10 @@ crates/
 │                             #   codec         Codec, CodecFactory, CodecRegistry, BatchReader,
 │                             #                 BatchWriter, MessageDecoder, ReadInput, and one
 │                             #                 child module per byte format. skill saci-codecs
+│                             #   operators     Tokio-free Arrow relational, analytical & stream
+│                             #                 operators (Filter, Project, GroupBy, Sort/TopN,
+│                             #                 Unnest, Join, IntervalJoin, LookupJoin,
+│                             #                 Deduplicate, Expr, SqlSystem)
 │                             #   processor     Processor SDK; `wit/` holds the canonical WIT
 │                             #                 package. skill saci-processors
 │                             #   plugin, plugin_abi
@@ -470,13 +474,26 @@ core and take `&RetryMode`: `run_with_retries` (async, `tokio::time::sleep`) and
 `is_retryable()` is true for `SystemExecution`, `Store`, `RetryExhausted` and, under `distributed`,
 `Distributed` and `LeaseExpired`.
 
+#### Relational & stream operators (`src/operators/`)
+
+Tokio-free vectorized Arrow operators compiled in every feature configuration (including
+`wasm32-wasip3` `--features processor`): `FilterSystem`, `ProjectSystem`, `GroupBySystem`,
+`SortSystem`, `TopNSystem`, `UnnestSystem`, `JoinSystem` (`Inner`, `Left`, `Right`, `Full`,
+`Semi`, `Anti`), stateful event-time `IntervalJoinSystem` (`sdk::State<IntervalJoinState>`),
+stateful `LookupJoinSystem` (`sdk::State<LookupJoinState>`), `DeduplicateSystem`
+(`sdk::State<DeduplicateState>` with TTL and `max_keys` bounds), `Expr` parser/evaluator, and
+`SqlSystem` / `SqlQuery`. Re-exported at `saci::operators` and in `saci::prelude`. Operators whose
+output row count differs from the input dataset row count write via `Dataset::set_batch` /
+`Dataset::set_batch_named`.
+
 #### Windowed aggregation (`src/windows/`, `windows` feature)
 
 `WindowedSystem` assigns rows to tumbling, sliding, or session windows,
 tracks watermarks, aggregates per key, and publishes results as a `WindowResults` resource.
 `WindowedSystem::new(FieldRef, spec, function)` or `new_named(component, time_field, spec,
 function)` builds it; `key_by` and `allowed_lateness_ms` chain on. `WindowFunction::sum`, `min`,
-`max`, `count`, `mean` and `process` build the function. The `windows` submodules are private:
+`max`, `count`, `mean`, `count_distinct`, `variance`, `stddev`, `first`, `last`,
+`approx_percentile`, `string_agg`, `list_agg`, `multi`, and `process` build the function. The `windows` submodules are private:
 `saci::windows` exports the types flat, with `key_hash` for the window key hash.
 `WindowAccumulator` is the component that carries open-window state across batches; the host
 persists it through `CheckpointStore`.
