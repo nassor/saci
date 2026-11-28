@@ -1,4 +1,5 @@
 use crate::error::SaciError;
+use crate::schema::{EvolutionPolicy, evolve_batch};
 
 use super::Dataset;
 
@@ -15,6 +16,20 @@ impl Dataset {
     ///
     /// Propagates [`Dataset::append_record_batch`]'s schema-mismatch error.
     pub fn forward_into(&self, dst: &mut Dataset) -> Result<usize, SaciError> {
+        self.forward_into_evolved(dst, EvolutionPolicy::strict())
+    }
+
+    /// Append every component `dst` declares and `self` also holds into `dst`,
+    /// adapting schemas according to `policy`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaciError`] when evolution fails or `dst` rejects the batch.
+    pub fn forward_into_evolved(
+        &self,
+        dst: &mut Dataset,
+        policy: EvolutionPolicy,
+    ) -> Result<usize, SaciError> {
         // Collected first so the shared borrow of `dst` ends before the loop
         // below borrows it mutably; the registry already hands out `&'static
         // str`, so nothing here is interned twice.
@@ -29,8 +44,15 @@ impl Dataset {
                 .batch_named(name)
                 .expect("component present in schemas() must have a batch")
                 .clone();
-            appended += batch.num_rows();
-            dst.append_record_batch(name, batch)?;
+            let adapted = if policy.is_strict() {
+                batch
+            } else if let Some(target) = dst.schemas().get(name) {
+                evolve_batch(&batch, &target, policy)?
+            } else {
+                batch
+            };
+            appended += adapted.num_rows();
+            dst.append_record_batch(name, adapted)?;
         }
         Ok(appended)
     }

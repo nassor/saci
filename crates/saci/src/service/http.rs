@@ -54,6 +54,7 @@
 //!         inspector: None,
 //!         lifecycle: None,
 //!         dlq: None,
+//!         lineage: None,
 //!     };
 //!
 //!     let cancel = CancellationToken::new();
@@ -93,6 +94,7 @@ use crate::service::standalone::WorkflowStats;
 mod dlq;
 mod inspector;
 mod lifecycle;
+mod lineage;
 
 /// The body of every refusal from the lifecycle and dead letter queue
 /// routes.
@@ -166,6 +168,9 @@ pub struct ServiceState {
     /// 404 rather than answering an empty list for a feature no workflow
     /// asked for.
     pub dlq: Option<Arc<crate::service::dlq::DlqRegistry>>,
+    /// OpenLineage dispatcher and dataset/column lineage graphs for
+    /// `/api/lineage` and `/api/workflows/{id}/lineage`.
+    pub lineage: Option<Arc<crate::service::lineage::LineageDispatcher>>,
 }
 
 /// Build the axum [`Router`] with the origin and the five control-plane
@@ -204,6 +209,10 @@ pub fn build_router(state: ServiceState) -> Router {
         if state.lifecycle.is_some() {
             router = router.merge(dlq::control_routes());
         }
+    }
+
+    if state.lineage.is_some() {
+        router = router.merge(lineage::routes());
     }
 
     router
@@ -553,6 +562,7 @@ mod tests {
             inspector: None,
             lifecycle: None,
             dlq: None,
+            lineage: None,
         }
     }
 

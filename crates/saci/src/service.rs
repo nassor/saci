@@ -78,6 +78,8 @@ mod heal;
 mod http;
 #[cfg(feature = "service")]
 mod lifecycle;
+#[cfg(feature = "service")]
+pub mod lineage;
 #[cfg(all(feature = "service", feature = "wasm-host"))]
 mod loader;
 #[cfg(feature = "service")]
@@ -125,11 +127,12 @@ pub use builder::{
 pub use cluster::{ClusterStats, run_cluster};
 #[cfg(feature = "service")]
 pub use config::{
-    ClusterConfig, CodecEncryptionConfig, CodecSpec, CronSchedule, CronTimezone, DlqBlock,
-    DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig, HttpConfig, KeySpec, LinkSpec,
-    LogFormat, NodeConfig, NodeCryptoConfig, ObservabilityConfig, PeerSpec, PluginSpec,
-    RetryConfig, RunMode, SchemaSpec, ServiceConfig, ServiceEncryptionConfig, ServiceMode,
-    SinkSpec, SourceSpec, StandaloneConfig, StoreConfig, WasmSpec, WindowConfig, WorkflowSpec,
+    ClusterConfig, CodecEncryptionConfig, CodecSpec, CorruptRecordPolicy, CronSchedule,
+    CronTimezone, DlqBlock, DlqConfig, DlqReplayPoint, FlowControlConfig, HealConfig, HttpConfig,
+    KeySpec, LinkSpec, LogFormat, NodeConfig, NodeCryptoConfig, ObservabilityConfig, PeerSpec,
+    PluginSpec, RetryConfig, RunMode, SchemaEvolutionConfig, SchemaSpec, ServiceConfig,
+    ServiceEncryptionConfig, ServiceMode, SinkSpec, SourceSpec, StandaloneConfig, StoreConfig,
+    WasmSpec, WindowConfig, WorkflowSpec,
 };
 #[cfg(feature = "service")]
 pub use dlq::{DeadLetterQueue, DlqError, DlqRegistry, DlqShared, ReplayFilter};
@@ -151,6 +154,11 @@ pub use http::{ServiceModeLabel, ServiceState, build_router, serve_http, spawn_w
 pub use lifecycle::{
     LIFECYCLE_ACK_BUDGET, LifecycleError, LifecycleRegistry, LifecycleRegistryBuilder, PauseGate,
     PauseHandle, RunControl, SupervisorChannels, WorkflowCommand, run_supervised,
+};
+#[cfg(feature = "service")]
+pub use lineage::{
+    LineageConfig, LineageDispatcher, LineageEmitMode, LineageEventType, LineageSnapshot,
+    OpenLineageEvent, WorkflowLineageGraph, build_service_lineage, build_workflow_lineage,
 };
 #[cfg(all(feature = "service", feature = "wasm-host"))]
 pub use loader::{LocalModuleResolver, ModuleResolver, PipelineRuntimeLoader};

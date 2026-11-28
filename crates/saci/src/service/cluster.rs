@@ -633,12 +633,14 @@ mod tests {
                 links: Vec::new(),
                 dlq: None,
                 run: None,
+                schema_evolution: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -920,12 +922,14 @@ mod tests {
                 links: Vec::new(),
                 dlq: None,
                 run: None,
+                schema_evolution: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         };
 

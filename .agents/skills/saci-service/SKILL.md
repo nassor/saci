@@ -249,6 +249,14 @@ Key types:
   `cooldown_ms` deduplication, and `timeout_ms`. Non-blocking dispatcher wired into `Healer`
   (`HealExhausted`), `DeadLetterQueue` (`DlqRecorded`, `DlqLost`), and `run_supervised`
   (`WorkflowFailed`), and updated live on hot-reload via `AlertDispatcher::update_config`
+- `LineageConfig`, `LineageDispatcher`, and `src/service/lineage.rs`: optional top-level `lineage`
+  block (`enabled`, `endpoint`, `api_key`, `namespace`, `job_prefix`, `emit_on` = `"lifecycle"` |
+  `"pass"`, `timeout_ms`) computing dataset and transitive `ColumnLineageDatasetFacet` provenance
+  across sources, operators, wasm/plugin processors, and sinks, serving `GET /api/lineage` and
+  `GET /api/workflows/{id}/lineage` (`src/service/http/lineage.rs`) and asynchronously posting
+  OpenLineage v2 `START`/`RUNNING`/`COMPLETE`/`FAIL`/`ABORT` events with per-source/per-sink
+  `rowCount` statistics (`emit_pass_with_node_rows`/`emit_complete_with_node_rows`). Updated on
+  reload via `LineageDispatcher::update_config` and `update_workflow_nodes`.
 - `ServiceEncryptionConfig` (`encryption { active_key "..." key "..." env|file|hex|base64 ... }`):
   optional top-level keyring and default AEAD algorithm (`aes-256-gcm` or `chacha20-poly1305`).
   Consumed by `codec.encryption` (`CodecEncryptionConfig`), `source.decrypt`, and `sink.encrypt`
@@ -264,13 +272,20 @@ Key types:
   a `store` block, because a cluster node's state is the raft-replicated `cluster-app.redb` under
   `node.data_dir`
 - `WorkflowSpec`: one declared workflow (standalone may declare several; cluster mode takes
-  exactly one). Declares `codec`, `source`, `wasm`, `plugin`, `operator` (`OperatorSpec`), and
-  `sink` nodes, each with a mandatory id and an optional name, plus `link` nodes carrying `from`,
-  `to` and an optional `branch`. `operator` nodes run native Arrow operators (`sql`, `filter`,
-  `project`, `group_by`, `window`, `route` / `branch`, `sort`, `top_n`, `unnest`, `join`,
-  `interval_join`, `lookup_join`, `deduplicate`) built by `src/service/operator_builder.rs`
-  (`connector = "operator:<kind>"`) with automatic in-memory state carry in standalone runs for
-  stateful kinds and per-branch `BranchPayloads` row-split delivery via `RuntimeOutput`. `#[serde(deny_unknown_fields)]` means a key the service cannot honour is a parse error, not a silently dropped section.
+  exactly one). Declares `codec`, `source` (with optional `on_corrupt` and `schema_evolution`), `wasm`,
+  `plugin`, `operator` (`OperatorSpec`), and `sink` nodes (each with a mandatory id and an optional
+  name), plus `link` nodes carrying `from`, `to`, optional `branch`, and optional `schema_evolution`
+  (`workflow.schema_evolution` sets the workflow-wide default `EvolutionPolicy`: `strict`,
+  `additive`, `compatible`). `operator` nodes run native Arrow operators (`sql`, `filter`,
+  `project`, `group_by`, `window`, `route` / `branch`, `quality` / `assert` with optional
+  `on_violation`, `quarantine_into`, `diagnostics`, and bounded `max_keys` on stateful `unique`,
+  `sort`, `top_n`, `unnest`, `join`, `interval_join`, `lookup_join`, `deduplicate`) built by
+  `src/service/operator_builder.rs` (`connector = "operator:<kind>"`) with automatic in-memory
+  state carry in standalone runs for stateful kinds and per-branch `BranchPayloads` row-split
+  delivery via `RuntimeOutput`. Source-side corrupt records drained under `on_corrupt="dlq"` are
+  stored in `DeadLetterQueue` under `corrupt:<source_id>` (retained for inspection/purge, skipped
+  by replay without auto-replay churn). `#[serde(deny_unknown_fields)]` means a key the service
+  cannot honour is a parse error, not a silently dropped section.
   error, not a silently dropped section. The `wasm` and `plugin` fields, and the `window`
   block either carries, are declared unconditionally, like `ServiceMode::Cluster`: the schema
   is the same in every build, so a node whose host is compiled out, or a `window` block in a
@@ -718,6 +733,34 @@ Key types:
   decision line and the inspector record share one formatted `reason`.
 - `SpanMetricsLayer`: turns each `pipeline.stage` span into a `saci_stage_duration_seconds` sample.
 
+- Schema Evolution (`crates/saci/src/schema.rs`, `io/cast.rs`, `service/config/workflow.rs`,
+  `service/validation.rs`, `service/heal.rs`, `service/runner.rs`, `dataset/{append,forward}.rs`):
+  `EvolutionPolicy` (`strict`, `compatible`, `additive`, `widen`, or explicit flags
+  `add_nullable_columns`, `drop_extra_columns`, `widen_types`), `can_widen_type`,
+  `check_schema_compatibility`, and `evolve_batch` adapt batches across links, datasets, and
+  healed sources/sinks (`HealingSource`/`HealingSink::with_evolution`). Configured in KDL via
+  `schema_evolution` on `workflow`, `source`, `sink`, or `link` (`SchemaEvolutionConfig`); defaults
+  to `"strict"`.
+- Source Corrupt-Record Isolation & Data Quality (`service/config/workflow.rs`, `service/dlq.rs`,
+  `service/operator_builder.rs`, `operators/quality.rs`, `operators/expr.rs`):
+  `SourceSpec::on_corrupt` (`CorruptRecordPolicy::{Fail, Drop, Dlq}`) configures
+  `ConnectorContext::skip_corrupt` and `Source::{set_skip_corrupt, drain_corrupt}` so malformed
+  records in `ndjson`/`csv`/`avro` streams or messages either fail the batch, drop silently, or
+  route via `DeadLetterQueue::record_corrupt`. Row-level processor validation uses
+  `operator kind="quality"` (alias `"assert"`) backed by `DataQualitySystem` and checkpointable
+  `DataQualityState` (`not_null`, `not_empty`, `regex`, `range`, `in_set`, `unique`, `check` SQL
+  expressions including `~`, `~*`, `!~`, `!~*`, and `REGEXP_LIKE`/`REGEXP_MATCH`), routing valid
+  rows (`valid` branch / `into`) and offending rows (`quarantine` branch / `quarantine_into`, with
+  optional `__dq_rule`, `__dq_column`, `__dq_reason` when `diagnostics=#true`).
+- OpenLineage / Data Catalog (`src/service/lineage.rs`, `src/service/http/lineage.rs`):
+  top-level `lineage` config block (`LineageConfig`: `enabled`, `endpoint`, `namespace`,
+  `job_prefix`, `api_key`, `emit_on = "lifecycle" | "pass"`, `timeout_ms`). `build_service_lineage`
+  and `build_workflow_lineage` compute dataset schemas, redacted connector URIs, and transitive
+  `columnLineage` facets across operators and runtimes; `LineageDispatcher` buffers recent
+  `OpenLineageEvent`s (`START`, `RUNNING`, `COMPLETE`, `FAIL`, `ABORT`), POSTs asynchronously to
+  `endpoint`, and serves `GET /api/lineage` and `GET /api/workflows/{id}/lineage` on
+  `ServiceState::lineage`.
+
 CLI subcommands (`src/service/cli.rs`, command modules in `src/service/cli/commands/`): `serve`, `validate`, `status`, `cluster init`,
 `cluster status`, `backfill` (`--start`, `--end`, `--time-field`, `--param KEY=VALUE`, `--reset-state`, `--url`, `--local`),
 `cursor list`, `cursor reset` (`--source`, `--to`, `--to-unix-ms`, `--items-processed`, `--keep-priors`), and `reload` (`--file`, `--url`). `--config`/`-c` (env `SACI_CONFIG`) is the only global option and defaults to `saci.kdl`, so `saci-service serve`
@@ -1064,7 +1107,8 @@ store, so it needs no Docker and no running service. Lib unit tests that assert 
 Update this file in the same change that: adds, removes or re-implies a `saci` host feature (`service`, `server`, `wasm-host`, `plugin-host`, `distributed*`, `inspector`, `metrics`);
 adds or renames a config block or key (`ServiceConfig`, or a type under `src/service/config/`:
 `WorkflowSpec`, `StoreConfig`, `ObservabilityConfig`, `RunMode`, `ClusterConfig`; `FlowControlConfig` in
-`flow.rs`, `HealConfig` in `heal.rs`, `DlqConfig`/`DlqBlock` in `dlq.rs`); changes the
+`flow.rs`, `HealConfig` in `heal.rs`, `DlqConfig`/`DlqBlock` in `dlq.rs`, `LineageConfig` in
+`lineage.rs`); changes the
 service's Rust API (`ServiceBuilder`'s chain, `BuiltWorkflow`, `BuiltWorkflowBuilder`, `RunOptions`,
 `WorkflowStats`, `serve`, `ServeOptions`, `ServeExit`, `ServiceConfig::from_kdl`, `PipelineRuntime::run_batch`);
 changes `serve.rs`, `runner.rs` (the code `standalone.rs` and `stream.rs` share) or a runner, the

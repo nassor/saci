@@ -174,6 +174,7 @@ postcard      = { version = "1.2.0", default-features = false, features = ["allo
 tempfile      = { version = "3.27.0" }
 anyhow        = { version = "1.0.104" }
 libc          = { version = "0.2.191" }
+regex         = { version = "1.13" }
 
 # Link-time optimisation. `codegen-units=1` (supplied by `cargo xtask bench` via
 # RUSTFLAGS) optimises each crate whole but stops at every crate boundary:

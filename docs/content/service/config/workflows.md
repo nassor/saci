@@ -261,6 +261,7 @@ is the runnable example.
 | leading argument | string | required | the workflow id, unique across the process |
 | `name` | string | the id | display name on the dashboard |
 | `dlq` | child block | none | this workflow's dead letter queue; see [Dead letter queue](@/service/operate/dead-letter-queue.md) |
+| `schema_evolution` | string or block | `"strict"` | default schema drift policy for all links in the workflow (`"strict"`, `"compatible"`, `"additive"`, `"widen"`, or block setting `add_nullable_columns`, `drop_extra_columns`, `widen_types`) |
 
 ### codec
 
@@ -288,6 +289,7 @@ is the runnable example.
 | `connector` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
 | `component` | string | required | the rows this source produces, which its downstream processor must declare |
 | `codec` | string | none | id of the `codec` node whose format decodes its bytes; omitted by a connector that carries rows already |
+| `on_corrupt` | string | `"fail"` | corrupt source record handling: `"fail"`, `"drop"`, or `"dlq"` (routes offending payloads into the workflow's `dlq`; requires a workflow `dlq` block) |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
 | `flow_control` | child block | the top-level policy | admission override for this source; see [Flow control](@/service/operate/flow-control.md) |
 | `decrypt` | child block | none | decrypt fields or whole batches read from the source; see [Encryption and TLS](@/service/config/encryption.md) |
@@ -311,7 +313,7 @@ is the runnable example.
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | leading argument | string | required | the operator node id, unique across `source`, `operator`, `wasm`, `plugin` and `sink` |
-| `kind` | string | required | `"filter"`, `"project"`, `"group_by"`, `"window"`, `"route"`, `"branch"`, `"sort"`, `"top_n"`, `"unnest"`, `"sql"`, `"deduplicate"`, `"join"`, `"interval_join"` or `"lookup_join"` |
+| `kind` | string | required | `"filter"`, `"project"`, `"group_by"`, `"window"`, `"route"`, `"branch"`, `"quality"`, `"assert"`, `"sort"`, `"top_n"`, `"unnest"`, `"sql"`, `"deduplicate"`, `"join"`, `"interval_join"` or `"lookup_join"` |
 | `name` | string | the id | display name on the dashboard |
 | `component` | string | none | input component for unary operators (or SQL fallback output component); omit for binary joins |
 | `left` | string | none | left input component for `"join"`, `"interval_join"` and `"lookup_join"` |
@@ -341,6 +343,7 @@ instead: [Embedding saci-service](@/library/service/_index.md).
 | `from` | string | required | the upstream `source`, `operator`, `wasm` or `plugin` node id |
 | `to` | string | required | the downstream `operator`, `wasm`, `plugin` or `sink` node id |
 | `branch` | string | none | labels the edge, so the upstream processor or router can choose it per batch or row |
+| `schema_evolution` | string or block | inherits workflow `schema_evolution` | schema drift policy for this edge (`"strict"`, `"compatible"`, `"additive"`, `"widen"`, or block flags) |
 
 ### retry
 
@@ -363,6 +366,7 @@ is the workflow id in the message, and the quoted node ids are yours.
 | `workflow 'orders': source id 'bad/id' is invalid; ids must match ^[A-Za-z0-9][A-Za-z0-9_-]*$ and be at most 64 bytes` | Rename the node to letters, digits, `_` and `-`, starting with a letter or digit. |
 | `workflow 'orders': id 'shared' is declared twice, as source and as sink` | Give the two nodes different ids; every kind shares one namespace. |
 | `workflow 'orders': source 'orders_in' names codec 'orders_csv', which is not declared` | Declare that `codec` node, or correct the id the source names. |
+| `workflow 'orders': source 'orders_in' sets on_corrupt="dlq" without a workflow 'dlq' block` | Declare a workflow `dlq` block, or change `on_corrupt` to `"drop"` or `"fail"`. |
 | `workflow 'orders': schema 'Order' is declared twice` | Rename one of the two `schema` nodes. |
 | `workflow 'orders': schema 'Order' declares no field` | Add a `field` line to the schema. |
 | `workflow 'orders': link 'enrich' -> 'enrich' links a node to itself` | Point `to` at a different node. |

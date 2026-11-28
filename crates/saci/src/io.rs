@@ -15,10 +15,12 @@ mod retry;
 mod sink;
 mod source;
 
-pub use cast::cast_batch;
+pub use cast::{
+    EvolutionPolicy, can_widen_type, cast_batch, check_schema_compatibility, evolve_batch,
+};
 pub use retry::{RetryingSink, RetryingSource};
 pub use sink::Sink;
-pub use source::Source;
+pub use source::{CorruptRecord, Source};
 
 use crate::dataset::Dataset;
 use crate::error::SaciResult;

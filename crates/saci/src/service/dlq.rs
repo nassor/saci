@@ -792,6 +792,43 @@ impl DeadLetterQueue {
         self
     }
 
+    /// Store malformed source records isolated under `source_id` / `component`
+    /// as a dead-letter batch carrying columns `(format, payload, error)`.
+    pub(crate) async fn record_corrupt(
+        &mut self,
+        source_id: &str,
+        component: &str,
+        records: &[crate::io::CorruptRecord],
+        stats: &mut WorkflowStats,
+    ) {
+        if records.is_empty() {
+            return;
+        }
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("format", arrow_schema::DataType::Utf8, false),
+            arrow_schema::Field::new("payload", arrow_schema::DataType::Binary, false),
+            arrow_schema::Field::new("error", arrow_schema::DataType::Utf8, false),
+        ]));
+        let formats: Vec<&str> = records.iter().map(|r| r.format).collect();
+        let payloads: Vec<&[u8]> = records.iter().map(|r| r.payload.as_slice()).collect();
+        let errors: Vec<&str> = records.iter().map(|r| r.error.as_str()).collect();
+        let batch = match RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow_array::StringArray::from(formats)),
+                Arc::new(arrow_array::BinaryArray::from(payloads)),
+                Arc::new(arrow_array::StringArray::from(errors)),
+            ],
+        ) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let first_err = SaciError::generic(records[0].error.clone());
+        let corrupt_target = format!("corrupt:{source_id}");
+        self.record(&batch, &corrupt_target, component, &first_err, stats)
+            .await;
+    }
+
     /// Store one batch a sink refused. Never fails outward: a queue that
     /// cannot take a letter counts it lost and says so.
     pub(crate) async fn record(
@@ -853,7 +890,9 @@ impl DeadLetterQueue {
                 stats.dead_letters_recorded += 1;
                 self.sink_metrics(sink).dlq_recorded(rows);
                 self.add_to_summary(&letter);
-                self.schedule_auto_replay();
+                if !is_corrupt_source_target(sink) {
+                    self.schedule_auto_replay();
+                }
                 self.alerts.emit(AlertEvent::dlq_recorded(
                     &self.workflow_id,
                     sink,
@@ -1036,7 +1075,8 @@ impl DeadLetterQueue {
         // with no letter in hand and no schedule, `maybe_replay` would find
         // no trigger again and whatever an earlier run left behind would wait
         // for a request.
-        if retained.is_empty() && report.error.is_none() {
+        let has_replayable = retained.iter().any(|l| !is_corrupt_source_target(&l.sink));
+        if !has_replayable && report.error.is_none() {
             self.auto_attempt = 0;
             self.next_auto_replay = None;
         } else {
@@ -1156,6 +1196,12 @@ impl DeadLetterQueue {
                     }
                 };
                 if !filter.admits(&letter) {
+                    retained.push(letter);
+                    continue;
+                }
+                if is_corrupt_source_target(&letter.sink) {
+                    // Corrupt-source letters capture raw un-decodable payloads for
+                    // inspection or purge rather than a sink that can accept a replay.
                     retained.push(letter);
                     continue;
                 }
@@ -1487,6 +1533,12 @@ impl DeadLetterQueue {
         self.metrics.dlq_pending(summary.letters);
         self.shared.publish(summary);
     }
+}
+
+/// Whether a letter targets a synthetic `corrupt:<source_id>` quarantine bucket
+/// rather than a replayable workflow sink.
+fn is_corrupt_source_target(sink: &str) -> bool {
+    sink.starts_with("corrupt:")
 }
 
 /// Group letters by `(sink, reason)`, in first-seen order.
@@ -2332,6 +2384,59 @@ mod tests {
         assert_eq!(delivered.load(Ordering::Relaxed), 4, "the store is empty");
     }
 
+    #[cfg(feature = "connector-redb")]
+    #[tokio::test]
+    async fn corrupt_source_letters_are_retained_without_auto_replay_churn_and_can_be_purged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shared = Arc::new(DlqShared::new("orders", &DlqBlock::default()));
+        let (mut queue, mut stats) = redb_queue(dir.path(), &shared, DlqBlock::default());
+
+        let corrupt = vec![crate::io::CorruptRecord {
+            format: "ndjson",
+            payload: b"{bad json".to_vec(),
+            error: "unexpected EOF".to_string(),
+        }];
+        queue
+            .record_corrupt("orders_in", "Order", &corrupt, &mut stats)
+            .await;
+
+        assert_eq!(stats.dead_letters_recorded, 1);
+        assert!(
+            queue.next_auto_replay.is_none(),
+            "recording corrupt source letters must not schedule auto-replay churn"
+        );
+        assert_eq!(shared.summary().letters, 1);
+        assert_eq!(shared.summary().groups[0].sink, "corrupt:orders_in");
+        assert!(shared.summary().next_auto_replay_unix_ms.is_none());
+
+        let delivered = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut nodes = Nodes::new(CancellationToken::new(), TestSink::accepting(&delivered));
+        queue.at_head(nodes.ctx()).await;
+
+        let report = shared
+            .summary()
+            .last_replay
+            .clone()
+            .expect("startup replay ran");
+        assert_eq!(report.delivered, 0);
+        assert_eq!(report.retained, 1);
+        assert!(
+            queue.next_auto_replay.is_none(),
+            "retaining corrupt-only letters must not schedule another auto-replay"
+        );
+        assert!(shared.summary().next_auto_replay_unix_ms.is_none());
+
+        // Manual purge removes the corrupt-source letters cleanly.
+        let mut nodes = Nodes::new(CancellationToken::new(), TestSink::accepting(&delivered));
+        let rx = shared
+            .request(DlqTrigger::Purge, ReplayFilter::default())
+            .expect("request purge");
+        queue.at_head(nodes.ctx()).await;
+        let purge_report = rx.await.expect("purge report");
+        assert_eq!(purge_report.purged, 1);
+        assert_eq!(shared.summary().letters, 0);
+    }
+
     /// A replay that errored with nothing in hand must put itself back on the
     /// schedule. It learnt nothing about the store, so `known` stays false and
     /// no other trigger would bring the queue back: whatever an earlier run
@@ -2442,6 +2547,7 @@ mod tests {
             links: Vec::new(),
             dlq: Some(crate::service::config::DlqConfig(block)),
             run: None,
+            schema_evolution: None,
         }
     }
 

@@ -8,6 +8,7 @@
 use arrow_array::RecordBatch;
 
 use crate::error::SaciError;
+pub use crate::io::CorruptRecord;
 
 /// How [`Codec::encode_messages`](crate::codec::Codec::encode_messages)
 /// splits a batch.
@@ -40,4 +41,13 @@ pub trait MessageDecoder: Send {
     /// Returns the format's error from finishing the window, such as a failed
     /// concatenation of per-payload batches.
     fn flush(&mut self) -> Result<Option<RecordBatch>, SaciError>;
+
+    /// Enable or disable per-payload corrupt-record isolation. When enabled, a
+    /// malformed payload is recorded rather than failing `push`.
+    fn set_skip_corrupt(&mut self, _skip: bool) {}
+
+    /// Drain malformed payloads isolated since the previous call.
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        Vec::new()
+    }
 }

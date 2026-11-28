@@ -96,7 +96,10 @@ pub use self::retry::RetryConfig;
 pub use self::store::StoreConfig;
 pub use self::window::WindowConfig;
 pub(crate) use self::workflow::NodeKind;
-pub use self::workflow::{CodecSpec, LinkSpec, SchemaSpec, SinkSpec, SourceSpec, WorkflowSpec};
+pub use self::workflow::{
+    CodecSpec, CorruptRecordPolicy, LinkSpec, SchemaEvolutionConfig, SchemaSpec, SinkSpec,
+    SourceSpec, WorkflowSpec,
+};
 pub use super::alert::AlertsConfig;
 pub use super::dlq::{DlqBlock, DlqConfig, DlqReplayPoint};
 pub use super::flow::FlowControlConfig;
@@ -188,6 +191,8 @@ pub struct ServiceConfig {
     pub encryption: Option<ServiceEncryptionConfig>,
     /// Outbound alerting targets (webhooks, Slack, PagerDuty).
     pub alerts: AlertsConfig,
+    /// OpenLineage dataset and column-level lineage settings.
+    pub lineage: super::lineage::LineageConfig,
     /// Names usable as `${name}` placeholders anywhere in this file. A
     /// declared name wins over a same-named process env var, so the file is
     /// self-contained.
@@ -228,6 +233,8 @@ struct RawServiceConfig {
     encryption: Option<ServiceEncryptionConfig>,
     #[serde(default, skip_serializing_if = "is_default")]
     alerts: AlertsConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    lineage: super::lineage::LineageConfig,
     #[serde(rename = "workflow", deserialize_with = "one_or_many")]
     workflows: Vec<WorkflowSpec>,
 }
@@ -269,6 +276,7 @@ impl TryFrom<RawServiceConfig> for ServiceConfig {
             heal: raw.heal,
             encryption: raw.encryption,
             alerts: raw.alerts,
+            lineage: raw.lineage,
             variables: raw.variables,
         })
     }
@@ -295,6 +303,7 @@ impl From<ServiceConfig> for RawServiceConfig {
             heal: config.heal,
             encryption: config.encryption,
             alerts: config.alerts,
+            lineage: config.lineage,
             variables: config.variables,
         }
     }
@@ -343,6 +352,7 @@ impl ServiceConfig {
             heal: HealConfig::default(),
             encryption: None,
             alerts: AlertsConfig::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -448,6 +458,7 @@ impl ServiceConfig {
 
         self.observability.validate()?;
         self.alerts.validate()?;
+        self.lineage.validate()?;
         if let Some(encryption) = &self.encryption {
             encryption.validate()?;
         }
@@ -747,6 +758,8 @@ mod tests {
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
                     decrypt: None,
+                    schema_evolution: None,
+                    on_corrupt: None,
                     config: default_config(),
                 }],
                 wasm: Vec::new(),
@@ -761,11 +774,13 @@ mod tests {
                     component: "orders".to_string(),
                     retry: RetryConfig::default(),
                     encrypt: None,
+                    schema_evolution: None,
                     config: default_config(),
                 }],
                 links: Vec::new(),
                 dlq: None,
                 run: None,
+                schema_evolution: None,
             }],
             store: None,
             http: HttpConfig {
@@ -782,6 +797,7 @@ mod tests {
                 inspector: crate::inspector::InspectorConfig::default(),
             },
             alerts: AlertsConfig::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -1179,11 +1195,13 @@ node id=1 data_dir="/tmp/saci"
                 links: Vec::new(),
                 dlq: None,
                 run: None,
+                schema_evolution: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             alerts: AlertsConfig::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         };
         cfg.validate()

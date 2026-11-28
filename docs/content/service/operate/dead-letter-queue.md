@@ -86,9 +86,17 @@ a fresh timestamp and its replay count raised by one. Replays run at four
 moments: at the workflow's first pass, whenever a self-healed sink reports
 itself rebuilt, on a widening schedule while letters wait, and when you ask.
 
-Only a sink write failure is captured. A processor error is not a dead letter:
-the batch it failed on came from upstream and is still upstream's, so storing
-it would run the processor twice on data it never accepted.
+Only a sink write failure is captured by default. A processor error is not a
+dead letter: the batch it failed on came from upstream and is still upstream's,
+so storing it would run the processor twice on data it never accepted. Setting
+`on_corrupt="dlq"` on a `source` node (with a `dlq` block configured) also
+isolates corrupt raw records decoded by NDJSON, CSV, or Avro readers/decoders
+into the dead letter store without failing valid rows in the same file or batch.
+Source-side corrupt letters are recorded under `sink: "corrupt:<source_id>"`
+carrying columns `(format, payload, error)`; because they have no target sink to
+replay into, they appear in `GET /api/workflows/{id}/dlq` for inspection and
+explicit `POST /api/workflows/{id}/dlq/purge`, and are skipped cleanly during
+automatic and manual replay passes.
 
 ## 2. Turn it on
 
@@ -411,6 +419,7 @@ schema, and a declared `field` is replaced.
 | Message | What to change |
 |---|---|
 | `workflow 'orders': dlq store 'mongodb' is not one of redb, kafka, nats` | Name one of the three stores. |
+| `workflow 'orders': source 'orders_in' sets on_corrupt="dlq" without a workflow 'dlq' block` | Declare a workflow `dlq` block, or switch the source's `on_corrupt` policy to `"drop"` or `"fail"`. |
 | `` mode "cluster" does not take a `dlq` block (workflow 'w'): a cluster workflow declares no sink node, so there is nothing to dead-letter `` | Delete the block. A cluster node writes through claims and checkpoints, not sinks. |
 | `workflow 'orders' dlq "nats": source needs a mode block` | Add `source { mode kind="jetstream" ... }`. The NATS connector needs a mode named. |
 | `workflow 'orders' dlq "nats": source mode kind must be "jetstream"; core NATS is at-most-once and drops a letter published with no subscriber` | Use JetStream on both halves, or pick another store. |

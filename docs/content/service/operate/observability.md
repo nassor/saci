@@ -308,7 +308,25 @@ Export covers spans only. Metrics stay pull-only on `/metrics`: there is no
 OTLP metrics exporter and no push path. What the spans are built from is on
 [Tracing and metrics](@/library/tracing.md).
 
-## 5. Stop it cleanly
+## 5. OpenLineage data & column lineage
+
+Add a top-level `lineage` block to serve dataset and transitive column-level
+lineage graphs on `GET /api/lineage` and `GET /api/workflows/{id}/lineage`, and
+optionally stream OpenLineage v2 `RunEvent`s (`START`, `RUNNING`, `COMPLETE`,
+`FAIL`, `ABORT`) to external catalogs such as Marquez or DataHub:
+
+```kdl,name=Top-level OpenLineage configuration
+lineage {
+    enabled #true
+    endpoint "http://127.0.0.1:5000/api/v1/lineage"
+    namespace "analytics"
+    job_prefix "prod"
+    emit_on "pass"
+    timeout_ms 5000
+}
+```
+
+## 6. Stop it cleanly
 
 Ctrl-C always stops the process, and `SIGTERM` does on Linux and macOS. The
 signal cancels every runner, which flushes what it has staged and calls

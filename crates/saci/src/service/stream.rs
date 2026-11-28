@@ -59,6 +59,7 @@
 //!   per sink. There is no `source.drain` span: the wait for input precedes
 //!   the item and would otherwise dominate its latency.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -170,8 +171,13 @@ pub(crate) async fn run(
         inspector,
         dlq,
         flow,
+        lineage,
         ..
     } = built;
+    let lineage_run_id = format!("{workflow_id}-{:016x}", rand::random::<u64>());
+    if let Some(l) = &lineage {
+        l.emit_start(&workflow_id, &lineage_run_id);
+    }
     let mut dlq = dlq;
     let inspector = inspector.as_ref();
     let n = nodes.len();
@@ -204,7 +210,18 @@ pub(crate) async fn run(
         #[cfg(feature = "windows")]
         mut trackers,
         mut staged,
+        edge_evolutions,
+        sink_schemas,
+        on_corrupt,
     } = nodes;
+
+    for (i, policy) in on_corrupt.iter().enumerate() {
+        if *policy != crate::service::config::CorruptRecordPolicy::Fail
+            && let Some(src) = sources[i].as_mut()
+        {
+            src.set_skip_corrupt(true);
+        }
+    }
     // One WIT checkpoint blob per processor node, fed back as `prior` on the
     // next item for that same node: every processor keeps its own.
     let mut prior: Vec<Option<Vec<u8>>> = vec![None; n];
@@ -261,11 +278,30 @@ pub(crate) async fn run(
     if let Some(client) = &state {
         for i in 0..n {
             if matches!(kinds[i], NodeRunKind::Processor) {
-                prior[i] = client.load_prior(&workflow_id, &ids[i]).await?;
+                prior[i] = match client.load_prior(&workflow_id, &ids[i]).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        if let Some(l) = &lineage {
+                            l.emit_fail(&workflow_id, &lineage_run_id, &e.message());
+                            l.flush().await;
+                        }
+                        return Err(e);
+                    }
+                };
             }
         }
         for &si in &source_indices {
-            if let Some(meta) = client.load_source_cursor(&workflow_id, &ids[si]).await? {
+            let meta_opt = match client.load_source_cursor(&workflow_id, &ids[si]).await {
+                Ok(m) => m,
+                Err(e) => {
+                    if let Some(l) = &lineage {
+                        l.emit_fail(&workflow_id, &lineage_run_id, &e.message());
+                        l.flush().await;
+                    }
+                    return Err(e);
+                }
+            };
+            if let Some(meta) = meta_opt {
                 items_per_source[si] = meta.items_processed;
                 #[cfg(feature = "tracing")]
                 tracing::info!(
@@ -328,8 +364,17 @@ pub(crate) async fn run(
             (si, source, outcome)
         });
     }
-    for (si, source, outcome) in futures::future::join_all(priming).await {
+    for (si, mut source, outcome) in futures::future::join_all(priming).await {
+        let corrupt = source.drain_corrupt();
         sources[si] = Some(source);
+        if !corrupt.is_empty() && on_corrupt[si] == crate::service::config::CorruptRecordPolicy::Dlq
+        {
+            let component = components[si].expect("the stream source declares a component");
+            if let Some(q) = &mut dlq {
+                q.record_corrupt(&ids[si], component, &corrupt, &mut stats)
+                    .await;
+            }
+        }
         match outcome {
             Ok(Ok(Some(batch))) => prefetched[si] = Some(batch),
             Ok(Ok(None)) => {
@@ -466,6 +511,20 @@ pub(crate) async fn run(
 
         let batch = match next {
             Ok(None) => {
+                if let Some(source) = sources[source_index].as_mut() {
+                    let corrupt = source.drain_corrupt();
+                    if !corrupt.is_empty()
+                        && on_corrupt[source_index]
+                            == crate::service::config::CorruptRecordPolicy::Dlq
+                    {
+                        let component = components[source_index]
+                            .expect("the stream source declares a component");
+                        if let Some(q) = &mut dlq {
+                            q.record_corrupt(&ids[source_index], component, &corrupt, &mut stats)
+                                .await;
+                        }
+                    }
+                }
                 #[cfg(feature = "tracing")]
                 tracing::info!(
                     source = %ids[source_index],
@@ -475,8 +534,41 @@ pub(crate) async fn run(
                 remaining_sources -= 1;
                 continue;
             }
-            Ok(Some(batch)) => batch,
+            Ok(Some(batch)) => {
+                if let Some(source) = sources[source_index].as_mut() {
+                    let corrupt = source.drain_corrupt();
+                    if !corrupt.is_empty()
+                        && on_corrupt[source_index]
+                            == crate::service::config::CorruptRecordPolicy::Dlq
+                    {
+                        let component = components[source_index]
+                            .expect("the stream source declares a component");
+                        if let Some(q) = &mut dlq {
+                            q.record_corrupt(&ids[source_index], component, &corrupt, &mut stats)
+                                .await;
+                        }
+                    }
+                }
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+                batch
+            }
             Err(_e) => {
+                if let Some(source) = sources[source_index].as_mut() {
+                    let corrupt = source.drain_corrupt();
+                    if !corrupt.is_empty()
+                        && on_corrupt[source_index]
+                            == crate::service::config::CorruptRecordPolicy::Dlq
+                    {
+                        let component = components[source_index]
+                            .expect("the stream source declares a component");
+                        if let Some(q) = &mut dlq {
+                            q.record_corrupt(&ids[source_index], component, &corrupt, &mut stats)
+                                .await;
+                        }
+                    }
+                }
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     workflow = %workflow_id,
@@ -600,10 +692,12 @@ pub(crate) async fn run(
         fan_out_source(
             source_index,
             &downstream,
+            &edge_evolutions,
             component,
             &batch,
             &kinds,
             &mut datasets,
+            &sink_schemas,
             &mut staged,
             &ids,
             &mut stats,
@@ -715,9 +809,11 @@ pub(crate) async fn run(
                                 rows_out,
                                 metrics,
                                 &downstream,
+                                &edge_evolutions,
                                 &kinds,
                                 &components,
                                 &mut datasets,
+                                &sink_schemas,
                                 &mut staged,
                                 &ids,
                                 &mut stats,
@@ -814,6 +910,10 @@ pub(crate) async fn run(
             stats.nodes = node_stats.clone();
             publish(&live_stats, &stats).await;
             log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
+            if let Some(l) = &lineage {
+                l.emit_abort(&workflow_id, &lineage_run_id);
+                l.flush().await;
+            }
             return Ok(stats);
         }
 
@@ -836,6 +936,26 @@ pub(crate) async fn run(
         stats.iterations += 1;
         workflow_metrics.pass();
         stats.total_busy_micros += item_micros;
+        if let Some(l) = &lineage {
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
+            let node_rows: HashMap<String, u64> = ids
+                .iter()
+                .zip(node_stats.iter())
+                .map(|(id, s)| (id.clone(), s.rows))
+                .collect();
+            l.emit_pass_with_node_rows(
+                &workflow_id,
+                &lineage_run_id,
+                rows,
+                sink_rows_out,
+                Some(&node_rows),
+            );
+        }
 
         // Each sink's own backlog is published under its own id; the maximum
         // is what governs admission, because the whole consumer chain is one
@@ -943,6 +1063,32 @@ pub(crate) async fn run(
     );
 
     log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
+
+    if let Some(l) = &lineage {
+        if cancel.is_cancelled() {
+            l.emit_abort(&workflow_id, &lineage_run_id);
+        } else {
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
+            let node_rows: HashMap<String, u64> = ids
+                .iter()
+                .zip(node_stats.iter())
+                .map(|(id, s)| (id.clone(), s.rows))
+                .collect();
+            l.emit_complete_with_node_rows(
+                &workflow_id,
+                &lineage_run_id,
+                stats.rows_processed,
+                sink_rows_out,
+                Some(&node_rows),
+            );
+        }
+        l.flush().await;
+    }
 
     Ok(stats)
 }
@@ -1465,11 +1611,13 @@ mod tests {
     /// Hands the workflow the source and the sink the test built, so the test
     /// keeps the sending end of the source's channel and the receiving end of
     /// the sink's.
+    #[cfg(any(feature = "wasm-host", feature = "connector-redb"))]
     struct HandedConnector {
         source: std::sync::Mutex<Option<Box<dyn Source>>>,
         sink: std::sync::Mutex<Option<Box<dyn Sink>>>,
     }
 
+    #[cfg(any(feature = "wasm-host", feature = "connector-redb"))]
     impl crate::connector::Connector for HandedConnector {
         fn name(&self) -> &'static str {
             "handed"
@@ -1602,5 +1750,90 @@ http enabled=#false
             delivered += batch.num_rows();
         }
         assert_eq!(delivered, 2, "both items reach the sink");
+    }
+
+    #[cfg(feature = "connector-redb")]
+    #[tokio::test]
+    async fn stream_run_drains_corrupt_records_when_source_reaches_eof_during_prime() {
+        use crate::io::CorruptRecord;
+        use crate::service::builder::ServiceBuilder;
+        use crate::service::config::ServiceConfig;
+
+        struct EofCorruptSource {
+            schema: Arc<Schema>,
+            corrupt: Vec<CorruptRecord>,
+        }
+
+        #[async_trait]
+        impl Source for EofCorruptSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+
+            async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+                self.corrupt.push(CorruptRecord {
+                    format: "ndjson",
+                    payload: b"{bad prime".to_vec(),
+                    error: "invalid json".to_string(),
+                });
+                Ok(None)
+            }
+
+            fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+                std::mem::take(&mut self.corrupt)
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_string_lossy().replace('\\', "/");
+        let config_path = dir.path().join("service.kdl");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+mode "standalone"
+
+node id=1 name="stream-prime-dlq" data_dir="{data_dir}"
+
+run "stream"
+
+workflow "w" {{
+    dlq "redb" replay="before_sources"
+    source "in" connector="handed" component="Row" on_corrupt="dlq"
+    sink "out" connector="handed" component="Row"
+    link from="in" to="out"
+}}
+
+http enabled=#false
+"#
+            ),
+        )
+        .expect("write config");
+        let config = ServiceConfig::load(&config_path).expect("config loads");
+        let sink_rows = Arc::new(AtomicU64::new(0));
+        let source: Box<dyn Source> = Box::new(EofCorruptSource {
+            schema: schema(),
+            corrupt: Vec::new(),
+        });
+        let sink: Box<dyn Sink> = Box::new(CountingSink {
+            schema: schema(),
+            rows: Arc::clone(&sink_rows),
+        });
+        let built = ServiceBuilder::new()
+            .connector(HandedConnector {
+                source: std::sync::Mutex::new(Some(source)),
+                sink: std::sync::Mutex::new(Some(sink)),
+            })
+            .build(&config)
+            .expect("the workflow builds")
+            .remove(0);
+
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("stream run exits cleanly on prime EOF");
+        assert_eq!(stats.dead_letters_recorded, 1);
+        assert_eq!(stats.source_batches_drained, 0);
+        assert_eq!(sink_rows.load(Ordering::Relaxed), 0);
     }
 }

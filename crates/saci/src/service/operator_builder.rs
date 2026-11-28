@@ -10,10 +10,11 @@ use crate::connector::{parse_fields, schema_of};
 use crate::dataset::intern_component_name;
 use crate::error::{SaciError, SaciResult};
 use crate::operators::{
-    AggregateOp, AggregateSpec, BranchRule, DeduplicateState, DeduplicateSystem, FilterSystem,
-    GroupBySystem, IntervalJoinState, IntervalJoinSystem, JoinKey, JoinKind, JoinSystem,
-    KeepPolicy, LookupJoinState, LookupJoinSystem, ProjectSystem, RouteMode, RouteSystem, SortKey,
-    SortSystem, SqlSystem, TopNSystem, UnnestSystem,
+    AggregateOp, AggregateSpec, BranchRule, DataQualityState, DataQualitySystem, DeduplicateState,
+    DeduplicateSystem, FilterSystem, GroupBySystem, IntervalJoinState, IntervalJoinSystem, JoinKey,
+    JoinKind, JoinSystem, KeepPolicy, LookupJoinState, LookupJoinSystem, ProjectSystem,
+    QualityFailureAction, QualityRule, RouteMode, RouteSystem, SortKey, SortSystem, SqlSystem,
+    TopNSystem, UnnestSystem,
 };
 #[cfg(feature = "windows")]
 use crate::operators::{WindowAggregateState, WindowAggregateSystem, WindowColumns};
@@ -56,6 +57,11 @@ pub(super) fn build_operator_node(
         artifact: None,
         heal_recovered: None,
         window: spec.window.clone(),
+        evolution: workflow
+            .schema_evolution
+            .map_or_else(crate::schema::EvolutionPolicy::strict, |c| c.policy()),
+        edge_evolutions: Vec::new(),
+        on_corrupt: super::config::CorruptRecordPolicy::default(),
     })
 }
 
@@ -421,6 +427,9 @@ fn build_operator_pipeline(
             }
             pipeline = pipeline.system(sys);
         }
+        "quality" | "assert" => {
+            pipeline = build_quality_operator_pipeline(pipeline, spec, cfg, &ctx, schemas)?;
+        }
         other => {
             return Err(SaciError::configuration(format!(
                 "{ctx}: unsupported operator kind '{other}'"
@@ -584,6 +593,295 @@ fn parse_branch_rule_object(val: &ConfigValue, ctx: &str) -> SaciResult<BranchRu
             SaciError::configuration(format!("{ctx}: branch '{name}' missing 'where' predicate"))
         })?;
     BranchRule::parse(name, &expr)
+}
+
+fn build_quality_operator_pipeline(
+    mut pipeline: Pipeline,
+    spec: &OperatorSpec,
+    cfg: &crate::config::ConfigMap,
+    ctx: &str,
+    schemas: Option<&HashMap<String, Arc<Schema>>>,
+) -> SaciResult<Pipeline> {
+    check_allowed_keys(
+        cfg,
+        &["rules", "on_violation", "quarantine_into", "diagnostics"],
+        ctx,
+    )?;
+    let src = req_endpoint(spec.component.as_deref(), "component", ctx)?;
+    let dst = spec.into.as_deref().unwrap_or(src);
+    let rules = parse_quality_rules(cfg, ctx)?;
+    let stateful = rules
+        .iter()
+        .any(|r| matches!(r, QualityRule::Unique { stateful: true, .. }));
+    let mut sys = DataQualitySystem::new(src, rules)?;
+    if dst != src {
+        sys = sys.into_component(dst);
+    }
+    if let Some(q_into) = opt_str(cfg, "quarantine_into") {
+        sys = sys.quarantine_into(&q_into);
+    }
+    if let Some(action_raw) = opt_str(cfg, "on_violation") {
+        sys = sys.on_violation(QualityFailureAction::from_name(&action_raw)?);
+    }
+    if let Some(diag) = opt_bool(cfg, "diagnostics", ctx)? {
+        sys = sys.include_diagnostics(diag);
+    }
+    if let Some(in_schema) = schemas.and_then(|m| m.get(src)) {
+        register_if_absent(&mut pipeline, src, in_schema.clone())?;
+        if dst != src {
+            register_if_absent(&mut pipeline, dst, in_schema.clone())?;
+        }
+        if let Some(q_comp) = sys.quarantine_component() {
+            let q_schema = sys.quarantine_schema(in_schema);
+            register_if_absent(&mut pipeline, q_comp, q_schema)?;
+        }
+    }
+    if stateful {
+        pipeline = pipeline.state::<DataQualityState>();
+    }
+    Ok(pipeline.system(sys))
+}
+
+fn parse_quality_rules(cfg: &crate::config::ConfigMap, ctx: &str) -> SaciResult<Vec<QualityRule>> {
+    let val = cfg
+        .get("rules")
+        .ok_or_else(|| SaciError::configuration(format!("{ctx}: missing 'rules' in config")))?;
+    let mut raw_rules = Vec::new();
+    match val {
+        ConfigValue::Object(map) => {
+            if let Some(nested) = map.get("rule") {
+                match nested {
+                    ConfigValue::Array(arr) => raw_rules.extend(arr.iter().cloned()),
+                    single => raw_rules.push(single.clone()),
+                }
+            } else {
+                raw_rules.push(ConfigValue::Object(map.clone()));
+            }
+        }
+        ConfigValue::Array(arr) => raw_rules.extend(arr.iter().cloned()),
+        other => {
+            return Err(SaciError::configuration(format!(
+                "{ctx}: invalid 'rules' value {other}"
+            )));
+        }
+    }
+    if raw_rules.is_empty() {
+        return Err(SaciError::configuration(format!(
+            "{ctx}: 'rules' must declare at least one rule"
+        )));
+    }
+    raw_rules
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| parse_single_quality_rule(item, idx, ctx))
+        .collect()
+}
+
+fn parse_single_quality_rule(val: &ConfigValue, idx: usize, ctx: &str) -> SaciResult<QualityRule> {
+    let obj = val.as_object().ok_or_else(|| {
+        SaciError::configuration(format!("{ctx}: quality rule entry must be an object"))
+    })?;
+    let kind = opt_str(obj, "type")
+        .or_else(|| opt_str(obj, "kind"))
+        .ok_or_else(|| {
+            SaciError::configuration(format!("{ctx}: quality rule #{idx} missing 'type'"))
+        })?;
+    let default_name = || format!("{kind}_{idx}");
+    let name = opt_str(obj, "id")
+        .or_else(|| opt_str(obj, "name"))
+        .unwrap_or_else(default_name);
+
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "not_null" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "column"],
+                &format!("{ctx}: not_null rule '{name}'"),
+            )?;
+            Ok(QualityRule::NotNull {
+                name,
+                column: req_str(obj, "column", ctx)?,
+            })
+        }
+        "not_empty" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "column"],
+                &format!("{ctx}: not_empty rule '{name}'"),
+            )?;
+            Ok(QualityRule::NotEmpty {
+                name,
+                column: req_str(obj, "column", ctx)?,
+            })
+        }
+        "regex" => {
+            check_allowed_keys(
+                obj,
+                &[
+                    "type",
+                    "kind",
+                    "id",
+                    "name",
+                    "column",
+                    "pattern",
+                    "case_insensitive",
+                ],
+                &format!("{ctx}: regex rule '{name}'"),
+            )?;
+            Ok(QualityRule::Regex {
+                name,
+                column: req_str(obj, "column", ctx)?,
+                pattern: req_str(obj, "pattern", ctx)?,
+                case_insensitive: opt_bool(obj, "case_insensitive", ctx)?.unwrap_or(false),
+            })
+        }
+        "range" => {
+            check_allowed_keys(
+                obj,
+                &[
+                    "type",
+                    "kind",
+                    "id",
+                    "name",
+                    "column",
+                    "min",
+                    "max",
+                    "min_exclusive",
+                    "max_exclusive",
+                ],
+                &format!("{ctx}: range rule '{name}'"),
+            )?;
+            let column = req_str(obj, "column", ctx)?;
+            let min = opt_f64(obj, "min", ctx)?;
+            let max = opt_f64(obj, "max", ctx)?;
+            let min_exclusive = opt_bool(obj, "min_exclusive", ctx)?.unwrap_or(false);
+            let max_exclusive = opt_bool(obj, "max_exclusive", ctx)?.unwrap_or(false);
+            Ok(QualityRule::Range {
+                name,
+                column,
+                min,
+                max,
+                min_exclusive,
+                max_exclusive,
+            })
+        }
+        "in_set" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "column", "values"],
+                &format!("{ctx}: in_set rule '{name}'"),
+            )?;
+            let column = req_str(obj, "column", ctx)?;
+            let values = match obj.get("values") {
+                Some(ConfigValue::Array(arr)) => arr
+                    .iter()
+                    .map(config_scalar_to_string)
+                    .collect::<SaciResult<Vec<_>>>()?,
+                Some(single) => vec![config_scalar_to_string(single)?],
+                None => {
+                    return Err(SaciError::configuration(format!(
+                        "{ctx}: in_set rule '{name}' missing 'values'"
+                    )));
+                }
+            };
+            Ok(QualityRule::InSet {
+                name,
+                column,
+                values,
+            })
+        }
+        "unique" => {
+            check_allowed_keys(
+                obj,
+                &[
+                    "type", "kind", "id", "name", "column", "columns", "stateful", "max_keys",
+                ],
+                &format!("{ctx}: unique rule '{name}'"),
+            )?;
+            let mut columns = opt_ident_list(obj, "columns");
+            if columns.is_empty()
+                && let Some(col) = opt_str(obj, "column")
+            {
+                columns.push(col);
+            }
+            if columns.is_empty() {
+                return Err(SaciError::configuration(format!(
+                    "{ctx}: unique rule '{name}' requires 'column' or 'columns'"
+                )));
+            }
+            let stateful = opt_bool(obj, "stateful", ctx)?.unwrap_or(false);
+            let max_keys = match obj.get("max_keys") {
+                None => None,
+                Some(ConfigValue::Number(n)) => {
+                    let v = n.as_i64().ok_or_else(|| {
+                        SaciError::configuration(format!(
+                            "{ctx}: unique rule '{name}' 'max_keys' must be an integer"
+                        ))
+                    })?;
+                    if v <= 0 {
+                        return Err(SaciError::configuration(format!(
+                            "{ctx}: unique rule '{name}' 'max_keys' must be greater than 0"
+                        )));
+                    }
+                    Some(v as usize)
+                }
+                Some(other) => {
+                    return Err(SaciError::configuration(format!(
+                        "{ctx}: unique rule '{name}' 'max_keys' must be a positive integer, got {other}"
+                    )));
+                }
+            };
+            Ok(QualityRule::Unique {
+                name,
+                columns,
+                stateful,
+                max_keys,
+            })
+        }
+        "check" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "expr", "where", "predicate"],
+                &format!("{ctx}: check rule '{name}'"),
+            )?;
+            let expr = opt_str(obj, "expr")
+                .or_else(|| opt_str(obj, "where"))
+                .or_else(|| opt_str(obj, "predicate"))
+                .ok_or_else(|| {
+                    SaciError::configuration(format!(
+                        "{ctx}: check rule '{name}' missing 'expr' / 'where'"
+                    ))
+                })?;
+            Ok(QualityRule::Check { name, expr })
+        }
+        other => Err(SaciError::configuration(format!(
+            "{ctx}: unknown quality rule type '{other}'"
+        ))),
+    }
+}
+
+fn opt_f64(cfg: &crate::config::ConfigMap, key: &str, ctx: &str) -> SaciResult<Option<f64>> {
+    match cfg.get(key) {
+        None => Ok(None),
+        Some(ConfigValue::Number(n)) => n
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| SaciError::configuration(format!("{ctx}: '{key}' must be finite"))),
+        Some(other) => Err(SaciError::configuration(format!(
+            "{ctx}: '{key}' must be numeric, got {other}"
+        ))),
+    }
+}
+
+fn config_scalar_to_string(val: &ConfigValue) -> SaciResult<String> {
+    match val {
+        ConfigValue::String(s) => Ok(s.clone()),
+        ConfigValue::Number(n) => Ok(n.to_string()),
+        ConfigValue::Bool(b) => Ok(b.to_string()),
+        other => Err(SaciError::configuration(format!(
+            "expected scalar value in quality rule, got {other}"
+        ))),
+    }
 }
 
 fn check_allowed_keys(
@@ -1046,5 +1344,79 @@ fn parse_join_kind(raw: Option<&str>, ctx: &str) -> SaciResult<JoinKind> {
         other => Err(SaciError::configuration(format!(
             "{ctx}: unsupported join_type '{other}'"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_rule_rejects_unknown_keys() {
+        let mut rule = serde_json::Map::new();
+        rule.insert("type".to_string(), ConfigValue::String("range".to_string()));
+        rule.insert("column".to_string(), ConfigValue::String("amt".to_string()));
+        rule.insert("minumum".to_string(), ConfigValue::from(0));
+        let err = parse_single_quality_rule(&ConfigValue::Object(rule), 0, "test").unwrap_err();
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(err.to_string().contains("minumum"), "got: {err}");
+    }
+
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[test]
+    fn assert_operator_quarantine_diagnostic_edge_validates_and_builds() {
+        use crate::service::ServiceConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let in_path = dir.path().join("in.ndjson");
+        let valid_path = dir.path().join("valid.ndjson");
+        let bad_path = dir.path().join("bad.ndjson");
+        std::fs::write(&in_path, "{\"id\":1}\n").expect("write input");
+
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-assert-diag"
+workflow "w" {{
+    codec "ndjson" format="ndjson"
+    schema "Order" {{
+        field "id" type="int64" nullable=#false
+    }}
+    source "in" connector="file" codec="ndjson" component="Order" {{
+        config path="{}"
+    }}
+    operator "check_orders" kind="assert" component="Order" {{
+        config on_violation="quarantine" diagnostics=#true {{
+            rules {{
+                rule type="not_null" column="id"
+            }}
+        }}
+    }}
+    sink "valid" connector="file" codec="ndjson" component="Order" {{
+        config path="{}"
+    }}
+    sink "bad" connector="file" codec="ndjson" component="Order" {{
+        config path="{}"
+    }}
+    link from="in" to="check_orders"
+    link from="check_orders" to="valid" branch="valid"
+    link from="check_orders" to="bad" branch="quarantine"
+}}
+"#,
+            in_path.display(),
+            valid_path.display(),
+            bad_path.display()
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("parse");
+        let built = crate::service::ServiceBuilder::new()
+            .build(&cfg)
+            .expect("assert operator with quarantine diagnostic branch builds");
+        let assert_node = &built[0].nodes[1];
+        let q_edge_idx = assert_node
+            .downstream
+            .iter()
+            .position(|e| e.branch.as_deref() == Some("quarantine"))
+            .expect("quarantine edge");
+        assert!(assert_node.edge_evolution(q_edge_idx).drop_extra_columns);
     }
 }

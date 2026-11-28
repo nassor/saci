@@ -381,6 +381,8 @@ mod tests {
             heal: None,
             flow_control: None,
             decrypt: None,
+            schema_evolution: None,
+            on_corrupt: None,
             config: serde_json::json!({
                 "path": "/data/${start_date}/${region:-us-east}.csv"
             }),

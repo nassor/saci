@@ -240,12 +240,14 @@ fn pinned_config(run_mode: RunMode) -> ServiceConfig {
             links: Vec::new(),
             dlq: None,
             run: None,
+            schema_evolution: None,
         }],
         http: HttpConfig::default(),
         store: None,
         observability: ObservabilityConfig::default(),
         encryption: None,
         alerts: Default::default(),
+        lineage: Default::default(),
         variables: std::collections::HashMap::new(),
     }
 }

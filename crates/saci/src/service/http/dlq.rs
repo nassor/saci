@@ -229,6 +229,7 @@ workflow "plain" {
             inspector: None,
             lifecycle: None,
             dlq,
+            lineage: None,
         }
     }
 

@@ -54,7 +54,9 @@ impl Connector for TcpConnector {
         let schema = schema_of(&parse_fields(config, "tcp")?)?;
         let codec = ctx.codec("tcp")?;
 
-        Ok(Box::new(TcpSource::new(cfg, schema, codec)?))
+        let mut src = TcpSource::new(cfg, schema, codec)?;
+        src.set_skip_corrupt(ctx.skip_corrupt());
+        Ok(Box::new(src))
     }
 
     fn sink(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Sink>> {

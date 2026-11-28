@@ -48,7 +48,12 @@ impl Connector for FileConnector {
         let declared = parse_optional_fields(config, "FileSource")?
             .map(|fields| schema_of(&fields))
             .transpose()?;
-        Ok(Box::new(FileSource::new(cfg, declared, codec)?))
+        Ok(Box::new(FileSource::new_with_corrupt(
+            cfg,
+            declared,
+            codec,
+            ctx.skip_corrupt(),
+        )?))
     }
 
     fn sink(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Sink>> {

@@ -133,17 +133,55 @@ wider `int`. A value that does not fit the declared column is an error rather th
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `compression` | string | `null` | container-file compression: `null`, `deflate`, `snappy` or `zstd` |
-| `schema_id` | integer | absent | the Confluent registry id: the encoder frames every message under it, and the decoder accepts a Confluent framed payload only when it is set; it must fit in 32 bits |
+| `schema_id` | integer | absent | static 32-bit Confluent registry id used when `registry_url` is unset |
+| `registry_url` | string | absent | base URL for an external Confluent, Apicurio v2, or AWS Glue schema registry |
+| `registry_kind` | string | `"confluent"` | registry protocol dialect: `"confluent"`, `"apicurio"`, or `"glue"` |
+| `subject` | string | absent | subject (Confluent) or artifact id (Apicurio) used to register or resolve schemas on write |
+| `auto_register` | bool | `#true` | register unseen writer schemas on encode (`#true`) or resolve an existing registration (`#false`) |
+| `compatibility` | string | `"NONE"` | compatibility mode checked against previous versions: `NONE`, `BACKWARD`, `BACKWARD_TRANSITIVE`, `FORWARD`, `FORWARD_TRANSITIVE`, `FULL`, `FULL_TRANSITIVE` |
+| `apicurio_group` | string | `"default"` | Apicurio artifact group id |
+| `apicurio_eight_byte_id` | bool | `#false` | frame Apicurio messages with `0x00` + 8-byte big-endian ID instead of 4-byte ID |
+| `glue_registry_name` | string | `"default-registry"` | AWS Glue registry name |
+| `glue_schema_name` | string | `subject` | AWS Glue schema name |
+| `aws_region` | string | `"us-east-1"` | AWS region used for Glue SigV4 signing (reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`) |
+| `auth_basic_user` | string | absent | HTTP Basic username (e.g. Confluent Cloud API key) |
+| `auth_basic_password` | string | `""` | HTTP Basic password / secret |
+| `auth_bearer_token` | string | absent | HTTP `Authorization: Bearer` token |
+
+## External schema registry
+
+Set `registry_url` to resolve writer schemas dynamically by wire prefix on decode (5-byte Confluent `0x00` + `u32`, 5-byte or 9-byte Apicurio `0x00` + `u32`/`u64`, or 18-byte AWS Glue `0x03 0x00` + UUID) and evolve decoded batches to the workflow's declared target schema. On encode, `AvroCodec` checks compatibility according to `compatibility` and caches registered schema IDs.
+
+```kdl,name=Confluent Schema Registry with backward compatibility
+codec "orders_avro" format="avro" {
+    config {
+        registry_url "https://registry.example.com"
+        registry_kind "confluent"
+        subject "orders-value"
+        auto_register #true
+        compatibility "BACKWARD"
+        auth_basic_user "${SR_KEY}"
+        auth_basic_password "${SR_SECRET}"
+    }
+}
+```
 
 ## How it behaves
 
-Two framings exist on the message surface, and `schema_id` picks which one this codec writes.
-Without it the encoder emits single-object framing; with it, the Confluent framing carrying that
-registry id.
+Three message framings exist alongside the OCF container format:
 
-Decoding is looser than encoding. Single-object framing is always accepted. The Confluent framing is
-accepted only when `schema_id` is set, so a topic that carries both framings needs the option set
-and reads either one.
+- Without `schema_id` or `registry_url`, encoding emits single-object framing (`0xC3 0x01` + 8-byte
+  Rabin fingerprint).
+- With a static `schema_id`, encoding emits Confluent 5-byte framing (`0x00` + 4-byte big-endian
+  ID).
+- With `registry_url`, `avro` dynamically fetches writer schemas by ID when decoding and resolves or
+  auto-registers schemas when encoding across Confluent (`0x00` + 4-byte ID), Apicurio (`0x00` +
+  4-byte or 8-byte ID), and AWS Glue (`0x03 0x00` + 16-byte UUID) registries, enforcing configured
+  `compatibility` rules against prior registry versions.
+
+Decoding is looser than encoding: single-object framing (`0xC3 0x01`) is always accepted; static
+Confluent framing is accepted when `schema_id` or `registry_url` is set; and Apicurio/Glue dynamic
+headers are accepted when `registry_url` is set.
 
 `compression` applies to the container writer alone and changes nothing on a message.
 
@@ -155,14 +193,20 @@ and reads either one.
 | `avro: option 'compression' must be one of null, deflate, snappy, zstd` | pick one of those four |
 | `avro: option 'schema_id' must be an integer` | write a bare number |
 | `avro: option 'schema_id' must fit in a u32` | use the registry id, which is a 32-bit number |
+| `avro: option '{key}' must be a string` | quote the string option value |
+| `avro: option '{key}' must be a boolean` | use `#true` or `#false` |
+| `avro: unknown registry_kind '{other}'; expected confluent, apicurio or glue` | pick one of `confluent`, `apicurio`, or `glue` |
+| `avro: unknown compatibility '{other}'; expected NONE, BACKWARD, BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, or FULL_TRANSITIVE` | pick a supported compatibility level |
 | `avro: the declared schema has no Avro form: {e}` | replace the column type the message names with one Avro can express |
-| `avro: unknown option '{key}'` | remove the key; `compression` and `schema_id` are the only two |
+| `avro: unknown option '{key}'` | remove the unknown key (see [Every option](#every-option)) |
 
-Some errors wait for a payload rather than the config check:
-`avro: payload carries the Confluent prefix; set option 'schema_id' to its registry id`,
-`avro: payload is not framed; expected single-object encoding (0xC3 0x01) or the Confluent prefix
-(0x00)`, and `avro: casting to the declared schema: {e}` for a value that does not fit its declared
-column, or for a declared column the container or payload does not carry.
+Some errors wait for a payload or registry round-trip rather than the static option check:
+`avro: payload carries the Confluent prefix; set option 'schema_id' or 'registry_url'`,
+`avro: payload is not framed; expected single-object encoding (0xC3 0x01) or the Confluent prefix (0x00)`,
+`avro: truncated Confluent header (expected 5 bytes)` (or Apicurio 9-byte / Glue 18-byte header),
+registry compatibility / missing subject errors, and `avro: casting to the declared schema: {e}` for
+a value that does not fit its declared column, or for a declared column the container or payload does
+not carry.
 
 ## Next
 

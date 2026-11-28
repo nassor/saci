@@ -262,8 +262,13 @@ pub(crate) async fn run(
         run: run_mode,
         flow: flow_plan,
         batch_resume,
+        lineage,
         ..
     } = built;
+    let lineage_run_id = format!("{workflow_id}-{:016x}", rand::random::<u64>());
+    if let Some(l) = &lineage {
+        l.emit_start(&workflow_id, &lineage_run_id);
+    }
     let mut dlq = dlq;
     let inspector = inspector.as_ref();
     let n = nodes.len();
@@ -313,7 +318,18 @@ pub(crate) async fn run(
         #[cfg(feature = "windows")]
         mut trackers,
         mut staged,
+        edge_evolutions,
+        sink_schemas,
+        on_corrupt,
     } = nodes;
+
+    for (i, policy) in on_corrupt.iter().enumerate() {
+        if *policy != crate::service::config::CorruptRecordPolicy::Fail
+            && let Some(src) = sources[i].as_mut()
+        {
+            src.set_skip_corrupt(true);
+        }
+    }
 
     let mut stats = WorkflowStats::default();
     let start = Instant::now();
@@ -331,7 +347,16 @@ pub(crate) async fn run(
     if batch_resume && let Some(client) = &state {
         for i in 0..n {
             if matches!(kinds[i], NodeRunKind::Processor) {
-                prior[i] = client.load_prior(&workflow_id, &ids[i]).await?;
+                prior[i] = match client.load_prior(&workflow_id, &ids[i]).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        if let Some(l) = &lineage {
+                            l.emit_fail(&workflow_id, &lineage_run_id, &e.message());
+                            l.flush().await;
+                        }
+                        return Err(e);
+                    }
+                };
             }
         }
     }
@@ -618,8 +643,38 @@ pub(crate) async fn run(
                                     break;
                                 };
                                 match result {
-                                    Ok(None) => break,
+                                    Ok(None) => {
+                                        let corrupt = source.drain_corrupt();
+                                        if !corrupt.is_empty()
+                                            && on_corrupt[i]
+                                                == crate::service::config::CorruptRecordPolicy::Dlq
+                                            && let Some(q) = &mut dlq
+                                        {
+                                            q.record_corrupt(
+                                                &ids[i], component, &corrupt, &mut stats,
+                                            )
+                                            .await;
+                                        }
+                                        break;
+                                    }
                                     Ok(Some(batch)) => {
+                                        let corrupt = source.drain_corrupt();
+                                        if !corrupt.is_empty()
+                                            && on_corrupt[i]
+                                                == crate::service::config::CorruptRecordPolicy::Dlq
+                                            && let Some(q) = &mut dlq
+                                        {
+                                            q.record_corrupt(
+                                                &ids[i], component, &corrupt, &mut stats,
+                                            )
+                                            .await;
+                                        }
+                                        // An all-corrupt poll window can return an empty wake
+                                        // batch solely so corrupt records reach the DLQ at once;
+                                        // skip arrival counters and downstream work for 0 rows.
+                                        if batch.num_rows() == 0 {
+                                            continue;
+                                        }
                                         // Weighed only for a source a controller
                                         // governs: the weight feeds its byte
                                         // accounting and nothing else.
@@ -631,6 +686,17 @@ pub(crate) async fn run(
                                         (batch, weight)
                                     }
                                     Err(_e) => {
+                                        let corrupt = source.drain_corrupt();
+                                        if !corrupt.is_empty()
+                                            && on_corrupt[i]
+                                                == crate::service::config::CorruptRecordPolicy::Dlq
+                                            && let Some(q) = &mut dlq
+                                        {
+                                            q.record_corrupt(
+                                                &ids[i], component, &corrupt, &mut stats,
+                                            )
+                                            .await;
+                                        }
                                         #[cfg(feature = "tracing")]
                                         tracing::warn!(
                                             parent: &batch_span,
@@ -690,10 +756,12 @@ pub(crate) async fn run(
                         fan_out_source(
                             i,
                             &downstream,
+                            &edge_evolutions,
                             component,
                             &batch,
                             &kinds,
                             &mut datasets,
+                            &sink_schemas,
                             &mut staged,
                             &ids,
                             &mut stats,
@@ -828,9 +896,11 @@ pub(crate) async fn run(
                                 rows_out,
                                 metrics,
                                 &downstream,
+                                &edge_evolutions,
                                 &kinds,
                                 &components,
                                 &mut datasets,
+                                &sink_schemas,
                                 &mut staged,
                                 &ids,
                                 &mut stats,
@@ -931,6 +1001,10 @@ pub(crate) async fn run(
             stats.total_duration_ms = start.elapsed().as_millis() as u64;
             stats.nodes = node_stats.clone();
             log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
+            if let Some(l) = &lineage {
+                l.emit_abort(&workflow_id, &lineage_run_id);
+                l.flush().await;
+            }
             return Ok(stats);
         }
 
@@ -1093,6 +1167,27 @@ pub(crate) async fn run(
         #[cfg(feature = "tracing")]
         drop(batch_span);
 
+        if let Some(l) = &lineage {
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
+            let node_rows: std::collections::HashMap<String, u64> = ids
+                .iter()
+                .zip(node_stats.iter())
+                .map(|(id, s)| (id.clone(), s.rows))
+                .collect();
+            l.emit_pass_with_node_rows(
+                &workflow_id,
+                &lineage_run_id,
+                total_rows_in,
+                sink_rows_out,
+                Some(&node_rows),
+            );
+        }
+
         if cancelled_before_finish {
             #[cfg(feature = "tracing")]
             tracing::info!("standalone runner cancelled after runtime, clean exit");
@@ -1220,6 +1315,32 @@ pub(crate) async fn run(
 
     log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
 
+    if let Some(l) = &lineage {
+        if cancel.is_cancelled() {
+            l.emit_abort(&workflow_id, &lineage_run_id);
+        } else {
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
+            let node_rows: std::collections::HashMap<String, u64> = ids
+                .iter()
+                .zip(node_stats.iter())
+                .map(|(id, s)| (id.clone(), s.rows))
+                .collect();
+            l.emit_complete_with_node_rows(
+                &workflow_id,
+                &lineage_run_id,
+                stats.rows_processed,
+                sink_rows_out,
+                Some(&node_rows),
+            );
+        }
+        l.flush().await;
+    }
+
     Ok(stats)
 }
 
@@ -1278,12 +1399,14 @@ mod tests {
                 links: Vec::new(),
                 dlq: None,
                 run: None,
+                schema_evolution: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -2517,6 +2640,7 @@ mod tests {
                 crate::service::config::DlqBlock::default(),
             )),
             run: None,
+            schema_evolution: None,
         };
         let mut registry = Registry::new();
         registry.register(crate::connector::redb::RedbConnector);
@@ -3098,5 +3222,342 @@ workflow "inherited_wf" {{
         );
         assert_eq!(b1.run, RunMode::Interval { every_ms: 250 });
         assert_eq!(b2.run, RunMode::Once);
+    }
+
+    #[tokio::test]
+    async fn evolved_link_adapts_source_batch_to_wider_sink_schema() {
+        let src_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("extra", DataType::Utf8, true),
+        ]));
+        let sink_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("added", DataType::Utf8, true),
+        ]));
+
+        let (source, tx) = ChannelSource::new(Arc::clone(&src_schema), 4);
+        let (sink, mut rx) = ChannelSink::new(Arc::clone(&sink_schema), 4);
+
+        let batch = RecordBatch::try_new(
+            src_schema,
+            vec![
+                Arc::new(arrow_array::Int32Array::from(vec![10, 20])),
+                Arc::new(arrow_array::StringArray::from(vec![Some("x"), None])),
+            ],
+        )
+        .unwrap();
+        tx.send(batch).await.unwrap();
+        drop(tx);
+
+        let built = BuiltWorkflow::builder("evolve_wf")
+            .schema_evolution(crate::schema::EvolutionPolicy::compatible())
+            .source("in", "Order", source)
+            .sink("out", "Order", sink)
+            .link("in", "out")
+            .run_mode(RunMode::Once)
+            .build()
+            .unwrap();
+
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
+        assert_eq!(stats.rows_processed, 2);
+        let out = rx.recv().await.expect("sink receives adapted batch");
+        assert_eq!(out.schema(), sink_schema);
+        assert_eq!(
+            out.column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .unwrap()
+                .values(),
+            &[10i64, 20]
+        );
+        assert_eq!(out.column(1).null_count(), 2);
+    }
+
+    #[cfg(all(
+        feature = "connector-file",
+        feature = "codec-ndjson",
+        feature = "connector-redb"
+    ))]
+    #[tokio::test]
+    async fn quality_operator_and_source_on_corrupt_route_bad_records_and_quarantine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            dir.path().join("in.ndjson"),
+            concat!(
+                "{\"id\":1,\"email\":\"ok@example.com\"}\n",
+                "{corrupt json line\n",
+                "{\"id\":2,\"email\":\"bad-email\"}\n",
+                "{\"id\":3,\"email\":\"two@example.com\"}\n",
+            ),
+        )
+        .expect("write ndjson");
+
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="{p}"
+run "once"
+
+workflow "dq_wf" {{
+    codec "json" format="ndjson"
+    dlq "redb" replay="before_sources"
+    source "in" connector="file" codec="json" component="Order" on_corrupt="dlq" {{
+        config path="{p}/in.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "email" type="utf8" nullable=#false
+        }}
+    }}
+    operator "dq" kind="quality" component="Order" {{
+        config {{
+            rules {{
+                rule "email_ok" type="regex" column="email" pattern="^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+            }}
+        }}
+    }}
+    sink "good" connector="file" codec="json" component="Order" {{
+        config path="{p}/good.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "email" type="utf8" nullable=#false
+        }}
+    }}
+    sink "bad" connector="file" codec="json" component="Order" {{
+        config path="{p}/bad.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "email" type="utf8" nullable=#false
+        }}
+    }}
+    link from="in" to="dq"
+    link from="dq" to="good" branch="valid"
+    link from="dq" to="bad" branch="quarantine"
+}}
+"#
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("config parses");
+        cfg.validate().expect("config validates");
+        let built = crate::service::ServiceBuilder::new()
+            .build(&cfg)
+            .expect("build")
+            .remove(0);
+        let stats = built.run(CancellationToken::new()).await.expect("run");
+
+        assert_eq!(
+            stats.dead_letters_recorded, 1,
+            "one corrupt line went to DLQ"
+        );
+        let good_text = std::fs::read_to_string(dir.path().join("good.ndjson")).unwrap();
+        let bad_text = std::fs::read_to_string(dir.path().join("bad.ndjson")).unwrap();
+        assert_eq!(good_text.lines().count(), 2);
+        assert!(good_text.contains("ok@example.com"));
+        assert!(good_text.contains("two@example.com"));
+        assert_eq!(bad_text.lines().count(), 1);
+        assert!(bad_text.contains("bad-email"));
+    }
+
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[tokio::test]
+    async fn lineage_reports_actual_sink_rows_out_after_filtering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            dir.path().join("in.ndjson"),
+            "{\"id\":1,\"keep\":true}\n{\"id\":2,\"keep\":false}\n{\"id\":3,\"keep\":true}\n",
+        )
+        .unwrap();
+
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="{p}"
+run "once"
+lineage enabled=#true namespace="analytics"
+
+workflow "filtered_wf" {{
+    codec "json" format="ndjson"
+    source "in" connector="file" codec="json" component="Row" {{
+        config path="{p}/in.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "keep" type="boolean" nullable=#false
+        }}
+    }}
+    operator "only_keep" kind="filter" component="Row" {{
+        config where="keep = true"
+    }}
+    sink "out" connector="file" codec="json" component="Row" {{
+        config path="{p}/out.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "keep" type="boolean" nullable=#false
+        }}
+    }}
+    link from="in" to="only_keep"
+    link from="only_keep" to="out"
+}}
+"#
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("parse");
+        cfg.validate().expect("validate");
+        let lineage =
+            std::sync::Arc::new(crate::service::lineage::LineageDispatcher::new(&cfg, None));
+        let built = crate::service::ServiceBuilder::new()
+            .lineage(std::sync::Arc::clone(&lineage))
+            .build(&cfg)
+            .expect("build")
+            .remove(0);
+        let stats = built.run(CancellationToken::new()).await.expect("run");
+        assert_eq!(stats.rows_processed, 3);
+
+        let events = lineage.snapshot().recent_events;
+        let complete = events
+            .iter()
+            .find(|e| e.event_type == crate::service::lineage::LineageEventType::Complete)
+            .expect("COMPLETE event emitted");
+        assert_eq!(
+            complete.inputs[0]
+                .facets
+                .input_statistics
+                .as_ref()
+                .unwrap()
+                .row_count,
+            3
+        );
+        assert_eq!(
+            complete.outputs[0]
+                .facets
+                .output_statistics
+                .as_ref()
+                .unwrap()
+                .row_count,
+            2
+        );
+    }
+
+    #[cfg(feature = "connector-redb")]
+    #[tokio::test]
+    async fn all_corrupt_zero_row_batch_records_dlq_without_counting_drained_batch_or_writing_empty_sink_batch()
+     {
+        use crate::io::CorruptRecord;
+        use crate::service::builder::ServiceBuilder;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct WakeZeroRowSource {
+            schema: Arc<Schema>,
+            polled: bool,
+            corrupt: Vec<CorruptRecord>,
+        }
+
+        #[async_trait]
+        impl Source for WakeZeroRowSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+
+            async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+                if self.polled {
+                    return Ok(None);
+                }
+                self.polled = true;
+                self.corrupt.push(CorruptRecord {
+                    format: "ndjson",
+                    payload: b"{corrupt window".to_vec(),
+                    error: "invalid json".to_string(),
+                });
+                Ok(Some(RecordBatch::new_empty(Arc::clone(&self.schema))))
+            }
+
+            fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+                std::mem::take(&mut self.corrupt)
+            }
+        }
+
+        struct BatchCountingSink {
+            schema: Arc<Schema>,
+            batches: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Sink for BatchCountingSink {
+            async fn write_batch(&mut self, _batch: &RecordBatch) -> Result<(), SaciError> {
+                self.batches.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn finish(&mut self) -> Result<(), SaciError> {
+                Ok(())
+            }
+
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+        }
+
+        struct Handed {
+            source: std::sync::Mutex<Option<Box<dyn Source>>>,
+            sink: std::sync::Mutex<Option<Box<dyn Sink>>>,
+        }
+
+        impl crate::connector::Connector for Handed {
+            fn name(&self) -> &'static str {
+                "handed"
+            }
+
+            fn source(
+                &self,
+                _config: &crate::config::ConfigValue,
+                _ctx: &crate::connector::ConnectorContext,
+            ) -> Result<Box<dyn Source>, SaciError> {
+                Ok(self.source.lock().unwrap().take().unwrap())
+            }
+
+            fn sink(
+                &self,
+                _config: &crate::config::ConfigValue,
+                _ctx: &crate::connector::ConnectorContext,
+            ) -> Result<Box<dyn Sink>, SaciError> {
+                Ok(self.sink.lock().unwrap().take().unwrap())
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().replace('\\', "/");
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="{p}"
+run "once"
+
+workflow "wake_zero" {{
+    dlq "redb" replay="before_sources"
+    source "in" connector="handed" component="Row" on_corrupt="dlq"
+    sink "out" connector="handed" component="Row"
+    link from="in" to="out"
+}}
+"#
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("config parses");
+        let sink_batches = Arc::new(AtomicUsize::new(0));
+        let built = ServiceBuilder::new()
+            .connector(Handed {
+                source: std::sync::Mutex::new(Some(Box::new(WakeZeroRowSource {
+                    schema: schema(),
+                    polled: false,
+                    corrupt: Vec::new(),
+                }))),
+                sink: std::sync::Mutex::new(Some(Box::new(BatchCountingSink {
+                    schema: schema(),
+                    batches: Arc::clone(&sink_batches),
+                }))),
+            })
+            .build(&cfg)
+            .expect("build")
+            .remove(0);
+
+        let stats = built.run(CancellationToken::new()).await.expect("run");
+        assert_eq!(stats.dead_letters_recorded, 1);
+        assert_eq!(stats.source_batches_drained, 0);
+        assert_eq!(stats.sink_batches_written, 0);
+        assert_eq!(sink_batches.load(Ordering::SeqCst), 0);
     }
 }

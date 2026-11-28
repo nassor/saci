@@ -10,6 +10,7 @@ pub mod expr;
 pub mod group_by;
 pub mod hash;
 pub mod join;
+pub mod quality;
 pub mod route;
 pub mod sort;
 pub mod sql;
@@ -27,6 +28,9 @@ pub use group_by::GroupBySystem;
 pub use join::{
     IntervalJoinState, IntervalJoinSystem, JoinKey, JoinKind, JoinSystem, LookupJoinState,
     LookupJoinSystem,
+};
+pub use quality::{
+    DataQualityState, DataQualitySystem, QualityFailureAction, QualityRule, QualitySplit,
 };
 pub use route::{BranchPayloads, BranchRule, RouteMode, RouteSystem};
 pub use sort::{SortKey, SortSystem, TopNSystem};

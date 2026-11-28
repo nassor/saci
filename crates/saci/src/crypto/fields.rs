@@ -12,6 +12,7 @@ use arrow_schema::{DataType, Field, Schema};
 use crate::crypto::cell;
 use crate::crypto::envelope::Cipher;
 use crate::error::SaciError;
+use crate::io::CorruptRecord;
 
 /// Column name used on the wire when [`EncryptionMode::Payload`] is active.
 pub const PAYLOAD_COLUMN: &str = "__saci_encrypted_payload";
@@ -285,6 +286,107 @@ pub fn decrypt_batch(
             }
             RecordBatch::try_new(Arc::clone(plain_schema), columns)
                 .map_err(|e| SaciError::generic(format!("crypto: build decrypted batch: {e}")))
+        }
+    }
+}
+
+/// Decrypt `batch` while isolating individual rows that fail AEAD authentication,
+/// base64 decoding, or non-null checks into [`CorruptRecord`]s.
+///
+/// Structural schema errors (wrong column count or missing encrypted columns)
+/// still return `Err`. When all rows fail decryption, an empty batch matching
+/// `plain_schema` is returned alongside the collected corrupt records.
+///
+/// # Errors
+///
+/// Returns [`SaciError`] when `batch` lacks the expected wire schema structure or
+/// concatenating surviving decrypted rows fails.
+pub fn decrypt_batch_isolating_corrupt(
+    batch: &RecordBatch,
+    plain_schema: &Arc<Schema>,
+    cipher: &Cipher,
+    mode: &EncryptionMode,
+) -> Result<(RecordBatch, Vec<CorruptRecord>), SaciError> {
+    match decrypt_batch(batch, plain_schema, cipher, mode) {
+        Ok(decrypted) => Ok((decrypted, Vec::new())),
+        Err(batch_err) => {
+            if batch.num_rows() == 0 {
+                return Err(batch_err);
+            }
+            match mode {
+                EncryptionMode::Payload { .. } => {
+                    if batch.num_columns() != 1 || batch.schema().field(0).name() != PAYLOAD_COLUMN
+                    {
+                        return Err(batch_err);
+                    }
+                }
+                EncryptionMode::Fields { fields, .. } => {
+                    validate_field_targets(plain_schema, fields)?;
+                    if batch.num_columns() != plain_schema.fields().len() {
+                        return Err(batch_err);
+                    }
+                }
+            }
+            let mut good: Vec<RecordBatch> = Vec::with_capacity(batch.num_rows());
+            let mut corrupt: Vec<CorruptRecord> = Vec::new();
+            for row in 0..batch.num_rows() {
+                let row_batch = batch.slice(row, 1);
+                match decrypt_batch(&row_batch, plain_schema, cipher, mode) {
+                    Ok(dec) => good.push(dec),
+                    Err(e) => corrupt.push(CorruptRecord {
+                        format: "crypto",
+                        payload: extract_row_wire_bytes(batch, row, mode),
+                        error: e.message().to_string(),
+                    }),
+                }
+            }
+            let out = if good.is_empty() {
+                RecordBatch::new_empty(Arc::clone(plain_schema))
+            } else if good.len() == 1 {
+                good.into_iter().next().expect("len == 1")
+            } else {
+                arrow_select::concat::concat_batches(plain_schema, &good).map_err(|e| {
+                    SaciError::generic(format!("crypto: concat decrypted batches: {e}"))
+                })?
+            };
+            Ok((out, corrupt))
+        }
+    }
+}
+
+fn extract_row_wire_bytes(batch: &RecordBatch, row: usize, mode: &EncryptionMode) -> Vec<u8> {
+    let raw_cell_bytes = |col: &dyn arrow_array::Array| -> Vec<u8> {
+        if col.is_null(row) {
+            return Vec::new();
+        }
+        if let Some(arr) = col.as_any().downcast_ref::<BinaryArray>() {
+            arr.value(row).to_vec()
+        } else if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+            arr.value(row).as_bytes().to_vec()
+        } else {
+            Vec::new()
+        }
+    };
+    match mode {
+        EncryptionMode::Payload { .. } => raw_cell_bytes(batch.column(0).as_ref()),
+        EncryptionMode::Fields { fields, .. } => {
+            if fields.len() == 1
+                && let Ok(idx) = batch.schema().index_of(&fields[0])
+            {
+                return raw_cell_bytes(batch.column(idx).as_ref());
+            }
+            let mut out = Vec::new();
+            for name in fields {
+                if let Ok(idx) = batch.schema().index_of(name) {
+                    if !out.is_empty() {
+                        out.push(b';');
+                    }
+                    out.extend_from_slice(name.as_bytes());
+                    out.push(b'=');
+                    out.extend_from_slice(&raw_cell_bytes(batch.column(idx).as_ref()));
+                }
+            }
+            out
         }
     }
 }

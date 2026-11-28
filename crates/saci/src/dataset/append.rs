@@ -7,6 +7,7 @@ use arrow_schema::Schema;
 use crate::component::Component;
 use crate::error::SaciError;
 use crate::row::Row;
+use crate::schema::{EvolutionPolicy, evolve_batch};
 
 use super::{Dataset, MERGE_THRESHOLD};
 
@@ -122,6 +123,38 @@ impl Dataset {
         }
 
         self.push_chunk(name, batch, &registered)
+    }
+
+    /// Append a raw [`RecordBatch`] for the named component, evolving its
+    /// schema onto the registered target schema according to `policy`.
+    ///
+    /// # Errors
+    ///
+    /// - [`SaciError::ComponentNotRegistered`] if `component` is not registered.
+    /// - `SaciError` if schema evolution is incompatible under `policy`.
+    pub fn append_record_batch_evolved(
+        &mut self,
+        component: &str,
+        batch: RecordBatch,
+        policy: EvolutionPolicy,
+    ) -> Result<Range<Row>, SaciError> {
+        if policy.is_strict() {
+            return self.append_record_batch(component, batch);
+        }
+        let (&name, _) = self
+            .components
+            .get_key_value(component)
+            .ok_or_else(|| SaciError::component_not_registered(component))?;
+        if batch.num_rows() == 0 {
+            let start = Row::new(self.row_count as u32);
+            return Ok(start..start);
+        }
+        let registered = self
+            .schemas
+            .get(name)
+            .expect("schema registered but get() failed — internal inconsistency");
+        let adapted = evolve_batch(&batch, &registered, policy)?;
+        self.push_chunk(name, adapted, &registered)
     }
 
     /// Add one validated, non-empty chunk to `name` and extend the row count

@@ -9,7 +9,8 @@
 
 use std::collections::VecDeque;
 use std::io::Seek;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema};
@@ -22,7 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::io::Source;
+use crate::io::{CorruptRecord, Source};
 
 use crate::connector::SchemaFrom;
 use crate::connector::s3::config::S3SourceConfig;
@@ -72,6 +73,8 @@ pub struct S3Source {
     pending: Option<VecDeque<Path>>,
     /// Batches from the object currently being decoded.
     current: Option<mpsc::Receiver<Result<RecordBatch, SaciError>>>,
+    skip_corrupt: Arc<AtomicBool>,
+    corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
 impl S3Source {
@@ -102,6 +105,8 @@ impl S3Source {
             schema_from: config.schema_from,
             pending: None,
             current: None,
+            skip_corrupt: Arc::new(AtomicBool::new(false)),
+            corrupt: Arc::new(Mutex::new(Vec::new())),
         })
     }
 }
@@ -110,6 +115,17 @@ impl S3Source {
 impl Source for S3Source {
     fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.declared)
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt.store(skip, Ordering::Relaxed);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.corrupt
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
     }
 
     /// One batch off the object at the front of the listing, or `Ok(None)`
@@ -230,8 +246,10 @@ impl Source for S3Source {
                 SchemaFrom::Payload => None,
             };
             let codec = Arc::clone(&self.codec);
+            let skip_corrupt = self.skip_corrupt.load(Ordering::Relaxed);
             let (mut reader, object_schema) = tokio::task::spawn_blocking(move || {
-                let reader = codec.open_reader(spool.into(), declared_arg)?;
+                let mut reader = codec.open_reader(spool.into(), declared_arg)?;
+                reader.set_skip_corrupt(skip_corrupt);
                 let schema = reader.schema();
                 Ok::<_, SaciError>((reader, schema))
             })
@@ -251,9 +269,17 @@ impl Source for S3Source {
             //    executor never blocks on the disk. The loop above drains the
             //    receiver the object just opened.
             let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+            let corrupt_bg = Arc::clone(&self.corrupt);
             std::thread::spawn(move || {
                 loop {
-                    match reader.next_batch() {
+                    let res = reader.next_batch();
+                    let drained = reader.drain_corrupt();
+                    if !drained.is_empty()
+                        && let Ok(mut guard) = corrupt_bg.lock()
+                    {
+                        guard.extend(drained);
+                    }
+                    match res {
                         Ok(None) => break,
                         Ok(Some(batch)) => {
                             // A send error means the source was dropped
@@ -329,6 +355,8 @@ mod tests {
             schema_from: SchemaFrom::Payload,
             pending: None,
             current: None,
+            skip_corrupt: Arc::new(AtomicBool::new(false)),
+            corrupt: Arc::new(Mutex::new(Vec::new())),
         };
 
         source

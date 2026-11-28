@@ -133,6 +133,7 @@ fn state_with(inspector: Option<Inspector>) -> ServiceState {
         inspector,
         lifecycle: None,
         dlq: None,
+        lineage: None,
     }
 }
 

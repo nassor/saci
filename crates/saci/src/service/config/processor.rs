@@ -168,6 +168,7 @@ impl PluginSpec {
 /// - `"deduplicate"`: `keys` (`key_fields`), optional `keep` (`first|last`), `time_field`, `ttl_ms`, `max_keys`, `stateful` (`component`, optional `into`)
 /// - `"window"`: `aggregates` (`component`, optional `into`, `keys`, `window_id_field`, `window_start_field`, `window_end_field`, `emit_bounds`, plus required `window { ... }` child block)
 /// - `"route"` / `"branch"`: `branches` map/list, optional `mode` (`row|first_row|any|all`), `exclusive`, `default` (`component`, optional `into`)
+/// - `"quality"` / `"assert"`: row-level validation with `rules`, optional `on_violation` (`quarantine|fail|drop`), `quarantine_into`, `diagnostics` (`component`, optional `into`)
 /// - `"sql"`: `query` SQL `SELECT ...` string (`into` output component, optional `component` hint)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
@@ -179,7 +180,7 @@ pub struct OperatorSpec {
     pub name: Option<String>,
     /// Operator kind (`"sql"`, `"filter"`, `"project"`, `"group_by"`, `"window"`,
     /// `"sort"`, `"top_n"`, `"unnest"`, `"join"`, `"interval_join"`,
-    /// `"lookup_join"`, `"deduplicate"`, `"route"`, `"branch"`).
+    /// `"lookup_join"`, `"deduplicate"`, `"route"`, `"branch"`, `"quality"`, `"assert"`).
     pub kind: String,
     /// Input component name (or in-place component) for single-input operators.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,7 +235,7 @@ impl OperatorSpec {
         let wf_ctx = format!("workflow '{workflow_id}': operator '{}'", self.id);
         match self.kind.as_str() {
             "filter" | "project" | "group_by" | "sort" | "top_n" | "unnest" | "deduplicate"
-            | "route" | "branch" => {
+            | "route" | "branch" | "quality" | "assert" => {
                 if self.component.as_deref().is_none_or(str::is_empty) {
                     return Err(SaciError::configuration(format!(
                         "{wf_ctx} (kind='{}') requires 'component'",
@@ -277,8 +278,8 @@ impl OperatorSpec {
             other => {
                 return Err(SaciError::configuration(format!(
                     "{wf_ctx}: unknown operator kind '{other}' (expected sql, filter, project, \
-                     group_by, window, route, branch, sort, top_n, unnest, join, interval_join, \
-                     lookup_join, or deduplicate)"
+                     group_by, window, route, branch, quality, assert, sort, top_n, unnest, join, \
+                     interval_join, lookup_join, or deduplicate)"
                 )));
             }
         }

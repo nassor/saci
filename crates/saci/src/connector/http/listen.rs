@@ -43,7 +43,8 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
@@ -56,7 +57,7 @@ use subtle::ConstantTimeEq as _;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::codec::Codec;
+use crate::codec::{Codec, CorruptRecord};
 use crate::connector::{NodeIdentity, SchemaFrom};
 use crate::error::SaciError;
 use crate::io::Source;
@@ -146,6 +147,8 @@ struct Handler {
     /// `alt-svc` for the QUIC port, when one is served.
     alt_svc: Option<HeaderValue>,
     metrics: Instruments,
+    skip_corrupt: AtomicBool,
+    corrupt_records: Mutex<Vec<CorruptRecord>>,
 }
 
 /// Listening HTTP source: one request in, its whole document out as batches.
@@ -322,6 +325,8 @@ impl HttpListenSource {
                 tx,
                 alt_svc,
                 metrics: Instruments::new("push", identity.as_ref()),
+                skip_corrupt: AtomicBool::new(false),
+                corrupt_records: Mutex::new(Vec::new()),
             }),
             schema,
             rx,
@@ -820,6 +825,7 @@ impl Handler {
         let check = self.schema_from == SchemaFrom::Payload;
         let expected = Arc::clone(&self.declared);
         let codec = Arc::clone(&self.codec);
+        let skip_corrupt = self.skip_corrupt.load(Ordering::Relaxed);
 
         // Decoding is blocking: a parquet footer read is a seek. The body is
         // already whole in memory, so the reader gets it as it is.
@@ -832,16 +838,23 @@ impl Handler {
                 declared,
                 check,
                 &expected,
+                skip_corrupt,
             )?;
             let mut batches = Vec::new();
+            let mut corrupt = Vec::new();
             while let Some(batch) = reader.next_batch()? {
+                let drained = reader.drain_corrupt();
+                if !drained.is_empty() {
+                    corrupt.extend(drained);
+                }
                 batches.push(batch);
             }
-            Ok::<_, SaciError>(batches)
+            corrupt.extend(reader.drain_corrupt());
+            Ok::<_, SaciError>((batches, corrupt))
         })
         .await;
 
-        let batches = match decoded {
+        let (mut batches, corrupt) = match decoded {
             Err(e) => {
                 return Answer {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -862,12 +875,21 @@ impl Handler {
                     allow: false,
                 };
             }
-            Ok(Ok(batches)) => batches,
+            Ok(Ok(pair)) => pair,
         };
+        let had_corrupt = !corrupt.is_empty();
+        if had_corrupt && let Ok(mut guard) = self.corrupt_records.lock() {
+            guard.extend(corrupt);
+        }
+        if batches.is_empty() && had_corrupt {
+            // Wake `HttpListenSource::next_batch()` immediately so the runner drains
+            // `corrupt_records` to the DLQ without waiting for another request.
+            batches.push(RecordBatch::new_empty(Arc::clone(&self.declared)));
+        }
 
         // Bounded, so a consumer that falls behind makes this request wait
         // for its response and the client wait with it. A document that held
-        // no rows queues nothing and is still accepted.
+        // neither valid rows nor corrupt records queues nothing and is still accepted.
         if !batches.is_empty() && self.tx.send(Ok(batches)).await.is_err() {
             return Answer {
                 status: StatusCode::SERVICE_UNAVAILABLE,
@@ -911,6 +933,18 @@ impl Handler {
 impl Source for HttpListenSource {
     fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.handler.skip_corrupt.store(skip, Ordering::Relaxed);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.handler
+            .corrupt_records
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default()
     }
 
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
@@ -1147,5 +1181,44 @@ mod tests {
             panic!("a listener that accepts no method accepts nothing");
         };
         assert!(err.message().contains("at least one"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn http_listen_all_corrupt_request_wakes_next_batch_and_drains_corrupt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let mut source = HttpListenSource::new(options(), schema(), ndjson()).expect("binds");
+        source.set_skip_corrupt(true);
+        let addr = source.local_addr();
+
+        let client = tokio::spawn(async move {
+            let mut sock = TcpStream::connect(addr).await.expect("connect");
+            let body = b"{not valid json\n";
+            let req = format!(
+                "POST / HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(req.as_bytes()).await.expect("write header");
+            sock.write_all(body).await.expect("write body");
+            sock.flush().await.expect("flush");
+            let mut resp = Vec::new();
+            sock.read_to_end(&mut resp).await.expect("read response");
+            String::from_utf8_lossy(&resp).to_string()
+        });
+
+        let batch = tokio::time::timeout(Duration::from_secs(2), source.next_batch())
+            .await
+            .expect("next_batch must wake on all-corrupt request")
+            .expect("source result ok")
+            .expect("wake batch present");
+        assert_eq!(batch.num_rows(), 0, "all-corrupt wake batch has zero rows");
+
+        let corrupt = source.drain_corrupt();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].format, "ndjson");
+
+        let resp_text = client.await.expect("client finishes");
+        assert!(resp_text.starts_with("HTTP/1.1 202"), "got: {resp_text}");
     }
 }

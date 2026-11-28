@@ -31,8 +31,8 @@ use super::alert::AlertDispatcher;
 #[cfg(feature = "crypto")]
 use super::config::encryption::resolve_cipher;
 use super::config::{
-    CodecSpec, HealConfig, NodeKind, RunMode, SchemaSpec, ServiceConfig, ServiceEncryptionConfig,
-    ServiceMode, StoreConfig, WindowConfig, WorkflowSpec,
+    CodecSpec, CorruptRecordPolicy, HealConfig, NodeKind, RunMode, SchemaSpec, ServiceConfig,
+    ServiceEncryptionConfig, ServiceMode, StoreConfig, WindowConfig, WorkflowSpec,
 };
 use super::dlq::{DeadLetterQueue, DlqRegistry, DlqShared};
 use super::factories::{lookup_connector, missing_codec_error};
@@ -55,6 +55,7 @@ use crate::crypto::{
     PAYLOAD_COLUMN, wire_schema,
 };
 use crate::inspector::Inspector;
+use crate::schema::EvolutionPolicy;
 #[cfg(feature = "wasm-host")]
 use crate::wasm_host::WasmEngine;
 use tokio::sync::RwLock;
@@ -300,6 +301,20 @@ impl WorkflowFactory {
         self.builder.alerts.update_config(&config.alerts);
     }
 
+    /// Refresh lineage graphs on `self.builder.lineage`, when present.
+    pub(crate) fn publish_lineage(&self, config: &ServiceConfig, built: &[BuiltWorkflow]) {
+        if let Some(lineage) = &self.builder.lineage {
+            lineage.update_graphs(config, Some(built));
+        }
+    }
+
+    /// Refresh lineage graph for a single workflow after a supervised rebuild.
+    pub(crate) fn refresh_workflow_lineage(&self, spec: &WorkflowSpec, built: &BuiltWorkflow) {
+        if let Some(lineage) = &self.builder.lineage {
+            lineage.refresh_workflow(spec, built);
+        }
+    }
+
     /// Snapshot current factory settings so a failed hot-reload can roll back.
     pub(crate) fn snapshot_settings(
         &self,
@@ -496,6 +511,22 @@ pub struct BuiltNode {
     /// sink. The runners read it to track the node's watermark when the
     /// `windows` feature is on; the topology uses it to describe the node.
     pub window: Option<WindowConfig>,
+    /// Node-level schema evolution policy.
+    pub(crate) evolution: EvolutionPolicy,
+    /// Per-outbound-edge evolution policy (parallel to [`downstream`](Self::downstream)).
+    pub(crate) edge_evolutions: Vec<EvolutionPolicy>,
+    /// Policy for corrupt source records (`fail`, `drop`, `dlq`).
+    pub(crate) on_corrupt: CorruptRecordPolicy,
+}
+
+impl BuiltNode {
+    /// Effective [`EvolutionPolicy`] for outbound edge `edge_idx`.
+    pub(crate) fn edge_evolution(&self, edge_idx: usize) -> EvolutionPolicy {
+        self.edge_evolutions
+            .get(edge_idx)
+            .copied()
+            .unwrap_or(self.evolution)
+    }
 }
 
 /// All runtime artifacts produced by [`ServiceBuilder::build`] for one
@@ -539,6 +570,8 @@ pub struct BuiltWorkflow {
     pub(super) flow: FlowPlan,
     /// Whether a batch run threads processor state through the redb store.
     pub(super) batch_resume: bool,
+    /// OpenLineage event dispatcher shared with the runner and control plane.
+    pub(super) lineage: Option<Arc<super::lineage::LineageDispatcher>>,
 }
 
 impl std::fmt::Debug for BuiltWorkflow {
@@ -585,6 +618,7 @@ impl BuiltWorkflow {
             batch_resume: false,
             inspector: None,
             dlq: None,
+            evolution: EvolutionPolicy::strict(),
         }
     }
 
@@ -677,13 +711,14 @@ pub struct BuiltWorkflowBuilder {
     id: String,
     name: Option<String>,
     nodes: Vec<BuiltNode>,
-    links: Vec<(String, String, Option<String>)>,
+    links: Vec<(String, String, Option<String>, Option<EvolutionPolicy>)>,
     windows: Vec<(String, WindowConfig)>,
     run: RunMode,
     flow: Option<FlowPlan>,
     batch_resume: bool,
     inspector: Option<Inspector>,
     dlq: Option<DeadLetterQueue>,
+    evolution: EvolutionPolicy,
 }
 
 impl BuiltWorkflowBuilder {
@@ -710,6 +745,9 @@ impl BuiltWorkflowBuilder {
             artifact: None,
             heal_recovered: None,
             window: None,
+            evolution: self.evolution,
+            edge_evolutions: Vec::new(),
+            on_corrupt: CorruptRecordPolicy::default(),
         });
         self
     }
@@ -757,15 +795,33 @@ impl BuiltWorkflowBuilder {
 
     /// Link node `from` to node `to`.
     pub fn link(mut self, from: &str, to: &str) -> Self {
-        self.links.push((from.to_string(), to.to_string(), None));
+        self.links
+            .push((from.to_string(), to.to_string(), None, None));
+        self
+    }
+
+    /// Link node `from` to node `to` with an explicit schema evolution policy.
+    pub fn link_evolved(mut self, from: &str, to: &str, policy: EvolutionPolicy) -> Self {
+        self.links
+            .push((from.to_string(), to.to_string(), None, Some(policy)));
         self
     }
 
     /// Link node `from` to node `to` on the named `branch`, which a
     /// processor's routing decision selects by name.
     pub fn link_branch(mut self, from: &str, to: &str, branch: &str) -> Self {
-        self.links
-            .push((from.to_string(), to.to_string(), Some(branch.to_string())));
+        self.links.push((
+            from.to_string(),
+            to.to_string(),
+            Some(branch.to_string()),
+            None,
+        ));
+        self
+    }
+
+    /// Set the default schema evolution policy for links in this hand-built workflow.
+    pub fn schema_evolution(mut self, policy: EvolutionPolicy) -> Self {
+        self.evolution = policy;
         self
     }
 
@@ -824,10 +880,14 @@ impl BuiltWorkflowBuilder {
             batch_resume,
             inspector,
             dlq,
+            evolution,
         } = self;
 
         let mut index: HashMap<String, usize> = HashMap::with_capacity(nodes.len());
-        for (i, node) in nodes.iter().enumerate() {
+        for (i, node) in nodes.iter_mut().enumerate() {
+            if node.evolution.is_strict() && !evolution.is_strict() {
+                node.evolution = evolution;
+            }
             if index.insert(node.id.clone(), i).is_some() {
                 return Err(SaciError::configuration(format!(
                     "workflow '{id}': duplicate node id '{}'",
@@ -853,7 +913,7 @@ impl BuiltWorkflowBuilder {
             nodes[i].window = Some(window);
         }
 
-        for (from, to, branch) in links {
+        for (from, to, branch, edge_policy) in links {
             let (f, t) = (position(&from)?, position(&to)?);
             if f == t {
                 return Err(SaciError::configuration(format!(
@@ -865,7 +925,9 @@ impl BuiltWorkflowBuilder {
                     "workflow '{id}': declare nodes in flow order: '{to}' comes before '{from}'"
                 )));
             }
+            let effective = edge_policy.unwrap_or(evolution);
             nodes[f].downstream.push(BuiltEdge { node: t, branch });
+            nodes[f].edge_evolutions.push(effective);
         }
 
         let flow = flow.unwrap_or_else(|| match run {
@@ -882,6 +944,7 @@ impl BuiltWorkflowBuilder {
             run,
             flow,
             batch_resume,
+            lineage: None,
         })
     }
 }
@@ -925,6 +988,8 @@ pub struct ServiceBuilder {
     key_provider: Option<Arc<dyn KeyProvider>>,
     /// Outbound alert dispatcher shared with healed connectors and DLQs.
     alerts: AlertDispatcher,
+    /// OpenLineage event dispatcher shared with workflow runners.
+    lineage: Option<Arc<super::lineage::LineageDispatcher>>,
 }
 
 impl ServiceBuilder {
@@ -947,12 +1012,20 @@ impl ServiceBuilder {
             #[cfg(feature = "crypto")]
             key_provider: None,
             alerts: AlertDispatcher::noop(),
+            lineage: None,
         }
     }
 
     /// Attach an outbound [`AlertDispatcher`] for connector heal-exhaustion and DLQ alerts.
     pub fn alerts(mut self, alerts: AlertDispatcher) -> Self {
         self.alerts = alerts;
+        self
+    }
+
+    /// Attach an OpenLineage [`LineageDispatcher`](super::lineage::LineageDispatcher)
+    /// for emitting workflow run lifecycle events.
+    pub fn lineage(mut self, lineage: Arc<super::lineage::LineageDispatcher>) -> Self {
+        self.lineage = Some(lineage);
         self
     }
 
@@ -1251,13 +1324,70 @@ impl ServiceBuilder {
                     workflow.id, link.to
                 ))
             })?;
+            let edge_evolution = link
+                .schema_evolution
+                .map(|c| c.policy())
+                .or_else(|| {
+                    if !nodes[from].evolution.is_strict() {
+                        Some(nodes[from].evolution)
+                    } else if !nodes[to].evolution.is_strict() {
+                        Some(nodes[to].evolution)
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| workflow.schema_evolution.map(|c| c.policy()))
+                .unwrap_or_else(EvolutionPolicy::strict);
             nodes[from].downstream.push(BuiltEdge {
                 node: to,
                 branch: link.branch.clone(),
             });
+            nodes[from].edge_evolutions.push(edge_evolution);
         }
 
         super::validation::validate_workflow_graph(&workflow.id, &nodes)?;
+
+        // When `operator kind="quality"` (or alias `"assert"`) emits `diagnostics=#true` onto `branch="quarantine"`
+        // without `quarantine_into` and the downstream target declares only the input schema
+        // (without `__dq_*`), adapt that branch edge to `Compatible` so `evolve_batch` drops
+        // extra diagnostic columns cleanly at runtime.
+        for op in &workflow.operator {
+            if matches!(op.kind.as_str(), "quality" | "assert")
+                && op.config.get("diagnostics").and_then(ConfigValue::as_bool) == Some(true)
+                && op.config.get("quarantine_into").is_none()
+                && let Some(&from_idx) = id_to_topo_index.get(op.id.as_str())
+            {
+                let mut adapt_edges = Vec::new();
+                for (edge_idx, edge) in nodes[from_idx].downstream.iter().enumerate() {
+                    if edge.branch.as_deref() == Some("quarantine")
+                        && nodes[from_idx].edge_evolution(edge_idx).is_strict()
+                    {
+                        let lacks_diag = match &nodes[edge.node].kind {
+                            BuiltNodeKind::Sink(sink) => {
+                                sink.schema().field_with_name("__dq_rule").is_err()
+                            }
+                            BuiltNodeKind::Processor { runtime, .. } => nodes[edge.node]
+                                .component
+                                .and_then(|c| {
+                                    runtime
+                                        .template_dataset()
+                                        .schemas()
+                                        .get(c)
+                                        .map(|s| s.field_with_name("__dq_rule").is_err())
+                                })
+                                .unwrap_or(false),
+                            BuiltNodeKind::Source(_) => false,
+                        };
+                        if lacks_diag {
+                            adapt_edges.push(edge_idx);
+                        }
+                    }
+                }
+                for edge_idx in adapt_edges {
+                    nodes[from_idx].edge_evolutions[edge_idx] = EvolutionPolicy::compatible();
+                }
+            }
+        }
 
         // After the nodes: a store that cannot be opened refuses the
         // workflow the way a sink node does, and it is worth hearing about
@@ -1276,6 +1406,7 @@ impl ServiceBuilder {
             run: RunMode::default(),
             flow: FlowPlan::default(),
             batch_resume: false,
+            lineage: self.lineage.clone(),
         })
     }
 
@@ -1363,6 +1494,7 @@ impl ServiceBuilder {
             plain_config
         };
 
+        let on_corrupt = spec.on_corrupt.unwrap_or_default();
         let bound = spec.codec.as_deref().map(|tid| build.codecs[tid].clone());
         let rebuilder = Rebuilder::new(
             build.registry.clone(),
@@ -1373,15 +1505,24 @@ impl ServiceBuilder {
             self.channels.clone(),
             retry_sources.then(|| spec.retry.to_retry_mode()),
         )
-        .with_identity(build.identity(workflow, &spec.id));
+        .with_identity(build.identity(workflow, &spec.id))
+        .with_skip_corrupt(on_corrupt != super::config::CorruptRecordPolicy::Fail);
         let built = rebuilder.build_source()?;
-        let source: Box<dyn Source> = match settings {
+        let evolution = spec
+            .schema_evolution
+            .or(workflow.schema_evolution)
+            .map_or_else(EvolutionPolicy::strict, |c| c.policy());
+        let mut source: Box<dyn Source> = match settings {
             Some(settings) => Box::new(
                 HealingSource::new(built, rebuilder, settings, &workflow.id, &spec.id)
+                    .with_evolution(evolution)
                     .with_alerts(self.alerts.clone()),
             ),
             None => built,
         };
+        if on_corrupt != super::config::CorruptRecordPolicy::Fail {
+            source.set_skip_corrupt(true);
+        }
         #[cfg(feature = "crypto")]
         let source: Box<dyn Source> = match decrypt_ctx {
             Some((plain_schema, cipher, mode)) => {
@@ -1399,6 +1540,9 @@ impl ServiceBuilder {
             artifact: None,
             window: None,
             heal_recovered: None,
+            evolution,
+            edge_evolutions: Vec::new(),
+            on_corrupt,
         })
     }
 
@@ -1469,9 +1613,14 @@ impl ServiceBuilder {
         )
         .with_identity(build.identity(workflow, &spec.id));
         let built = rebuilder.build_sink()?;
+        let evolution = spec
+            .schema_evolution
+            .or(workflow.schema_evolution)
+            .map_or_else(EvolutionPolicy::strict, |c| c.policy());
         let (sink, heal_recovered): (Box<dyn Sink>, _) = match settings {
             Some(settings) => {
                 let healing = HealingSink::new(built, rebuilder, settings, &workflow.id, &spec.id)
+                    .with_evolution(evolution)
                     .with_alerts(self.alerts.clone());
                 let recovered = healing.recovered_flag();
                 (Box::new(healing), Some(recovered))
@@ -1495,6 +1644,9 @@ impl ServiceBuilder {
             artifact: None,
             heal_recovered,
             window: None,
+            evolution,
+            edge_evolutions: Vec::new(),
+            on_corrupt: CorruptRecordPolicy::default(),
         })
     }
 
@@ -1531,7 +1683,7 @@ impl ServiceBuilder {
         }
         #[cfg(feature = "wasm-host")]
         if let Some(spec) = workflow.wasm.iter().find(|w| w.id == id) {
-            return self.build_wasm_node(spec, &workflow.id);
+            return self.build_wasm_node(spec, workflow);
         }
         #[cfg(not(feature = "wasm-host"))]
         if let Some(spec) = workflow.wasm.iter().find(|w| w.id == id) {
@@ -1542,7 +1694,7 @@ impl ServiceBuilder {
         }
         #[cfg(feature = "plugin-host")]
         if let Some(spec) = workflow.plugin.iter().find(|p| p.id == id) {
-            return self.build_plugin_node(spec, &workflow.id);
+            return self.build_plugin_node(spec, workflow);
         }
         #[cfg(not(feature = "plugin-host"))]
         if let Some(spec) = workflow.plugin.iter().find(|p| p.id == id) {
@@ -1561,8 +1713,9 @@ impl ServiceBuilder {
     fn build_wasm_node(
         &mut self,
         spec: &super::config::WasmSpec,
-        workflow_id: &str,
+        workflow: &WorkflowSpec,
     ) -> SaciResult<BuiltNode> {
+        let workflow_id = &workflow.id;
         // The embedder-facing half of the windowing capability question, the
         // counterpart of the `#[cfg(not(feature = "wasm-host"))]` arm in
         // `build_processor_node`. It sits here, inside the host-gated
@@ -1636,6 +1789,11 @@ impl ServiceBuilder {
             artifact,
             window: spec.window.clone(),
             heal_recovered: None,
+            evolution: workflow
+                .schema_evolution
+                .map_or_else(EvolutionPolicy::strict, |c| c.policy()),
+            edge_evolutions: Vec::new(),
+            on_corrupt: CorruptRecordPolicy::default(),
         })
     }
 
@@ -1643,8 +1801,9 @@ impl ServiceBuilder {
     fn build_plugin_node(
         &mut self,
         spec: &super::config::PluginSpec,
-        workflow_id: &str,
+        workflow: &WorkflowSpec,
     ) -> SaciResult<BuiltNode> {
+        let workflow_id = &workflow.id;
         // Same placement and reasoning as the wasm path above: host first,
         // then the block it carries.
         if !cfg!(feature = "windows") && spec.window.is_some() {
@@ -1684,6 +1843,11 @@ impl ServiceBuilder {
             artifact,
             window: spec.window.clone(),
             heal_recovered: None,
+            evolution: workflow
+                .schema_evolution
+                .map_or_else(EvolutionPolicy::strict, |c| c.policy()),
+            edge_evolutions: Vec::new(),
+            on_corrupt: CorruptRecordPolicy::default(),
         })
     }
 }
@@ -2009,6 +2173,7 @@ mod tests {
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -2027,6 +2192,7 @@ mod tests {
             links: Vec::new(),
             dlq: None,
             run: None,
+            schema_evolution: None,
         }
     }
 
@@ -2044,6 +2210,8 @@ mod tests {
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             decrypt: None,
+            schema_evolution: None,
+            on_corrupt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.sinks.push(SinkSpec {
@@ -2055,12 +2223,14 @@ mod tests {
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             encrypt: None,
+            schema_evolution: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.links.push(super::super::config::LinkSpec {
             from: "src1".to_string(),
             to: "sink1".to_string(),
             branch: None,
+            schema_evolution: None,
         });
         let config = base_config(workflow);
 
@@ -2099,6 +2269,8 @@ mod tests {
             component: "comp".to_string(),
             retry: RetryConfig::default(),
             decrypt: None,
+            schema_evolution: None,
+            on_corrupt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         let config = base_config(workflow);
@@ -2243,6 +2415,7 @@ mod tests {
             component: "comp".to_string(),
             retry: RetryConfig::default(),
             encrypt: None,
+            schema_evolution: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         let config = base_config(workflow);
@@ -2358,6 +2531,8 @@ mod tests {
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
                 decrypt: None,
+                schema_evolution: None,
+                on_corrupt: None,
                 config: source_config,
             });
             workflow.sinks.push(SinkSpec {
@@ -2369,6 +2544,7 @@ mod tests {
                 component: "comp1".to_string(),
                 retry: RetryConfig::default(),
                 encrypt: None,
+                schema_evolution: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             });
             workflow.wasm.push(super::super::config::WasmSpec {
@@ -2383,11 +2559,13 @@ mod tests {
                 from: "src1".to_string(),
                 to: "p".to_string(),
                 branch: None,
+                schema_evolution: None,
             });
             workflow.links.push(super::super::config::LinkSpec {
                 from: "p".to_string(),
                 to: "sink1".to_string(),
                 branch: None,
+                schema_evolution: None,
             });
             workflow
         }
@@ -2522,6 +2700,7 @@ workflow "w" {
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         };
 
@@ -2643,6 +2822,8 @@ workflow "w" {
             component: "comp1".to_string(),
             retry: source_retry,
             decrypt: None,
+            schema_evolution: None,
+            on_corrupt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.sinks.push(SinkSpec {
@@ -2654,12 +2835,14 @@ workflow "w" {
             component: "comp1".to_string(),
             retry: sink_retry,
             encrypt: None,
+            schema_evolution: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.links.push(super::super::config::LinkSpec {
             from: "src1".to_string(),
             to: "sink1".to_string(),
             branch: None,
+            schema_evolution: None,
         });
         workflow
     }
@@ -2913,6 +3096,8 @@ workflow "w" {
                 ..Default::default()
             },
             decrypt: None,
+            schema_evolution: None,
+            on_corrupt: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.sinks.push(SinkSpec {
@@ -2924,12 +3109,14 @@ workflow "w" {
             component: "comp1".to_string(),
             retry: RetryConfig::default(),
             encrypt: None,
+            schema_evolution: None,
             config: ConfigValue::Object(ConfigMap::new()),
         });
         workflow.links.push(super::super::config::LinkSpec {
             from: "src1".to_string(),
             to: "sink1".to_string(),
             branch: None,
+            schema_evolution: None,
         });
         workflow
     }
