@@ -792,6 +792,43 @@ impl DeadLetterQueue {
         self
     }
 
+    /// Store malformed source records isolated under `source_id` / `component`
+    /// as a dead-letter batch carrying columns `(format, payload, error)`.
+    pub(crate) async fn record_corrupt(
+        &mut self,
+        source_id: &str,
+        component: &str,
+        records: &[crate::io::CorruptRecord],
+        stats: &mut WorkflowStats,
+    ) {
+        if records.is_empty() {
+            return;
+        }
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("format", arrow_schema::DataType::Utf8, false),
+            arrow_schema::Field::new("payload", arrow_schema::DataType::Binary, false),
+            arrow_schema::Field::new("error", arrow_schema::DataType::Utf8, false),
+        ]));
+        let formats: Vec<&str> = records.iter().map(|r| r.format).collect();
+        let payloads: Vec<&[u8]> = records.iter().map(|r| r.payload.as_slice()).collect();
+        let errors: Vec<&str> = records.iter().map(|r| r.error.as_str()).collect();
+        let batch = match RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow_array::StringArray::from(formats)),
+                Arc::new(arrow_array::BinaryArray::from(payloads)),
+                Arc::new(arrow_array::StringArray::from(errors)),
+            ],
+        ) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let first_err = SaciError::generic(records[0].error.clone());
+        let corrupt_target = format!("corrupt:{source_id}");
+        self.record(&batch, &corrupt_target, component, &first_err, stats)
+            .await;
+    }
+
     /// Store one batch a sink refused. Never fails outward: a queue that
     /// cannot take a letter counts it lost and says so.
     pub(crate) async fn record(
@@ -2442,6 +2479,7 @@ mod tests {
             links: Vec::new(),
             dlq: Some(crate::service::config::DlqConfig(block)),
             run: None,
+            schema_evolution: None,
         }
     }
 

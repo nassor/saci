@@ -262,8 +262,13 @@ pub(crate) async fn run(
         run: run_mode,
         flow: flow_plan,
         batch_resume,
+        lineage,
         ..
     } = built;
+    let lineage_run_id = format!("{workflow_id}-{:016x}", rand::random::<u64>());
+    if let Some(l) = &lineage {
+        l.emit_start(&workflow_id, &lineage_run_id);
+    }
     let mut dlq = dlq;
     let inspector = inspector.as_ref();
     let n = nodes.len();
@@ -313,7 +318,18 @@ pub(crate) async fn run(
         #[cfg(feature = "windows")]
         mut trackers,
         mut staged,
+        edge_evolutions,
+        sink_schemas,
+        on_corrupt,
     } = nodes;
+
+    for (i, policy) in on_corrupt.iter().enumerate() {
+        if *policy != crate::service::config::CorruptRecordPolicy::Fail
+            && let Some(src) = sources[i].as_mut()
+        {
+            src.set_skip_corrupt(true);
+        }
+    }
 
     let mut stats = WorkflowStats::default();
     let start = Instant::now();
@@ -618,8 +634,32 @@ pub(crate) async fn run(
                                     break;
                                 };
                                 match result {
-                                    Ok(None) => break,
+                                    Ok(None) => {
+                                        let corrupt = source.drain_corrupt();
+                                        if !corrupt.is_empty()
+                                            && on_corrupt[i]
+                                                == crate::service::config::CorruptRecordPolicy::Dlq
+                                            && let Some(q) = &mut dlq
+                                        {
+                                            q.record_corrupt(
+                                                &ids[i], component, &corrupt, &mut stats,
+                                            )
+                                            .await;
+                                        }
+                                        break;
+                                    }
                                     Ok(Some(batch)) => {
+                                        let corrupt = source.drain_corrupt();
+                                        if !corrupt.is_empty()
+                                            && on_corrupt[i]
+                                                == crate::service::config::CorruptRecordPolicy::Dlq
+                                            && let Some(q) = &mut dlq
+                                        {
+                                            q.record_corrupt(
+                                                &ids[i], component, &corrupt, &mut stats,
+                                            )
+                                            .await;
+                                        }
                                         // Weighed only for a source a controller
                                         // governs: the weight feeds its byte
                                         // accounting and nothing else.
@@ -690,10 +730,12 @@ pub(crate) async fn run(
                         fan_out_source(
                             i,
                             &downstream,
+                            &edge_evolutions,
                             component,
                             &batch,
                             &kinds,
                             &mut datasets,
+                            &sink_schemas,
                             &mut staged,
                             &ids,
                             &mut stats,
@@ -828,9 +870,11 @@ pub(crate) async fn run(
                                 rows_out,
                                 metrics,
                                 &downstream,
+                                &edge_evolutions,
                                 &kinds,
                                 &components,
                                 &mut datasets,
+                                &sink_schemas,
                                 &mut staged,
                                 &ids,
                                 &mut stats,
@@ -1093,6 +1137,15 @@ pub(crate) async fn run(
         #[cfg(feature = "tracing")]
         drop(batch_span);
 
+        if let Some(l) = &lineage {
+            l.emit_pass(
+                &workflow_id,
+                &lineage_run_id,
+                total_rows_in,
+                stats.rows_processed,
+            );
+        }
+
         if cancelled_before_finish {
             #[cfg(feature = "tracing")]
             tracing::info!("standalone runner cancelled after runtime, clean exit");
@@ -1220,6 +1273,19 @@ pub(crate) async fn run(
 
     log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
 
+    if let Some(l) = &lineage {
+        if cancel.is_cancelled() {
+            l.emit_abort(&workflow_id, &lineage_run_id);
+        } else {
+            l.emit_complete(
+                &workflow_id,
+                &lineage_run_id,
+                stats.rows_processed,
+                stats.rows_processed,
+            );
+        }
+    }
+
     Ok(stats)
 }
 
@@ -1278,12 +1344,14 @@ mod tests {
                 links: Vec::new(),
                 dlq: None,
                 run: None,
+                schema_evolution: None,
             }],
             http: HttpConfig::default(),
             store: None,
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -2517,6 +2585,7 @@ mod tests {
                 crate::service::config::DlqBlock::default(),
             )),
             run: None,
+            schema_evolution: None,
         };
         let mut registry = Registry::new();
         registry.register(crate::connector::redb::RedbConnector);
@@ -3098,5 +3167,138 @@ workflow "inherited_wf" {{
         );
         assert_eq!(b1.run, RunMode::Interval { every_ms: 250 });
         assert_eq!(b2.run, RunMode::Once);
+    }
+
+    #[tokio::test]
+    async fn evolved_link_adapts_source_batch_to_wider_sink_schema() {
+        let src_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("extra", DataType::Utf8, true),
+        ]));
+        let sink_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("added", DataType::Utf8, true),
+        ]));
+
+        let (source, tx) = ChannelSource::new(Arc::clone(&src_schema), 4);
+        let (sink, mut rx) = ChannelSink::new(Arc::clone(&sink_schema), 4);
+
+        let batch = RecordBatch::try_new(
+            src_schema,
+            vec![
+                Arc::new(arrow_array::Int32Array::from(vec![10, 20])),
+                Arc::new(arrow_array::StringArray::from(vec![Some("x"), None])),
+            ],
+        )
+        .unwrap();
+        tx.send(batch).await.unwrap();
+        drop(tx);
+
+        let built = BuiltWorkflow::builder("evolve_wf")
+            .schema_evolution(crate::schema::EvolutionPolicy::compatible())
+            .source("in", "Order", source)
+            .sink("out", "Order", sink)
+            .link("in", "out")
+            .run_mode(RunMode::Once)
+            .build()
+            .unwrap();
+
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("run succeeds");
+        assert_eq!(stats.rows_processed, 2);
+        let out = rx.recv().await.expect("sink receives adapted batch");
+        assert_eq!(out.schema(), sink_schema);
+        assert_eq!(
+            out.column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .unwrap()
+                .values(),
+            &[10i64, 20]
+        );
+        assert_eq!(out.column(1).null_count(), 2);
+    }
+
+    #[cfg(all(
+        feature = "connector-file",
+        feature = "codec-ndjson",
+        feature = "connector-redb"
+    ))]
+    #[tokio::test]
+    async fn quality_operator_and_source_on_corrupt_route_bad_records_and_quarantine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            dir.path().join("in.ndjson"),
+            concat!(
+                "{\"id\":1,\"email\":\"ok@example.com\"}\n",
+                "{corrupt json line\n",
+                "{\"id\":2,\"email\":\"bad-email\"}\n",
+                "{\"id\":3,\"email\":\"two@example.com\"}\n",
+            ),
+        )
+        .expect("write ndjson");
+
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="{p}"
+run "once"
+
+workflow "dq_wf" {{
+    codec "json" format="ndjson"
+    dlq "redb" replay="before_sources"
+    source "in" connector="file" codec="json" component="Order" on_corrupt="dlq" {{
+        config path="{p}/in.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "email" type="utf8" nullable=#false
+        }}
+    }}
+    operator "dq" kind="quality" component="Order" {{
+        config {{
+            rules {{
+                rule "email_ok" type="regex" column="email" pattern="^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+            }}
+        }}
+    }}
+    sink "good" connector="file" codec="json" component="Order" {{
+        config path="{p}/good.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "email" type="utf8" nullable=#false
+        }}
+    }}
+    sink "bad" connector="file" codec="json" component="Order" {{
+        config path="{p}/bad.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "email" type="utf8" nullable=#false
+        }}
+    }}
+    link from="in" to="dq"
+    link from="dq" to="good" branch="valid"
+    link from="dq" to="bad" branch="quarantine"
+}}
+"#
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("config parses");
+        cfg.validate().expect("config validates");
+        let built = crate::service::ServiceBuilder::new()
+            .build(&cfg)
+            .expect("build")
+            .remove(0);
+        let stats = built.run(CancellationToken::new()).await.expect("run");
+
+        assert_eq!(
+            stats.dead_letters_recorded, 1,
+            "one corrupt line went to DLQ"
+        );
+        let good_text = std::fs::read_to_string(dir.path().join("good.ndjson")).unwrap();
+        let bad_text = std::fs::read_to_string(dir.path().join("bad.ndjson")).unwrap();
+        assert_eq!(good_text.lines().count(), 2);
+        assert!(good_text.contains("ok@example.com"));
+        assert!(good_text.contains("two@example.com"));
+        assert_eq!(bad_text.lines().count(), 1);
+        assert!(bad_text.contains("bad-email"));
     }
 }

@@ -1,7 +1,8 @@
 //! [`AvroCodec`]: the `avro` format, both surfaces.
 
+use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Write};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow_array::RecordBatch;
 use arrow_avro::compression::CompressionCodec;
@@ -14,14 +15,20 @@ use arrow_avro::writer::format::{AvroOcfFormat, AvroSoeFormat};
 use arrow_cast::CastOptions;
 use arrow_schema::Schema;
 use arrow_select::concat::concat_batches;
+use uuid::Uuid;
 
+use super::registry::{
+    CompatibilityMode, RegistryAuth, RegistrySchemaId, SchemaRegistryClient, SchemaRegistryConfig,
+    SchemaRegistryKind,
+};
 use crate::codec::registry::reject_unknown_options;
 use crate::codec::{
-    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
-    ReadInput,
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, CorruptRecord, MessageDecoder,
+    MessageShape, ReadInput,
 };
 use crate::error::SaciError;
 use crate::io::cast_batch;
+use crate::schema::{EvolutionPolicy, evolve_batch};
 
 /// The block compression an Avro object container file is written with.
 ///
@@ -52,6 +59,8 @@ impl AvroCompression {
 pub struct AvroCodec {
     compression: Option<AvroCompression>,
     schema_id: Option<u32>,
+    registry_config: Option<SchemaRegistryConfig>,
+    registry_client: OnceLock<Arc<SchemaRegistryClient>>,
 }
 
 impl AvroCodec {
@@ -73,6 +82,29 @@ impl AvroCodec {
     pub fn schema_id(mut self, schema_id: u32) -> Self {
         self.schema_id = Some(schema_id);
         self
+    }
+
+    /// Attach an external schema registry configuration (Confluent, Apicurio,
+    /// or AWS Glue) for dynamic writer-schema resolution and write-side
+    /// schema registration.
+    pub fn schema_registry(mut self, config: SchemaRegistryConfig) -> Self {
+        self.registry_config = Some(config);
+        self.registry_client = OnceLock::new();
+        self
+    }
+
+    fn registry_client(&self) -> Result<Option<Arc<SchemaRegistryClient>>, SaciError> {
+        let Some(cfg) = &self.registry_config else {
+            return Ok(None);
+        };
+        if let Some(client) = self.registry_client.get() {
+            return Ok(Some(Arc::clone(client)));
+        }
+        let client = Arc::new(SchemaRegistryClient::new(cfg.clone())?);
+        let _ = self.registry_client.set(Arc::clone(&client));
+        Ok(Some(Arc::clone(
+            self.registry_client.get().unwrap_or(&client),
+        )))
     }
 }
 
@@ -126,23 +158,47 @@ impl Codec for AvroCodec {
         let avro = AvroSchema::try_from(schema.as_ref()).map_err(|e| {
             SaciError::configuration(format!("avro: the declared schema has no Avro form: {e}"))
         })?;
+        let registry = self.registry_client()?;
         // No decoder is built here: a consumer opens one per window, so the
         // framing that never arrives costs nothing.
         Ok(Box::new(AvroMessageDecoder {
             avro,
             schema_id: self.schema_id,
+            registry,
             declared: schema,
             single_object: None,
             confluent: None,
+            dynamic_id32: HashMap::new(),
+            dynamic_id64: HashMap::new(),
+            dynamic_uuid: HashMap::new(),
             active: None,
             pending: Vec::new(),
+            skip_corrupt: false,
+            corrupt: Vec::new(),
         }))
     }
 
     fn encode_messages(&self, batch: &RecordBatch) -> Result<Vec<Vec<u8>>, SaciError> {
+        let registry_id = if let Some(client) = self.registry_client()? {
+            let avro_schema = AvroSchema::try_from(batch.schema().as_ref()).map_err(|e| {
+                SaciError::configuration(format!("avro: batch schema has no Avro form: {e}"))
+            })?;
+            Some(client.resolve_or_register_for_write(&avro_schema.json_string)?)
+        } else {
+            self.schema_id.map(RegistrySchemaId::Id32)
+        };
+
         let mut builder = WriterBuilder::new(batch.schema().as_ref().clone());
-        if let Some(id) = self.schema_id {
-            builder = builder.with_fingerprint_strategy(FingerprintStrategy::Id(id));
+        match registry_id {
+            Some(RegistrySchemaId::Id32(id)) => {
+                builder = builder.with_fingerprint_strategy(FingerprintStrategy::Id(id));
+            }
+            Some(RegistrySchemaId::Id64(_)) | Some(RegistrySchemaId::GlueUuid(_)) => {
+                // Encode with a dummy 5-byte Id(0) prefix so we can swap in the
+                // 9-byte Apicurio or 18-byte Glue wire header cleanly per record.
+                builder = builder.with_fingerprint_strategy(FingerprintStrategy::Id(0));
+            }
+            None => {}
         }
         // `AvroSoeFormat` is the only choice: an OCF format is rejected here,
         // and the prefix-free binary format has no public decoder.
@@ -152,7 +208,23 @@ impl Codec for AvroCodec {
         encoder
             .encode(batch)
             .map_err(|e| SaciError::generic(format!("avro: encode error: {e}")))?;
-        Ok(encoder.flush().iter().map(|row| row.to_vec()).collect())
+        let raw_rows = encoder.flush();
+        match registry_id {
+            Some(reg_id @ (RegistrySchemaId::Id64(_) | RegistrySchemaId::GlueUuid(_))) => {
+                let prefix = reg_id.prefix_bytes();
+                Ok(raw_rows
+                    .iter()
+                    .map(|row| {
+                        let body = row.get(5..).unwrap_or(row.as_ref());
+                        let mut out = Vec::with_capacity(prefix.len() + body.len());
+                        out.extend_from_slice(&prefix);
+                        out.extend_from_slice(body);
+                        out
+                    })
+                    .collect())
+            }
+            _ => Ok(raw_rows.iter().map(|row| row.to_vec()).collect()),
+        }
     }
 
     fn message_shape(&self) -> Option<MessageShape> {
@@ -180,18 +252,51 @@ impl Codec for AvroCodec {
 /// Both sit on one node: `config compression="zstd" schema_id=42`.
 pub struct AvroCodecFactory;
 
+const AVRO_OPTIONS: &[&str] = &[
+    "compression",
+    "schema_id",
+    "registry_url",
+    "registry_kind",
+    "subject",
+    "auto_register",
+    "compatibility",
+    "apicurio_group",
+    "apicurio_eight_byte_id",
+    "glue_registry_name",
+    "glue_schema_name",
+    "aws_region",
+    "auth_basic_user",
+    "auth_basic_password",
+    "auth_bearer_token",
+];
+
+fn opt_str<'a>(options: &'a ConfigValue, key: &str) -> Result<Option<&'a str>, SaciError> {
+    match options.get(key) {
+        None => Ok(None),
+        Some(v) => v.as_str().map(Some).ok_or_else(|| {
+            SaciError::configuration(format!("avro: option '{key}' must be a string"))
+        }),
+    }
+}
+
+fn opt_bool(options: &ConfigValue, key: &str) -> Result<Option<bool>, SaciError> {
+    match options.get(key) {
+        None => Ok(None),
+        Some(v) => v.as_bool().map(Some).ok_or_else(|| {
+            SaciError::configuration(format!("avro: option '{key}' must be a boolean"))
+        }),
+    }
+}
+
 impl CodecFactory for AvroCodecFactory {
     fn format_name(&self) -> &'static str {
         "avro"
     }
 
     fn build(&self, options: &ConfigValue) -> Result<Arc<dyn Codec>, SaciError> {
-        reject_unknown_options("avro", options, &["compression", "schema_id"])?;
+        reject_unknown_options("avro", options, AVRO_OPTIONS)?;
         let mut codec = AvroCodec::new();
-        if let Some(value) = options.get("compression") {
-            let raw = value.as_str().ok_or_else(|| {
-                SaciError::configuration("avro: option 'compression' must be a string")
-            })?;
+        if let Some(raw) = opt_str(options, "compression")? {
             match raw {
                 "null" => {}
                 "deflate" => codec = codec.compression(AvroCompression::Deflate),
@@ -212,6 +317,66 @@ impl CodecFactory for AvroCodecFactory {
             codec = codec.schema_id(u32::try_from(raw).map_err(|_| {
                 SaciError::configuration("avro: option 'schema_id' must fit in a u32")
             })?);
+        }
+
+        if let Some(endpoint) = opt_str(options, "registry_url")? {
+            let kind = match opt_str(options, "registry_kind")? {
+                Some(raw) => SchemaRegistryKind::from_name(raw)?,
+                None => SchemaRegistryKind::Confluent,
+            };
+            let mut reg_cfg = match kind {
+                SchemaRegistryKind::Confluent => SchemaRegistryConfig::confluent(endpoint),
+                SchemaRegistryKind::Apicurio => SchemaRegistryConfig::apicurio(endpoint),
+                SchemaRegistryKind::Glue => {
+                    let region = opt_str(options, "aws_region")?.unwrap_or("us-east-1");
+                    SchemaRegistryConfig::glue(endpoint, region)
+                }
+            };
+            if let Some(subject) = opt_str(options, "subject")? {
+                reg_cfg = reg_cfg.with_subject(subject);
+            }
+            if let Some(auto_register) = opt_bool(options, "auto_register")? {
+                reg_cfg = reg_cfg.with_auto_register(auto_register);
+            }
+            if let Some(compat) = opt_str(options, "compatibility")? {
+                reg_cfg = reg_cfg.with_compatibility(CompatibilityMode::from_name(compat)?);
+            }
+            if let Some(group) = opt_str(options, "apicurio_group")? {
+                reg_cfg = reg_cfg.with_apicurio_group(group);
+            }
+            if let Some(eight_byte) = opt_bool(options, "apicurio_eight_byte_id")? {
+                reg_cfg = reg_cfg.with_apicurio_eight_byte_id(eight_byte);
+            }
+            if let Some(glue_reg) = opt_str(options, "glue_registry_name")? {
+                reg_cfg.glue_registry_name = glue_reg.to_string();
+            }
+            if let Some(glue_schema) = opt_str(options, "glue_schema_name")? {
+                reg_cfg.glue_schema_name = Some(glue_schema.to_string());
+            }
+            if let Some(token) = opt_str(options, "auth_bearer_token")? {
+                reg_cfg = reg_cfg.with_auth(RegistryAuth::Bearer {
+                    token: token.to_string(),
+                });
+            } else if let Some(user) = opt_str(options, "auth_basic_user")? {
+                let password = opt_str(options, "auth_basic_password")?.unwrap_or("");
+                reg_cfg = reg_cfg.with_auth(RegistryAuth::Basic {
+                    username: user.to_string(),
+                    password: password.to_string(),
+                });
+            } else if kind == SchemaRegistryKind::Glue
+                && let Some(region) = opt_str(options, "aws_region")?
+            {
+                reg_cfg = reg_cfg.with_auth(RegistryAuth::AwsSigV4 {
+                    access_key_id: None,
+                    secret_access_key: None,
+                    session_token: None,
+                    region: region.to_string(),
+                });
+            }
+            // Validate registry configuration eagerly at factory build time.
+            let client = Arc::new(SchemaRegistryClient::new(reg_cfg.clone())?);
+            codec = codec.schema_registry(reg_cfg);
+            let _ = codec.registry_client.set(client);
         }
         Ok(Arc::new(codec))
     }
@@ -298,44 +463,96 @@ impl BatchWriter for AvroBatchWriter {
 enum Framing {
     /// `0xC3 0x01` then an 8-byte little-endian Rabin fingerprint.
     SingleObject,
-    /// `0x00` then a 4-byte big-endian registry id.
+    /// `0x00` then a 4-byte big-endian static registry id (`schema_id`).
     Confluent,
+    /// `0x00` then a 4-byte big-endian dynamic registry id fetched from the registry.
+    DynamicId32(u32),
+    /// `0x00` then an 8-byte big-endian Apicurio global/content id.
+    DynamicId64(u64),
+    /// `0x03 0x00` then a 16-byte AWS Glue schema version UUID.
+    GlueUuid(Uuid),
 }
 
 impl Framing {
     fn label(self) -> &'static str {
         match self {
             Self::SingleObject => "single-object encoded",
-            Self::Confluent => "Confluent-framed",
+            Self::Confluent | Self::DynamicId32(_) => "Confluent-framed",
+            Self::DynamicId64(_) => "Apicurio 8-byte framed",
+            Self::GlueUuid(_) => "AWS Glue framed",
         }
+    }
+
+    fn is_registry_dynamic(self) -> bool {
+        matches!(
+            self,
+            Self::DynamicId32(_) | Self::DynamicId64(_) | Self::GlueUuid(_)
+        )
     }
 }
 
 /// A decoder over a mixed stream of framed Avro records.
 ///
 /// `arrow_avro::reader::Decoder` binds one fingerprint algorithm for its whole
-/// life, so this keeps one decoder per framing, picks the framing off each
-/// payload's first byte, and banks the outgoing decoder's rows before switching
-/// so `pending` stays in arrival order.
+/// life, so this keeps one decoder per framing/schema ID, picks the framing
+/// off each payload's prefix bytes, and banks + adapts the outgoing decoder's
+/// rows before switching so `pending` stays in arrival order.
 struct AvroMessageDecoder {
-    /// The declared schema in Avro form. Each store build clones it.
+    /// The declared schema in Avro form. Each static store build clones it.
     avro: AvroSchema,
     schema_id: Option<u32>,
+    registry: Option<Arc<SchemaRegistryClient>>,
     declared: Arc<Schema>,
     single_object: Option<arrow_avro::reader::Decoder>,
     confluent: Option<arrow_avro::reader::Decoder>,
+    dynamic_id32: HashMap<u32, arrow_avro::reader::Decoder>,
+    dynamic_id64: HashMap<u64, arrow_avro::reader::Decoder>,
+    dynamic_uuid: HashMap<Uuid, arrow_avro::reader::Decoder>,
     active: Option<Framing>,
     pending: Vec<RecordBatch>,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
 }
 
 impl AvroMessageDecoder {
     fn framing_of(&self, payload: &[u8]) -> Result<Framing, SaciError> {
         match payload.first().copied() {
             Some(0xC3) => Ok(Framing::SingleObject),
+            Some(0x03) if payload.get(1).copied() == Some(0x00) && self.registry.is_some() => {
+                if payload.len() < 18 {
+                    return Err(SaciError::generic(
+                        "avro: truncated AWS Glue header (expected 18 bytes)",
+                    ));
+                }
+                let uuid = Uuid::from_slice(&payload[2..18]).map_err(|e| {
+                    SaciError::generic(format!("avro: invalid Glue schema UUID: {e}"))
+                })?;
+                Ok(Framing::GlueUuid(uuid))
+            }
+            Some(0x00) if self.registry.is_some() => {
+                let reg = self.registry.as_ref().expect("checked");
+                if reg.config().apicurio_eight_byte_id {
+                    if payload.len() < 9 {
+                        return Err(SaciError::generic(
+                            "avro: truncated Apicurio 8-byte header (expected 9 bytes)",
+                        ));
+                    }
+                    let id = u64::from_be_bytes(payload[1..9].try_into().expect("8 bytes"));
+                    Ok(Framing::DynamicId64(id))
+                } else {
+                    if payload.len() < 5 {
+                        return Err(SaciError::generic(
+                            "avro: truncated Confluent header (expected 5 bytes)",
+                        ));
+                    }
+                    let id = u32::from_be_bytes(payload[1..5].try_into().expect("4 bytes"));
+                    Ok(Framing::DynamicId32(id))
+                }
+            }
             Some(0x00) if self.schema_id.is_some() => Ok(Framing::Confluent),
             Some(0x00) => Err(SaciError::configuration(
-                "avro: payload carries the Confluent prefix; set option 'schema_id' to its \
-                 registry id",
+                "avro: payload carries the Confluent prefix; set option 'schema_id' or \
+                 'registry_url'",
             )),
             Some(_) => Err(SaciError::generic(
                 "avro: payload is not framed; expected single-object encoding (0xC3 0x01) or the \
@@ -345,59 +562,132 @@ impl AvroMessageDecoder {
         }
     }
 
-    fn slot(&mut self, framing: Framing) -> &mut Option<arrow_avro::reader::Decoder> {
+    fn slot_mut(&mut self, framing: Framing) -> Option<&mut arrow_avro::reader::Decoder> {
         match framing {
-            Framing::SingleObject => &mut self.single_object,
-            Framing::Confluent => &mut self.confluent,
+            Framing::SingleObject => self.single_object.as_mut(),
+            Framing::Confluent => self.confluent.as_mut(),
+            Framing::DynamicId32(id) => self.dynamic_id32.get_mut(&id),
+            Framing::DynamicId64(id) => self.dynamic_id64.get_mut(&id),
+            Framing::GlueUuid(uuid) => self.dynamic_uuid.get_mut(&uuid),
         }
     }
 
-    fn decoder(&mut self, framing: Framing) -> &mut arrow_avro::reader::Decoder {
-        self.slot(framing)
-            .as_mut()
-            .expect("the active framing's decoder is built when it becomes active")
-    }
-
-    fn build(&self, framing: Framing) -> Result<arrow_avro::reader::Decoder, SaciError> {
-        let (mut store, id) = match framing {
-            Framing::SingleObject => (SchemaStore::new(), None),
-            Framing::Confluent => (
-                SchemaStore::new_with_type(FingerprintAlgorithm::Id),
-                Some(Fingerprint::Id(self.schema_id.expect(
-                    "Confluent framing is only reachable with a schema id",
-                ))),
-            ),
+    fn ensure_decoder(&mut self, framing: Framing) -> Result<(), SaciError> {
+        if self.slot_mut(framing).is_some() {
+            return Ok(());
+        }
+        let decoder = match framing {
+            Framing::SingleObject => build_static_decoder(self.avro.clone(), None)?,
+            Framing::Confluent => {
+                let id = self
+                    .schema_id
+                    .expect("Confluent framing is only reachable with a schema id");
+                build_static_decoder(self.avro.clone(), Some(id))?
+            }
+            Framing::DynamicId32(id) => {
+                let schema = self
+                    .registry
+                    .as_ref()
+                    .expect("registry present")
+                    .fetch_schema_by_id32(id)?;
+                build_static_decoder((*schema).clone(), Some(id))?
+            }
+            Framing::DynamicId64(id) => {
+                let schema = self
+                    .registry
+                    .as_ref()
+                    .expect("registry present")
+                    .fetch_schema_by_id64(id)?;
+                build_static_decoder((*schema).clone(), Some(1))?
+            }
+            Framing::GlueUuid(uuid) => {
+                let schema = self
+                    .registry
+                    .as_ref()
+                    .expect("registry present")
+                    .fetch_schema_by_uuid(uuid)?;
+                build_static_decoder((*schema).clone(), Some(1))?
+            }
         };
-        let fingerprint = match id {
-            None => store.register(self.avro.clone()),
-            Some(id) => store.set(id, self.avro.clone()),
+        match framing {
+            Framing::SingleObject => self.single_object = Some(decoder),
+            Framing::Confluent => self.confluent = Some(decoder),
+            Framing::DynamicId32(id) => {
+                self.dynamic_id32.insert(id, decoder);
+            }
+            Framing::DynamicId64(id) => {
+                self.dynamic_id64.insert(id, decoder);
+            }
+            Framing::GlueUuid(uuid) => {
+                self.dynamic_uuid.insert(uuid, decoder);
+            }
         }
-        .map_err(|e| SaciError::generic(format!("avro: schema registration failed: {e}")))?;
-        ReaderBuilder::new()
-            .with_writer_schema_store(store)
-            // Seeds the expected fingerprint so the first payload is not read as
-            // a schema switch.
-            .with_active_fingerprint(fingerprint)
-            .build_decoder()
-            .map_err(|e| SaciError::generic(format!("avro: decoder build failed: {e}")))
+        Ok(())
     }
 
     fn bank(&mut self, framing: Framing) -> Result<(), SaciError> {
-        let banked = match self.slot(framing).as_mut() {
+        let banked = match self.slot_mut(framing) {
             None => None,
             Some(decoder) => decoder
                 .flush()
                 .map_err(|e| SaciError::generic(format!("avro: flush: {e}")))?,
         };
         if let Some(batch) = banked {
-            self.pending.push(batch);
+            let adapted = if framing.is_registry_dynamic() {
+                match evolve_batch(&batch, &self.declared, EvolutionPolicy::compatible()) {
+                    Ok(evolved) => evolved,
+                    Err(_) => project(batch, &self.declared)?,
+                }
+            } else {
+                batch
+            };
+            self.pending.push(adapted);
         }
         Ok(())
     }
 }
 
-impl MessageDecoder for AvroMessageDecoder {
-    fn push(&mut self, payload: &[u8]) -> Result<(), SaciError> {
+fn build_static_decoder(
+    avro: AvroSchema,
+    id: Option<u32>,
+) -> Result<arrow_avro::reader::Decoder, SaciError> {
+    let (mut store, fp) = match id {
+        None => (SchemaStore::new(), None),
+        Some(id) => (
+            SchemaStore::new_with_type(FingerprintAlgorithm::Id),
+            Some(Fingerprint::Id(id)),
+        ),
+    };
+    let fingerprint = match fp {
+        None => store.register(avro),
+        Some(fp) => store.set(fp, avro),
+    }
+    .map_err(|e| SaciError::generic(format!("avro: schema registration failed: {e}")))?;
+    ReaderBuilder::new()
+        .with_writer_schema_store(store)
+        .with_active_fingerprint(fingerprint)
+        .build_decoder()
+        .map_err(|e| SaciError::generic(format!("avro: decoder build failed: {e}")))
+}
+
+impl AvroMessageDecoder {
+    fn drop_slot(&mut self, framing: Framing) {
+        match framing {
+            Framing::SingleObject => self.single_object = None,
+            Framing::Confluent => self.confluent = None,
+            Framing::DynamicId32(id) => {
+                self.dynamic_id32.remove(&id);
+            }
+            Framing::DynamicId64(id) => {
+                self.dynamic_id64.remove(&id);
+            }
+            Framing::GlueUuid(uuid) => {
+                self.dynamic_uuid.remove(&uuid);
+            }
+        }
+    }
+
+    fn push_inner(&mut self, payload: &[u8]) -> Result<(), SaciError> {
         let framing = self.framing_of(payload)?;
         if self.active != Some(framing) {
             // Bank the framing being left so `pending` keeps arrival order
@@ -405,21 +695,41 @@ impl MessageDecoder for AvroMessageDecoder {
             if let Some(previous) = self.active.replace(framing) {
                 self.bank(previous)?;
             }
-            if self.slot(framing).is_none() {
-                let decoder = self.build(framing)?;
-                *self.slot(framing) = Some(decoder);
-            }
+            self.ensure_decoder(framing)?;
+        } else if self.skip_corrupt {
+            // When isolating bad records, bank previously decoded rows so a
+            // failure inside `payload` never discards earlier valid messages.
+            self.bank(framing)?;
         }
-        let mut remaining = payload;
+        // Normalize 9-byte Apicurio and 18-byte Glue headers into 5-byte Id(1)
+        // framing that `arrow_avro::reader::Decoder` expects.
+        let rewritten: Vec<u8>;
+        let wire: &[u8] = match framing {
+            Framing::DynamicId64(_) => {
+                rewritten = [&[0x00, 0, 0, 0, 1], &payload[9..]].concat();
+                &rewritten
+            }
+            Framing::GlueUuid(_) => {
+                rewritten = [&[0x00, 0, 0, 0, 1], &payload[18..]].concat();
+                &rewritten
+            }
+            _ => payload,
+        };
+        let mut remaining = wire;
         while !remaining.is_empty() {
             // The decoder stops at its batch capacity and then consumes
             // nothing, so bank the full batch and keep going: one window is one
             // batch to the connector whatever the decoder's batch size is.
-            if self.decoder(framing).batch_is_full() {
+            if self
+                .slot_mut(framing)
+                .expect("active decoder ensured")
+                .batch_is_full()
+            {
                 self.bank(framing)?;
             }
             let read = self
-                .decoder(framing)
+                .slot_mut(framing)
+                .expect("active decoder ensured")
                 .decode(remaining)
                 .map_err(|e| SaciError::generic(format!("avro: decode: {e}")))?;
             if read == 0 {
@@ -429,6 +739,33 @@ impl MessageDecoder for AvroMessageDecoder {
                 )));
             }
             remaining = &remaining[read..];
+        }
+        Ok(())
+    }
+}
+
+impl MessageDecoder for AvroMessageDecoder {
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        std::mem::take(&mut self.corrupt)
+    }
+
+    fn push(&mut self, payload: &[u8]) -> Result<(), SaciError> {
+        if !self.skip_corrupt {
+            return self.push_inner(payload);
+        }
+        if let Err(e) = self.push_inner(payload) {
+            if let Some(active) = self.active.take() {
+                self.drop_slot(active);
+            }
+            self.corrupt.push(CorruptRecord {
+                format: "avro",
+                payload: payload.to_vec(),
+                error: e.to_string(),
+            });
         }
         Ok(())
     }
@@ -443,9 +780,6 @@ impl MessageDecoder for AvroMessageDecoder {
             0 => return Ok(None),
             1 => self.pending.pop().expect("one banked batch"),
             _ => {
-                // Both framings resolve the same Avro schema, so every banked
-                // batch has the same Arrow schema and the first one's governs
-                // the fold.
                 let schema = self.pending[0].schema();
                 let folded = concat_batches(&schema, self.pending.iter())
                     .map_err(|e| SaciError::generic(format!("avro: concatenating batches: {e}")))?;
@@ -453,8 +787,12 @@ impl MessageDecoder for AvroMessageDecoder {
                 folded
             }
         };
-        // Avro widens, so the decoded columns may not be the declared ones.
-        project(batch, &self.declared).map(Some)
+        // Static framings may still carry Avro-widened columns; adapt or project to declared.
+        if batch.schema_ref().fields() == self.declared.fields() {
+            Ok(Some(batch))
+        } else {
+            project(batch, &self.declared).map(Some)
+        }
     }
 }
 
@@ -1006,5 +1344,125 @@ mod tests {
             panic!("400 does not fit an int8");
         };
         assert!(err.message().contains("casting"), "got: {err}");
+    }
+
+    #[test]
+    fn confluent_registry_registers_and_evolves_mixed_writer_schemas_on_decode() {
+        use arrow_array::Array;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let store: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let store_srv = Arc::clone(&store);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock registry");
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(12) {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let req_line = req.lines().next().unwrap_or("");
+                let mut parts = req_line.split_whitespace();
+                let method = parts.next().unwrap_or("GET");
+                let path = parts.next().unwrap_or("/");
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+
+                let (status, resp_body) = if method == "POST" && path == "/subjects/ev/versions" {
+                    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let schema_str = v["schema"].as_str().unwrap().to_string();
+                    let mut guard = store_srv.lock().unwrap();
+                    guard.push(schema_str);
+                    let id = guard.len();
+                    (200, format!(r#"{{"id":{id}}}"#))
+                } else if method == "GET" && path.starts_with("/schemas/ids/") {
+                    let id: usize = path
+                        .trim_start_matches("/schemas/ids/")
+                        .parse()
+                        .unwrap_or(0);
+                    let guard = store_srv.lock().unwrap();
+                    if let Some(s) = guard.get(id.saturating_sub(1)) {
+                        (200, serde_json::json!({ "schema": s }).to_string())
+                    } else {
+                        (404, "{}".to_string())
+                    }
+                } else {
+                    (404, "{}".to_string())
+                };
+
+                let reply = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+                    resp_body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let endpoint = format!("http://{addr}");
+        let writer_v1_schema =
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let writer_v2_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+        let consumer_schema = Arc::clone(&writer_v2_schema);
+
+        let writer_codec = AvroCodec::new()
+            .schema_registry(SchemaRegistryConfig::confluent(&endpoint).with_subject("ev"));
+
+        let b1 = RecordBatch::try_new(writer_v1_schema, vec![Arc::new(Int32Array::from(vec![10]))])
+            .unwrap();
+        let b2 = RecordBatch::try_new(
+            writer_v2_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![20])),
+                Arc::new(StringArray::from(vec![Some("v2")])),
+            ],
+        )
+        .unwrap();
+
+        let p1 = writer_codec
+            .encode_messages(&b1)
+            .expect("encode v1")
+            .remove(0);
+        let p2 = writer_codec
+            .encode_messages(&b2)
+            .expect("encode v2")
+            .remove(0);
+        assert_eq!(&p1[..5], &[0x00, 0, 0, 0, 1]);
+        assert_eq!(&p2[..5], &[0x00, 0, 0, 0, 2]);
+
+        let consumer_codec =
+            AvroCodec::new().schema_registry(SchemaRegistryConfig::confluent(endpoint));
+        let mut decoder = consumer_codec
+            .open_message_decoder(Arc::clone(&consumer_schema))
+            .expect("decoder opens");
+        decoder.push(&p1).expect("push v1");
+        decoder.push(&p2).expect("push v2");
+        let decoded = decoder.flush().expect("flush").expect("batch");
+
+        assert_eq!(decoded.schema(), consumer_schema);
+        assert_eq!(decoded.num_rows(), 2);
+        assert_eq!(
+            decoded
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[10i64, 20]
+        );
+        let notes = decoded
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(notes.is_null(0));
+        assert_eq!(notes.value(1), "v2");
     }
 }

@@ -41,6 +41,7 @@ pub struct ConnectorContext {
     codec: Option<Arc<dyn Codec>>,
     channels: Option<Arc<dyn ChannelBridge>>,
     identity: Option<NodeIdentity>,
+    skip_corrupt: bool,
 }
 
 impl ConnectorContext {
@@ -54,7 +55,21 @@ impl ConnectorContext {
             codec,
             channels: None,
             identity: None,
+            skip_corrupt: false,
         }
+    }
+
+    /// Configure whether byte readers/decoders isolate malformed source records
+    /// rather than failing the batch.
+    pub fn with_skip_corrupt(mut self, skip: bool) -> Self {
+        self.skip_corrupt = skip;
+        self
+    }
+
+    /// Whether sources built under this context should isolate malformed input
+    /// records rather than failing the batch.
+    pub fn skip_corrupt(&self) -> bool {
+        self.skip_corrupt
     }
 
     /// Attach the shared channel bridge every `ChannelSource`/`ChannelSink`

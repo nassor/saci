@@ -103,7 +103,7 @@ connector-api = ["engine", "codec-api"]
 
 # Byte formats
 codec-arrow-ipc = ["codec-api"]
-codec-avro = ["codec-api", "dep:arrow-avro"]
+codec-avro = ["codec-api", "dep:arrow-avro", "tls", "dep:reqwest", "reqwest/json", "dep:ring", "dep:hex", "dep:uuid", "dep:chrono"]
 codec-csv = ["codec-api", "dep:arrow-csv"]
 codec-ndjson = ["codec-api", "dep:arrow-json"]
 codec-parquet = ["codec-api", "dep:parquet", "dep:bytes"]
@@ -205,6 +205,7 @@ futures       = { workspace = true, optional = true }
 serde         = { workspace = true }
 fnv           = { workspace = true }
 rand          = { workspace = true }
+regex         = { workspace = true }
 
 # Engine and SDKs
 tokio         = { workspace = true, optional = true }

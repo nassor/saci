@@ -1,17 +1,18 @@
 //! [`NdjsonCodec`]: the `ndjson` format, both surfaces.
 
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_json::ReaderBuilder;
 use arrow_json::writer::LineDelimitedWriter;
 use arrow_schema::Schema;
+use arrow_select::concat::concat_batches;
 
 use crate::codec::registry::reject_unknown_options;
 use crate::codec::{
-    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
-    ReadInput,
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, CorruptRecord, MessageDecoder,
+    MessageShape, ReadInput,
 };
 use crate::error::SaciError;
 
@@ -71,10 +72,12 @@ impl Codec for NdjsonCodec {
             }
         };
 
-        let reader = ReaderBuilder::new(Arc::clone(&schema))
-            .build(buffered)
-            .map_err(|e| SaciError::generic(format!("ndjson: reader build failed: {e}")))?;
-        Ok(Box::new(NdjsonBatchReader { reader, schema }))
+        Ok(Box::new(NdjsonBatchReader {
+            state: Some(NdjsonReaderState::Unstarted(buffered)),
+            schema,
+            skip_corrupt: false,
+            corrupt: Vec::new(),
+        }))
     }
 
     fn open_writer(
@@ -92,10 +95,16 @@ impl Codec for NdjsonCodec {
         &self,
         schema: Arc<Schema>,
     ) -> Result<Box<dyn MessageDecoder>, SaciError> {
-        let decoder = ReaderBuilder::new(schema)
+        let decoder = ReaderBuilder::new(Arc::clone(&schema))
             .build_decoder()
             .map_err(|e| SaciError::generic(format!("ndjson: decoder build failed: {e}")))?;
-        Ok(Box::new(NdjsonMessageDecoder { decoder }))
+        Ok(Box::new(NdjsonMessageDecoder {
+            decoder,
+            schema,
+            pending: Vec::new(),
+            skip_corrupt: false,
+            corrupt: Vec::new(),
+        }))
     }
 
     fn encode_messages(&self, batch: &RecordBatch) -> Result<Vec<Vec<u8>>, SaciError> {
@@ -153,9 +162,117 @@ impl CodecFactory for NdjsonCodecFactory {
     }
 }
 
+enum NdjsonReaderState {
+    Unstarted(BufReader<ReadInput>),
+    Fast(arrow_json::Reader<BufReader<ReadInput>>),
+    SafeLines {
+        reader: BufReader<ReadInput>,
+        eof: bool,
+    },
+}
+
 struct NdjsonBatchReader {
-    reader: arrow_json::Reader<BufReader<ReadInput>>,
+    state: Option<NdjsonReaderState>,
     schema: Arc<Schema>,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
+}
+
+impl NdjsonBatchReader {
+    fn decode_ndjson_bytes(&self, bytes: &[u8]) -> Result<Option<RecordBatch>, SaciError> {
+        let mut decoder = ReaderBuilder::new(Arc::clone(&self.schema))
+            .build_decoder()
+            .map_err(|e| SaciError::generic(format!("ndjson: decoder build failed: {e}")))?;
+        let mut rem = bytes;
+        while !rem.is_empty() {
+            let read = decoder
+                .decode(rem)
+                .map_err(|e| SaciError::generic(format!("ndjson: decode: {e}")))?;
+            if read == 0 {
+                return Err(SaciError::generic("ndjson: incomplete JSON record"));
+            }
+            rem = &rem[read..];
+        }
+        decoder
+            .flush()
+            .map_err(|e| SaciError::generic(format!("ndjson: flush: {e}")))
+    }
+
+    fn next_safe_batch(
+        &mut self,
+        reader: &mut BufReader<ReadInput>,
+        eof: &mut bool,
+    ) -> Result<Option<RecordBatch>, SaciError> {
+        if *eof {
+            return Ok(None);
+        }
+        let mut valid_batches = Vec::new();
+        let mut collected_rows = 0usize;
+        while collected_rows < 1024 && !*eof {
+            let mut lines: Vec<Vec<u8>> = Vec::with_capacity(64);
+            let mut joined = Vec::new();
+            for _ in 0..64 {
+                let mut raw = Vec::new();
+                let n = reader
+                    .read_until(b'\n', &mut raw)
+                    .map_err(|e| SaciError::generic(format!("ndjson: read error: {e}")))?;
+                if n == 0 {
+                    *eof = true;
+                    break;
+                }
+                while matches!(raw.last(), Some(b'\n' | b'\r')) {
+                    raw.pop();
+                }
+                if raw.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                joined.extend_from_slice(&raw);
+                joined.push(b'\n');
+                lines.push(raw);
+            }
+            if lines.is_empty() {
+                break;
+            }
+            if let Ok(maybe_batch) = self.decode_ndjson_bytes(&joined) {
+                if let Some(batch) = maybe_batch
+                    && batch.num_rows() > 0
+                {
+                    collected_rows += batch.num_rows();
+                    valid_batches.push(batch);
+                }
+            } else {
+                for line in lines {
+                    let mut one = Vec::with_capacity(line.len() + 1);
+                    one.extend_from_slice(&line);
+                    one.push(b'\n');
+                    match self.decode_ndjson_bytes(&one) {
+                        Ok(Some(batch)) if batch.num_rows() > 0 => {
+                            collected_rows += batch.num_rows();
+                            valid_batches.push(batch);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            self.corrupt.push(CorruptRecord {
+                                format: "ndjson",
+                                payload: line,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if valid_batches.is_empty() {
+            Ok(None)
+        } else if valid_batches.len() == 1 {
+            Ok(valid_batches.pop())
+        } else {
+            let merged = concat_batches(&self.schema, &valid_batches)
+                .map_err(|e| SaciError::generic(format!("ndjson: concatenating batches: {e}")))?;
+            Ok(Some(merged))
+        }
+    }
 }
 
 impl BatchReader for NdjsonBatchReader {
@@ -163,12 +280,44 @@ impl BatchReader for NdjsonBatchReader {
         Arc::clone(&self.schema)
     }
 
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        std::mem::take(&mut self.corrupt)
+    }
+
     fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
-        match self.reader.next() {
-            None => Ok(None),
-            Some(Ok(batch)) => Ok(Some(batch)),
-            Some(Err(e)) => Err(SaciError::generic(format!("ndjson: read error: {e}"))),
+        if let Some(NdjsonReaderState::Unstarted(_)) = &self.state {
+            let Some(NdjsonReaderState::Unstarted(buf)) = self.state.take() else {
+                unreachable!()
+            };
+            if self.skip_corrupt {
+                self.state = Some(NdjsonReaderState::SafeLines {
+                    reader: buf,
+                    eof: false,
+                });
+            } else {
+                let reader = ReaderBuilder::new(Arc::clone(&self.schema))
+                    .build(buf)
+                    .map_err(|e| SaciError::generic(format!("ndjson: reader build failed: {e}")))?;
+                self.state = Some(NdjsonReaderState::Fast(reader));
+            }
         }
+
+        let mut state = self.state.take();
+        let res = match state.as_mut() {
+            Some(NdjsonReaderState::Fast(reader)) => match reader.next() {
+                None => Ok(None),
+                Some(Ok(batch)) => Ok(Some(batch)),
+                Some(Err(e)) => Err(SaciError::generic(format!("ndjson: read error: {e}"))),
+            },
+            Some(NdjsonReaderState::SafeLines { reader, eof }) => self.next_safe_batch(reader, eof),
+            _ => Ok(None),
+        };
+        self.state = state;
+        res
     }
 }
 
@@ -208,10 +357,56 @@ impl BatchWriter for NdjsonBatchWriter {
 
 struct NdjsonMessageDecoder {
     decoder: arrow_json::reader::Decoder,
+    schema: Arc<Schema>,
+    pending: Vec<RecordBatch>,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
 }
 
 impl MessageDecoder for NdjsonMessageDecoder {
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        std::mem::take(&mut self.corrupt)
+    }
+
     fn push(&mut self, payload: &[u8]) -> Result<(), SaciError> {
+        if self.skip_corrupt {
+            let decode_one = || -> Result<Option<RecordBatch>, SaciError> {
+                let mut iso = ReaderBuilder::new(Arc::clone(&self.schema))
+                    .build_decoder()
+                    .map_err(|e| {
+                        SaciError::generic(format!("ndjson: decoder build failed: {e}"))
+                    })?;
+                for chunk in [payload, b"\n".as_slice()] {
+                    let mut remaining = chunk;
+                    while !remaining.is_empty() {
+                        let read = iso
+                            .decode(remaining)
+                            .map_err(|e| SaciError::generic(format!("ndjson: decode: {e}")))?;
+                        if read == 0 {
+                            break;
+                        }
+                        remaining = &remaining[read..];
+                    }
+                }
+                iso.flush()
+                    .map_err(|e| SaciError::generic(format!("ndjson: flush: {e}")))
+            };
+            match decode_one() {
+                Ok(Some(batch)) if batch.num_rows() > 0 => self.pending.push(batch),
+                Ok(_) => {}
+                Err(e) => self.corrupt.push(CorruptRecord {
+                    format: "ndjson",
+                    payload: payload.to_vec(),
+                    error: e.to_string(),
+                }),
+            }
+            return Ok(());
+        }
+
         // The decoder consumes whole records, so each payload is followed by the
         // newline that terminates its object. `decode` returns the bytes it
         // took, which is why this loops rather than asserting one call is
@@ -233,9 +428,24 @@ impl MessageDecoder for NdjsonMessageDecoder {
     }
 
     fn flush(&mut self) -> Result<Option<RecordBatch>, SaciError> {
-        self.decoder
+        if let Some(batch) = self
+            .decoder
             .flush()
-            .map_err(|e| SaciError::generic(format!("ndjson: flush: {e}")))
+            .map_err(|e| SaciError::generic(format!("ndjson: flush: {e}")))?
+        {
+            self.pending.push(batch);
+        }
+        match self.pending.len() {
+            0 => Ok(None),
+            1 => Ok(self.pending.pop()),
+            _ => {
+                let folded = concat_batches(&self.schema, &self.pending).map_err(|e| {
+                    SaciError::generic(format!("ndjson: concatenating batches: {e}"))
+                })?;
+                self.pending.clear();
+                Ok(Some(folded))
+            }
+        }
     }
 }
 
@@ -486,5 +696,40 @@ mod tests {
         let from_file = read_all(&codec, f.reopen().expect("reopen"), Some(schema()));
         let from_memory = read_all(&codec, bytes, Some(schema()));
         assert_eq!(from_file.1, from_memory.1);
+    }
+
+    #[test]
+    fn skip_corrupt_isolates_malformed_ndjson_lines_and_messages() {
+        let f = write_ndjson(&[
+            r#"{"id":1,"val":1.5}"#,
+            r#"{not valid json"#,
+            r#"{"id":2,"val":"wrong_type"}"#,
+            r#"{"id":3,"val":3.5}"#,
+        ]);
+        let mut reader = NdjsonCodec::default()
+            .open_reader(f.reopen().expect("reopen").into(), Some(schema()))
+            .expect("reader opens");
+        reader.set_skip_corrupt(true);
+
+        let mut rows = 0usize;
+        while let Some(batch) = reader.next_batch().expect("read continues past bad lines") {
+            rows += batch.num_rows();
+        }
+        assert_eq!(rows, 2);
+        let corrupt = reader.drain_corrupt();
+        assert_eq!(corrupt.len(), 2);
+        assert_eq!(corrupt[0].format, "ndjson");
+        assert_eq!(corrupt[0].payload, br#"{not valid json"#);
+
+        let mut decoder = NdjsonCodec::default()
+            .open_message_decoder(schema())
+            .expect("decoder");
+        decoder.set_skip_corrupt(true);
+        decoder.push(br#"{"id":10,"val":1.0}"#).expect("push 1");
+        decoder.push(b"}{").expect("bad message isolated");
+        decoder.push(br#"{"id":11,"val":2.0}"#).expect("push 3");
+        let batch = decoder.flush().expect("flush").expect("2 valid rows");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(decoder.drain_corrupt().len(), 1);
     }
 }

@@ -5,7 +5,8 @@
 //! bounded channel; [`Source::next_batch`] awaits that channel. The executor
 //! never blocks on the disk and the file is never materialised in full.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -15,7 +16,7 @@ use tokio::sync::mpsc;
 use crate::codec::Codec;
 use crate::connector::file::FileSourceConfig;
 use crate::error::SaciError;
-use crate::io::Source;
+use crate::io::{CorruptRecord, Source};
 
 /// Batches the reader thread may queue before it blocks. Four lets it stay
 /// slightly ahead of the pipeline without holding much memory.
@@ -44,6 +45,8 @@ pub struct FileSource {
     rx: mpsc::Receiver<Result<RecordBatch, SaciError>>,
     schema: Arc<Schema>,
     estimated_rows: Option<usize>,
+    skip_corrupt: Arc<AtomicBool>,
+    corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
 impl FileSource {
@@ -65,17 +68,41 @@ impl FileSource {
         schema: Option<Arc<Schema>>,
         codec: Arc<dyn Codec>,
     ) -> Result<Self, SaciError> {
+        Self::new_with_corrupt(config, schema, codec, false)
+    }
+
+    /// Same as [`new`](Self::new), configuring `skip_corrupt` before the reader
+    /// thread starts polling the codec's [`BatchReader`](crate::codec::BatchReader).
+    pub fn new_with_corrupt(
+        config: FileSourceConfig,
+        schema: Option<Arc<Schema>>,
+        codec: Arc<dyn Codec>,
+        skip_corrupt: bool,
+    ) -> Result<Self, SaciError> {
         let path = config.path;
         let file = std::fs::File::open(&path)
             .map_err(|e| SaciError::generic(format!("FileSource: cannot open {path:?}: {e}")))?;
         let mut reader = codec.open_reader(file.into(), schema)?;
+        reader.set_skip_corrupt(skip_corrupt);
         let schema = reader.schema();
         let estimated_rows = reader.estimated_rows();
+        let skip_flag = Arc::new(AtomicBool::new(skip_corrupt));
+        let skip_flag_bg = Arc::clone(&skip_flag);
+        let corrupt = Arc::new(Mutex::new(Vec::new()));
+        let corrupt_bg = Arc::clone(&corrupt);
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         std::thread::spawn(move || {
             loop {
-                match reader.next_batch() {
+                reader.set_skip_corrupt(skip_flag_bg.load(Ordering::Acquire));
+                let res = reader.next_batch();
+                let drained = reader.drain_corrupt();
+                if !drained.is_empty()
+                    && let Ok(mut guard) = corrupt_bg.lock()
+                {
+                    guard.extend(drained);
+                }
+                match res {
                     Ok(None) => break,
                     Ok(Some(batch)) => {
                         // A send error means the source was dropped (pipeline
@@ -96,6 +123,8 @@ impl FileSource {
             rx,
             schema,
             estimated_rows,
+            skip_corrupt: skip_flag,
+            corrupt,
         })
     }
 
@@ -135,5 +164,16 @@ impl Source for FileSource {
 
     fn estimated_rows(&self) -> Option<usize> {
         self.estimated_rows
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt.store(skip, Ordering::Release);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.corrupt
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
     }
 }

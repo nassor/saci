@@ -726,6 +726,8 @@ connection url="nats://localhost:4222" password="hunter2"
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
                 decrypt: None,
+                schema_evolution: None,
+                on_corrupt: None,
                 config: source_config,
             }],
             wasm: Vec::new(),
@@ -740,15 +742,18 @@ connection url="nats://localhost:4222" password="hunter2"
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
                 encrypt: None,
+                schema_evolution: None,
                 config: sink_config,
             }],
             links: vec![super::super::config::LinkSpec {
                 from: "orders-in".to_string(),
                 to: "settlements".to_string(),
                 branch: None,
+                schema_evolution: None,
             }],
             dlq: None,
             run: None,
+            schema_evolution: None,
         }
     }
 
@@ -770,6 +775,7 @@ connection url="nats://localhost:4222" password="hunter2"
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -791,6 +797,7 @@ connection url="nats://localhost:4222" password="hunter2"
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: HashMap::new(),
         }
     }
@@ -1096,6 +1103,8 @@ field "v" type="int64" nullable=#false
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
                 decrypt: None,
+                schema_evolution: None,
+                on_corrupt: None,
                 config: default_config_value(),
             }],
             wasm: Vec::new(),
@@ -1110,15 +1119,18 @@ field "v" type="int64" nullable=#false
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
                 encrypt: None,
+                schema_evolution: None,
                 config: cfg("name \"bridge\""),
             }],
             links: vec![super::super::config::LinkSpec {
                 from: "orders_in".to_string(),
                 to: "bridge_out".to_string(),
                 branch: None,
+                schema_evolution: None,
             }],
             dlq: None,
             run: None,
+            schema_evolution: None,
         };
         let consumer = WorkflowSpec {
             id: "consumer".to_string(),
@@ -1135,6 +1147,8 @@ field "v" type="int64" nullable=#false
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
                 decrypt: None,
+                schema_evolution: None,
+                on_corrupt: None,
                 config: cfg("name \"bridge\""),
             }],
             wasm: Vec::new(),
@@ -1149,15 +1163,18 @@ field "v" type="int64" nullable=#false
                 component: "Order".to_string(),
                 retry: RetryConfig::default(),
                 encrypt: None,
+                schema_evolution: None,
                 config: default_config_value(),
             }],
             links: vec![super::super::config::LinkSpec {
                 from: "bridge_in".to_string(),
                 to: "orders_out".to_string(),
                 branch: None,
+                schema_evolution: None,
             }],
             dlq: None,
             run: None,
+            schema_evolution: None,
         };
         let config = service_config_many(vec![producer, consumer]);
 

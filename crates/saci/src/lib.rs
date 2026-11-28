@@ -95,7 +95,9 @@ pub use row::Row;
 #[cfg(feature = "derive")]
 pub use saci_macros::Component;
 pub use scheduler::{PipelineConfig, Scheduler};
-pub use schema::SchemaRegistry;
+pub use schema::{
+    EvolutionPolicy, SchemaRegistry, can_widen_type, check_schema_compatibility, evolve_batch,
+};
 pub use system::{
     FieldRef, ParallelSystem, SliceWriteSet, System, SystemMeta, WriteSet, parallel_fn, system_fn,
 };
@@ -195,11 +197,12 @@ pub mod service;
 pub mod prelude {
     pub use crate::column::ComponentView;
     pub use crate::operators::{
-        AggregateOp, AggregateSpec, BinaryOp, BranchPayloads, BranchRule, DeduplicateState,
-        DeduplicateSystem, Expr, FilterSystem, GroupBySystem, IntervalJoinState,
-        IntervalJoinSystem, JoinKey, JoinKind, JoinSystem, KeepPolicy, LookupJoinState,
-        LookupJoinSystem, ProjectItem, ProjectSystem, RouteMode, RouteSystem, ScalarFunc,
-        ScalarValue, SortKey, SortSystem, SqlSystem, TopNSystem, UnaryOp, UnnestSystem,
+        AggregateOp, AggregateSpec, BinaryOp, BranchPayloads, BranchRule, DataQualityState,
+        DataQualitySystem, DeduplicateState, DeduplicateSystem, Expr, FilterSystem, GroupBySystem,
+        IntervalJoinState, IntervalJoinSystem, JoinKey, JoinKind, JoinSystem, KeepPolicy,
+        LookupJoinState, LookupJoinSystem, ProjectItem, ProjectSystem, QualityFailureAction,
+        QualityRule, QualitySplit, RouteMode, RouteSystem, ScalarFunc, ScalarValue, SortKey,
+        SortSystem, SqlSystem, TopNSystem, UnaryOp, UnnestSystem,
     };
     #[cfg(feature = "windows")]
     pub use crate::operators::{WindowAggregateState, WindowAggregateSystem, WindowColumns};

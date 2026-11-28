@@ -164,7 +164,10 @@ pub async fn serve(
     // supervisors. Updated dynamically when config reloads.
     let alerts =
         AlertDispatcher::new_live(config.alerts.clone(), config.node.label(), config.node.id);
-    let builder = builder.alerts(alerts.clone());
+    let lineage = Arc::new(crate::service::lineage::LineageDispatcher::new(
+        &config, None,
+    ));
+    let builder = builder.alerts(alerts.clone()).lineage(lineage.clone());
 
     // One shared half per declared queue, built before the workflows so the
     // runner and the control plane are two views of the same state.
@@ -188,6 +191,7 @@ pub async fn serve(
         built.push(factory.build(workflow)?);
     }
     factory.publish_topology(&config, &built);
+    factory.publish_lineage(&config, &built);
 
     let coord = ShutdownCoordinator::new(SHUTDOWN_BUDGET);
     let coord_root = coord.root();
@@ -266,6 +270,7 @@ pub async fn serve(
         } else {
             (!dlq_registry.is_empty()).then_some(dlq_registry.clone())
         },
+        lineage: Some(lineage.clone()),
     };
 
     let watchdog_handle = spawn_watchdog(state.clone(), coord.child());
@@ -356,6 +361,7 @@ pub async fn serve(
                     lifecycle,
                     dlq_registry,
                     alerts,
+                    lineage,
                     coord_root,
                     runner_config_path,
                     &mut reload_rx,
@@ -364,6 +370,7 @@ pub async fn serve(
             }
             #[cfg(feature = "service-cluster")]
             ServiceMode::Cluster { .. } => {
+                drop(lineage);
                 let (b, cancel_child, _channels) = items
                     .into_iter()
                     .next()
@@ -388,6 +395,7 @@ pub async fn serve(
                 drop(lifecycle);
                 drop(dlq_registry);
                 drop(alerts);
+                drop(lineage);
                 drop(coord_root);
                 drop(runner_config_path);
                 let _ = &mut reload_rx;
@@ -663,6 +671,7 @@ async fn apply_reload<'a>(
     lifecycle: &Option<Arc<LifecycleRegistry>>,
     dlq_registry: &Arc<DlqRegistry>,
     alerts: &AlertDispatcher,
+    lineage: &Arc<crate::service::lineage::LineageDispatcher>,
     coord_root: &CancellationToken,
 ) -> Result<ReloadReport, String> {
     let raw_kdl = match kdl {
@@ -886,6 +895,7 @@ async fn apply_reload<'a>(
     }
 
     alerts.update_config(&new_config.alerts);
+    lineage.update_config(&new_config, None);
 
     let topology_version = if let Some(inspector) = factory.borrow().inspector() {
         let existing = inspector.topology();
@@ -941,6 +951,7 @@ async fn run_standalone_with_reload<'a>(
     lifecycle: Option<Arc<LifecycleRegistry>>,
     dlq_registry: Arc<DlqRegistry>,
     alerts: AlertDispatcher,
+    lineage: Arc<crate::service::lineage::LineageDispatcher>,
     coord_root: CancellationToken,
     config_path: Option<PathBuf>,
     reload_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReloadEnvelope>,
@@ -1015,6 +1026,7 @@ async fn run_standalone_with_reload<'a>(
                     &lifecycle,
                     &dlq_registry,
                     &alerts,
+                    &lineage,
                     &coord_root,
                 )
                 .await;
@@ -1032,6 +1044,7 @@ async fn run_standalone_with_reload<'a>(
                     &lifecycle,
                     &dlq_registry,
                     &alerts,
+                    &lineage,
                     &coord_root,
                 )
                 .await {

@@ -151,4 +151,12 @@ impl<S: Source> Source for DecryptingSource<S> {
     async fn finish(&mut self) -> Result<(), SaciError> {
         self.inner.finish().await
     }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.inner.set_skip_corrupt(skip);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<crate::io::CorruptRecord> {
+        self.inner.drain_corrupt()
+    }
 }

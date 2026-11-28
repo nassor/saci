@@ -273,6 +273,7 @@ mod tests {
                     from: s.id.clone(),
                     to: k.id.clone(),
                     branch: None,
+                    schema_evolution: None,
                 })
             })
             .collect();
@@ -289,6 +290,7 @@ mod tests {
             links,
             dlq: None,
             run: None,
+            schema_evolution: None,
         }
     }
 
@@ -310,6 +312,7 @@ mod tests {
             observability: ObservabilityConfig::default(),
             encryption: None,
             alerts: Default::default(),
+            lineage: Default::default(),
             variables: std::collections::HashMap::new(),
         }
     }
@@ -339,6 +342,7 @@ mod tests {
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
                 encrypt: None,
+                schema_evolution: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
         );
@@ -364,6 +368,8 @@ mod tests {
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
                 decrypt: None,
+                schema_evolution: None,
+                on_corrupt: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
             vec![],
@@ -393,6 +399,7 @@ mod tests {
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
                 encrypt: None,
+                schema_evolution: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
         );
@@ -437,6 +444,8 @@ mod tests {
                 component: "orders".to_string(),
                 retry: RetryConfig::default(),
                 decrypt: None,
+                schema_evolution: None,
+                on_corrupt: None,
                 config: ConfigValue::Object(ConfigMap::new()),
             }],
             vec![],

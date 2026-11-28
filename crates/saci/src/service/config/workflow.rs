@@ -13,9 +13,81 @@ use super::window::WindowConfig;
 use crate::config::{ConfigMap, ConfigValue, one_or_many};
 use crate::connector::{parse_fields, schema_of};
 use crate::error::{SaciError, SaciResult};
+use crate::schema::EvolutionPolicy;
 use crate::service::dlq::DlqConfig;
 use crate::service::flow::FlowControlConfig;
 use crate::service::heal::HealConfig;
+
+/// What a source does with a malformed record when the codec isolates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorruptRecordPolicy {
+    /// Abort the batch / fail the source poll (default).
+    #[default]
+    Fail,
+    /// Log a warning, drop the malformed record, and continue with valid rows.
+    Drop,
+    /// Route the malformed record to the workflow's `dlq` store while valid rows proceed.
+    Dlq,
+}
+
+impl CorruptRecordPolicy {
+    /// Canonical lowercase string representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+            Self::Drop => "drop",
+            Self::Dlq => "dlq",
+        }
+    }
+}
+
+/// Declarative schema evolution policy in KDL (`schema_evolution "compatible"` or
+/// `schema_evolution add_nullable_columns=#true drop_extra_columns=#true widen_types=#false`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SchemaEvolutionConfig(pub EvolutionPolicy);
+
+impl SchemaEvolutionConfig {
+    /// Returns the underlying [`EvolutionPolicy`].
+    #[must_use]
+    pub const fn policy(self) -> EvolutionPolicy {
+        self.0
+    }
+}
+
+impl From<EvolutionPolicy> for SchemaEvolutionConfig {
+    fn from(policy: EvolutionPolicy) -> Self {
+        Self(policy)
+    }
+}
+
+impl Serialize for SchemaEvolutionConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Some(name) = self.0.preset_name() {
+            serializer.serialize_str(name)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaEvolutionConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Name(String),
+            Policy(EvolutionPolicy),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Name(name) => EvolutionPolicy::from_name(&name)
+                .map(Self)
+                .map_err(serde::de::Error::custom),
+            Raw::Policy(policy) => Ok(Self(policy)),
+        }
+    }
+}
 
 /// A declared byte-format instance: a name a source or sink's `codec`
 /// key can reference.
@@ -100,6 +172,12 @@ pub struct SourceSpec {
     /// Optional field-level or whole-payload decryption on incoming batches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decrypt: Option<NodeCryptoConfig>,
+    /// Optional schema evolution policy when this source heals or feeds downstream links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_evolution: Option<SchemaEvolutionConfig>,
+    /// Policy for malformed records encountered by message/stream decoders (`fail`, `drop`, `dlq`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_corrupt: Option<CorruptRecordPolicy>,
     /// Opaque per-source configuration.
     #[serde(
         default = "default_config",
@@ -129,6 +207,8 @@ impl SourceSpec {
             heal: None,
             flow_control: None,
             decrypt: None,
+            schema_evolution: None,
+            on_corrupt: None,
             config: default_config(),
         }
     }
@@ -168,6 +248,9 @@ pub struct SinkSpec {
     /// Optional field-level or whole-payload encryption before writing to the sink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypt: Option<NodeCryptoConfig>,
+    /// Optional schema evolution policy when this sink heals or receives upstream batches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_evolution: Option<SchemaEvolutionConfig>,
     /// Opaque per-sink configuration.
     #[serde(
         default = "default_config",
@@ -195,6 +278,7 @@ impl SinkSpec {
             retry: RetryConfig::default(),
             heal: None,
             encrypt: None,
+            schema_evolution: None,
             config: default_config(),
         }
     }
@@ -217,6 +301,10 @@ pub struct LinkSpec {
     /// legacy multicast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Optional schema evolution override for this link (`strict`, `compatible`,
+    /// `additive`, `widen`, or explicit flags).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_evolution: Option<SchemaEvolutionConfig>,
 }
 
 impl LinkSpec {
@@ -228,6 +316,7 @@ impl LinkSpec {
             from: from.into(),
             to: to.into(),
             branch: None,
+            schema_evolution: None,
         }
     }
 }
@@ -378,6 +467,10 @@ pub struct WorkflowSpec {
     /// refuses a per-workflow `run` node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunMode>,
+    /// Workflow-wide schema evolution default for links and healing connectors.
+    /// Defaults to `"strict"` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_evolution: Option<SchemaEvolutionConfig>,
 }
 
 impl WorkflowSpec {
@@ -400,6 +493,7 @@ impl WorkflowSpec {
             links: Vec::new(),
             dlq: None,
             run: None,
+            schema_evolution: None,
         }
     }
 }
@@ -1351,6 +1445,7 @@ workflow "w" {
                 from: "validate".to_string(),
                 to: "settle".to_string(),
                 branch: None,
+                schema_evolution: None,
             }]
         );
         cfg.validate().expect("two linked processors are valid");

@@ -82,6 +82,14 @@ impl<S: Source + 'static> Source for RetryingSource<S> {
         log_recovered("source", &self.what, retries);
         Ok(())
     }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.inner.set_skip_corrupt(skip);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<crate::io::CorruptRecord> {
+        self.inner.drain_corrupt()
+    }
 }
 
 /// A [`Sink`] that retries failed [`write_batch`](Sink::write_batch) and

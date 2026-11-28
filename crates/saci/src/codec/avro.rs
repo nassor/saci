@@ -52,5 +52,10 @@
 #![deny(missing_docs)]
 
 mod codec;
+pub mod registry;
 
 pub use codec::{AvroCodec, AvroCodecFactory, AvroCompression};
+pub use registry::{
+    CompatibilityMode, RegistryAuth, SchemaRegistryConfig, SchemaRegistryKind,
+    check_avro_compatibility,
+};

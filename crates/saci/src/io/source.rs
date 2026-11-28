@@ -15,6 +15,18 @@ use async_trait::async_trait;
 
 use crate::error::SaciError;
 
+/// One malformed or unparseable source record isolated by a decoder or reader
+/// when corrupt-record recovery (`set_skip_corrupt(true)`) is enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorruptRecord {
+    /// Byte format that rejected the record (for example `"ndjson"`, `"csv"`, or `"avro"`).
+    pub format: &'static str,
+    /// Raw bytes of the malformed line or message payload.
+    pub payload: Vec<u8>,
+    /// Parser/codec error explaining why the record was rejected.
+    pub error: String,
+}
+
 /// Pull-based batch source for Arrow data.
 ///
 /// Each call to [`next_batch`](Self::next_batch) yields the next
@@ -60,6 +72,15 @@ pub trait Source: Send + Sync {
     async fn finish(&mut self) -> Result<(), SaciError> {
         Ok(())
     }
+
+    /// Enable or disable per-record corrupt-input recovery when supported by
+    /// the underlying source/codec.
+    fn set_skip_corrupt(&mut self, _skip: bool) {}
+
+    /// Drain malformed source records isolated since the previous call.
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        Vec::new()
+    }
 }
 
 /// Delegating impl so a boxed source can be wrapped like a concrete one.
@@ -83,5 +104,13 @@ impl<S: Source + ?Sized> Source for Box<S> {
 
     async fn finish(&mut self) -> Result<(), SaciError> {
         (**self).finish().await
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        (**self).set_skip_corrupt(skip);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        (**self).drain_corrupt()
     }
 }

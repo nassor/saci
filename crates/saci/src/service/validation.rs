@@ -16,7 +16,8 @@ use std::collections::HashSet;
 
 use crate::SaciResult;
 use crate::error::SaciError;
-use arrow_schema::Fields;
+use crate::schema::{EvolutionPolicy, check_schema_compatibility};
+use arrow_schema::{Fields, Schema};
 
 use crate::dataset::Dataset;
 
@@ -107,9 +108,10 @@ pub fn validate_workflow_graph(workflow_id: &str, nodes: &[BuiltNode]) -> SaciRe
     }
 
     for (i, node) in nodes.iter().enumerate() {
-        for edge in &node.downstream {
+        for (edge_idx, edge) in node.downstream.iter().enumerate() {
             let d = edge.node;
-            validate_edge(workflow_id, nodes, &declared, &templates, i, d)?;
+            let evolution = node.edge_evolution(edge_idx);
+            validate_edge(workflow_id, nodes, &declared, &templates, i, d, evolution)?;
         }
     }
 
@@ -258,6 +260,22 @@ fn output_fields_of(dataset: &Dataset, component: &str) -> Option<Fields> {
     dataset.output_schema(component).map(|s| s.fields().clone())
 }
 
+fn schemas_agree(
+    upstream: &Fields,
+    downstream: &Fields,
+    evolution: EvolutionPolicy,
+) -> Result<(), String> {
+    if upstream == downstream {
+        return Ok(());
+    }
+    if evolution.is_strict() {
+        return Err(String::new());
+    }
+    let up = Schema::new(upstream.to_vec());
+    let down = Schema::new(downstream.to_vec());
+    check_schema_compatibility(&up, &down, evolution).map_err(|e| e.message())
+}
+
 fn validate_edge(
     workflow_id: &str,
     nodes: &[BuiltNode],
@@ -265,6 +283,7 @@ fn validate_edge(
     templates: &[Option<Dataset>],
     from: usize,
     to: usize,
+    evolution: EvolutionPolicy,
 ) -> SaciResult<()> {
     let from_node = &nodes[from];
     let to_node = &nodes[to];
@@ -287,20 +306,33 @@ fn validate_edge(
             }
             let proc_template = templates[to].as_ref().expect("processor node");
             if let Some(proc_fields) = fields_of(proc_template, component)
-                && source.schema().fields() != &proc_fields
+                && let Err(reason) =
+                    schemas_agree(source.schema().fields(), &proc_fields, evolution)
             {
+                let suffix = if reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({reason})")
+                };
                 return Err(SaciError::configuration(format!(
                     "workflow '{workflow_id}': link '{}' -> '{}': component '{component}' \
-                     schema differs between source '{}' and processor '{}'",
+                     schema differs between source '{}' and processor '{}'{suffix}",
                     from_node.id, to_node.id, from_node.id, to_node.id
                 )));
             }
         }
         (BuiltNodeKind::Source(source), BuiltNodeKind::Sink(sink)) => {
-            if source.schema().fields() != sink.schema().fields() {
+            if let Err(reason) =
+                schemas_agree(source.schema().fields(), sink.schema().fields(), evolution)
+            {
+                let suffix = if reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({reason})")
+                };
                 return Err(SaciError::configuration(format!(
                     "workflow '{workflow_id}': link '{}' -> '{}': source and sink schemas \
-                     differ; a source-to-sink link has no processor to reconcile them",
+                     differ; a source-to-sink link has no processor to reconcile them{suffix}",
                     from_node.id, to_node.id
                 )));
             }
@@ -329,12 +361,30 @@ fn validate_edge(
                 }
                 let up_fields = output_fields_of(up_template, component);
                 let down_fields = fields_of(down_template, component);
-                if up_fields != down_fields {
-                    return Err(SaciError::configuration(format!(
-                        "workflow '{workflow_id}': link '{}' -> '{}': component '{component}' \
-                         schema differs between processor '{}' and processor '{}'",
-                        from_node.id, to_node.id, from_node.id, to_node.id
-                    )));
+                match (up_fields, down_fields) {
+                    (Some(u), Some(d)) => {
+                        if let Err(reason) = schemas_agree(&u, &d, evolution) {
+                            let suffix = if reason.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({reason})")
+                            };
+                            return Err(SaciError::configuration(format!(
+                                "workflow '{workflow_id}': link '{}' -> '{}': component \
+                                 '{component}' schema differs between processor '{}' and \
+                                 processor '{}'{suffix}",
+                                from_node.id, to_node.id, from_node.id, to_node.id
+                            )));
+                        }
+                    }
+                    (None, None) => {}
+                    _ => {
+                        return Err(SaciError::configuration(format!(
+                            "workflow '{workflow_id}': link '{}' -> '{}': component '{component}' \
+                             schema differs between processor '{}' and processor '{}'",
+                            from_node.id, to_node.id, from_node.id, to_node.id
+                        )));
+                    }
                 }
             }
         }
@@ -355,11 +405,16 @@ fn validate_edge(
             }
             let up_template = templates[from].as_ref().expect("processor node");
             if let Some(up_fields) = output_fields_of(up_template, component)
-                && sink.schema().fields() != &up_fields
+                && let Err(reason) = schemas_agree(&up_fields, sink.schema().fields(), evolution)
             {
+                let suffix = if reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({reason})")
+                };
                 return Err(SaciError::configuration(format!(
                     "workflow '{workflow_id}': link '{}' -> '{}': component '{component}' \
-                     schema differs between processor '{}' and sink '{}'",
+                     schema differs between processor '{}' and sink '{}'{suffix}",
                     from_node.id, to_node.id, from_node.id, to_node.id
                 )));
             }
@@ -1090,5 +1145,36 @@ mod tests {
             err.message().contains("--features crypto"),
             "expected --features crypto hint, got: {err}"
         );
+    }
+
+    #[cfg(feature = "connector-channel")]
+    #[test]
+    fn schema_evolution_compatible_allows_added_nullable_and_widened_columns() {
+        let wide_src_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let evolved_sink_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+
+        let mut strict_src = source_node("in", "Order", wide_src_schema.clone());
+        strict_src.downstream.push(BuiltEdge {
+            node: 1,
+            branch: None,
+        });
+        let strict_sink = sink_node("out", "Order", evolved_sink_schema.clone());
+        assert!(
+            validate_workflow_graph("w", &[strict_src, strict_sink]).is_err(),
+            "strict evolution must reject mismatched schemas"
+        );
+
+        let mut compat_src = source_node("in", "Order", wide_src_schema);
+        compat_src.downstream.push(BuiltEdge {
+            node: 1,
+            branch: None,
+        });
+        compat_src.edge_evolutions = vec![crate::schema::EvolutionPolicy::compatible()];
+        let compat_sink = sink_node("out", "Order", evolved_sink_schema);
+        validate_workflow_graph("w", &[compat_src, compat_sink])
+            .expect("compatible evolution allows widening Int32->Int64 and adding nullable column");
     }
 }

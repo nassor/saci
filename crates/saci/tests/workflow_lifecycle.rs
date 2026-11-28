@@ -304,6 +304,7 @@ impl Harness {
             inspector: None,
             lifecycle: config.http.control.then_some(registry),
             dlq: None,
+            lineage: None,
         };
 
         let cancel = CancellationToken::new();

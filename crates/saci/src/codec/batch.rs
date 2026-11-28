@@ -10,6 +10,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
 use crate::error::SaciError;
+pub use crate::io::CorruptRecord;
 
 /// Pull batches out of a byte stream. Runs on a blocking thread, so it is
 /// synchronous: the connector owns the async plumbing.
@@ -28,6 +29,15 @@ pub trait BatchReader: Send {
     /// Estimated total rows, when the format records one.
     fn estimated_rows(&self) -> Option<usize> {
         None
+    }
+
+    /// Enable or disable isolation of malformed records instead of failing
+    /// the whole batch.
+    fn set_skip_corrupt(&mut self, _skip: bool) {}
+
+    /// Drain malformed records isolated while `set_skip_corrupt(true)` was set.
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        Vec::new()
     }
 }
 

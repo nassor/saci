@@ -36,6 +36,7 @@ pub mod message;
 pub mod registry;
 
 pub use crate::config::{ConfigMap, ConfigValue, from_kdl_str, one_or_many};
+pub use crate::io::CorruptRecord;
 pub use batch::{BatchReader, BatchWriter};
 pub use contract::{Codec, unsupported};
 pub use message::{MessageDecoder, MessageShape};

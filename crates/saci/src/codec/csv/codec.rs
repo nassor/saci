@@ -1,6 +1,6 @@
 //! [`CsvCodec`]: the `csv` format, both surfaces.
 
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -10,8 +10,8 @@ use arrow_select::concat::concat_batches;
 
 use crate::codec::registry::reject_unknown_options;
 use crate::codec::{
-    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, MessageDecoder, MessageShape,
-    ReadInput,
+    BatchReader, BatchWriter, Codec, CodecFactory, ConfigValue, CorruptRecord, MessageDecoder,
+    MessageShape, ReadInput,
 };
 use crate::error::SaciError;
 
@@ -70,12 +70,13 @@ impl Codec for CsvCodec {
         let schema = declared.ok_or_else(|| {
             SaciError::configuration("csv: reading needs a declared schema; add 'field' entries")
         })?;
-        // `build` wraps the handle in its own `BufReader`.
-        let reader = ReaderBuilder::new(Arc::clone(&schema))
-            .with_header(self.has_headers)
-            .build(input)
-            .map_err(|e| SaciError::generic(format!("csv: reader build failed: {e}")))?;
-        Ok(Box::new(CsvBatchReader { reader, schema }))
+        Ok(Box::new(CsvBatchReader {
+            state: Some(CsvReaderState::Unstarted(input)),
+            schema,
+            has_headers: self.has_headers,
+            skip_corrupt: false,
+            corrupt: Vec::new(),
+        }))
     }
 
     fn open_writer(
@@ -109,6 +110,8 @@ impl Codec for CsvCodec {
             decoder,
             schema,
             pending: Vec::new(),
+            skip_corrupt: false,
+            corrupt: Vec::new(),
         }))
     }
 
@@ -173,9 +176,131 @@ impl CodecFactory for CsvCodecFactory {
     }
 }
 
+enum CsvReaderState {
+    Unstarted(ReadInput),
+    Fast(Box<arrow_csv::Reader<ReadInput>>),
+    SafeLines {
+        reader: BufReader<ReadInput>,
+        header_pending: bool,
+        eof: bool,
+    },
+}
+
 struct CsvBatchReader {
-    reader: arrow_csv::Reader<ReadInput>,
+    state: Option<CsvReaderState>,
     schema: Arc<Schema>,
+    has_headers: bool,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
+}
+
+impl CsvBatchReader {
+    fn decode_csv_bytes(&self, bytes: &[u8]) -> Result<Option<RecordBatch>, SaciError> {
+        let mut decoder = ReaderBuilder::new(Arc::clone(&self.schema))
+            .with_header(false)
+            .build_decoder();
+        let mut rem = bytes;
+        while !rem.is_empty() {
+            let read = decoder
+                .decode(rem)
+                .map_err(|e| SaciError::generic(format!("csv: decode: {e}")))?;
+            if read == 0 {
+                return Err(SaciError::generic("csv: incomplete CSV record"));
+            }
+            rem = &rem[read..];
+        }
+        decoder
+            .flush()
+            .map_err(|e| SaciError::generic(format!("csv: flush: {e}")))
+    }
+
+    fn next_safe_batch(
+        &mut self,
+        reader: &mut BufReader<ReadInput>,
+        header_pending: &mut bool,
+        eof: &mut bool,
+    ) -> Result<Option<RecordBatch>, SaciError> {
+        if *eof {
+            return Ok(None);
+        }
+        if *header_pending {
+            *header_pending = false;
+            let mut hdr = Vec::new();
+            let n = reader
+                .read_until(b'\n', &mut hdr)
+                .map_err(|e| SaciError::generic(format!("csv: read error: {e}")))?;
+            if n == 0 {
+                *eof = true;
+                return Ok(None);
+            }
+        }
+        let mut valid_batches = Vec::new();
+        let mut collected_rows = 0usize;
+        while collected_rows < 1024 && !*eof {
+            let mut lines: Vec<Vec<u8>> = Vec::with_capacity(64);
+            let mut joined = Vec::new();
+            for _ in 0..64 {
+                let mut raw = Vec::new();
+                let n = reader
+                    .read_until(b'\n', &mut raw)
+                    .map_err(|e| SaciError::generic(format!("csv: read error: {e}")))?;
+                if n == 0 {
+                    *eof = true;
+                    break;
+                }
+                while matches!(raw.last(), Some(b'\n' | b'\r')) {
+                    raw.pop();
+                }
+                if raw.is_empty() {
+                    continue;
+                }
+                joined.extend_from_slice(&raw);
+                joined.push(b'\n');
+                lines.push(raw);
+            }
+            if lines.is_empty() {
+                break;
+            }
+            if let Ok(maybe_batch) = self.decode_csv_bytes(&joined) {
+                if let Some(batch) = maybe_batch
+                    && batch.num_rows() > 0
+                {
+                    collected_rows += batch.num_rows();
+                    valid_batches.push(batch);
+                }
+            } else {
+                for line in lines {
+                    let mut one = Vec::with_capacity(line.len() + 1);
+                    one.extend_from_slice(&line);
+                    one.push(b'\n');
+                    match self.decode_csv_bytes(&one) {
+                        Ok(Some(batch)) if batch.num_rows() > 0 => {
+                            collected_rows += batch.num_rows();
+                            valid_batches.push(batch);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            self.corrupt.push(CorruptRecord {
+                                format: "csv",
+                                payload: line,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if valid_batches.is_empty() {
+            Ok(None)
+        } else if valid_batches.len() == 1 {
+            Ok(valid_batches.pop())
+        } else {
+            let merged = concat_batches(&self.schema, &valid_batches)
+                .map_err(|e| SaciError::generic(format!("csv: concatenating batches: {e}")))?;
+            Ok(Some(merged))
+        }
+    }
 }
 
 impl BatchReader for CsvBatchReader {
@@ -183,12 +308,50 @@ impl BatchReader for CsvBatchReader {
         Arc::clone(&self.schema)
     }
 
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        std::mem::take(&mut self.corrupt)
+    }
+
     fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
-        match self.reader.next() {
-            None => Ok(None),
-            Some(Ok(batch)) => Ok(Some(batch)),
-            Some(Err(e)) => Err(SaciError::generic(format!("csv: read error: {e}"))),
+        if let Some(CsvReaderState::Unstarted(_)) = &self.state {
+            let Some(CsvReaderState::Unstarted(input)) = self.state.take() else {
+                unreachable!()
+            };
+            if self.skip_corrupt {
+                self.state = Some(CsvReaderState::SafeLines {
+                    reader: BufReader::new(input),
+                    header_pending: self.has_headers,
+                    eof: false,
+                });
+            } else {
+                let reader = ReaderBuilder::new(Arc::clone(&self.schema))
+                    .with_header(self.has_headers)
+                    .build(input)
+                    .map_err(|e| SaciError::generic(format!("csv: reader build failed: {e}")))?;
+                self.state = Some(CsvReaderState::Fast(Box::new(reader)));
+            }
         }
+
+        let mut state = self.state.take();
+        let res = match state.as_mut() {
+            Some(CsvReaderState::Fast(reader)) => match reader.next() {
+                None => Ok(None),
+                Some(Ok(batch)) => Ok(Some(batch)),
+                Some(Err(e)) => Err(SaciError::generic(format!("csv: read error: {e}"))),
+            },
+            Some(CsvReaderState::SafeLines {
+                reader,
+                header_pending,
+                eof,
+            }) => self.next_safe_batch(reader, header_pending, eof),
+            _ => Ok(None),
+        };
+        self.state = state;
+        res
     }
 }
 
@@ -231,6 +394,8 @@ struct CsvMessageDecoder {
     decoder: arrow_csv::reader::Decoder,
     schema: Arc<Schema>,
     pending: Vec<RecordBatch>,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
 }
 
 impl CsvMessageDecoder {
@@ -249,6 +414,14 @@ impl CsvMessageDecoder {
 }
 
 impl MessageDecoder for CsvMessageDecoder {
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        std::mem::take(&mut self.corrupt)
+    }
+
     fn push(&mut self, payload: &[u8]) -> Result<(), SaciError> {
         // A record is complete only once the decoder sees its terminator, and a
         // payload carries none of its own. A producer that left one on is
@@ -257,7 +430,48 @@ impl MessageDecoder for CsvMessageDecoder {
         let body = payload.strip_suffix(b"\n").unwrap_or(payload);
         let body = body.strip_suffix(b"\r").unwrap_or(body);
         if body.is_empty() {
+            if self.skip_corrupt {
+                self.corrupt.push(CorruptRecord {
+                    format: "csv",
+                    payload: payload.to_vec(),
+                    error: "csv: empty payload".to_string(),
+                });
+                return Ok(());
+            }
             return Err(SaciError::generic("csv: empty payload"));
+        }
+        if self.skip_corrupt {
+            let decode_one = || -> Result<Option<RecordBatch>, SaciError> {
+                let mut iso = ReaderBuilder::new(Arc::clone(&self.schema))
+                    .with_header(false)
+                    .build_decoder();
+                for chunk in [body, b"\n".as_slice()] {
+                    let mut remaining = chunk;
+                    while !remaining.is_empty() {
+                        let read = iso
+                            .decode(remaining)
+                            .map_err(|e| SaciError::generic(format!("csv: decode: {e}")))?;
+                        if read == 0 {
+                            return Err(SaciError::generic(
+                                "csv: payload is not a complete record",
+                            ));
+                        }
+                        remaining = &remaining[read..];
+                    }
+                }
+                iso.flush()
+                    .map_err(|e| SaciError::generic(format!("csv: flush: {e}")))
+            };
+            match decode_one() {
+                Ok(Some(batch)) if batch.num_rows() > 0 => self.pending.push(batch),
+                Ok(_) => {}
+                Err(e) => self.corrupt.push(CorruptRecord {
+                    format: "csv",
+                    payload: payload.to_vec(),
+                    error: e.to_string(),
+                }),
+            }
+            return Ok(());
         }
         for chunk in [body, b"\n".as_slice()] {
             let mut remaining = chunk;
@@ -637,5 +851,35 @@ mod tests {
             .expect("int column");
         assert_eq!(ids.value(0), 0);
         assert_eq!(ids.value(1029), 1029);
+    }
+
+    #[test]
+    fn skip_corrupt_isolates_malformed_csv_lines_and_messages() {
+        let f = write_csv(true, &["1,1.5", "bad_int,2.5", "2", "3,3.5"]);
+        let mut reader = CsvCodec::new()
+            .open_reader(f.reopen().expect("reopen").into(), Some(schema()))
+            .expect("reader opens");
+        reader.set_skip_corrupt(true);
+
+        let mut rows = 0usize;
+        while let Some(batch) = reader.next_batch().expect("read continues") {
+            rows += batch.num_rows();
+        }
+        assert_eq!(rows, 2);
+        let corrupt = reader.drain_corrupt();
+        assert_eq!(corrupt.len(), 2);
+        assert_eq!(corrupt[0].format, "csv");
+        assert_eq!(corrupt[0].payload, b"bad_int,2.5");
+
+        let mut decoder = CsvCodec::new()
+            .open_message_decoder(schema())
+            .expect("decoder");
+        decoder.set_skip_corrupt(true);
+        decoder.push(b"10,1.0").expect("ok");
+        decoder.push(b"bad_row").expect("isolated");
+        decoder.push(b"20,2.0").expect("ok");
+        let batch = decoder.flush().expect("flush").expect("2 valid rows");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(decoder.drain_corrupt().len(), 1);
     }
 }

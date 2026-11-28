@@ -170,8 +170,13 @@ pub(crate) async fn run(
         inspector,
         dlq,
         flow,
+        lineage,
         ..
     } = built;
+    let lineage_run_id = format!("{workflow_id}-{:016x}", rand::random::<u64>());
+    if let Some(l) = &lineage {
+        l.emit_start(&workflow_id, &lineage_run_id);
+    }
     let mut dlq = dlq;
     let inspector = inspector.as_ref();
     let n = nodes.len();
@@ -204,7 +209,18 @@ pub(crate) async fn run(
         #[cfg(feature = "windows")]
         mut trackers,
         mut staged,
+        edge_evolutions,
+        sink_schemas,
+        on_corrupt,
     } = nodes;
+
+    for (i, policy) in on_corrupt.iter().enumerate() {
+        if *policy != crate::service::config::CorruptRecordPolicy::Fail
+            && let Some(src) = sources[i].as_mut()
+        {
+            src.set_skip_corrupt(true);
+        }
+    }
     // One WIT checkpoint blob per processor node, fed back as `prior` on the
     // next item for that same node: every processor keeps its own.
     let mut prior: Vec<Option<Vec<u8>>> = vec![None; n];
@@ -466,6 +482,20 @@ pub(crate) async fn run(
 
         let batch = match next {
             Ok(None) => {
+                if let Some(source) = sources[source_index].as_mut() {
+                    let corrupt = source.drain_corrupt();
+                    if !corrupt.is_empty()
+                        && on_corrupt[source_index]
+                            == crate::service::config::CorruptRecordPolicy::Dlq
+                    {
+                        let component = components[source_index]
+                            .expect("the stream source declares a component");
+                        if let Some(q) = &mut dlq {
+                            q.record_corrupt(&ids[source_index], component, &corrupt, &mut stats)
+                                .await;
+                        }
+                    }
+                }
                 #[cfg(feature = "tracing")]
                 tracing::info!(
                     source = %ids[source_index],
@@ -475,7 +505,23 @@ pub(crate) async fn run(
                 remaining_sources -= 1;
                 continue;
             }
-            Ok(Some(batch)) => batch,
+            Ok(Some(batch)) => {
+                if let Some(source) = sources[source_index].as_mut() {
+                    let corrupt = source.drain_corrupt();
+                    if !corrupt.is_empty()
+                        && on_corrupt[source_index]
+                            == crate::service::config::CorruptRecordPolicy::Dlq
+                    {
+                        let component = components[source_index]
+                            .expect("the stream source declares a component");
+                        if let Some(q) = &mut dlq {
+                            q.record_corrupt(&ids[source_index], component, &corrupt, &mut stats)
+                                .await;
+                        }
+                    }
+                }
+                batch
+            }
             Err(_e) => {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
@@ -600,10 +646,12 @@ pub(crate) async fn run(
         fan_out_source(
             source_index,
             &downstream,
+            &edge_evolutions,
             component,
             &batch,
             &kinds,
             &mut datasets,
+            &sink_schemas,
             &mut staged,
             &ids,
             &mut stats,
@@ -715,9 +763,11 @@ pub(crate) async fn run(
                                 rows_out,
                                 metrics,
                                 &downstream,
+                                &edge_evolutions,
                                 &kinds,
                                 &components,
                                 &mut datasets,
+                                &sink_schemas,
                                 &mut staged,
                                 &ids,
                                 &mut stats,
@@ -836,6 +886,9 @@ pub(crate) async fn run(
         stats.iterations += 1;
         workflow_metrics.pass();
         stats.total_busy_micros += item_micros;
+        if let Some(l) = &lineage {
+            l.emit_pass(&workflow_id, &lineage_run_id, rows, stats.rows_processed);
+        }
 
         // Each sink's own backlog is published under its own id; the maximum
         // is what governs admission, because the whole consumer chain is one
@@ -943,6 +996,19 @@ pub(crate) async fn run(
     );
 
     log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
+
+    if let Some(l) = &lineage {
+        if cancel.is_cancelled() {
+            l.emit_abort(&workflow_id, &lineage_run_id);
+        } else {
+            l.emit_complete(
+                &workflow_id,
+                &lineage_run_id,
+                stats.rows_processed,
+                stats.rows_processed,
+            );
+        }
+    }
 
     Ok(stats)
 }

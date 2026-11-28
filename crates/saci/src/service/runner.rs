@@ -98,6 +98,12 @@ pub(super) struct Nodes {
     pub(super) trackers: Vec<Option<WindowTracker>>,
     /// The batches staged for each sink node since it last wrote.
     pub(super) staged: Vec<Vec<RecordBatch>>,
+    /// Per-outbound-edge schema evolution policy, parallel to [`downstream`](Self::downstream).
+    pub(super) edge_evolutions: Vec<Vec<crate::schema::EvolutionPolicy>>,
+    /// Expected input schema for each sink node (`None` for sources and processors).
+    pub(super) sink_schemas: Vec<Option<Arc<arrow_schema::Schema>>>,
+    /// Per-source corrupt-record handling policy (`Fail` for non-source nodes).
+    pub(super) on_corrupt: Vec<super::config::CorruptRecordPolicy>,
 }
 
 impl Nodes {
@@ -121,18 +127,26 @@ impl Nodes {
         let mut recovered: Vec<Option<Arc<AtomicBool>>> = Vec::with_capacity(n);
         #[cfg(feature = "windows")]
         let mut trackers: Vec<Option<WindowTracker>> = Vec::with_capacity(n);
+        let mut edge_evolutions: Vec<Vec<crate::schema::EvolutionPolicy>> = Vec::with_capacity(n);
+        let mut sink_schemas: Vec<Option<Arc<arrow_schema::Schema>>> = Vec::with_capacity(n);
+        let mut on_corrupt: Vec<super::config::CorruptRecordPolicy> = Vec::with_capacity(n);
 
         for node in nodes {
+            let node_edge_evolutions = (0..node.downstream.len())
+                .map(|idx| node.edge_evolution(idx))
+                .collect();
+            edge_evolutions.push(node_edge_evolutions);
             ids.push(node.id);
             components.push(node.component);
             downstream.push(node.downstream);
             recovered.push(node.heal_recovered);
+            on_corrupt.push(node.on_corrupt);
             #[cfg(feature = "windows")]
             trackers.push(node.window.map(WindowTracker::new));
 
-            let (kind, source, runtime, dataset, sink) = match node.kind {
+            let (kind, source, runtime, dataset, sink, sink_schema) = match node.kind {
                 BuiltNodeKind::Source(source) => {
-                    (NodeRunKind::Source, Some(source), None, None, None)
+                    (NodeRunKind::Source, Some(source), None, None, None, None)
                 }
                 BuiltNodeKind::Processor { runtime, .. } => {
                     let dataset = runtime.template_dataset();
@@ -142,11 +156,23 @@ impl Nodes {
                         Some(runtime),
                         Some(dataset),
                         None,
+                        None,
                     )
                 }
-                BuiltNodeKind::Sink(sink) => (NodeRunKind::Sink, None, None, None, Some(sink)),
+                BuiltNodeKind::Sink(sink) => {
+                    let schema = sink.schema();
+                    (
+                        NodeRunKind::Sink,
+                        None,
+                        None,
+                        None,
+                        Some(sink),
+                        Some(schema),
+                    )
+                }
             };
             kinds.push(kind);
+            sink_schemas.push(sink_schema);
             {
                 let id = ids.last().expect("just pushed");
                 let instruments = crate::metrics::instruments();
@@ -185,6 +211,9 @@ impl Nodes {
             #[cfg(feature = "windows")]
             trackers,
             staged: vec![Vec::new(); n],
+            edge_evolutions,
+            sink_schemas,
+            on_corrupt,
         }
     }
 }
@@ -238,10 +267,12 @@ pub(super) struct PassLog<'a> {
 pub(super) fn fan_out_source(
     from: usize,
     downstream: &[Vec<BuiltEdge>],
+    edge_evolutions: &[Vec<crate::schema::EvolutionPolicy>],
     component: &str,
     batch: &RecordBatch,
     kinds: &[NodeRunKind],
     datasets: &mut [Option<Dataset>],
+    sink_schemas: &[Option<Arc<arrow_schema::Schema>>],
     staged: &mut [Vec<RecordBatch>],
     ids: &[String],
     stats: &mut WorkflowStats,
@@ -249,14 +280,19 @@ pub(super) fn fan_out_source(
 ) {
     #[cfg(not(feature = "tracing"))]
     let _ = (ids, log);
-    for edge in &downstream[from] {
+    for (edge_idx, edge) in downstream[from].iter().enumerate() {
         let d = edge.node;
+        let policy = edge_evolutions
+            .get(from)
+            .and_then(|v| v.get(edge_idx))
+            .copied()
+            .unwrap_or_default();
         match kinds[d] {
             NodeRunKind::Processor => {
                 if let Err(_e) = datasets[d]
                     .as_mut()
                     .expect("processor node keeps its dataset")
-                    .append_record_batch(component, batch.clone())
+                    .append_record_batch_evolved(component, batch.clone(), policy)
                 {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
@@ -269,7 +305,28 @@ pub(super) fn fan_out_source(
                     stats.iteration_errors += 1;
                 }
             }
-            NodeRunKind::Sink => staged[d].push(batch.clone()),
+            NodeRunKind::Sink => {
+                if !policy.is_strict()
+                    && let Some(target_schema) = sink_schemas.get(d).and_then(|s| s.as_ref())
+                {
+                    match crate::schema::evolve_batch(batch, target_schema, policy) {
+                        Ok(adapted) => staged[d].push(adapted),
+                        Err(_e) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                parent: log.span,
+                                workflow = %log.workflow_id,
+                                iteration = log.iteration,
+                                from = %ids[from], to = %ids[d], error = %_e,
+                                "fan-out schema evolution error (continuing)"
+                            );
+                            stats.iteration_errors += 1;
+                        }
+                    }
+                } else {
+                    staged[d].push(batch.clone());
+                }
+            }
             NodeRunKind::Source => {
                 unreachable!("a source is never a link target")
             }
@@ -352,9 +409,11 @@ pub(super) fn deliver_outbound(
     rows_out: u64,
     metrics: &ProcessorMetrics,
     downstream: &[Vec<BuiltEdge>],
+    edge_evolutions: &[Vec<crate::schema::EvolutionPolicy>],
     kinds: &[NodeRunKind],
     components: &[Option<&'static str>],
     datasets: &mut [Option<Dataset>],
+    sink_schemas: &[Option<Arc<arrow_schema::Schema>>],
     staged: &mut [Vec<RecordBatch>],
     ids: &[String],
     stats: &mut WorkflowStats,
@@ -381,11 +440,16 @@ pub(super) fn deliver_outbound(
         }
     }
 
-    for edge in &downstream[i] {
+    for (edge_idx, edge) in downstream[i].iter().enumerate() {
         let d = edge.node;
         if !super::builder::edge_selected(routes, &edge.branch) {
             continue;
         }
+        let policy = edge_evolutions
+            .get(i)
+            .and_then(|v| v.get(edge_idx))
+            .copied()
+            .unwrap_or_default();
         let branch_batch = edge.branch.as_deref().and_then(|branch| {
             branch_batches.and_then(|bp| bp.batches.get(branch).map(|rb| (bp.component, rb)))
         });
@@ -401,9 +465,9 @@ pub(super) fn deliver_outbound(
                     .as_mut()
                     .expect("downstream processor dataset");
                 let res = if let Some((comp, rb)) = branch_batch {
-                    forward_with_branch_override(src, dst, comp, rb)
+                    forward_with_branch_override(src, dst, comp, rb, policy)
                 } else {
-                    src.forward_into(dst)
+                    src.forward_into_evolved(dst, policy)
                 };
                 if let Err(_e) = res {
                     #[cfg(feature = "tracing")]
@@ -419,20 +483,41 @@ pub(super) fn deliver_outbound(
             }
             NodeRunKind::Sink => {
                 let component = components[d].expect("a sink node always declares a component");
-                if let Some((comp, rb)) = branch_batch
+                let maybe_batch = if let Some((comp, rb)) = branch_batch
                     && comp == component
                 {
-                    if rb.num_rows() > 0 {
-                        staged[d].push(rb.clone());
-                    }
-                } else if let Ok(batch) = datasets[i]
-                    .as_ref()
-                    .expect("processor dataset")
-                    .batch_named(component)
-                    .cloned()
+                    Some(rb.clone())
+                } else {
+                    datasets[i]
+                        .as_ref()
+                        .expect("processor dataset")
+                        .batch_named(component)
+                        .cloned()
+                        .ok()
+                };
+                if let Some(batch) = maybe_batch
                     && batch.num_rows() > 0
                 {
-                    staged[d].push(batch);
+                    if !policy.is_strict()
+                        && let Some(target_schema) = sink_schemas.get(d).and_then(|s| s.as_ref())
+                    {
+                        match crate::schema::evolve_batch(&batch, target_schema, policy) {
+                            Ok(adapted) => staged[d].push(adapted),
+                            Err(_e) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(
+                                    parent: log.span,
+                                    workflow = %log.workflow_id,
+                                    iteration = log.iteration,
+                                    from = %ids[i], to = %ids[d], error = %_e,
+                                    "fan-out schema evolution error (continuing)"
+                                );
+                                stats.iteration_errors += 1;
+                            }
+                        }
+                    } else {
+                        staged[d].push(batch);
+                    }
                 }
             }
             NodeRunKind::Source => {
@@ -447,20 +532,21 @@ fn forward_with_branch_override(
     dst: &mut Dataset,
     override_component: &'static str,
     override_batch: &RecordBatch,
+    policy: crate::schema::EvolutionPolicy,
 ) -> Result<usize, crate::error::SaciError> {
     let names: Vec<&'static str> = dst.schemas().iter().map(|(name, _)| *name).collect();
     let mut appended = 0usize;
     for name in names {
         if name == override_component {
             appended += override_batch.num_rows();
-            dst.append_record_batch(name, override_batch.clone())?;
+            dst.append_record_batch_evolved(name, override_batch.clone(), policy)?;
         } else if src.schemas().contains(name) {
             let batch = src
                 .batch_named(name)
                 .expect("component present in schemas() must have a batch")
                 .clone();
             appended += batch.num_rows();
-            dst.append_record_batch(name, batch)?;
+            dst.append_record_batch_evolved(name, batch, policy)?;
         }
     }
     Ok(appended)

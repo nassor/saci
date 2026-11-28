@@ -53,9 +53,12 @@ use tokio::time::Instant;
 use crate::codec::Codec;
 use crate::connector::{ChannelBridge, ConfigValue, ConnectorContext, NodeIdentity, Role};
 use crate::error::SaciError;
-use crate::io::{RetryingSink, RetryingSource, Sink, Source};
+use crate::io::{
+    RetryingSink, RetryingSource, Sink, Source, check_schema_compatibility, evolve_batch,
+};
 use crate::metrics::{SinkMetrics, SourceMetrics};
 use crate::retry::RetryMode;
+use crate::schema::EvolutionPolicy;
 
 use super::alert::{AlertDispatcher, AlertEvent};
 use super::config::flexible::{de_opt_bool_flexible, de_opt_f64_flexible, de_opt_u64_flexible};
@@ -180,6 +183,7 @@ pub(crate) struct Rebuilder {
     /// The retry policy the built instance is wrapped in. `None` for a source
     /// in `run "stream"`, where the runner's own re-poll is the retry loop.
     retry: Option<RetryMode>,
+    skip_corrupt: bool,
 }
 
 impl Rebuilder {
@@ -204,6 +208,7 @@ impl Rebuilder {
             channels,
             identity: None,
             retry,
+            skip_corrupt: false,
         }
     }
 
@@ -217,8 +222,15 @@ impl Rebuilder {
         self
     }
 
+    /// Configure whether rebuilt source instances isolate corrupt records.
+    pub(crate) fn with_skip_corrupt(mut self, skip: bool) -> Self {
+        self.skip_corrupt = skip;
+        self
+    }
+
     fn context(&self) -> ConnectorContext {
-        let mut ctx = ConnectorContext::new(self.codec.clone());
+        let mut ctx =
+            ConnectorContext::new(self.codec.clone()).with_skip_corrupt(self.skip_corrupt);
         if let Some(channels) = &self.channels {
             ctx = ctx.with_channels(channels.clone());
         }
@@ -238,7 +250,10 @@ impl Rebuilder {
     pub(crate) fn build_source(&self) -> Result<Box<dyn Source>, SaciError> {
         let connector =
             lookup_connector(&self.registry, Role::Source, &self.connector, &self.node_id)?;
-        let built = connector.source(&self.config, &self.context())?;
+        let mut built = connector.source(&self.config, &self.context())?;
+        if self.skip_corrupt {
+            built.set_skip_corrupt(true);
+        }
         Ok(match self.retry {
             Some(retry) => Box::new(RetryingSource::new(built, retry, &self.node_id)),
             None => built,
@@ -483,8 +498,11 @@ pub struct HealingSource {
     healer: Healer,
     /// Pinned at construction. [`Source::schema`] returns a value, not a
     /// `Result`, and the workflow graph's schema agreement was validated
-    /// against this one at load time, so a rebuild may not change it.
+    /// against this one at load time, so a rebuild may only change it when
+    /// [`evolution`](Self::evolution) permits compatible drift.
     schema: Arc<Schema>,
+    /// Schema evolution policy for rebuilt instances and emitted batches.
+    evolution: EvolutionPolicy,
     /// The last size hint, re-applied to a rebuilt instance so a healed
     /// source keeps its flow-control credit.
     last_hint: Option<usize>,
@@ -511,8 +529,15 @@ impl HealingSource {
                 AlertDispatcher::noop(),
             ),
             schema,
+            evolution: EvolutionPolicy::strict(),
             last_hint: None,
         }
+    }
+
+    /// Configure the schema evolution policy for rebuilt source instances.
+    pub(crate) fn with_evolution(mut self, evolution: EvolutionPolicy) -> Self {
+        self.evolution = evolution;
+        self
     }
 
     /// Attach an outbound [`AlertDispatcher`] for heal-exhausted notifications.
@@ -534,7 +559,9 @@ impl HealingSource {
         self.inner = None;
         match self.healer.rebuilder.build_source() {
             Ok(fresh) => {
-                if let Some(mismatch) = schema_mismatch(&self.schema, &fresh.schema()) {
+                if let Some(mismatch) =
+                    schema_mismatch(&self.schema, &fresh.schema(), self.evolution, true)
+                {
                     drop(fresh);
                     self.healer.build_failed(attempt, mismatch);
                     return;
@@ -542,6 +569,15 @@ impl HealingSource {
                 let mut fresh = fresh;
                 if let Some(rows) = self.last_hint {
                     fresh.request_batch_rows(rows);
+                }
+                if !self.evolution.is_strict() && fresh.schema().fields() != self.schema.fields() {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        target: HEAL_TARGET,
+                        workflow = %self.healer.workflow_id,
+                        node = %self.healer.node_id,
+                        "rebuilt source schema evolved compatibly under policy"
+                    );
                 }
                 self.inner = Some(fresh);
                 self.healer.built(attempt);
@@ -565,9 +601,20 @@ impl Source for HealingSource {
         // `Ok(None)` is EOF, not a failure: it takes the success path, the
         // same call the retry wrapper never retries.
         match inner.next_batch().await {
-            Ok(batch) => {
+            Ok(Some(batch)) => {
+                let adapted = if !self.evolution.is_strict()
+                    && batch.schema_ref().fields() != self.schema.fields()
+                {
+                    evolve_batch(&batch, &self.schema, self.evolution)?
+                } else {
+                    batch
+                };
                 self.healer.success();
-                Ok(batch)
+                Ok(Some(adapted))
+            }
+            Ok(None) => {
+                self.healer.success();
+                Ok(None)
             }
             Err(e) => {
                 self.healer.failure();
@@ -605,6 +652,19 @@ impl Source for HealingSource {
             }
         }
     }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.set_skip_corrupt(skip);
+        }
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<crate::io::CorruptRecord> {
+        self.inner
+            .as_mut()
+            .map(Source::drain_corrupt)
+            .unwrap_or_default()
+    }
 }
 
 /// A [`Sink`] that is replaced with a fresh instance from its factory when its
@@ -621,6 +681,8 @@ pub struct HealingSink {
     /// Pinned at construction, for the same reason as
     /// [`HealingSource::schema`].
     schema: Arc<Schema>,
+    /// Schema evolution policy when rebuilt sinks report compatible schema drift.
+    evolution: EvolutionPolicy,
 }
 
 impl HealingSink {
@@ -644,7 +706,14 @@ impl HealingSink {
                 AlertDispatcher::noop(),
             ),
             schema,
+            evolution: EvolutionPolicy::strict(),
         }
+    }
+
+    /// Configure the schema evolution policy for rebuilt sink instances.
+    pub(crate) fn with_evolution(mut self, evolution: EvolutionPolicy) -> Self {
+        self.evolution = evolution;
+        self
     }
 
     /// Attach an outbound [`AlertDispatcher`] for heal-exhausted notifications.
@@ -670,7 +739,9 @@ impl HealingSink {
         self.inner = None;
         match self.healer.rebuilder.build_sink() {
             Ok(fresh) => {
-                if let Some(mismatch) = schema_mismatch(&self.schema, &fresh.schema()) {
+                if let Some(mismatch) =
+                    schema_mismatch(&self.schema, &fresh.schema(), self.evolution, false)
+                {
                     drop(fresh);
                     self.healer.build_failed(attempt, mismatch);
                     return;
@@ -690,7 +761,17 @@ impl Sink for HealingSink {
         let Some(inner) = self.inner.as_mut() else {
             return Err(self.healer.down_error());
         };
-        match inner.write_batch(batch).await {
+        let target_schema = inner.schema();
+        let adapted;
+        let to_write = if !self.evolution.is_strict()
+            && batch.schema_ref().fields() != target_schema.fields()
+        {
+            adapted = evolve_batch(batch, &target_schema, self.evolution)?;
+            &adapted
+        } else {
+            batch
+        };
+        match inner.write_batch(to_write).await {
             Ok(()) => {
                 self.healer.success();
                 Ok(())
@@ -737,9 +818,24 @@ impl Sink for HealingSink {
 /// A rebuild that changed the schema would break the field-for-field
 /// agreement `validate_workflow_graph` checked at load time, so it is
 /// discarded rather than installed.
-fn schema_mismatch(pinned: &Schema, fresh: &Schema) -> Option<String> {
+fn schema_mismatch(
+    pinned: &Schema,
+    fresh: &Schema,
+    evolution: EvolutionPolicy,
+    is_source: bool,
+) -> Option<String> {
     if pinned.fields() == fresh.fields() {
         return None;
+    }
+    if !evolution.is_strict() {
+        let compat = if is_source {
+            check_schema_compatibility(fresh, pinned, evolution)
+        } else {
+            check_schema_compatibility(pinned, fresh, evolution)
+        };
+        if compat.is_ok() {
+            return None;
+        }
     }
     Some(format!(
         "rebuilt connector reports schema {:?} but the workflow was validated against {:?}",
@@ -1538,6 +1634,190 @@ field "v" type="int64" nullable=#false
         rebuilder
             .build_source()
             .expect("a heal rebuild binds a fresh ephemeral port and keeps the identity");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healing_source_and_sink_adapt_batches_under_compatible_evolution() {
+        struct EvolvingSource {
+            schema: Arc<Schema>,
+            batch: RecordBatch,
+            fail_first: bool,
+        }
+        #[async_trait]
+        impl Source for EvolvingSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+            async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+                if self.fail_first {
+                    return Err(SaciError::generic("initial handle dropped"));
+                }
+                Ok(Some(self.batch.clone()))
+            }
+            async fn finish(&mut self) -> Result<(), SaciError> {
+                Ok(())
+            }
+        }
+
+        struct EvolvingSink {
+            schema: Arc<Schema>,
+            seen: Arc<std::sync::Mutex<Vec<RecordBatch>>>,
+        }
+        #[async_trait]
+        impl Sink for EvolvingSink {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+            async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
+                self.seen.lock().unwrap().push(batch.clone());
+                Ok(())
+            }
+            async fn finish(&mut self) -> Result<(), SaciError> {
+                Ok(())
+            }
+        }
+
+        struct EvolvingFactory {
+            builds: AtomicUsize,
+            initial_schema: Arc<Schema>,
+            evolved_schema: Arc<Schema>,
+            sink_schema: Arc<Schema>,
+            seen: Arc<std::sync::Mutex<Vec<RecordBatch>>>,
+        }
+        impl crate::service::registry::Connector for EvolvingFactory {
+            fn name(&self) -> &'static str {
+                "evolving"
+            }
+            fn source(
+                &self,
+                _c: &ConfigValue,
+                _ctx: &ConnectorContext,
+            ) -> Result<Box<dyn Source>, SaciError> {
+                let n = self.builds.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    let batch = RecordBatch::try_new(
+                        Arc::clone(&self.initial_schema),
+                        vec![
+                            Arc::new(Int64Array::from(vec![1i64])),
+                            Arc::new(arrow_array::StringArray::from(vec![Some("a")])),
+                        ],
+                    )
+                    .unwrap();
+                    Ok(Box::new(EvolvingSource {
+                        schema: Arc::clone(&self.initial_schema),
+                        batch,
+                        fail_first: true,
+                    }))
+                } else {
+                    let batch = RecordBatch::try_new(
+                        Arc::clone(&self.evolved_schema),
+                        vec![
+                            Arc::new(arrow_array::Int32Array::from(vec![7])),
+                            Arc::new(arrow_array::StringArray::from(vec![Some("ok")])),
+                            Arc::new(arrow_array::StringArray::from(vec![Some("x")])),
+                        ],
+                    )
+                    .unwrap();
+                    Ok(Box::new(EvolvingSource {
+                        schema: Arc::clone(&self.evolved_schema),
+                        batch,
+                        fail_first: false,
+                    }))
+                }
+            }
+            fn sink(
+                &self,
+                _c: &ConfigValue,
+                _ctx: &ConnectorContext,
+            ) -> Result<Box<dyn Sink>, SaciError> {
+                Ok(Box::new(EvolvingSink {
+                    schema: Arc::clone(&self.sink_schema),
+                    seen: Arc::clone(&self.seen),
+                }))
+            }
+            fn rebuild(&self, _r: Role, _c: &ConfigValue) -> Rebuild {
+                Rebuild::Yes
+            }
+        }
+
+        let pinned_source_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+        let rebuilt_source_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("note", DataType::Utf8, true),
+            Field::new("extra", DataType::Utf8, true),
+        ]));
+        let evolved_sink_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("note", DataType::Utf8, true),
+            Field::new("extra", DataType::Utf8, true),
+        ]));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+        reg.register(EvolvingFactory {
+            builds: AtomicUsize::new(0),
+            initial_schema: Arc::clone(&pinned_source_schema),
+            evolved_schema: Arc::clone(&rebuilt_source_schema),
+            sink_schema: Arc::clone(&evolved_sink_schema),
+            seen: Arc::clone(&seen),
+        });
+        let reg = Arc::new(reg);
+
+        let src_rebuilder = Rebuilder::new(
+            Arc::clone(&reg),
+            "evolving",
+            "src",
+            ConfigValue::Object(ConfigMap::new()),
+            None,
+            None,
+            None,
+        );
+        let initial_src = src_rebuilder.build_source().expect("initial source builds");
+        let mut healing_src =
+            HealingSource::new(initial_src, src_rebuilder, settings(1, 0), "wf", "src")
+                .with_evolution(crate::schema::EvolutionPolicy::compatible());
+
+        assert!(healing_src.next_batch().await.is_err());
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let recovered_batch = healing_src
+            .next_batch()
+            .await
+            .expect("rebuild should succeed")
+            .expect("batch present");
+        assert_eq!(recovered_batch.schema(), pinned_source_schema);
+        assert_eq!(
+            recovered_batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[7i64]
+        );
+
+        let sink_rebuilder = Rebuilder::new(
+            reg,
+            "evolving",
+            "sink",
+            ConfigValue::Object(ConfigMap::new()),
+            None,
+            None,
+            None,
+        );
+        let initial_sink = sink_rebuilder.build_sink().unwrap();
+        let mut healing_sink =
+            HealingSink::new(initial_sink, sink_rebuilder, settings(1, 0), "wf", "sink")
+                .with_evolution(crate::schema::EvolutionPolicy::compatible());
+
+        healing_sink
+            .write_batch(&recovered_batch)
+            .await
+            .expect("compatible sink adapts pinned batch (adds nullable extra & accepts Int64)");
+        let recorded = seen.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].schema(), evolved_sink_schema);
     }
 }
 

@@ -19,6 +19,9 @@ use arrow_cast::{CastOptions, cast_with_options};
 use arrow_schema::Schema;
 
 use crate::error::{SaciError, SaciResult};
+pub use crate::schema::{
+    EvolutionPolicy, can_widen_type, check_schema_compatibility, evolve_batch,
+};
 
 /// Cast each column of `batch` to match `target` schema.
 ///

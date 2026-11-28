@@ -126,6 +126,14 @@ pub enum BinaryOp {
     NotLike,
     /// `NOT ILIKE`
     NotILike,
+    /// `~` (case-sensitive POSIX/Rust regex match)
+    RegexMatch,
+    /// `~*` (case-insensitive POSIX/Rust regex match)
+    RegexIMatch,
+    /// `!~` (negated case-sensitive regex match)
+    NotRegexMatch,
+    /// `!~*` (negated case-insensitive regex match)
+    NotRegexIMatch,
 }
 
 impl BinaryOp {
@@ -144,6 +152,10 @@ impl BinaryOp {
                 | Self::ILike
                 | Self::NotLike
                 | Self::NotILike
+                | Self::RegexMatch
+                | Self::RegexIMatch
+                | Self::NotRegexMatch
+                | Self::NotRegexIMatch
         )
     }
 }
@@ -206,6 +218,8 @@ pub enum ScalarFunc {
     EpochMs,
     /// `DATE_TRUNC(unit, ts)` — truncates timestamp/epoch-ms to `'second'|'minute'|'hour'|'day'`.
     DateTrunc,
+    /// `REGEXP_LIKE(s, pattern[, flags])` / `REGEXP_MATCH(s, pattern[, flags])`
+    RegexpLike,
 }
 
 impl ScalarFunc {
@@ -222,6 +236,7 @@ impl ScalarFunc {
             "CONTAINS" => Ok(Self::Contains),
             "STARTS_WITH" => Ok(Self::StartsWith),
             "ENDS_WITH" => Ok(Self::EndsWith),
+            "REGEXP_LIKE" | "REGEXP_MATCH" => Ok(Self::RegexpLike),
             "ABS" => Ok(Self::Abs),
             "CEIL" | "CEILING" => Ok(Self::Ceil),
             "FLOOR" => Ok(Self::Floor),
@@ -523,9 +538,10 @@ impl Expr {
                 | ScalarFunc::Concat
                 | ScalarFunc::Replace => Ok(DataType::Utf8),
                 ScalarFunc::Length => Ok(DataType::Int64),
-                ScalarFunc::Contains | ScalarFunc::StartsWith | ScalarFunc::EndsWith => {
-                    Ok(DataType::Boolean)
-                }
+                ScalarFunc::Contains
+                | ScalarFunc::StartsWith
+                | ScalarFunc::EndsWith
+                | ScalarFunc::RegexpLike => Ok(DataType::Boolean),
                 ScalarFunc::Abs => {
                     let dt = args.first().map(|a| a.data_type(schema)).transpose()?;
                     Ok(dt.unwrap_or(DataType::Float64))
@@ -810,6 +826,14 @@ fn eval_binary(
             let case_insensitive = matches!(op, BinaryOp::ILike | BinaryOp::NotILike);
             let negated = matches!(op, BinaryOp::NotLike | BinaryOp::NotILike);
             eval_like(&l_arr, &r_arr, case_insensitive, negated)
+        }
+        BinaryOp::RegexMatch
+        | BinaryOp::RegexIMatch
+        | BinaryOp::NotRegexMatch
+        | BinaryOp::NotRegexIMatch => {
+            let case_insensitive = matches!(op, BinaryOp::RegexIMatch | BinaryOp::NotRegexIMatch);
+            let negated = matches!(op, BinaryOp::NotRegexMatch | BinaryOp::NotRegexIMatch);
+            eval_regex(&l_arr, &r_arr, case_insensitive, negated)
         }
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
             if matches!(l_arr.data_type(), DataType::Null)
@@ -1155,6 +1179,24 @@ fn eval_call(func: ScalarFunc, args: &[Expr], batch: &RecordBatch) -> SaciResult
                 .collect();
             Ok(Arc::new(out))
         }
+        ScalarFunc::RegexpLike => {
+            if args.len() != 2 && args.len() != 3 {
+                return Err(SaciError::configuration(format!(
+                    "REGEXP_LIKE expects 2 or 3 arguments, got {}",
+                    args.len()
+                )));
+            }
+            let src = args[0].evaluate(batch)?;
+            let pat = args[1].evaluate(batch)?;
+            let ci = if args.len() == 3 {
+                let flags = to_utf8_array(&args[2].evaluate(batch)?)?;
+                let f_arr = flags.as_string::<i32>();
+                (0..len).any(|i| !f_arr.is_null(i) && f_arr.value(i).contains('i'))
+            } else {
+                false
+            };
+            eval_regex(&src, &pat, ci, false)
+        }
         ScalarFunc::Abs => {
             expect_arity(func, args, 1)?;
             let arr = args[0].evaluate(batch)?;
@@ -1369,6 +1411,44 @@ fn eval_concat(arrays: &[ArrayRef], len: usize) -> SaciResult<ArrayRef> {
     Ok(Arc::new(out))
 }
 
+fn eval_regex(
+    lhs: &ArrayRef,
+    rhs: &ArrayRef,
+    case_insensitive: bool,
+    negated: bool,
+) -> SaciResult<ArrayRef> {
+    let len = lhs.len();
+    let l = to_utf8_array(lhs)?;
+    let r = to_utf8_array(rhs)?;
+    let ls = l.as_string::<i32>();
+    let rs = r.as_string::<i32>();
+    let mut cached_pat: Option<(String, regex::Regex)> = None;
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        if ls.is_null(i) || rs.is_null(i) {
+            out.push(None);
+            continue;
+        }
+        let text = ls.value(i);
+        let pat = rs.value(i);
+        let re = match &cached_pat {
+            Some((prev, compiled)) if prev == pat => compiled,
+            _ => {
+                let compiled = regex::RegexBuilder::new(pat)
+                    .case_insensitive(case_insensitive)
+                    .build()
+                    .map_err(|e| SaciError::configuration(format!("invalid regex '{pat}': {e}")))?;
+                cached_pat = Some((pat.to_string(), compiled));
+                &cached_pat.as_ref().expect("just set").1
+            }
+        };
+        let matched = re.is_match(text);
+        out.push(Some(if negated { !matched } else { matched }));
+    }
+    let arr: BooleanArray = out.into_iter().collect();
+    Ok(Arc::new(arr))
+}
+
 fn eval_like(
     lhs: &ArrayRef,
     rhs: &ArrayRef,
@@ -1505,6 +1585,10 @@ pub(crate) enum Token {
     Le,
     Gt,
     Ge,
+    Tilde,
+    TildeStar,
+    BangTilde,
+    BangTildeStar,
     Concat,
     DoubleColon,
     LParen,
@@ -1531,6 +1615,10 @@ impl fmt::Display for Token {
             Self::Le => f.write_str("<="),
             Self::Gt => f.write_str(">"),
             Self::Ge => f.write_str(">="),
+            Self::Tilde => f.write_str("~"),
+            Self::TildeStar => f.write_str("~*"),
+            Self::BangTilde => f.write_str("!~"),
+            Self::BangTildeStar => f.write_str("!~*"),
             Self::Concat => f.write_str("||"),
             Self::DoubleColon => f.write_str("::"),
             Self::LParen => f.write_str("("),
@@ -1611,10 +1699,27 @@ pub(crate) fn tokenize(input: &str) -> SaciResult<Vec<Token>> {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token::Ne);
                     i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '~' {
+                    if i + 2 < chars.len() && chars[i + 2] == '*' {
+                        tokens.push(Token::BangTildeStar);
+                        i += 3;
+                    } else {
+                        tokens.push(Token::BangTilde);
+                        i += 2;
+                    }
                 } else {
                     return Err(SaciError::configuration(format!(
                         "unexpected character '!' at position {i}"
                     )));
+                }
+            }
+            '~' => {
+                if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    tokens.push(Token::TildeStar);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Tilde);
+                    i += 1;
                 }
             }
             '<' => {
@@ -1889,6 +1994,18 @@ impl<'a> ExprParser<'a> {
             } else if self.eat(&Token::Ge) {
                 let right = self.parse_concat()?;
                 left = Expr::binary(left, BinaryOp::Ge, right);
+            } else if self.eat(&Token::Tilde) {
+                let right = self.parse_concat()?;
+                left = Expr::binary(left, BinaryOp::RegexMatch, right);
+            } else if self.eat(&Token::TildeStar) {
+                let right = self.parse_concat()?;
+                left = Expr::binary(left, BinaryOp::RegexIMatch, right);
+            } else if self.eat(&Token::BangTilde) {
+                let right = self.parse_concat()?;
+                left = Expr::binary(left, BinaryOp::NotRegexMatch, right);
+            } else if self.eat(&Token::BangTildeStar) {
+                let right = self.parse_concat()?;
+                left = Expr::binary(left, BinaryOp::NotRegexIMatch, right);
             } else if self.eat_keyword("IS") {
                 let negated = self.eat_keyword("NOT");
                 if self.eat_keyword("NULL") {

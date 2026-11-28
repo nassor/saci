@@ -718,6 +718,34 @@ Key types:
   decision line and the inspector record share one formatted `reason`.
 - `SpanMetricsLayer`: turns each `pipeline.stage` span into a `saci_stage_duration_seconds` sample.
 
+- Schema Evolution (`crates/saci/src/schema.rs`, `io/cast.rs`, `service/config/workflow.rs`,
+  `service/validation.rs`, `service/heal.rs`, `service/runner.rs`, `dataset/{append,forward}.rs`):
+  `EvolutionPolicy` (`strict`, `compatible`, `additive`, `widen`, or explicit flags
+  `add_nullable_columns`, `drop_extra_columns`, `widen_types`), `can_widen_type`,
+  `check_schema_compatibility`, and `evolve_batch` adapt batches across links, datasets, and
+  healed sources/sinks (`HealingSource`/`HealingSink::with_evolution`). Configured in KDL via
+  `schema_evolution` on `workflow`, `source`, `sink`, or `link` (`SchemaEvolutionConfig`); defaults
+  to `"strict"`.
+- Source Corrupt-Record Isolation & Data Quality (`service/config/workflow.rs`, `service/dlq.rs`,
+  `service/operator_builder.rs`, `operators/quality.rs`, `operators/expr.rs`):
+  `SourceSpec::on_corrupt` (`CorruptRecordPolicy::{Fail, Drop, Dlq}`) configures
+  `ConnectorContext::skip_corrupt` and `Source::{set_skip_corrupt, drain_corrupt}` so malformed
+  records in `ndjson`/`csv`/`avro` streams or messages either fail the batch, drop silently, or
+  route via `DeadLetterQueue::record_corrupt`. Row-level processor validation uses
+  `operator kind="quality"` (alias `"assert"`) backed by `DataQualitySystem` and checkpointable
+  `DataQualityState` (`not_null`, `not_empty`, `regex`, `range`, `in_set`, `unique`, `check` SQL
+  expressions including `~`, `~*`, `!~`, `!~*`, and `REGEXP_LIKE`/`REGEXP_MATCH`), routing valid
+  rows (`valid` branch / `into`) and offending rows (`quarantine` branch / `quarantine_into`, with
+  optional `__dq_rule`, `__dq_column`, `__dq_reason` when `diagnostics=#true`).
+- OpenLineage / Data Catalog (`src/service/lineage.rs`, `src/service/http/lineage.rs`):
+  top-level `lineage` config block (`LineageConfig`: `enabled`, `endpoint`, `namespace`,
+  `job_prefix`, `api_key`, `emit_on = "lifecycle" | "pass"`, `timeout_ms`). `build_service_lineage`
+  and `build_workflow_lineage` compute dataset schemas, redacted connector URIs, and transitive
+  `columnLineage` facets across operators and runtimes; `LineageDispatcher` buffers recent
+  `OpenLineageEvent`s (`START`, `RUNNING`, `COMPLETE`, `FAIL`, `ABORT`), POSTs asynchronously to
+  `endpoint`, and serves `GET /api/lineage` and `GET /api/workflows/{id}/lineage` on
+  `ServiceState::lineage`.
+
 CLI subcommands (`src/service/cli.rs`, command modules in `src/service/cli/commands/`): `serve`, `validate`, `status`, `cluster init`,
 `cluster status`, `backfill` (`--start`, `--end`, `--time-field`, `--param KEY=VALUE`, `--reset-state`, `--url`, `--local`),
 `cursor list`, `cursor reset` (`--source`, `--to`, `--to-unix-ms`, `--items-processed`, `--keep-priors`), and `reload` (`--file`, `--url`). `--config`/`-c` (env `SACI_CONFIG`) is the only global option and defaults to `saci.kdl`, so `saci-service serve`
@@ -1064,7 +1092,8 @@ store, so it needs no Docker and no running service. Lib unit tests that assert 
 Update this file in the same change that: adds, removes or re-implies a `saci` host feature (`service`, `server`, `wasm-host`, `plugin-host`, `distributed*`, `inspector`, `metrics`);
 adds or renames a config block or key (`ServiceConfig`, or a type under `src/service/config/`:
 `WorkflowSpec`, `StoreConfig`, `ObservabilityConfig`, `RunMode`, `ClusterConfig`; `FlowControlConfig` in
-`flow.rs`, `HealConfig` in `heal.rs`, `DlqConfig`/`DlqBlock` in `dlq.rs`); changes the
+`flow.rs`, `HealConfig` in `heal.rs`, `DlqConfig`/`DlqBlock` in `dlq.rs`, `LineageConfig` in
+`lineage.rs`); changes the
 service's Rust API (`ServiceBuilder`'s chain, `BuiltWorkflow`, `BuiltWorkflowBuilder`, `RunOptions`,
 `WorkflowStats`, `serve`, `ServeOptions`, `ServeExit`, `ServiceConfig::from_kdl`, `PipelineRuntime::run_batch`);
 changes `serve.rs`, `runner.rs` (the code `standalone.rs` and `stream.rs` share) or a runner, the

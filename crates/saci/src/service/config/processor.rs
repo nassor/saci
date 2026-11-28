@@ -234,7 +234,7 @@ impl OperatorSpec {
         let wf_ctx = format!("workflow '{workflow_id}': operator '{}'", self.id);
         match self.kind.as_str() {
             "filter" | "project" | "group_by" | "sort" | "top_n" | "unnest" | "deduplicate"
-            | "route" | "branch" => {
+            | "route" | "branch" | "quality" | "assert" => {
                 if self.component.as_deref().is_none_or(str::is_empty) {
                     return Err(SaciError::configuration(format!(
                         "{wf_ctx} (kind='{}') requires 'component'",
@@ -277,8 +277,8 @@ impl OperatorSpec {
             other => {
                 return Err(SaciError::configuration(format!(
                     "{wf_ctx}: unknown operator kind '{other}' (expected sql, filter, project, \
-                     group_by, window, route, branch, sort, top_n, unnest, join, interval_join, \
-                     lookup_join, or deduplicate)"
+                     group_by, window, route, branch, quality, assert, sort, top_n, unnest, join, \
+                     interval_join, lookup_join, or deduplicate)"
                 )));
             }
         }
