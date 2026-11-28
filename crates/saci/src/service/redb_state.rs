@@ -350,7 +350,14 @@ impl RedbStateClient {
             }
 
             let mut checkpoints = std::collections::BTreeSet::new();
-            for table_def in [CURSOR_HISTORY_TABLE, PRIOR_HISTORY_TABLE] {
+            let active_sources: std::collections::HashSet<&str> =
+                sources.iter().map(String::as_str).collect();
+            let active_processors: std::collections::HashSet<&str> =
+                processors.iter().map(String::as_str).collect();
+            for (table_def, allowed) in [
+                (CURSOR_HISTORY_TABLE, &active_sources),
+                (PRIOR_HISTORY_TABLE, &active_processors),
+            ] {
                 match txn.open_table(table_def) {
                     Ok(table) => {
                         let wf_prefix = format!("{wf}/");
@@ -364,7 +371,9 @@ impl RedbStateClient {
                             if !ks.starts_with(&wf_prefix) {
                                 break;
                             }
-                            if let Some((_, ts_str)) = ks.rsplit_once('/')
+                            let rest = &ks[wf_prefix.len()..];
+                            if let Some((node_id, ts_str)) = rest.rsplit_once('/')
+                                && allowed.contains(node_id)
                                 && let Ok(ts) = ts_str.parse::<u64>()
                             {
                                 checkpoints.insert(ts);
@@ -427,12 +436,13 @@ impl RedbStateClient {
                 let mut ctable = txn
                     .open_table(CURSORS_TABLE)
                     .map_err(|e| SaciError::store(format!("redb open cursor table: {e}")))?;
-                let chist = txn
+                let mut chist = txn
                     .open_table(CURSOR_HISTORY_TABLE)
                     .map_err(|e| SaciError::store(format!("redb open cursor history: {e}")))?;
 
                 for sid in &targets {
                     let key = join(&wf, sid);
+                    let hist_prefix = format!("{key}/");
                     if let Some(items) = items_processed {
                         let meta = SourceCursorMeta {
                             items_processed: items,
@@ -443,14 +453,20 @@ impl RedbStateClient {
                         ctable
                             .insert(key.as_str(), bytes.as_slice())
                             .map_err(|e| SaciError::store(format!("redb put cursor: {e}")))?;
+                        let hist_key = format!("{hist_prefix}{:020}", meta.last_batch_at_ms);
+                        chist
+                            .insert(hist_key.as_str(), bytes.as_slice())
+                            .map_err(|e| {
+                                SaciError::store(format!("redb put cursor history: {e}"))
+                            })?;
+                        prune_prefix(&mut chist, &hist_prefix)?;
                         result_cursors.push(CursorSnapshot {
                             source: sid.clone(),
                             items_processed: meta.items_processed,
                             last_batch_at_ms: meta.last_batch_at_ms,
                         });
                     } else if let Some(target_ts) = to_unix_ms {
-                        let prefix = format!("{key}/");
-                        let best = find_latest_before(&chist, &prefix, target_ts)?;
+                        let best = find_latest_before(&chist, &hist_prefix, target_ts)?;
                         let meta = match best {
                             Some((ts, bytes)) => {
                                 restored_checkpoint =
@@ -747,5 +763,60 @@ mod tests {
             client.load_prior("w", "n").await.unwrap(),
             Some(b"blob".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn inspect_workflow_ignores_orphaned_history_and_explicit_reset_records_snapshot() {
+        let (client, _dir) = client();
+        client
+            .save_source_cursor(
+                "w",
+                "active_src",
+                SourceCursorMeta {
+                    items_processed: 5,
+                    last_batch_at_ms: 1_000,
+                },
+            )
+            .await
+            .unwrap();
+        client
+            .save_source_cursor(
+                "w",
+                "removed_src",
+                SourceCursorMeta {
+                    items_processed: 99,
+                    last_batch_at_ms: 9_999,
+                },
+            )
+            .await
+            .unwrap();
+        client
+            .save_prior("w", "removed_proc", b"old")
+            .await
+            .unwrap();
+
+        let report = client
+            .inspect_workflow("w", &["active_src".to_string()], &[])
+            .await
+            .unwrap();
+        assert_eq!(report.checkpoints_unix_ms, vec![1_000]);
+
+        let reset = client
+            .reset_workflow(
+                "w",
+                &["active_src".to_string()],
+                &[],
+                Some(2_500),
+                Some(42),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset.cursors[0].items_processed, 42);
+        let report_after = client
+            .inspect_workflow("w", &["active_src".to_string()], &[])
+            .await
+            .unwrap();
+        assert_eq!(report_after.checkpoints_unix_ms, vec![1_000, 2_500]);
     }
 }

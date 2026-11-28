@@ -261,7 +261,11 @@ pub async fn serve(
         standalone_stats: standalone_stats.clone(),
         inspector,
         lifecycle: lifecycle.clone(),
-        dlq: (!dlq_registry.is_empty()).then_some(dlq_registry.clone()),
+        dlq: if matches!(config.mode, ServiceMode::Standalone { .. }) {
+            Some(dlq_registry.clone())
+        } else {
+            (!dlq_registry.is_empty()).then_some(dlq_registry.clone())
+        },
     };
 
     let watchdog_handle = spawn_watchdog(state.clone(), coord.child());
@@ -479,22 +483,45 @@ pub async fn serve(
 
 struct ActiveWorkflow {
     spec: WorkflowSpec,
-    artifact_mtimes: Vec<(String, Option<SystemTime>)>,
+    artifact_mtimes: Vec<(String, Option<u64>, Option<SystemTime>)>,
     cancel: CancellationToken,
 }
 
-fn workflow_artifact_mtimes(spec: &WorkflowSpec) -> Vec<(String, Option<SystemTime>)> {
+fn artifact_stat(
+    path: &str,
+    base_dir: Option<&std::path::Path>,
+) -> (Option<u64>, Option<SystemTime>) {
+    let p = std::path::Path::new(path);
+    let meta = std::fs::metadata(p).or_else(|e| {
+        if p.is_relative()
+            && let Some(dir) = base_dir
+        {
+            std::fs::metadata(dir.join(p))
+        } else {
+            Err(e)
+        }
+    });
+    match meta {
+        Ok(m) => (Some(m.len()), m.modified().ok()),
+        Err(_) => (None, None),
+    }
+}
+
+fn workflow_artifact_mtimes(
+    spec: &WorkflowSpec,
+    base_dir: Option<&std::path::Path>,
+) -> Vec<(String, Option<u64>, Option<SystemTime>)> {
     let mut out = Vec::new();
     for w in &spec.wasm {
         if let Some(path) = &w.path {
-            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-            out.push((format!("wasm:{}:{path}", w.id), mtime));
+            let (len, mtime) = artifact_stat(path, base_dir);
+            out.push((format!("wasm:{}:{path}", w.id), len, mtime));
         }
     }
     for p in &spec.plugin {
         if let Some(path) = &p.path {
-            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-            out.push((format!("plugin:{}:{path}", p.id), mtime));
+            let (len, mtime) = artifact_stat(path, base_dir);
+            out.push((format!("plugin:{}:{path}", p.id), len, mtime));
         }
     }
     out
@@ -654,8 +681,10 @@ async fn apply_reload<'a>(
         return Err("cannot live-reload a standalone service into cluster mode".to_string());
     }
     crate::service::validate_build_capabilities(&new_config).map_err(|e| e.to_string())?;
+    new_config.node.id = current_config.node.id;
     new_config.http.bind = current_config.http.bind.clone();
 
+    let config_dir = config_path.and_then(|p| p.parent());
     let prev_by_id: HashMap<&str, &WorkflowSpec> = current_config
         .workflows
         .iter()
@@ -673,7 +702,7 @@ async fn apply_reload<'a>(
             added_specs.push(new_spec.clone());
             continue;
         }
-        let mtimes = workflow_artifact_mtimes(new_spec);
+        let mtimes = workflow_artifact_mtimes(new_spec, config_dir);
         let is_unchanged = if let Some(entry) = active.get(&new_spec.id) {
             !global_changed && specs_equal(&entry.spec, new_spec) && entry.artifact_mtimes == mtimes
         } else if let Some(prev_spec) = prev_by_id.get(new_spec.id.as_str()) {
@@ -695,16 +724,21 @@ async fn apply_reload<'a>(
         .map(|w| w.id.clone())
         .collect();
 
-    // Pre-build added workflows before mutating any running workflow.
+    // Sync DLQ registry before building added/updated workflows so newly declared
+    // DLQ queues attach to the shared HTTP registry rather than private instances.
     let snap = factory.borrow().snapshot_settings();
     factory.borrow_mut().update_config(&new_config);
+    dlq_registry.sync_with_config(&new_config);
+
     let mut built_added: Vec<(WorkflowSpec, BuiltWorkflow, WorkflowTopology)> =
         Vec::with_capacity(added_specs.len());
     for spec in &added_specs {
-        let built = match factory.borrow_mut().build(spec) {
+        let build_res = factory.borrow_mut().build(spec);
+        let built = match build_res {
             Ok(b) => b,
             Err(e) => {
                 factory.borrow_mut().restore_settings(snap);
+                dlq_registry.sync_with_config(current_config);
                 return Err(format!("building added workflow '{}': {e}", spec.id));
             }
         };
@@ -732,19 +766,19 @@ async fn apply_reload<'a>(
     }
 
     // Apply updates: live-reload controlled active workflows, or stop+rebuild
-    // if unsupervised / already exited.
+    // if unsupervised / already exited. Track partial update errors without
+    // leaving `current_config` / `active` out of sync.
     let mut reload_waiters = Vec::new();
     let mut respawn_specs = Vec::new();
     let mut stop_for_respawn = HashSet::new();
+    let mut reload_errors = Vec::new();
 
     for spec in &updated_specs {
         if active.contains_key(&spec.id) {
             if let Some(lc) = lifecycle {
                 match lc.send_reload_workflow(&spec.id, spec.clone()) {
                     Ok(rx) => reload_waiters.push((spec.id.clone(), rx)),
-                    Err(e) => {
-                        return Err(format!("sending reload to workflow '{}': {e}", spec.id));
-                    }
+                    Err(e) => reload_errors.push(format!("sending reload to '{}': {e}", spec.id)),
                 }
             } else if let Some(entry) = active.get(&spec.id) {
                 entry.cancel.cancel();
@@ -765,23 +799,29 @@ async fn apply_reload<'a>(
             .map_err(|e| e.to_string())?;
     }
 
-    if !reload_waiters.is_empty() {
-        wait_reload_replies(active_futs, active, reload_waiters).await?;
+    if !reload_waiters.is_empty()
+        && let Err(e) = wait_reload_replies(active_futs, active, reload_waiters).await
+    {
+        reload_errors.push(e);
     }
 
     for spec in &updated_specs {
         if let Some(entry) = active.get_mut(&spec.id) {
             entry.spec = spec.clone();
-            entry.artifact_mtimes = workflow_artifact_mtimes(spec);
+            entry.artifact_mtimes = workflow_artifact_mtimes(spec, config_dir);
         }
     }
 
     let mut built_topos: HashMap<String, WorkflowTopology> = HashMap::new();
     for spec in respawn_specs {
-        let built = factory
-            .borrow_mut()
-            .build(&spec)
-            .map_err(|e| format!("rebuilding workflow '{}': {e}", spec.id))?;
+        let build_res = factory.borrow_mut().build(&spec);
+        let built = match build_res {
+            Ok(b) => b,
+            Err(e) => {
+                reload_errors.push(format!("rebuilding workflow '{}': {e}", spec.id));
+                continue;
+            }
+        };
         let wf_topo = workflow_topology(
             &new_config,
             factory.borrow().registry(),
@@ -796,7 +836,7 @@ async fn apply_reload<'a>(
             .as_ref()
             .map(|lc| lc.register_dynamic(&spec, live_stats.clone()));
         let cancel_child = coord_root.child_token();
-        let mtimes = workflow_artifact_mtimes(&spec);
+        let mtimes = workflow_artifact_mtimes(&spec, config_dir);
         active.insert(
             spec.id.clone(),
             ActiveWorkflow {
@@ -825,7 +865,7 @@ async fn apply_reload<'a>(
             .as_ref()
             .map(|lc| lc.register_dynamic(&spec, live_stats.clone()));
         let cancel_child = coord_root.child_token();
-        let mtimes = workflow_artifact_mtimes(&spec);
+        let mtimes = workflow_artifact_mtimes(&spec, config_dir);
         active.insert(
             spec.id.clone(),
             ActiveWorkflow {
@@ -845,7 +885,6 @@ async fn apply_reload<'a>(
         ));
     }
 
-    dlq_registry.sync_with_config(&new_config);
     alerts.update_config(&new_config.alerts);
 
     let topology_version = if let Some(inspector) = factory.borrow().inspector() {
@@ -879,6 +918,10 @@ async fn apply_reload<'a>(
 
     *current_config = new_config;
 
+    if !reload_errors.is_empty() {
+        return Err(reload_errors.join("; "));
+    }
+
     Ok(ReloadReport {
         added: added_specs.into_iter().map(|s| s.id).collect(),
         updated: updated_specs.into_iter().map(|s| s.id).collect(),
@@ -906,6 +949,7 @@ async fn run_standalone_with_reload<'a>(
     let mut active_futs: FuturesUnordered<LocalBoxFuture<'a, (String, Result<(), SaciError>)>> =
         FuturesUnordered::new();
 
+    let config_dir = config_path.as_deref().and_then(|p| p.parent());
     for (i, (built, cancel_child, channels)) in items.into_iter().enumerate() {
         let spec = current_config.workflows[i].clone();
         let live_stats = runner_stats.as_ref().and_then(|entries| {
@@ -918,7 +962,7 @@ async fn run_standalone_with_reload<'a>(
             spec.id.clone(),
             ActiveWorkflow {
                 spec: spec.clone(),
-                artifact_mtimes: workflow_artifact_mtimes(&spec),
+                artifact_mtimes: workflow_artifact_mtimes(&spec, config_dir),
                 cancel: cancel_child.clone(),
             },
         );

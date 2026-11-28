@@ -396,14 +396,18 @@ impl RaftClusterHarness {
         // costs quorum and the cluster campaigns forever without electing.
         // Binding 0.0.0.0 rather than loopback is what lets the container
         // reach these listeners through `HOST_ALIAS`.
-        let listen_addrs: Vec<SocketAddr> = (0..n)
-            .map(|_| {
-                let l = std::net::TcpListener::bind("0.0.0.0:0")?;
-                let addr = l.local_addr()?;
-                drop(l);
-                Ok(addr)
-            })
-            .collect::<std::io::Result<_>>()?;
+        // Keep the bound listeners alive across proxy wiring rather than dropping
+        // them here; converting via `TcpListener::from_std` right before spawn
+        // eliminates the window where another process/container claims a freed
+        // ephemeral port and causes `EADDRINUSE` during cluster wiring.
+        let mut std_listeners: Vec<Option<std::net::TcpListener>> = Vec::with_capacity(n);
+        let mut listen_addrs: Vec<SocketAddr> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let l = std::net::TcpListener::bind("0.0.0.0:0")?;
+            l.set_nonblocking(true)?;
+            listen_addrs.push(l.local_addr()?);
+            std_listeners.push(Some(l));
+        }
 
         // edge_host_ports[(src, dst)] = host port of the proxy for src→dst traffic.
         let mut edge_host_ports = std::collections::HashMap::<(usize, usize), u16>::new();
@@ -460,11 +464,12 @@ impl RaftClusterHarness {
                 dir.path().join("cluster-app.redb"),
             )
             .await?;
-            // The bind is eager, so a port lost to another process between the
-            // reservation and here fails now rather than leaving the node
-            // unreachable and the cluster failing later with an unexplained
-            // election timeout.
-            handle.spawn_tcp_server(listen_addr).await?;
+            // Transfer the already-bound listener straight to the server task.
+            let std_listener = std_listeners[i]
+                .take()
+                .expect("each node has one reserved listener");
+            let tokio_listener = tokio::net::TcpListener::from_std(std_listener)?;
+            handle.spawn_tcp_server_with_listener(tokio_listener)?;
             await_listening(listen_addr).await.map_err(|e| {
                 anyhow::anyhow!("node {node_id} never accepted on {listen_addr}: {e}")
             })?;

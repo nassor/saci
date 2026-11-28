@@ -4,7 +4,6 @@
 //! error.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -39,6 +38,7 @@ pub struct ChannelSource {
     rx: mpsc::Receiver<RecordBatch>,
     schema: Arc<Schema>,
     slot: Option<Arc<ChannelSlot>>,
+    generation: u64,
 }
 
 impl ChannelSource {
@@ -53,6 +53,7 @@ impl ChannelSource {
                 rx,
                 schema,
                 slot: None,
+                generation: 0,
             },
             tx,
         )
@@ -66,6 +67,7 @@ impl ChannelSource {
             rx,
             schema,
             slot: None,
+            generation: 0,
         }
     }
 
@@ -73,11 +75,13 @@ impl ChannelSource {
         schema: Arc<Schema>,
         rx: mpsc::Receiver<RecordBatch>,
         slot: Arc<ChannelSlot>,
+        generation: u64,
     ) -> Self {
         Self {
             rx,
             schema,
             slot: Some(slot),
+            generation,
         }
     }
 }
@@ -85,7 +89,7 @@ impl ChannelSource {
 impl Drop for ChannelSource {
     fn drop(&mut self) {
         if let Some(slot) = &self.slot {
-            slot.source_active.store(false, Ordering::SeqCst);
+            slot.release_source(self.generation);
         }
     }
 }
@@ -101,7 +105,7 @@ impl Source for ChannelSource {
             match self.rx.recv().await {
                 None => {
                     if let Some(slot) = &self.slot
-                        && let Some(new_rx) = slot.take_pending_rx()
+                        && let Some(new_rx) = slot.take_newer_rx(&mut self.generation)
                     {
                         self.rx = new_rx;
                         continue;

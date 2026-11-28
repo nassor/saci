@@ -472,6 +472,9 @@ impl AlertEvent {
     }
 }
 
+/// Bounded queue capacity for asynchronous outbound alert delivery.
+const MAX_ALERT_QUEUE_CAPACITY: usize = 1024;
+
 /// Inner shared state for [`AlertDispatcher`].
 type CooldownMap = Mutex<HashMap<(String, AlertEventKind, String, String), Instant>>;
 
@@ -480,7 +483,7 @@ struct DispatcherInner {
     service_label: String,
     node_id: u64,
     cooldowns: CooldownMap,
-    tx: Mutex<Option<mpsc::UnboundedSender<AlertEvent>>>,
+    tx: Mutex<Option<mpsc::Sender<AlertEvent>>>,
 }
 
 /// Non-blocking outbound alert dispatcher shared across runners, healers, and DLQs.
@@ -569,7 +572,7 @@ impl AlertDispatcher {
             {
                 tx.clone()
             } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = mpsc::channel(MAX_ALERT_QUEUE_CAPACITY);
                 let worker_inner = Arc::clone(inner);
                 handle.spawn(run_delivery_loop(worker_inner, rx));
                 *tx_guard = Some(tx.clone());
@@ -579,7 +582,13 @@ impl AlertDispatcher {
                 return;
             }
         };
-        let _ = sender.send(event);
+        if let Err(mpsc::error::TrySendError::Full(_)) = sender.try_send(event) {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                queue_capacity = MAX_ALERT_QUEUE_CAPACITY,
+                "alert delivery queue full; dropping alert event"
+            );
+        }
     }
 }
 
@@ -619,10 +628,7 @@ fn check_cooldown(
     true
 }
 
-async fn run_delivery_loop(
-    inner: Arc<DispatcherInner>,
-    mut rx: mpsc::UnboundedReceiver<AlertEvent>,
-) {
+async fn run_delivery_loop(inner: Arc<DispatcherInner>, mut rx: mpsc::Receiver<AlertEvent>) {
     crate::service::install_ring_provider();
     let client = reqwest::Client::new();
 
@@ -636,6 +642,7 @@ async fn run_delivery_loop(
             continue;
         }
         let timeout = Duration::from_millis(config.timeout_ms.max(1));
+        let mut deliveries: Vec<futures::future::BoxFuture<'_, ()>> = Vec::new();
 
         for target in &config.webhooks {
             if !target_accepts(target.events.as_deref(), event.kind) {
@@ -660,10 +667,14 @@ async fn run_delivery_loop(
             for (k, v) in &target.headers {
                 req = req.header(k, v);
             }
-            if let Err(_e) = send_and_check(req).await {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(target_id = %target.id, url = %target.url, error = %_e, "webhook alert delivery failed");
-            }
+            let target_id = target.id.clone();
+            let target_url = target.url.clone();
+            deliveries.push(Box::pin(async move {
+                if let Err(_e) = send_and_check(req).await {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(target_id = %target_id, url = %target_url, error = %_e, "webhook alert delivery failed");
+                }
+            }));
         }
 
         for target in &config.slack {
@@ -702,10 +713,13 @@ async fn run_delivery_loop(
                 .post(&target.webhook_url)
                 .timeout(timeout)
                 .json(&payload);
-            if let Err(_e) = send_and_check(req).await {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(target_id = %target.id, error = %_e, "slack alert delivery failed");
-            }
+            let target_id = target.id.clone();
+            deliveries.push(Box::pin(async move {
+                if let Err(_e) = send_and_check(req).await {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(target_id = %target_id, error = %_e, "slack alert delivery failed");
+                }
+            }));
         }
 
         for target in &config.pagerduty {
@@ -742,10 +756,17 @@ async fn run_delivery_loop(
                 }
             });
             let req = client.post(&target.url).timeout(timeout).json(&payload);
-            if let Err(_e) = send_and_check(req).await {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(target_id = %target.id, error = %_e, "pagerduty alert delivery failed");
-            }
+            let target_id = target.id.clone();
+            deliveries.push(Box::pin(async move {
+                if let Err(_e) = send_and_check(req).await {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(target_id = %target_id, error = %_e, "pagerduty alert delivery failed");
+                }
+            }));
+        }
+
+        if !deliveries.is_empty() {
+            futures::future::join_all(deliveries).await;
         }
     }
 }
@@ -927,6 +948,81 @@ workflow "w" {
                 .any(|(t, b)| t == "webhook" && b["event"] == "workflow_failed")
         );
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_delivery_is_not_blocked_by_slow_target() {
+        let fast_received = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let fast_rec = Arc::clone(&fast_received);
+
+        let app = Router::new()
+            .route(
+                "/slow",
+                post(|| async {
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    axum::http::StatusCode::OK
+                }),
+            )
+            .route(
+                "/fast",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let rec = Arc::clone(&fast_rec);
+                    async move {
+                        rec.lock().unwrap().push(body);
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let config = AlertsConfig {
+            cooldown_ms: 0,
+            timeout_ms: 2_000,
+            webhooks: vec![
+                WebhookTargetSpec {
+                    id: "slow".to_string(),
+                    url: format!("http://{addr}/slow"),
+                    headers: HashMap::new(),
+                    events: None,
+                    cooldown_ms: None,
+                },
+                WebhookTargetSpec {
+                    id: "fast".to_string(),
+                    url: format!("http://{addr}/fast"),
+                    headers: HashMap::new(),
+                    events: None,
+                    cooldown_ms: None,
+                },
+            ],
+            slack: Vec::new(),
+            pagerduty: Vec::new(),
+        };
+
+        let dispatcher = AlertDispatcher::from_config(&config, "svc".to_string(), 1);
+        let started = Instant::now();
+        dispatcher.emit(AlertEvent::workflow_failed("wf", "boom", 1));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(350);
+        while tokio::time::Instant::now() < deadline {
+            if !fast_received.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            fast_received.lock().unwrap().len(),
+            1,
+            "fast target should receive alert concurrently in <350ms despite 600ms slow target (elapsed={:?})",
+            started.elapsed()
+        );
         server.abort();
     }
 }

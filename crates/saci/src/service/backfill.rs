@@ -16,7 +16,7 @@ use std::sync::Arc;
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
     Date32Type, Date64Type, Int64Type, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType,
+    TimestampNanosecondType, TimestampSecondType, UInt64Type,
 };
 use arrow_array::{Array, BooleanArray, RecordBatch};
 use arrow_schema::{DataType, Schema, TimeUnit};
@@ -266,6 +266,14 @@ fn filter_batch_by_window(
                 .map(|i| (!arr.is_null(i)).then(|| in_window(arr.value(i))))
                 .collect()
         }
+        DataType::UInt64 => {
+            let arr = col.as_primitive::<UInt64Type>();
+            (0..arr.len())
+                .map(|i| {
+                    (!arr.is_null(i)).then(|| i64::try_from(arr.value(i)).is_ok_and(in_window))
+                })
+                .collect()
+        }
         DataType::Timestamp(TimeUnit::Second, _) => {
             let arr = col.as_primitive::<TimestampSecondType>();
             (0..arr.len())
@@ -319,6 +327,18 @@ fn filter_batch_by_window(
         }
         DataType::LargeUtf8 => {
             let arr = col.as_string::<i64>();
+            (0..arr.len())
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(parse_timestamp_utc_ms(arr.value(i), false).is_ok_and(in_window))
+                    }
+                })
+                .collect()
+        }
+        DataType::Utf8View => {
+            let arr = col.as_string_view();
             (0..arr.len())
                 .map(|i| {
                     if arr.is_null(i) {
@@ -424,5 +444,124 @@ mod tests {
         let end = parse_timestamp_utc_ms("2026-01-10", true).unwrap();
         let by_str = filter_batch_by_window(&batch, "label", Some(start), Some(end)).unwrap();
         assert_eq!(by_str.num_rows(), 2);
+    }
+
+    #[test]
+    fn filter_batch_by_window_supports_all_temporal_types_and_nulls() {
+        use arrow_array::{
+            Date32Array, Date64Array, StringViewArray, TimestampMicrosecondArray,
+            TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
+        };
+
+        let s_sec = 1_700_000_000i64;
+        let in_sec = 1_700_000_100i64;
+        let out_sec = 1_700_000_500i64;
+        let start_ms = Some(in_sec * 1_000);
+        let end_ms = Some(in_sec * 1_000 + 500);
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts_s", DataType::Timestamp(TimeUnit::Second, None), true),
+            Field::new(
+                "ts_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new(
+                "ts_us",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new(
+                "ts_ns",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+            Field::new("d64", DataType::Date64, true),
+            Field::new("u64", DataType::UInt64, true),
+            Field::new("sv", DataType::Utf8View, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampSecondArray::from(vec![
+                    Some(s_sec),
+                    Some(in_sec),
+                    None,
+                    Some(out_sec),
+                ])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    Some(s_sec * 1_000),
+                    Some(in_sec * 1_000),
+                    None,
+                    Some(out_sec * 1_000),
+                ])),
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    Some(s_sec * 1_000_000),
+                    Some(in_sec * 1_000_000),
+                    None,
+                    Some(out_sec * 1_000_000),
+                ])),
+                Arc::new(TimestampNanosecondArray::from(vec![
+                    Some(s_sec * 1_000_000_000),
+                    Some(in_sec * 1_000_000_000),
+                    None,
+                    Some(out_sec * 1_000_000_000),
+                ])),
+                Arc::new(Date64Array::from(vec![
+                    Some(s_sec * 1_000),
+                    Some(in_sec * 1_000),
+                    None,
+                    Some(out_sec * 1_000),
+                ])),
+                Arc::new(UInt64Array::from(vec![
+                    Some((s_sec * 1_000) as u64),
+                    Some((in_sec * 1_000) as u64),
+                    None,
+                    Some((out_sec * 1_000) as u64),
+                ])),
+                Arc::new(StringViewArray::from(vec![
+                    Some("2020-01-01T00:00:00Z"),
+                    Some("2023-11-14T22:15:00Z"),
+                    None,
+                    Some("2025-01-01T00:00:00Z"),
+                ])),
+            ],
+        )
+        .unwrap();
+
+        for col in ["ts_s", "ts_ms", "ts_us", "ts_ns", "d64", "u64"] {
+            let f = filter_batch_by_window(&batch, col, start_ms, end_ms).unwrap();
+            assert_eq!(f.num_rows(), 1, "column {col} must keep only row 1");
+        }
+        let sv_f = filter_batch_by_window(
+            &batch,
+            "sv",
+            Some(parse_timestamp_utc_ms("2023-01-01", false).unwrap()),
+            Some(parse_timestamp_utc_ms("2024-01-01", true).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(sv_f.num_rows(), 1);
+
+        // Date32 check (days since epoch: 2026-01-05 = 20458).
+        let d32_schema = Arc::new(Schema::new(vec![Field::new("d32", DataType::Date32, true)]));
+        let d32_batch = RecordBatch::try_new(
+            d32_schema,
+            vec![Arc::new(Date32Array::from(vec![
+                Some(20_450),
+                Some(20_458),
+                None,
+                Some(20_470),
+            ]))],
+        )
+        .unwrap();
+        let d32_f = filter_batch_by_window(
+            &d32_batch,
+            "d32",
+            Some(parse_timestamp_utc_ms("2026-01-05", false).unwrap()),
+            Some(parse_timestamp_utc_ms("2026-01-06", true).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(d32_f.num_rows(), 1);
     }
 }

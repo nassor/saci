@@ -550,9 +550,11 @@ impl CronSchedule {
                 self.timezone.to_local_parts(utc_secs)?;
 
             if !self.matches_date(month, day, dow) {
-                // Advance safely toward the next local day without overshooting a 23h DST day.
+                // Advance safely to 21:00:00 (or past the current hour if >= 21) without
+                // overshooting a 23-hour DST spring-forward day.
                 let jump = if hour < 21 {
-                    i64::from(21 - hour) * 3600
+                    (i64::from(21 - hour) * 3600 - i64::from(minute) * 60 - i64::from(second))
+                        .max(1)
                 } else {
                     (3600 - (i64::from(minute) * 60 + i64::from(second))).max(1)
                 };
@@ -733,6 +735,19 @@ fn parse_dow_name(s: &str) -> Option<u8> {
 #[allow(dead_code)]
 pub(crate) fn parse_timestamp_utc_ms(raw: &str, end_of_day_for_date: bool) -> Result<i64, String> {
     let trimmed = raw.trim();
+    if trimmed.len() == 8
+        && trimmed.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y%m%d")
+        && (1970..=2199).contains(&date.year())
+    {
+        let ndt = if end_of_day_for_date {
+            date.and_hms_milli_opt(23, 59, 59, 999)
+        } else {
+            date.and_hms_milli_opt(0, 0, 0, 0)
+        }
+        .ok_or_else(|| format!("invalid date '{trimmed}'"))?;
+        return Ok(ndt.and_utc().timestamp_millis());
+    }
     if let Ok(ms) = trimmed.parse::<i64>() {
         return Ok(ms);
     }
@@ -840,5 +855,36 @@ mod tests {
         assert!(CronSchedule::parse("60 * * * *", None).is_err());
         assert!(CronSchedule::parse("0 0 30 2 *", None).is_err());
         assert!(CronSchedule::parse("* * * * *", Some("Mars/Olympus_Mons")).is_err());
+    }
+
+    #[test]
+    fn dst_spring_forward_skips_nonexistent_hour_and_compact_date_parses_cleanly() {
+        // 02:30 AM does not exist in America/New_York on 2026-03-08 (clocks jump 02:00 -> 03:00).
+        // After 2026-03-07 02:30 EST (07:30 UTC), next fire must skip 2026-03-08 and land on 2026-03-09 02:30 EDT (06:30 UTC).
+        let sched = CronSchedule::parse("30 2 * * *", Some("America/New_York")).expect("ny tz");
+        assert_eq!(
+            sched.next_after_ms(utc_ms(2026, 3, 7, 7, 30, 0)),
+            Some(utc_ms(2026, 3, 9, 6, 30, 0))
+        );
+
+        // Fall-back on 2026-11-01 (01:00..02:00 EDT repeats as 01:00..02:00 EST); 02:30 local fires 2026-11-01 07:30 UTC.
+        assert_eq!(
+            sched.next_after_ms(utc_ms(2026, 10, 31, 6, 30, 0)),
+            Some(utc_ms(2026, 11, 1, 7, 30, 0))
+        );
+
+        // Compact 8-digit YYYYMMDD parses as calendar date rather than 1970 unix_ms.
+        assert_eq!(
+            parse_timestamp_utc_ms("20260105", false).unwrap(),
+            utc_ms(2026, 1, 5, 0, 0, 0) as i64
+        );
+        assert_eq!(
+            parse_timestamp_utc_ms("20260105", true).unwrap(),
+            utc_ms(2026, 1, 5, 23, 59, 59) as i64 + 999
+        );
+        assert_eq!(
+            parse_timestamp_utc_ms("1700000000000", false).unwrap(),
+            1_700_000_000_000
+        );
     }
 }

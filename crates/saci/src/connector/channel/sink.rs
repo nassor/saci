@@ -3,7 +3,6 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -52,6 +51,8 @@ pub struct ChannelSink {
     sent_rows: u64,
     /// Shared registry slot, cleared on drop so a stopped workflow can rebuild.
     slot: Option<Arc<ChannelSlot>>,
+    /// Generation of `slot` that produced `tx`.
+    generation: u64,
 }
 
 impl ChannelSink {
@@ -74,6 +75,7 @@ impl ChannelSink {
             queued: VecDeque::with_capacity(buffer.min(64)),
             sent_rows: 0,
             slot: None,
+            generation: 0,
         }
     }
 
@@ -82,6 +84,7 @@ impl ChannelSink {
         buffer: usize,
         tx: mpsc::Sender<RecordBatch>,
         slot: Arc<ChannelSlot>,
+        generation: u64,
     ) -> Self {
         Self {
             tx,
@@ -90,6 +93,7 @@ impl ChannelSink {
             queued: VecDeque::with_capacity(buffer.min(64)),
             sent_rows: 0,
             slot: Some(slot),
+            generation,
         }
     }
 
@@ -105,8 +109,7 @@ impl ChannelSink {
 impl Drop for ChannelSink {
     fn drop(&mut self) {
         if let Some(slot) = &self.slot {
-            let _ = slot.take_pending_tx();
-            slot.sink_active.store(false, Ordering::SeqCst);
+            slot.release_sink(self.generation);
         }
     }
 }
@@ -119,16 +122,14 @@ impl Sink for ChannelSink {
 
     async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SaciError> {
         if let Some(slot) = &self.slot
-            && let Some(new_tx) = slot.take_pending_tx()
+            && slot.refresh_tx(&mut self.tx, &mut self.generation)
         {
-            self.tx = new_tx;
             self.queued.clear();
         }
         if let Err(err) = self.tx.send(batch.clone()).await {
             if let Some(slot) = &self.slot
-                && let Some(new_tx) = slot.take_pending_tx()
+                && slot.refresh_tx(&mut self.tx, &mut self.generation)
             {
-                self.tx = new_tx;
                 self.queued.clear();
                 self.tx.send(err.0).await.map_err(|e| {
                     SaciError::generic(format!("ChannelSink: channel send error: {e}"))

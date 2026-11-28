@@ -83,7 +83,15 @@ impl RaftTcpServer {
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind(self.listen_addr).await?;
-        Ok(tokio::spawn(async move { self.run(listener).await }))
+        Ok(self.spawn_with_listener(listener))
+    }
+
+    /// Run the server loop on an already-bound [`tokio::net::TcpListener`].
+    pub fn spawn_with_listener(
+        self,
+        listener: tokio::net::TcpListener,
+    ) -> tokio::task::JoinHandle<io::Result<()>> {
+        tokio::spawn(async move { self.run(listener).await })
     }
 
     async fn run(mut self, listener: tokio::net::TcpListener) -> io::Result<()> {

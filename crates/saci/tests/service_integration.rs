@@ -732,7 +732,7 @@ observability log_level="warn"
     let reset_json: serde_json::Value = reset_resp.json().await.expect("reset JSON");
     assert_eq!(reset_json["cursors"][0]["items_processed"], 10);
 
-    // Also verify `saci-service cursor list` CLI subcommand against the live server.
+    // Also verify `saci-service cursor list`, `cursor reset`, and `backfill --local` CLI subcommands.
     let cli_out = std::process::Command::new(BIN)
         .args(["cursor", "list", "orders", "--url", &service.url("")])
         .output()
@@ -741,6 +741,246 @@ observability log_level="warn"
         cli_out.status.success(),
         "cursor list failed: {}",
         String::from_utf8_lossy(&cli_out.stderr)
+    );
+
+    service.terminate();
+    service.wait_exit(SHUTDOWN_BUDGET);
+
+    let bf_local_out = std::process::Command::new(BIN)
+        .args([
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "backfill",
+            "orders",
+            "--start",
+            "2025-02-01",
+            "--end",
+            "2025-02-10",
+            "--time-field",
+            "ts",
+            "--param",
+            "OUT_TAG=localbf",
+            "--reset-state",
+            "--local",
+        ])
+        .output()
+        .expect("run backfill --local CLI");
+    assert!(
+        bf_local_out.status.success(),
+        "backfill --local failed: {}",
+        String::from_utf8_lossy(&bf_local_out.stderr)
+    );
+    let local_out =
+        std::fs::read_to_string(dir.path().join("events_localbf.csv")).expect("localbf output");
+    assert!(local_out.contains("2,2025-02-05T12:00:00Z"));
+    assert!(!local_out.contains("1,2025-01-15"));
+}
+
+#[cfg(all(
+    feature = "connector-file",
+    feature = "codec-csv",
+    feature = "connector-redb",
+    feature = "inspector"
+))]
+#[tokio::test]
+async fn test_hot_reload_syncs_newly_added_dlq_workflow_and_rejects_broken_reload() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let d = dir.path().to_string_lossy().replace('\\', "/");
+    std::fs::write(dir.path().join("orders.csv"), "id,total\n1,10.0\n").expect("write csv");
+
+    let kdl_initial = format!(
+        r#"
+mode "standalone"
+node id=1 name="dlq-reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "base" {{
+    codec "base_csv" format="csv" {{ config has_headers=#true }}
+    source "base_in" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "base_out" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/base_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="base_in" to="base_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+
+    let cfg_path = dir.path().join("service.kdl");
+    std::fs::write(&cfg_path, &kdl_initial).expect("write initial");
+
+    let mut service = Service::spawn(&cfg_path);
+    let health_url = service.url("/health");
+    service
+        .poll_until_200(&health_url, STARTUP_BUDGET)
+        .await
+        .expect("service starts");
+
+    let client = probe_client();
+    // 1. Failing pre-build on an added workflow returns 400 and keeps base intact.
+    let broken_kdl = format!(
+        r#"
+mode "standalone"
+node id=1 name="dlq-reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "base" {{
+    codec "base_csv" format="csv" {{ config has_headers=#true }}
+    source "base_in" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "base_out" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/base_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="base_in" to="base_out"
+}}
+
+workflow "broken" {{
+    codec "b_csv" format="csv" {{ config has_headers=#true }}
+    source "b_in" connector="file" component="Order" codec="b_csv" {{
+        config {{
+            path "{d}/does_not_exist.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "b_out" connector="file" component="Order" codec="b_csv" {{
+        config {{
+            path "{d}/b_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="b_in" to="b_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+    let broken_resp = client
+        .post(service.url("/api/reload"))
+        .body(broken_kdl)
+        .send()
+        .await
+        .expect("POST broken reload");
+    assert_eq!(broken_resp.status(), 400);
+
+    // 2. Reload adding a workflow with a `dlq "redb"` block succeeds via CLI `saci-service reload --file`
+    //    and exposes it under `GET /api/dlq`.
+    let with_dlq_path = dir.path().join("with_dlq.kdl");
+    let with_dlq_kdl = format!(
+        r#"
+mode "standalone"
+node id=1 name="dlq-reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "base" {{
+    codec "base_csv" format="csv" {{ config has_headers=#true }}
+    source "base_in" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "base_out" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/base_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="base_in" to="base_out"
+}}
+
+workflow "with_dlq" {{
+    codec "d_csv" format="csv" {{ config has_headers=#true }}
+    source "d_in" connector="file" component="Order" codec="d_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "d_out" connector="file" component="Order" codec="d_csv" {{
+        config {{
+            path "{d}/d_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    dlq "redb" {{
+        directory "{d}/dlq"
+    }}
+    link from="d_in" to="d_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+    std::fs::write(&with_dlq_path, &with_dlq_kdl).expect("write with_dlq");
+
+    let reload_cli = std::process::Command::new(BIN)
+        .args([
+            "reload",
+            "--file",
+            with_dlq_path.to_str().unwrap(),
+            "--url",
+            &service.url(""),
+        ])
+        .output()
+        .expect("run reload CLI");
+    assert!(
+        reload_cli.status.success(),
+        "reload CLI failed: {}{}",
+        String::from_utf8_lossy(&reload_cli.stderr),
+        service.diagnostics()
+    );
+
+    let dlq_resp = client
+        .get(service.url("/api/dlq"))
+        .send()
+        .await
+        .expect("GET /api/dlq");
+    assert_eq!(dlq_resp.status(), 200);
+    let dlq_json: serde_json::Value = dlq_resp.json().await.expect("dlq json");
+    let entries = dlq_json.as_array().expect("dlq array");
+    assert!(
+        entries.iter().any(|e| e["workflow"] == "with_dlq"),
+        "expected hot-reloaded DLQ workflow in /api/dlq: {dlq_json}"
     );
 
     service.terminate();

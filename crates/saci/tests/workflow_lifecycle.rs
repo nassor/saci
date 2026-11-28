@@ -817,6 +817,31 @@ async fn a_channel_workflow_is_restartable_and_supports_rebuild_verbs() {
                 "drain rebuilt and incremented runs: {drain}"
             );
 
+            // Service-wide restart rebuilds both halves together and data keeps flowing.
+            let resp_all = harness.post("/api/service/restart").await;
+            assert!(
+                matches!(resp_all.status().as_u16(), 200 | 202),
+                "service restart is accepted: {}",
+                resp_all.status()
+            );
+            let bridged_after = harness.await_state("bridged", &["running"]).await;
+            let drain_after = harness.await_state("drain", &["running"]).await;
+            assert!(bridged_after["runs"].as_u64().unwrap_or(0) >= 3);
+            assert!(drain_after["runs"].as_u64().unwrap_or(0) >= 3);
+
+            let deadline = Instant::now() + SETTLE_BUDGET;
+            loop {
+                let text = std::fs::read_to_string(&output).unwrap_or_default();
+                if text.lines().filter(|l| l.starts_with("1,")).count() >= 2 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "bridge output stopped flowing after dual restart; output:\n{text}"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
             harness.stop();
         })
         .await;

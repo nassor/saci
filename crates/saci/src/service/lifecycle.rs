@@ -1240,6 +1240,9 @@ pub async fn run_supervised(
                             run_now = true;
                         }
                         SupervisorAction::Backfill(payload, reply) => {
+                            let prev_state = publisher.current.state;
+                            let prev_error = publisher.current.error.clone();
+                            publisher.publish(WorkflowRunState::Running, None);
                             let (request, override_spec) = *payload;
                             let target_spec = override_spec.as_ref().unwrap_or(&workflow);
                             let res = execute_backfill(
@@ -1252,6 +1255,7 @@ pub async fn run_supervised(
                                 &cancel,
                             )
                             .await;
+                            publisher.publish(prev_state, prev_error);
                             let _ = reply.send(res);
                         }
                     },
@@ -1266,6 +1270,7 @@ pub async fn run_supervised(
         }
 
         if let Some((payload, reply)) = pending_backfill.take() {
+            publisher.publish(WorkflowRunState::Running, None);
             let (request, override_spec) = *payload;
             let target_spec = override_spec.as_ref().unwrap_or(&workflow);
             let res = execute_backfill(
@@ -1429,11 +1434,18 @@ pub async fn run_supervised(
                                     run_token.cancel();
                                 }
                                 SupervisorAction::Backfill(payload, reply) => {
-                                    after = Some(AfterRun::Restart);
-                                    pending_backfill = Some((payload, reply));
-                                    publisher.publish(WorkflowRunState::Stopping, None);
-                                    pause_handle.request_resume();
-                                    run_token.cancel();
+                                    if pending_backfill.is_some() {
+                                        let _ = reply.send(Err(
+                                            "a backfill is already pending for this workflow"
+                                                .to_string(),
+                                        ));
+                                    } else {
+                                        after = Some(AfterRun::Restart);
+                                        pending_backfill = Some((payload, reply));
+                                        publisher.publish(WorkflowRunState::Stopping, None);
+                                        pause_handle.request_resume();
+                                        run_token.cancel();
+                                    }
                                 }
                             },
                         }

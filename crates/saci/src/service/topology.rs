@@ -498,7 +498,7 @@ fn processor_topo_node_from_spec(
 
     let (name, type_name, component, artifact): (
         Option<String>,
-        &str,
+        String,
         Option<String>,
         Option<&str>,
     ) = if let Some(w) = spec.wasm.iter().find(|w| w.id == id) {
@@ -506,21 +506,26 @@ fn processor_topo_node_from_spec(
         {
             win_cfg = w.window.as_ref();
         }
-        (w.name.clone(), "wasm", None, w.path.as_deref())
+        (w.name.clone(), "wasm".to_string(), None, w.path.as_deref())
     } else if let Some(p) = spec.plugin.iter().find(|p| p.id == id) {
         #[cfg(feature = "windows")]
         {
             win_cfg = p.window.as_ref();
         }
-        (p.name.clone(), "plugin", None, p.path.as_deref())
+        (
+            p.name.clone(),
+            "plugin".to_string(),
+            None,
+            p.path.as_deref(),
+        )
     } else if let Some(o) = spec.operator.iter().find(|o| o.id == id) {
         #[cfg(feature = "windows")]
         {
             win_cfg = o.window.as_ref();
         }
-        (o.name.clone(), "operator", o.component.clone(), None)
+        (o.name.clone(), format!("operator:{}", o.kind), None, None)
     } else {
-        (None, "processor", None, None)
+        (None, "processor".to_string(), None, None)
     };
 
     let runtime = prev.and_then(|n| n.runtime.clone());
@@ -560,7 +565,7 @@ fn processor_topo_node_from_spec(
         id: id.to_string(),
         kind: "processor".to_string(),
         name,
-        type_name: type_name.to_string(),
+        type_name,
         component,
         runtime,
         window,

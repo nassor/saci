@@ -183,6 +183,25 @@ pub(crate) mod raft_impl {
                 .map_err(|e| SaciError::store(format!("bind raft listener on {listen_addr}: {e}")))
         }
 
+        /// Spawn the Raft TCP peer listener using an already-bound [`tokio::net::TcpListener`].
+        ///
+        /// Keeps pre-reserved ephemeral listeners open across port setup so
+        /// another process cannot claim a released port before bind.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`SaciError::Store`] when `listener.local_addr()` fails.
+        pub fn spawn_tcp_server_with_listener(
+            &self,
+            listener: tokio::net::TcpListener,
+        ) -> SaciResult<tokio::task::JoinHandle<std::io::Result<()>>> {
+            let listen_addr = listener
+                .local_addr()
+                .map_err(|e| SaciError::store(format!("read raft listener addr: {e}")))?;
+            use crate::distributed::consensus::transport::RaftTcpServer;
+            Ok(RaftTcpServer::new(self.raft.clone(), listen_addr).spawn_with_listener(listener))
+        }
+
         /// Bootstrap the Raft cluster with the given initial membership.
         ///
         /// This is a no-op if the cluster is already initialised
