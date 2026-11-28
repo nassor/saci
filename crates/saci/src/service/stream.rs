@@ -277,11 +277,30 @@ pub(crate) async fn run(
     if let Some(client) = &state {
         for i in 0..n {
             if matches!(kinds[i], NodeRunKind::Processor) {
-                prior[i] = client.load_prior(&workflow_id, &ids[i]).await?;
+                prior[i] = match client.load_prior(&workflow_id, &ids[i]).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        if let Some(l) = &lineage {
+                            l.emit_fail(&workflow_id, &lineage_run_id, &e.message());
+                            l.flush().await;
+                        }
+                        return Err(e);
+                    }
+                };
             }
         }
         for &si in &source_indices {
-            if let Some(meta) = client.load_source_cursor(&workflow_id, &ids[si]).await? {
+            let meta_opt = match client.load_source_cursor(&workflow_id, &ids[si]).await {
+                Ok(m) => m,
+                Err(e) => {
+                    if let Some(l) = &lineage {
+                        l.emit_fail(&workflow_id, &lineage_run_id, &e.message());
+                        l.flush().await;
+                    }
+                    return Err(e);
+                }
+            };
+            if let Some(meta) = meta_opt {
                 items_per_source[si] = meta.items_processed;
                 #[cfg(feature = "tracing")]
                 tracing::info!(
@@ -864,6 +883,10 @@ pub(crate) async fn run(
             stats.nodes = node_stats.clone();
             publish(&live_stats, &stats).await;
             log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
+            if let Some(l) = &lineage {
+                l.emit_abort(&workflow_id, &lineage_run_id);
+                l.flush().await;
+            }
             return Ok(stats);
         }
 
@@ -887,7 +910,13 @@ pub(crate) async fn run(
         workflow_metrics.pass();
         stats.total_busy_micros += item_micros;
         if let Some(l) = &lineage {
-            l.emit_pass(&workflow_id, &lineage_run_id, rows, stats.rows_processed);
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
+            l.emit_pass(&workflow_id, &lineage_run_id, rows, sink_rows_out);
         }
 
         // Each sink's own backlog is published under its own id; the maximum
@@ -1001,13 +1030,20 @@ pub(crate) async fn run(
         if cancel.is_cancelled() {
             l.emit_abort(&workflow_id, &lineage_run_id);
         } else {
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
             l.emit_complete(
                 &workflow_id,
                 &lineage_run_id,
                 stats.rows_processed,
-                stats.rows_processed,
+                sink_rows_out,
             );
         }
+        l.flush().await;
     }
 
     Ok(stats)

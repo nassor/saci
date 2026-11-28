@@ -86,9 +86,12 @@ a fresh timestamp and its replay count raised by one. Replays run at four
 moments: at the workflow's first pass, whenever a self-healed sink reports
 itself rebuilt, on a widening schedule while letters wait, and when you ask.
 
-Only a sink write failure is captured. A processor error is not a dead letter:
-the batch it failed on came from upstream and is still upstream's, so storing
-it would run the processor twice on data it never accepted.
+Only a sink write failure is captured by default. A processor error is not a
+dead letter: the batch it failed on came from upstream and is still upstream's,
+so storing it would run the processor twice on data it never accepted. Setting
+`on_corrupt="dlq"` on a `source` node (with a `dlq` block configured) also
+isolates corrupt raw records decoded by NDJSON, CSV, or Avro readers/decoders
+into the dead letter store without failing valid rows in the same file or batch.
 
 ## 2. Turn it on
 

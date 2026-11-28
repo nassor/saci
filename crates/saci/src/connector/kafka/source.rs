@@ -18,7 +18,7 @@
 //! always the whole state.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arrow_array::{ArrayRef, BinaryArray, LargeBinaryArray, RecordBatch, StringArray};
@@ -33,7 +33,7 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::codec::{Codec, MessageShape};
 use crate::error::SaciError;
-use crate::io::Source;
+use crate::io::{CorruptRecord, Source};
 
 use crate::connector::kafka::admin::ensure_topics;
 use crate::connector::kafka::config::{KafkaSourceConfig, client_config};
@@ -244,6 +244,8 @@ pub struct KafkaSource {
     snapshot: Vec<CompactedEntry>,
     snapshot_cursor: usize,
     snapshot_taken: bool,
+    skip_corrupt: bool,
+    corrupt: Mutex<Vec<CorruptRecord>>,
 }
 
 impl KafkaSource {
@@ -312,6 +314,8 @@ impl KafkaSource {
             snapshot: Vec::new(),
             snapshot_cursor: 0,
             snapshot_taken: false,
+            skip_corrupt: false,
+            corrupt: Mutex::new(Vec::new()),
         })
     }
 
@@ -496,6 +500,7 @@ impl KafkaSource {
     /// attribution; the codec names the format that rejected it.
     fn decode_window(&self, messages: &[ReceivedMessage]) -> Result<RecordBatch, SaciError> {
         let mut decoder = self.codec.open_message_decoder(Arc::clone(&self.schema))?;
+        decoder.set_skip_corrupt(self.skip_corrupt);
         for message in messages {
             let Some(payload) = &message.payload else {
                 continue; // tombstone, already excluded from the buffer
@@ -507,9 +512,18 @@ impl KafkaSource {
                 ))
             })?;
         }
-        decoder
-            .flush()?
-            .ok_or_else(|| SaciError::generic("KafkaSource: window decoded no rows"))
+        let batch = decoder.flush()?;
+        let drained = decoder.drain_corrupt();
+        if !drained.is_empty()
+            && let Ok(mut guard) = self.corrupt.lock()
+        {
+            guard.extend(drained);
+        }
+        match batch {
+            Some(batch) => Ok(batch),
+            None if self.skip_corrupt => Ok(RecordBatch::new_empty(Arc::clone(&self.schema))),
+            None => Err(SaciError::generic("KafkaSource: window decoded no rows")),
+        }
     }
 
     /// Hand out the next `batch_rows` chunk of the compacted snapshot,
@@ -878,6 +892,17 @@ fn key_column(
 impl Source for KafkaSource {
     fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.corrupt
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
     }
 
     /// Cancel-safe: every message the consumer has taken from the broker is

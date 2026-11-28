@@ -74,7 +74,9 @@ impl Connector for UdpConnector {
         let schema = schema_of(&parse_fields(config, "udp")?)?;
         let codec = ctx.codec("udp")?;
 
-        Ok(Box::new(UdpSource::new(cfg, schema, codec)?))
+        let mut src = UdpSource::new(cfg, schema, codec)?;
+        src.set_skip_corrupt(ctx.skip_corrupt());
+        Ok(Box::new(src))
     }
 
     fn sink(

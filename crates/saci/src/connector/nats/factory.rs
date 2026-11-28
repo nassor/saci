@@ -44,7 +44,9 @@ impl Connector for NatsConnector {
             .map_err(|e| SaciError::configuration(format!("NatsSource config: {e}")))?;
         let schema = schema_of(&parse_fields(config, "NatsSource")?)?;
         let codec = ctx.codec("NatsSource")?;
-        Ok(Box::new(NatsSource::new(cfg, schema, codec)?))
+        let mut src = NatsSource::new(cfg, schema, codec)?;
+        src.set_skip_corrupt(ctx.skip_corrupt());
+        Ok(Box::new(src))
     }
 
     fn sink(

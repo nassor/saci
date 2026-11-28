@@ -155,19 +155,31 @@ impl QualityRule {
 /// Parallel vectors `(rules, keys)` record each seen `(rule_name, row_key)`
 /// pair so the state serializes natively across WASM, native plugin, and
 /// service checkpoints.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DataQualityState {
     /// Rule name for each tracked unique key entry.
     pub rules: Vec<String>,
     /// Canonical row key for each tracked unique key entry.
     pub keys: Vec<String>,
+    /// Transient O(1) lookup index rebuilt lazily after deserialization.
+    #[serde(skip)]
+    index: HashSet<(String, String)>,
 }
+
+impl PartialEq for DataQualityState {
+    fn eq(&self, other: &Self) -> bool {
+        self.rules == other.rules && self.keys == other.keys
+    }
+}
+
+impl Eq for DataQualityState {}
 
 impl DataQualityState {
     /// Clears all tracked uniqueness keys across every rule.
     pub fn clear(&mut self) {
         self.rules.clear();
         self.keys.clear();
+        self.index.clear();
     }
 
     /// Number of unique keys tracked across all stateful rules.
@@ -182,20 +194,23 @@ impl DataQualityState {
         self.keys.is_empty()
     }
 
-    fn contains(&self, rule_name: &str, key: &str) -> bool {
-        self.rules
-            .iter()
-            .zip(self.keys.iter())
-            .any(|(r, k)| r == rule_name && k == key)
+    fn ensure_index(&mut self) {
+        if self.index.len() != self.keys.len() {
+            self.index.clear();
+            for (r, k) in self.rules.iter().zip(self.keys.iter()) {
+                self.index.insert((r.clone(), k.clone()));
+            }
+        }
     }
 
     fn insert(&mut self, rule_name: &str, key: String) -> bool {
-        if self.contains(rule_name, &key) {
-            false
-        } else {
+        self.ensure_index();
+        if self.index.insert((rule_name.to_string(), key.clone())) {
             self.rules.push(rule_name.to_string());
             self.keys.push(key);
             true
+        } else {
+            false
         }
     }
 }
@@ -210,6 +225,7 @@ impl Component for DataQualityState {
         let sample = DataQualityState {
             rules: vec!["r".to_string()],
             keys: vec!["k".to_string()],
+            ..Self::default()
         };
         let fields =
             Vec::<arrow_schema::FieldRef>::from_samples(&[sample], TracingOptions::default())
@@ -227,6 +243,14 @@ pub struct QualitySplit {
     pub quarantine: RecordBatch,
 }
 
+#[derive(Debug, Clone)]
+enum CompiledRule {
+    Plain,
+    Regex(regex::Regex),
+    InSet(HashSet<String>),
+    Check(Expr),
+}
+
 /// Arrow [`System`] that checks declarative [`QualityRule`]s per row and splits
 /// valid records from offending records.
 #[derive(Debug)]
@@ -235,6 +259,7 @@ pub struct DataQualitySystem {
     target_component: &'static str,
     quarantine_component: Option<&'static str>,
     rules: Vec<QualityRule>,
+    compiled: Vec<CompiledRule>,
     on_violation: QualityFailureAction,
     include_diagnostics: bool,
     fallback_state: Mutex<DataQualityState>,
@@ -251,6 +276,7 @@ impl Clone for DataQualitySystem {
             target_component: self.target_component,
             quarantine_component: self.quarantine_component,
             rules: self.rules.clone(),
+            compiled: self.compiled.clone(),
             on_violation: self.on_violation,
             include_diagnostics: self.include_diagnostics,
             fallback_state: Mutex::new(guard.clone()),
@@ -271,8 +297,9 @@ impl DataQualitySystem {
                 "DataQualitySystem requires at least one QualityRule",
             ));
         }
+        let mut compiled = Vec::with_capacity(rules.len());
         for rule in &rules {
-            validate_rule(rule)?;
+            compiled.push(compile_rule(rule)?);
         }
         let comp = intern_component_name(component);
         Ok(Self {
@@ -280,6 +307,7 @@ impl DataQualitySystem {
             target_component: comp,
             quarantine_component: None,
             rules,
+            compiled,
             on_violation: QualityFailureAction::Quarantine,
             include_diagnostics: false,
             fallback_state: Mutex::new(DataQualityState::default()),
@@ -377,9 +405,9 @@ impl DataQualitySystem {
         let mut first_reason: Vec<Option<String>> = vec![None; n];
 
         let mut state_opt = state;
-        for rule in &self.rules {
+        for (rule, compiled) in self.rules.iter().zip(self.compiled.iter()) {
             let state_ref = state_opt.as_deref_mut();
-            let (pass_mask, reason_msg) = evaluate_rule(rule, batch, state_ref)?;
+            let (pass_mask, reason_msg) = evaluate_rule(rule, compiled, batch, state_ref)?;
             for i in 0..n {
                 if !pass_mask[i] && !row_failed[i] {
                     row_failed[i] = true;
@@ -442,9 +470,7 @@ impl DataQualitySystem {
         let batch = match data.batch_named(self.source_component) {
             Ok(b) => b.clone(),
             Err(_) => {
-                if self.on_violation == QualityFailureAction::Quarantine
-                    && self.quarantine_component.is_none()
-                {
+                if self.on_violation == QualityFailureAction::Quarantine {
                     let _ = data.take_resource::<RouteDecision>();
                     let _ = data.take_resource::<BranchPayloads>();
                 }
@@ -471,9 +497,7 @@ impl DataQualitySystem {
             data.put_batch_named(q_comp, split.quarantine.clone())?;
         }
 
-        if self.on_violation == QualityFailureAction::Quarantine
-            && self.quarantine_component.is_none()
-        {
+        if self.on_violation == QualityFailureAction::Quarantine {
             let mut selected = Vec::new();
             let mut branches = std::collections::HashMap::new();
             if split.valid.num_rows() > 0 {
@@ -495,7 +519,7 @@ impl DataQualitySystem {
     }
 }
 
-fn validate_rule(rule: &QualityRule) -> SaciResult<()> {
+fn compile_rule(rule: &QualityRule) -> SaciResult<CompiledRule> {
     if rule.rule_name().trim().is_empty() {
         return Err(SaciError::configuration(
             "quality rule name must not be empty",
@@ -509,6 +533,7 @@ fn validate_rule(rule: &QualityRule) -> SaciResult<()> {
                     rule.rule_name()
                 )));
             }
+            Ok(CompiledRule::Plain)
         }
         QualityRule::Regex {
             column,
@@ -522,7 +547,7 @@ fn validate_rule(rule: &QualityRule) -> SaciResult<()> {
                     rule.rule_name()
                 )));
             }
-            RegexBuilder::new(pattern)
+            let re = RegexBuilder::new(pattern)
                 .case_insensitive(*case_insensitive)
                 .build()
                 .map_err(|e| {
@@ -531,6 +556,7 @@ fn validate_rule(rule: &QualityRule) -> SaciResult<()> {
                         rule.rule_name()
                     ))
                 })?;
+            Ok(CompiledRule::Regex(re))
         }
         QualityRule::Range {
             column, min, max, ..
@@ -547,6 +573,7 @@ fn validate_rule(rule: &QualityRule) -> SaciResult<()> {
                     rule.rule_name()
                 )));
             }
+            Ok(CompiledRule::Plain)
         }
         QualityRule::InSet { column, values, .. } => {
             if column.trim().is_empty() || values.is_empty() {
@@ -555,6 +582,7 @@ fn validate_rule(rule: &QualityRule) -> SaciResult<()> {
                     rule.rule_name()
                 )));
             }
+            Ok(CompiledRule::InSet(values.iter().cloned().collect()))
         }
         QualityRule::Unique { columns, .. } => {
             if columns.is_empty() || columns.iter().any(|c| c.trim().is_empty()) {
@@ -563,22 +591,24 @@ fn validate_rule(rule: &QualityRule) -> SaciResult<()> {
                     rule.rule_name()
                 )));
             }
+            Ok(CompiledRule::Plain)
         }
         QualityRule::Check { expr, .. } => {
-            Expr::parse(expr).map_err(|e| {
+            let parsed = Expr::parse(expr).map_err(|e| {
                 SaciError::configuration(format!(
                     "quality rule '{}': invalid SQL check expression '{expr}': {}",
                     rule.rule_name(),
                     e.message()
                 ))
             })?;
+            Ok(CompiledRule::Check(parsed))
         }
     }
-    Ok(())
 }
 
 fn evaluate_rule(
     rule: &QualityRule,
+    compiled: &CompiledRule,
     batch: &RecordBatch,
     state: Option<&mut DataQualityState>,
 ) -> SaciResult<(Vec<bool>, String)> {
@@ -606,18 +636,14 @@ fn evaluate_rule(
             Ok((mask, format!("column '{column}' is null or empty")))
         }
         QualityRule::Regex {
-            column,
-            pattern,
-            case_insensitive,
-            ..
+            column, pattern, ..
         } => {
             let col = batch.column_by_name(column).ok_or_else(|| {
                 SaciError::configuration(format!("quality: column '{column}' not found in batch"))
             })?;
-            let re = RegexBuilder::new(pattern)
-                .case_insensitive(*case_insensitive)
-                .build()
-                .map_err(|e| SaciError::configuration(format!("quality regex: {e}")))?;
+            let CompiledRule::Regex(re) = compiled else {
+                unreachable!("Regex rule always compiles to CompiledRule::Regex")
+            };
             let utf8 = cast_to_utf8(col)?;
             let s_arr = utf8
                 .as_any()
@@ -689,12 +715,14 @@ fn evaluate_rule(
             let col = batch.column_by_name(column).ok_or_else(|| {
                 SaciError::configuration(format!("quality: column '{column}' not found in batch"))
             })?;
+            let CompiledRule::InSet(allowed) = compiled else {
+                unreachable!("InSet rule always compiles to CompiledRule::InSet")
+            };
             let utf8 = cast_to_utf8(col)?;
             let s_arr = utf8
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| SaciError::generic("quality in_set: failed Utf8 downcast"))?;
-            let allowed: HashSet<&str> = values.iter().map(String::as_str).collect();
             let mask = (0..n)
                 .map(|i| !s_arr.is_null(i) && allowed.contains(s_arr.value(i)))
                 .collect();
@@ -737,7 +765,9 @@ fn evaluate_rule(
             Ok((mask, format!("duplicate key on ({})", columns.join(", "))))
         }
         QualityRule::Check { name, expr } => {
-            let parsed = Expr::parse(expr)?;
+            let CompiledRule::Check(parsed) = compiled else {
+                unreachable!("Check rule always compiles to CompiledRule::Check")
+            };
             let pred = parsed.evaluate_predicate(batch)?;
             let mask = (0..n).map(|i| !pred.is_null(i) && pred.value(i)).collect();
             Ok((
@@ -773,9 +803,7 @@ impl System for DataQualitySystem {
         if let Some(q_comp) = self.quarantine_component {
             meta = meta.writes_all_named(q_comp);
         }
-        if self.on_violation == QualityFailureAction::Quarantine
-            && self.quarantine_component.is_none()
-        {
+        if self.on_violation == QualityFailureAction::Quarantine {
             meta = meta.writes_resource::<RouteDecision>();
             meta = meta.writes_resource::<BranchPayloads>();
         }

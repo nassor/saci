@@ -347,7 +347,16 @@ pub(crate) async fn run(
     if batch_resume && let Some(client) = &state {
         for i in 0..n {
             if matches!(kinds[i], NodeRunKind::Processor) {
-                prior[i] = client.load_prior(&workflow_id, &ids[i]).await?;
+                prior[i] = match client.load_prior(&workflow_id, &ids[i]).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        if let Some(l) = &lineage {
+                            l.emit_fail(&workflow_id, &lineage_run_id, &e.message());
+                            l.flush().await;
+                        }
+                        return Err(e);
+                    }
+                };
             }
         }
     }
@@ -975,6 +984,10 @@ pub(crate) async fn run(
             stats.total_duration_ms = start.elapsed().as_millis() as u64;
             stats.nodes = node_stats.clone();
             log_flow_finish(&workflow_id, &ids, &controllers, &flow_episodes);
+            if let Some(l) = &lineage {
+                l.emit_abort(&workflow_id, &lineage_run_id);
+                l.flush().await;
+            }
             return Ok(stats);
         }
 
@@ -1138,12 +1151,13 @@ pub(crate) async fn run(
         drop(batch_span);
 
         if let Some(l) = &lineage {
-            l.emit_pass(
-                &workflow_id,
-                &lineage_run_id,
-                total_rows_in,
-                stats.rows_processed,
-            );
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
+            l.emit_pass(&workflow_id, &lineage_run_id, total_rows_in, sink_rows_out);
         }
 
         if cancelled_before_finish {
@@ -1277,13 +1291,20 @@ pub(crate) async fn run(
         if cancel.is_cancelled() {
             l.emit_abort(&workflow_id, &lineage_run_id);
         } else {
+            let sink_rows_out: u64 = kinds
+                .iter()
+                .zip(node_stats.iter())
+                .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
+                .map(|(_, s)| s.rows)
+                .sum();
             l.emit_complete(
                 &workflow_id,
                 &lineage_run_id,
                 stats.rows_processed,
-                stats.rows_processed,
+                sink_rows_out,
             );
         }
+        l.flush().await;
     }
 
     Ok(stats)
@@ -3300,5 +3321,82 @@ workflow "dq_wf" {{
         assert!(good_text.contains("two@example.com"));
         assert_eq!(bad_text.lines().count(), 1);
         assert!(bad_text.contains("bad-email"));
+    }
+
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[tokio::test]
+    async fn lineage_reports_actual_sink_rows_out_after_filtering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            dir.path().join("in.ndjson"),
+            "{\"id\":1,\"keep\":true}\n{\"id\":2,\"keep\":false}\n{\"id\":3,\"keep\":true}\n",
+        )
+        .unwrap();
+
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="{p}"
+run "once"
+lineage enabled=#true namespace="analytics"
+
+workflow "filtered_wf" {{
+    codec "json" format="ndjson"
+    source "in" connector="file" codec="json" component="Row" {{
+        config path="{p}/in.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "keep" type="boolean" nullable=#false
+        }}
+    }}
+    operator "only_keep" kind="filter" component="Row" {{
+        config where="keep = true"
+    }}
+    sink "out" connector="file" codec="json" component="Row" {{
+        config path="{p}/out.ndjson" {{
+            field "id" type="int64" nullable=#false
+            field "keep" type="boolean" nullable=#false
+        }}
+    }}
+    link from="in" to="only_keep"
+    link from="only_keep" to="out"
+}}
+"#
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("parse");
+        cfg.validate().expect("validate");
+        let lineage =
+            std::sync::Arc::new(crate::service::lineage::LineageDispatcher::new(&cfg, None));
+        let built = crate::service::ServiceBuilder::new()
+            .lineage(std::sync::Arc::clone(&lineage))
+            .build(&cfg)
+            .expect("build")
+            .remove(0);
+        let stats = built.run(CancellationToken::new()).await.expect("run");
+        assert_eq!(stats.rows_processed, 3);
+
+        let events = lineage.snapshot().recent_events;
+        let complete = events
+            .iter()
+            .find(|e| e.event_type == crate::service::lineage::LineageEventType::Complete)
+            .expect("COMPLETE event emitted");
+        assert_eq!(
+            complete.inputs[0]
+                .facets
+                .input_statistics
+                .as_ref()
+                .unwrap()
+                .row_count,
+            3
+        );
+        assert_eq!(
+            complete.outputs[0]
+                .facets
+                .output_statistics
+                .as_ref()
+                .unwrap()
+                .row_count,
+            2
+        );
     }
 }

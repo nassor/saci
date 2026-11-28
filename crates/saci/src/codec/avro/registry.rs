@@ -1,7 +1,7 @@
 //! External Avro schema registry clients (Confluent, Apicurio, AWS Glue),
 //! compatibility checks, and thread-safe in-memory caching.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -88,6 +88,29 @@ impl CompatibilityMode {
             Self::ForwardTransitive => "FORWARD_TRANSITIVE",
             Self::Full => "FULL",
             Self::FullTransitive => "FULL_TRANSITIVE",
+        }
+    }
+
+    /// Returns `true` when every historical version must satisfy compatibility.
+    #[must_use]
+    pub const fn is_transitive(self) -> bool {
+        matches!(
+            self,
+            Self::BackwardTransitive | Self::ForwardTransitive | Self::FullTransitive
+        )
+    }
+
+    /// AWS Glue Schema Registry `Compatibility` enum string.
+    #[must_use]
+    pub const fn glue_str(self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::Backward => "BACKWARD",
+            Self::BackwardTransitive => "BACKWARD_ALL",
+            Self::Forward => "FORWARD",
+            Self::ForwardTransitive => "FORWARD_ALL",
+            Self::Full => "FULL",
+            Self::FullTransitive => "FULL_ALL",
         }
     }
 }
@@ -360,23 +383,22 @@ fn check_reader_writer_compat(reader: &Value, writer: &Value, dir: &str) -> Resu
         return Ok(());
     }
 
+    if let Some(w_union) = writer.as_array() {
+        if w_union.is_empty() {
+            return Err(SaciError::configuration(
+                "avro registry: writer union must not be empty",
+            ));
+        }
+        for w_branch in w_union {
+            check_reader_writer_compat(reader, w_branch, dir)?;
+        }
+        return Ok(());
+    }
     if let Some(r_union) = reader.as_array() {
         for r_branch in r_union {
             if check_reader_writer_compat(r_branch, writer, dir).is_ok() {
                 return Ok(());
             }
-        }
-    }
-    if let Some(w_union) = writer.as_array() {
-        let mut all_ok = !w_union.is_empty();
-        for w_branch in w_union {
-            if check_reader_writer_compat(reader, w_branch, dir).is_err() {
-                all_ok = false;
-                break;
-            }
-        }
-        if all_ok {
-            return Ok(());
         }
     }
 
@@ -443,6 +465,7 @@ fn avro_type_compatible(writer: &Value, reader: &Value) -> bool {
 pub(crate) struct SchemaRegistryClient {
     config: SchemaRegistryConfig,
     http: reqwest::Client,
+    rt: Arc<tokio::runtime::Runtime>,
     id32_cache: RwLock<HashMap<u32, Arc<AvroSchema>>>,
     id64_cache: RwLock<HashMap<u64, Arc<AvroSchema>>>,
     uuid_cache: RwLock<HashMap<Uuid, Arc<AvroSchema>>>,
@@ -465,9 +488,16 @@ impl SchemaRegistryClient {
             .map_err(|e| {
                 SaciError::generic(format!("avro registry: HTTP client init failed: {e}"))
             })?;
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| SaciError::generic(format!("avro registry runtime build: {e}")))?,
+        );
         Ok(Self {
             config,
             http,
+            rt,
             id32_cache: RwLock::new(HashMap::new()),
             id64_cache: RwLock::new(HashMap::new()),
             uuid_cache: RwLock::new(HashMap::new()),
@@ -626,16 +656,43 @@ impl SchemaRegistryClient {
     fn resolve_confluent_write(&self, schema_json: &str) -> Result<RegistrySchemaId, SaciError> {
         let subject = url_encode(self.subject_name()?);
         if self.config.compatibility != CompatibilityMode::None {
-            let latest_url = format!(
-                "{}/subjects/{subject}/versions/latest",
-                self.config.endpoint
-            );
-            if let Ok((status, body)) = self.send_raw(Method::GET, &latest_url, None, &[])
-                && status == 200
-                && let Ok(val) = serde_json::from_str::<Value>(&body)
-                && let Some(existing) = val.get("schema").and_then(Value::as_str)
-            {
-                check_avro_compatibility(schema_json, existing, self.config.compatibility)?;
+            let mut checked_any = false;
+            if self.config.compatibility.is_transitive() {
+                let versions_url = format!("{}/subjects/{subject}/versions", self.config.endpoint);
+                if let Ok((status, body)) = self.send_raw(Method::GET, &versions_url, None, &[])
+                    && status == 200
+                    && let Ok(versions) = serde_json::from_str::<Vec<u64>>(&body)
+                {
+                    for v in versions {
+                        let ver_url =
+                            format!("{}/subjects/{subject}/versions/{v}", self.config.endpoint);
+                        if let Ok((st, ver_body)) = self.send_raw(Method::GET, &ver_url, None, &[])
+                            && st == 200
+                            && let Ok(val) = serde_json::from_str::<Value>(&ver_body)
+                            && let Some(existing) = val.get("schema").and_then(Value::as_str)
+                        {
+                            check_avro_compatibility(
+                                schema_json,
+                                existing,
+                                self.config.compatibility,
+                            )?;
+                            checked_any = true;
+                        }
+                    }
+                }
+            }
+            if !checked_any {
+                let latest_url = format!(
+                    "{}/subjects/{subject}/versions/latest",
+                    self.config.endpoint
+                );
+                if let Ok((status, body)) = self.send_raw(Method::GET, &latest_url, None, &[])
+                    && status == 200
+                    && let Ok(val) = serde_json::from_str::<Value>(&body)
+                    && let Some(existing) = val.get("schema").and_then(Value::as_str)
+                {
+                    check_avro_compatibility(schema_json, existing, self.config.compatibility)?;
+                }
             }
         }
 
@@ -671,15 +728,65 @@ impl SchemaRegistryClient {
         let subject = url_encode(self.subject_name()?);
 
         if self.config.compatibility != CompatibilityMode::None {
-            let latest_url = format!(
-                "{}/apis/registry/v2/groups/{group}/artifacts/{subject}",
-                self.config.endpoint
-            );
-            if let Ok((status, body)) = self.send_raw(Method::GET, &latest_url, None, &[])
-                && status == 200
-            {
-                let existing = extract_schema_text(&body);
-                check_avro_compatibility(schema_json, &existing, self.config.compatibility)?;
+            let mut checked_any = false;
+            if self.config.compatibility.is_transitive() {
+                let versions_url = format!(
+                    "{}/apis/registry/v2/groups/{group}/artifacts/{subject}/versions",
+                    self.config.endpoint
+                );
+                if let Ok((status, body)) = self.send_raw(Method::GET, &versions_url, None, &[])
+                    && status == 200
+                    && let Ok(val) = serde_json::from_str::<Value>(&body)
+                {
+                    let items = val
+                        .get("versions")
+                        .and_then(Value::as_array)
+                        .or_else(|| val.as_array());
+                    if let Some(list) = items {
+                        for item in list {
+                            let ver = item
+                                .get("version")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    item.get("version")
+                                        .and_then(Value::as_u64)
+                                        .map(|n| n.to_string())
+                                });
+                            if let Some(ver) = ver {
+                                let ver_url = format!(
+                                    "{}/apis/registry/v2/groups/{group}/artifacts/{subject}/versions/{}",
+                                    self.config.endpoint,
+                                    url_encode(&ver)
+                                );
+                                if let Ok((st, ver_body)) =
+                                    self.send_raw(Method::GET, &ver_url, None, &[])
+                                    && st == 200
+                                {
+                                    let existing = extract_schema_text(&ver_body);
+                                    check_avro_compatibility(
+                                        schema_json,
+                                        &existing,
+                                        self.config.compatibility,
+                                    )?;
+                                    checked_any = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !checked_any {
+                let latest_url = format!(
+                    "{}/apis/registry/v2/groups/{group}/artifacts/{subject}",
+                    self.config.endpoint
+                );
+                if let Ok((status, body)) = self.send_raw(Method::GET, &latest_url, None, &[])
+                    && status == 200
+                {
+                    let existing = extract_schema_text(&body);
+                    check_avro_compatibility(schema_json, &existing, self.config.compatibility)?;
+                }
             }
         }
 
@@ -767,7 +874,7 @@ impl SchemaRegistryClient {
                         "RegistryId": { "RegistryName": self.config.glue_registry_name },
                         "SchemaName": schema_name,
                         "DataFormat": "AVRO",
-                        "Compatibility": self.config.compatibility.as_str(),
+                        "Compatibility": self.config.compatibility.glue_str(),
                         "SchemaDefinition": schema_json,
                     });
                     self.send_glue("AWSGlue.CreateSchema", &create_req)?
@@ -833,6 +940,7 @@ impl SchemaRegistryClient {
         extra_headers: &[(&str, &str)],
     ) -> Result<(u16, String), SaciError> {
         let http = self.http.clone();
+        let rt = Arc::clone(&self.rt);
         let auth = self.config.auth.clone();
         let url_owned = url.to_string();
         let headers_owned: Vec<(String, String)> = extra_headers
@@ -844,13 +952,7 @@ impl SchemaRegistryClient {
         // so synchronous `Codec` methods never conflict with an outer Tokio runtime.
         std::thread::scope(|scope| {
             scope
-                .spawn(|| {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| {
-                            SaciError::generic(format!("avro registry runtime build: {e}"))
-                        })?;
+                .spawn(move || {
                     rt.block_on(async move {
                         let mut req = http.request(method.clone(), &url_owned);
                         let has_content_type = headers_owned
@@ -883,6 +985,7 @@ impl SchemaRegistryClient {
                                     region,
                                     "glue",
                                     payload,
+                                    &headers_owned,
                                     access_key_id.as_deref(),
                                     secret_access_key.as_deref(),
                                     session_token.as_deref(),
@@ -943,6 +1046,7 @@ fn sign_aws_sigv4(
     region: &str,
     service: &str,
     payload: &str,
+    extra_headers: &[(String, String)],
     access_key_opt: Option<&str>,
     secret_key_opt: Option<&str>,
     session_token_opt: Option<&str>,
@@ -985,9 +1089,30 @@ fn sign_aws_sigv4(
     let date_stamp = now.format("%Y%m%d").to_string();
 
     let payload_hash = hex::encode(digest::digest(&digest::SHA256, payload.as_bytes()));
-    let canonical_headers =
-        format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let mut canonical_map: BTreeMap<String, String> = BTreeMap::new();
+    canonical_map.insert("host".to_string(), host.clone());
+    canonical_map.insert("x-amz-content-sha256".to_string(), payload_hash.clone());
+    canonical_map.insert("x-amz-date".to_string(), amz_date.clone());
+    if let Some(token) = &session_token {
+        canonical_map.insert("x-amz-security-token".to_string(), token.trim().to_string());
+    }
+    for (k, v) in extra_headers {
+        let lower = k.to_ascii_lowercase();
+        if lower.starts_with("x-amz-") {
+            canonical_map.insert(lower, v.trim().to_string());
+        }
+    }
+
+    let mut canonical_headers = String::new();
+    let mut signed_keys = Vec::with_capacity(canonical_map.len());
+    for (k, v) in &canonical_map {
+        canonical_headers.push_str(k);
+        canonical_headers.push(':');
+        canonical_headers.push_str(v);
+        canonical_headers.push('\n');
+        signed_keys.push(k.as_str());
+    }
+    let signed_headers = signed_keys.join(";");
     let canonical_request = format!(
         "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
     );
@@ -1205,6 +1330,99 @@ mod tests {
                 .unwrap()
                 .json_string
                 .contains("\"Order\"")
+        );
+    }
+
+    #[test]
+    fn union_to_union_and_transitive_compatibility_checks() {
+        let union_int = r#"{"type":"record","name":"U","fields":[{"name":"x","type":["null","int"],"default":null}]}"#;
+        let union_long = r#"{"type":"record","name":"U","fields":[{"name":"x","type":["null","long"],"default":null}]}"#;
+        check_avro_compatibility(union_long, union_int, CompatibilityMode::Backward)
+            .expect("union widening int->long must be backward compatible");
+
+        // v1 has int `id`; v2 widens `id` to long and adds defaulted `note`; v3 drops `id` and widens?
+        // Actually v1 requires `id: int` and `tag: string` (default `"a"`).
+        // v2 keeps `id: long` (backward compatible with v1) and adds `v2_req` with default.
+        // v3 removes `id` (or narrows `id` back to int?Wait: in Backward, v3 reader reads v1 writer):
+        // Better: v1 has `extra_req` with NO default in v1? No: v3 adds `strict_since_v2` which was present in v2 WITHOUT default, absent in v1!
+        let v1 = r#"{"type":"record","name":"Ev","fields":[{"name":"id","type":"int"}]}"#;
+        let v2 = r#"{"type":"record","name":"Ev","fields":[{"name":"id","type":"int"},{"name":"mid","type":"string","default":"ok"}]}"#;
+        let v3 = r#"{"type":"record","name":"Ev","fields":[{"name":"id","type":"int"},{"name":"mid","type":"string"}]}"#;
+        // v3 removed default from `mid`: backward-compatible with v2 (which has `mid`), but breaks v1 (which lacks `mid`).
+        check_avro_compatibility(v3, v2, CompatibilityMode::Backward)
+            .expect("v3 vs v2 alone is backward compatible");
+        assert!(
+            check_avro_compatibility(v3, v1, CompatibilityMode::BackwardTransitive).is_err(),
+            "v3 vs v1 must fail backward compatibility"
+        );
+
+        let v1_s = serde_json::to_string(v1).unwrap();
+        let v2_s = serde_json::to_string(v2).unwrap();
+        let (endpoint, _) = spawn_mock_server(move |method, path, _body| match (method, path) {
+            ("GET", "/subjects/ev-value/versions") => (200, "[1,2]".to_string()),
+            ("GET", "/subjects/ev-value/versions/1") => {
+                (200, format!(r#"{{"id":1,"schema":{v1_s}}}"#))
+            }
+            ("GET", "/subjects/ev-value/versions/2") => {
+                (200, format!(r#"{{"id":2,"schema":{v2_s}}}"#))
+            }
+            ("GET", "/subjects/ev-value/versions/latest") => {
+                (200, format!(r#"{{"id":2,"schema":{v2_s}}}"#))
+            }
+            ("POST", "/subjects/ev-value/versions") => (200, r#"{"id":3}"#.to_string()),
+            _ => (404, "{}".to_string()),
+        });
+
+        let trans_cfg = SchemaRegistryConfig::confluent(&endpoint)
+            .with_subject("ev-value")
+            .with_compatibility(CompatibilityMode::BackwardTransitive);
+        let trans_client = SchemaRegistryClient::new(trans_cfg).unwrap();
+        let err = trans_client
+            .resolve_or_register_for_write(v3)
+            .expect_err("BackwardTransitive must reject schema incompatible with historical v1");
+        assert!(err.message().contains("mid"), "got: {err}");
+    }
+
+    #[test]
+    fn glue_sigv4_signs_session_token_and_target_and_maps_glue_compatibility() {
+        assert_eq!(
+            CompatibilityMode::BackwardTransitive.glue_str(),
+            "BACKWARD_ALL"
+        );
+        assert_eq!(
+            CompatibilityMode::ForwardTransitive.glue_str(),
+            "FORWARD_ALL"
+        );
+        assert_eq!(CompatibilityMode::FullTransitive.glue_str(), "FULL_ALL");
+
+        let headers = sign_aws_sigv4(
+            "POST",
+            "https://glue.us-east-1.amazonaws.com/",
+            "us-east-1",
+            "glue",
+            "{}",
+            &[(
+                "X-Amz-Target".to_string(),
+                "AWSGlue.CreateSchema".to_string(),
+            )],
+            Some("AKIAEXAMPLE"),
+            Some("secret"),
+            Some("STS_TOKEN"),
+        )
+        .expect("sigv4 succeeds");
+        let auth = headers
+            .iter()
+            .find(|(k, _)| k == "Authorization")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert!(
+            auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amz-target"),
+            "signed headers missing security token or target: {auth}"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "X-Amz-Security-Token" && v == "STS_TOKEN")
         );
     }
 }

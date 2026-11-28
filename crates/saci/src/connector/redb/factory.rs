@@ -82,7 +82,9 @@ impl Connector for RedbConnector {
             .map_err(|e| SaciError::configuration(format!("RedbSource config: {e}")))?;
         let codec = ctx.codec("RedbSource")?;
         let schema = schema_of(&parse_fields(config, "RedbSource")?)?;
-        Ok(Box::new(RedbSource::new(cfg, schema, codec)?))
+        let mut src = RedbSource::new(cfg, schema, codec)?;
+        src.set_skip_corrupt(ctx.skip_corrupt());
+        Ok(Box::new(src))
     }
 
     fn sink(&self, config: &ConfigValue, ctx: &ConnectorContext) -> SaciResult<Box<dyn Sink>> {

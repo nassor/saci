@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 
 use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::io::Source;
+use crate::io::{CorruptRecord, Source};
 
 use crate::connector::redb::config::RedbSourceConfig;
 
@@ -88,6 +88,8 @@ pub struct RedbSource {
     /// The keys whose entries were handed over whole, oldest first, waiting
     /// for [`Source::finish`] to delete them. Empty unless `consume`.
     yielded: Vec<String>,
+    skip_corrupt: bool,
+    corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
 impl RedbSource {
@@ -121,6 +123,8 @@ impl RedbSource {
             current: None,
             consume: config.consume,
             yielded: Vec::new(),
+            skip_corrupt: false,
+            corrupt: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -315,6 +319,17 @@ impl Source for RedbSource {
         Arc::clone(&self.declared)
     }
 
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.corrupt
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
+    }
+
     /// One batch off the entry at the front of the key list, or `Ok(None)`
     /// once that list is exhausted. The first call opens the file and scans
     /// the table.
@@ -382,14 +397,23 @@ impl Source for RedbSource {
 
             // 4. Spool the entry and open the reader off the executor.
             let mut reader = self.open_entry(key).await?;
+            reader.set_skip_corrupt(self.skip_corrupt);
 
             // 5. Decode off the executor, feeding a bounded channel; the
             //    executor never blocks on the disk. The loop above drains the
             //    receiver the entry just opened.
             let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+            let corrupt_bg = Arc::clone(&self.corrupt);
             std::thread::spawn(move || {
                 loop {
-                    match reader.next_batch() {
+                    let res = reader.next_batch();
+                    let drained = reader.drain_corrupt();
+                    if !drained.is_empty()
+                        && let Ok(mut guard) = corrupt_bg.lock()
+                    {
+                        guard.extend(drained);
+                    }
+                    match res {
                         Ok(None) => break,
                         Ok(Some(batch)) => {
                             // A send error means the source was dropped
@@ -465,5 +489,67 @@ impl Source for RedbSource {
         .map_err(|e| SaciError::generic(format!("RedbSource: spawn_blocking panic: {e}")))??;
         self.yielded.clear();
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "codec-ndjson"))]
+mod tests {
+    use super::*;
+    use crate::codec::ndjson::NdjsonCodec;
+    use arrow_array::Int64Array;
+    use arrow_schema::{DataType, Field};
+    use redb::TableDefinition;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn redb_source_isolates_corrupt_records_when_skip_corrupt_enabled() {
+        let dir = TempDir::new().unwrap();
+        let file = "orders.redb";
+        let path = dir.path().join(file);
+        {
+            let db = Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn
+                    .open_table(TableDefinition::<&str, &[u8]>::new("records"))
+                    .unwrap();
+                t.insert(
+                    "batch-1",
+                    b"{\"id\":1}\n{not_valid_json\n{\"id\":2}\n".as_slice(),
+                )
+                .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let cfg = RedbSourceConfig {
+            directory: dir.path().to_path_buf(),
+            file: file.to_string(),
+            table: "records".to_string(),
+            key_prefix: String::new(),
+            key_suffix: String::new(),
+            check_integrity: false,
+            cache_size_bytes: None,
+            consume: false,
+        };
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut src = RedbSource::new(cfg, schema, Arc::new(NdjsonCodec::new())).unwrap();
+        src.set_skip_corrupt(true);
+
+        let mut total_ids = Vec::new();
+        while let Some(batch) = src.next_batch().await.expect("valid rows succeed") {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .to_vec();
+            total_ids.extend(ids);
+        }
+        assert_eq!(total_ids, vec![1, 2]);
+        let corrupt = src.drain_corrupt();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].format, "ndjson");
+        assert_eq!(corrupt[0].payload, b"{not_valid_json");
     }
 }

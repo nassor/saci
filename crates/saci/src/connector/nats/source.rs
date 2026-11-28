@@ -35,7 +35,7 @@
 //! would never send again, delays none JetStream already sent, and
 //! acknowledges none that no caller has seen.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arrow_array::RecordBatch;
@@ -52,7 +52,7 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::codec::Codec;
 use crate::error::SaciError;
-use crate::io::Source;
+use crate::io::{CorruptRecord, Source};
 
 use crate::connector::nats::config::{AckPolicyConfig, NatsSourceConfig, SourceMode};
 use crate::connector::nats::connect::{connect, jetstream_context};
@@ -189,6 +189,8 @@ pub struct NatsSource {
     max_decode_attempts: u32,
     /// JetStream's own count of messages still waiting for this consumer.
     last_pending: Option<usize>,
+    skip_corrupt: bool,
+    corrupt: Mutex<Vec<CorruptRecord>>,
 }
 
 impl NatsSource {
@@ -246,6 +248,8 @@ impl NatsSource {
             pending_acks: Vec::new(),
             max_decode_attempts,
             last_pending: None,
+            skip_corrupt: false,
+            corrupt: Mutex::new(Vec::new()),
         })
     }
 
@@ -395,6 +399,7 @@ impl NatsSource {
             .codec
             .open_message_decoder(Arc::clone(&self.schema))
             .map_err(whole_window)?;
+        decoder.set_skip_corrupt(self.skip_corrupt);
         for (index, message) in received.iter().enumerate() {
             decoder.push(&message.payload).map_err(|e| DecodeFailure {
                 index: Some(index),
@@ -404,11 +409,20 @@ impl NatsSource {
                 )),
             })?;
         }
-        decoder.flush().map_err(whole_window)?.ok_or_else(|| {
-            whole_window(SaciError::generic(format!(
+        let batch = decoder.flush().map_err(whole_window)?;
+        let drained = decoder.drain_corrupt();
+        if !drained.is_empty()
+            && let Ok(mut guard) = self.corrupt.lock()
+        {
+            guard.extend(drained);
+        }
+        match batch {
+            Some(batch) => Ok(batch),
+            None if self.skip_corrupt => Ok(RecordBatch::new_empty(Arc::clone(&self.schema))),
+            None => Err(whole_window(SaciError::generic(format!(
                 "{WHAT}: window decoded no rows"
-            )))
-        })
+            )))),
+        }
     }
 
     /// Terminate the message a decode failure blames, once the server has
@@ -739,6 +753,17 @@ async fn collect_jetstream(
 impl Source for NatsSource {
     fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.corrupt
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
     }
 
     /// Cancel-safe: the collected window and any open JetStream pull request

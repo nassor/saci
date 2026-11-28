@@ -1016,6 +1016,15 @@ fn extract_string_list(val: Option<&ConfigValue>) -> Vec<String> {
     }
 }
 
+fn push_aggregate_spec(raw: &str, out: &mut Vec<(String, Option<String>, String)>) {
+    for part in split_top_level_commas(raw) {
+        let (expr_s, alias_opt) = split_select_alias(part);
+        let col = extract_first_paren_arg(expr_s);
+        let alias = alias_opt.unwrap_or_else(|| expr_s.trim().to_string());
+        out.push((alias, col, part.trim().to_string()));
+    }
+}
+
 fn extract_aggregate_refs(val: &ConfigValue) -> Vec<(String, Option<String>, String)> {
     let mut out = Vec::new();
     match val {
@@ -1049,13 +1058,11 @@ fn extract_aggregate_refs(val: &ConfigValue) -> Vec<(String, Option<String>, Str
                 }
             }
         }
+        ConfigValue::String(s) => push_aggregate_spec(s, &mut out),
         ConfigValue::Array(arr) => {
             for item in arr {
                 if let Some(s) = item.as_str() {
-                    let (expr_s, alias_opt) = split_select_alias(s);
-                    let col = extract_first_paren_arg(expr_s);
-                    let alias = alias_opt.unwrap_or_else(|| expr_s.trim().to_string());
-                    out.push((alias, col, s.to_string()));
+                    push_aggregate_spec(s, &mut out);
                 }
             }
         }
@@ -1165,11 +1172,16 @@ struct LineageInner {
     recent_events: VecDeque<OpenLineageEvent>,
 }
 
+enum WorkerMsg {
+    Event(Box<OpenLineageEvent>),
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
 /// Thread-safe asynchronous OpenLineage dispatcher shared across the service
 /// runner and HTTP control plane.
 pub struct LineageDispatcher {
     inner: Arc<RwLock<LineageInner>>,
-    tx: Mutex<Option<mpsc::Sender<OpenLineageEvent>>>,
+    tx: Mutex<Option<mpsc::Sender<WorkerMsg>>>,
 }
 
 impl LineageDispatcher {
@@ -1239,20 +1251,57 @@ impl LineageDispatcher {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             crate::service::install_ring_provider();
             let client = reqwest::Client::builder().timeout(timeout).build().ok();
-            let (tx, mut rx) = mpsc::channel::<OpenLineageEvent>(256);
+            let (tx, mut rx) = mpsc::channel::<WorkerMsg>(256);
             *slot = Some(tx);
             handle.spawn(async move {
-                while let Some(ev) = rx.recv().await {
-                    let Some(c) = &client else {
-                        continue;
-                    };
-                    let mut req = c.post(&endpoint).json(&ev);
-                    if let Some(key) = &api_key {
-                        req = req.bearer_auth(key);
+                while let Some(msg) = rx.recv().await {
+                    match msg {
+                        WorkerMsg::Event(ev) => {
+                            let Some(c) = &client else {
+                                continue;
+                            };
+                            let mut req = c.post(&endpoint).json(ev.as_ref());
+                            if let Some(key) = &api_key {
+                                req = req.bearer_auth(key);
+                            }
+                            match req.send().await {
+                                Ok(resp) if !resp.status().is_success() => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::warn!(
+                                        status = %resp.status(),
+                                        endpoint = %endpoint,
+                                        "openlineage event POST returned non-success status"
+                                    );
+                                }
+                                Err(_e) => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::warn!(
+                                        error = %_e,
+                                        endpoint = %endpoint,
+                                        "openlineage event POST failed"
+                                    );
+                                }
+                                Ok(_) => {}
+                            }
+                        }
+                        WorkerMsg::Flush(ack) => {
+                            let _ = ack.send(());
+                        }
                     }
-                    let _ = req.send().await;
                 }
             });
+        }
+    }
+
+    /// Wait for any queued HTTP OpenLineage events to finish sending (up to 5s).
+    pub async fn flush(&self) {
+        let tx = self.tx.lock().ok().and_then(|g| g.clone());
+        let Some(tx) = tx else {
+            return;
+        };
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if tx.send(WorkerMsg::Flush(ack_tx)).await.is_ok() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), ack_rx).await;
         }
     }
 
@@ -1454,7 +1503,7 @@ impl LineageDispatcher {
         if let Ok(slot) = self.tx.lock()
             && let Some(tx) = slot.as_ref()
         {
-            let _ = tx.try_send(event);
+            let _ = tx.try_send(WorkerMsg::Event(Box::new(event)));
         }
     }
 }
@@ -1569,6 +1618,7 @@ workflow "w" {{
         let dispatcher = LineageDispatcher::new(&cfg, None);
         dispatcher.emit_start("w", "run-1");
         dispatcher.emit_complete("w", "run-1", 42, 40);
+        dispatcher.flush().await;
 
         let ev1 = tokio::time::timeout(Duration::from_secs(3), done_rx.recv())
             .await
@@ -1584,5 +1634,99 @@ workflow "w" {{
             "{ev2}"
         );
         assert_eq!(dispatcher.snapshot().recent_events.len(), 2);
+    }
+
+    #[test]
+    fn lineage_traces_join_group_by_and_sql_wildcard_columns() {
+        let kdl = r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-lineage-complex"
+lineage enabled=#true namespace="analytics"
+
+workflow "join_sum" {
+    source "s_orders" connector="file" component="Orders" {
+        config path="/data/orders.csv" {
+            field "order_id" type="int64" nullable=#false
+            field "cust_id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#false
+        }
+    }
+    source "s_cust" connector="file" component="Customers" {
+        config path="/data/customers.csv" {
+            field "id" type="int64" nullable=#false
+            field "tier" type="utf8" nullable=#false
+        }
+    }
+    operator "join_oc" kind="join" left="Orders" right="Customers" into="Joined" {
+        config on="cust_id=id" join_type="inner"
+    }
+    operator "agg_tier" kind="group_by" component="Joined" into="TierTotals" {
+        config keys="tier" {
+            aggregates "sum(amount) AS total_amount"
+        }
+    }
+    operator "pass_sql" kind="sql" into="OutRows" {
+        config query="SELECT * FROM TierTotals"
+    }
+    sink "out" connector="file" component="OutRows" {
+        config path="/data/tier_totals.parquet" {
+            field "tier" type="utf8" nullable=#false
+            field "total_amount" type="float64" nullable=#false
+        }
+    }
+    link from="s_orders" to="join_oc"
+    link from="s_cust" to="join_oc"
+    link from="join_oc" to="agg_tier"
+    link from="agg_tier" to="pass_sql"
+    link from="pass_sql" to="out"
+}
+"#;
+        let cfg = parse(kdl).expect("parse");
+        let g = build_workflow_lineage(&cfg, &cfg.workflows[0], None);
+        let col = g.outputs[0]
+            .facets
+            .column_lineage
+            .as_ref()
+            .expect("column lineage present");
+        assert_eq!(
+            col.fields["tier"].input_fields[0].name,
+            "/data/customers.csv"
+        );
+        assert_eq!(col.fields["tier"].input_fields[0].field, "tier");
+        assert_eq!(
+            col.fields["total_amount"].input_fields[0].name,
+            "/data/orders.csv"
+        );
+        assert_eq!(col.fields["total_amount"].input_fields[0].field, "amount");
+        assert_eq!(
+            col.fields["total_amount"].transformation_type.as_deref(),
+            Some("AGGREGATION")
+        );
+    }
+
+    #[test]
+    fn emit_fail_records_error_message_run_facet() {
+        let cfg = parse(
+            r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-lineage-fail"
+lineage enabled=#true namespace="prod"
+workflow "wf" {
+    source "in" connector="noop" component="X"
+    sink "out" connector="noop" component="X"
+    link from="in" to="out"
+}
+"#,
+        )
+        .unwrap();
+        let dispatcher = LineageDispatcher::new(&cfg, None);
+        dispatcher.emit_fail("wf", "run-fail", "connection reset");
+        let events = dispatcher.snapshot().recent_events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, LineageEventType::Fail);
+        assert_eq!(
+            events[0].run.facets["errorMessage"]["message"],
+            "connection reset"
+        );
     }
 }

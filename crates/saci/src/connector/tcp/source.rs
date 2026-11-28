@@ -33,7 +33,7 @@
 //! nothing.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arrow_array::RecordBatch;
@@ -48,7 +48,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::codec::Codec;
 use crate::connector::tcp::TcpSourceConfig;
 use crate::error::SaciError;
-use crate::io::Source;
+use crate::io::{CorruptRecord, Source};
 
 /// Live TCP ingestion source: one frame in, one `RecordBatch` out.
 ///
@@ -70,6 +70,8 @@ pub struct TcpSource {
     max_frame_bytes: usize,
     tls: Option<TlsAcceptor>,
     listener_task: Option<JoinHandle<()>>,
+    skip_corrupt: bool,
+    corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
 impl TcpSource {
@@ -133,6 +135,8 @@ impl TcpSource {
             max_frame_bytes,
             tls,
             listener_task: None,
+            skip_corrupt: false,
+            corrupt: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -160,6 +164,8 @@ impl TcpSource {
         let codec = Arc::clone(&self.codec);
         let max_frame_bytes = self.max_frame_bytes;
         let tls = self.tls.clone();
+        let skip_corrupt = self.skip_corrupt;
+        let corrupt = Arc::clone(&self.corrupt);
 
         self.listener_task = Some(tokio::spawn(async move {
             loop {
@@ -176,13 +182,23 @@ impl TcpSource {
                 let schema = Arc::clone(&schema);
                 let codec = Arc::clone(&codec);
                 let tls = tls.clone();
+                let corrupt = Arc::clone(&corrupt);
                 tokio::spawn(async move {
                     if let Some(acceptor) = tls {
                         match tokio::time::timeout(Duration::from_secs(30), acceptor.accept(stream))
                             .await
                         {
                             Ok(Ok(accepted)) => {
-                                read_connection(accepted, tx, schema, codec, max_frame_bytes).await;
+                                read_connection(
+                                    accepted,
+                                    tx,
+                                    schema,
+                                    codec,
+                                    max_frame_bytes,
+                                    skip_corrupt,
+                                    corrupt,
+                                )
+                                .await;
                             }
                             Ok(Err(_e)) => {
                                 #[cfg(feature = "tracing")]
@@ -194,7 +210,16 @@ impl TcpSource {
                             }
                         }
                     } else {
-                        read_connection(stream, tx, schema, codec, max_frame_bytes).await;
+                        read_connection(
+                            stream,
+                            tx,
+                            schema,
+                            codec,
+                            max_frame_bytes,
+                            skip_corrupt,
+                            corrupt,
+                        )
+                        .await;
                     }
                 });
             }
@@ -215,9 +240,14 @@ async fn read_connection<S: AsyncRead + Unpin>(
     schema: Arc<Schema>,
     codec: Arc<dyn Codec>,
     max_frame_bytes: usize,
+    skip_corrupt: bool,
+    corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 ) {
     let mut decoder = match codec.open_message_decoder(schema) {
-        Ok(decoder) => decoder,
+        Ok(mut decoder) => {
+            decoder.set_skip_corrupt(skip_corrupt);
+            decoder
+        }
         Err(_e) => {
             #[cfg(feature = "tracing")]
             tracing::warn!(error = %_e, "TcpSource: cannot decode this format, closing connection");
@@ -267,11 +297,20 @@ async fn read_connection<S: AsyncRead + Unpin>(
         }
 
         let decoded = decoder.push(&frame).and_then(|()| decoder.flush());
+        let drained = decoder.drain_corrupt();
+        if !drained.is_empty()
+            && let Ok(mut guard) = corrupt.lock()
+        {
+            guard.extend(drained);
+        }
         let batch = match decoded {
             Ok(Some(batch)) => batch,
-            // A frame that decodes to no rows at all is a protocol violation:
-            // the producer sent bytes that carry nothing.
+            // A frame that decodes to no rows at all is isolated if skip_corrupt is on,
+            // otherwise it is a protocol violation.
             Ok(None) => {
+                if skip_corrupt {
+                    continue;
+                }
                 #[cfg(feature = "tracing")]
                 tracing::warn!("TcpSource: frame decoded no batch");
                 return;
@@ -295,6 +334,17 @@ async fn read_connection<S: AsyncRead + Unpin>(
 impl Source for TcpSource {
     fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.corrupt
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
     }
 
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {

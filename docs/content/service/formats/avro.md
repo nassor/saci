@@ -133,7 +133,38 @@ wider `int`. A value that does not fit the declared column is an error rather th
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `compression` | string | `null` | container-file compression: `null`, `deflate`, `snappy` or `zstd` |
-| `schema_id` | integer | absent | the Confluent registry id: the encoder frames every message under it, and the decoder accepts a Confluent framed payload only when it is set; it must fit in 32 bits |
+| `schema_id` | integer | absent | static 32-bit Confluent registry id used when `registry_url` is unset |
+| `registry_url` | string | absent | base URL for an external Confluent, Apicurio v2, or AWS Glue schema registry |
+| `registry_kind` | string | `"confluent"` | registry protocol dialect: `"confluent"`, `"apicurio"`, or `"glue"` |
+| `subject` | string | absent | subject (Confluent) or artifact id (Apicurio) used to register or resolve schemas on write |
+| `auto_register` | bool | `#true` | register unseen writer schemas on encode (`#true`) or resolve an existing registration (`#false`) |
+| `compatibility` | string | `"NONE"` | compatibility mode checked against previous versions: `NONE`, `BACKWARD`, `BACKWARD_TRANSITIVE`, `FORWARD`, `FORWARD_TRANSITIVE`, `FULL`, `FULL_TRANSITIVE` |
+| `apicurio_group` | string | `"default"` | Apicurio artifact group id |
+| `apicurio_eight_byte_id` | bool | `#false` | frame Apicurio messages with `0x00` + 8-byte big-endian ID instead of 4-byte ID |
+| `glue_registry_name` | string | `"default-registry"` | AWS Glue registry name |
+| `glue_schema_name` | string | `subject` | AWS Glue schema name |
+| `aws_region` | string | `"us-east-1"` | AWS region used for Glue SigV4 signing (reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`) |
+| `auth_basic_user` | string | absent | HTTP Basic username (e.g. Confluent Cloud API key) |
+| `auth_basic_password` | string | `""` | HTTP Basic password / secret |
+| `auth_bearer_token` | string | absent | HTTP `Authorization: Bearer` token |
+
+## External schema registry
+
+Set `registry_url` to resolve writer schemas dynamically by wire prefix on decode (5-byte Confluent `0x00` + `u32`, 5-byte or 9-byte Apicurio `0x00` + `u32`/`u64`, or 18-byte AWS Glue `0x03 0x00` + UUID) and evolve decoded batches to the workflow's declared target schema. On encode, `AvroCodec` checks compatibility according to `compatibility` and caches registered schema IDs.
+
+```kdl,name=Confluent Schema Registry with backward compatibility
+codec "orders_avro" format="avro" {
+    config {
+        registry_url "https://registry.example.com"
+        registry_kind "confluent"
+        subject "orders-value"
+        auto_register #true
+        compatibility "BACKWARD"
+        auth_basic_user "${SR_KEY}"
+        auth_basic_password "${SR_SECRET}"
+    }
+}
+```
 
 ## How it behaves
 

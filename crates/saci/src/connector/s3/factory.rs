@@ -59,7 +59,9 @@ impl Connector for S3Connector {
             .map_err(|e| SaciError::configuration(format!("S3Source config: {e}")))?;
         let codec = ctx.codec("S3Source")?;
         let schema = schema_of(&parse_fields(config, "S3Source")?)?;
-        Ok(Box::new(S3Source::new(cfg, schema, codec)?))
+        let mut src = S3Source::new(cfg, schema, codec)?;
+        src.set_skip_corrupt(ctx.skip_corrupt());
+        Ok(Box::new(src))
     }
 
     fn sink(

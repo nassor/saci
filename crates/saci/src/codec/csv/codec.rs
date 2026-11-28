@@ -241,11 +241,23 @@ impl CsvBatchReader {
             let mut joined = Vec::new();
             for _ in 0..64 {
                 let mut raw = Vec::new();
-                let n = reader
-                    .read_until(b'\n', &mut raw)
-                    .map_err(|e| SaciError::generic(format!("csv: read error: {e}")))?;
-                if n == 0 {
-                    *eof = true;
+                loop {
+                    let prev_len = raw.len();
+                    let n = reader
+                        .read_until(b'\n', &mut raw)
+                        .map_err(|e| SaciError::generic(format!("csv: read error: {e}")))?;
+                    if n == 0 {
+                        *eof = true;
+                        break;
+                    }
+                    // Keep reading across embedded newlines while inside an
+                    // odd-quoted CSV field so multiline quoted records stay whole.
+                    let quote_count = raw.iter().filter(|&&b| b == b'"').count();
+                    if quote_count % 2 == 0 || raw.len() == prev_len {
+                        break;
+                    }
+                }
+                if raw.is_empty() && *eof {
                     break;
                 }
                 while matches!(raw.last(), Some(b'\n' | b'\r')) {
@@ -881,5 +893,39 @@ mod tests {
         let batch = decoder.flush().expect("flush").expect("2 valid rows");
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(decoder.drain_corrupt().len(), 1);
+    }
+
+    #[test]
+    fn csv_batch_reader_preserves_multiline_quoted_fields_under_skip_corrupt() {
+        let declared = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("note", DataType::Utf8, false),
+        ]));
+        let f = write_csv(
+            true,
+            &["1,\"line one\nline two\"", "bad_int,\"oops\"", "2,\"ok\""],
+        );
+        let mut reader = CsvCodec::new()
+            .open_reader(
+                f.reopen().expect("reopen").into(),
+                Some(Arc::clone(&declared)),
+            )
+            .expect("reader opens");
+        reader.set_skip_corrupt(true);
+
+        let mut batches = Vec::new();
+        while let Some(b) = reader.next_batch().expect("read succeeds") {
+            batches.push(b);
+        }
+        let merged = concat_batches(&declared, &batches).expect("concat");
+        assert_eq!(merged.num_rows(), 2);
+        let notes = merged
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(notes.value(0), "line one\nline two");
+        assert_eq!(notes.value(1), "ok");
+        assert_eq!(reader.drain_corrupt().len(), 1);
     }
 }

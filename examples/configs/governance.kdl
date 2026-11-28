@@ -1,0 +1,81 @@
+// SACI governance example: source corrupt-record DLQ isolation, declarative
+// row-level quality assertions, schema evolution across links, and OpenLineage.
+//
+// Validate:
+//   cargo run -p saci --features server -- validate --config examples/configs/governance.kdl
+// Run:
+//   cargo run -p saci --features server -- serve --config examples/configs/governance.kdl
+
+mode "standalone"
+
+node id=1 name="saci-governance" data_dir="${SACI_DATA_DIR:-/tmp/saci-governance}"
+
+run "once"
+
+http bind="127.0.0.1:0" enabled=#true
+
+// Expose dataset & column-level lineage via /api/lineage (and optionally push
+// OpenLineage v2 RunEvents to an HTTP collector when `endpoint` is set).
+lineage enabled=#true namespace="saci.examples" job_prefix="demo" emit_on="lifecycle"
+
+workflow "governed_orders" schema_evolution="compatible" {
+    dlq "redb"
+
+    codec "csv_fmt" format="csv" {
+        config has_headers=#true
+    }
+
+    source "csv_orders" connector="file" component="Order" codec="csv_fmt" on_corrupt="dlq" {
+        config {
+            path "examples/configs/fixtures/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#true
+            field "status" type="utf8" nullable=#true
+        }
+    }
+
+    // Declarative row-level data quality gate: splits passing rows on branch
+    // "valid" and offending rows with __dq_* diagnostic columns onto branch
+    // "quarantine" / component "QuarantinedOrder".
+    operator "validate_orders" kind="quality" component="Order" {
+        config on_violation="quarantine" diagnostics=#true quarantine_into="QuarantinedOrder" {
+            rules {
+                rule "id_present" type="not_null" column="id"
+                rule "positive_amount" type="range" column="amount" min=0.0
+                rule "allowed_status" type="in_set" column="status" {
+                    values "pending" "confirmed"
+                }
+            }
+        }
+    }
+
+    // Downstream evolved schema: adds nullable `audit_note` synthesized as null
+    // under the compatible evolution policy.
+    sink "valid_out" connector="file" component="Order" codec="csv_fmt" {
+        config {
+            path "/tmp/saci-governance-valid.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#true
+            field "status" type="utf8" nullable=#true
+            field "audit_note" type="utf8" nullable=#true
+        }
+    }
+
+    sink "quarantine_out" connector="file" component="QuarantinedOrder" codec="csv_fmt" {
+        config {
+            path "/tmp/saci-governance-quarantine.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "amount" type="float64" nullable=#true
+            field "status" type="utf8" nullable=#true
+            field "__dq_rule" type="utf8" nullable=#false
+            field "__dq_column" type="utf8" nullable=#false
+            field "__dq_reason" type="utf8" nullable=#false
+        }
+    }
+
+    link from="csv_orders" to="validate_orders"
+    link from="validate_orders" to="valid_out" branch="valid" schema_evolution="compatible"
+    link from="validate_orders" to="quarantine_out" branch="quarantine"
+}

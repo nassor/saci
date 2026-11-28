@@ -1,7 +1,7 @@
 //! [`FileSource`]: a local file read through a codec.
 //!
 //! One dedicated OS thread drives the codec's
-//! [`BatchReader`](crate::codec::BatchReader) and pushes batches down a
+//! [`BatchReader`] and pushes batches down a
 //! bounded channel; [`Source::next_batch`] awaits that channel. The executor
 //! never blocks on the disk and the file is never materialised in full.
 
@@ -13,7 +13,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::codec::Codec;
+use crate::codec::{BatchReader, Codec};
 use crate::connector::file::FileSourceConfig;
 use crate::error::SaciError;
 use crate::io::{CorruptRecord, Source};
@@ -42,6 +42,8 @@ const CHANNEL_CAPACITY: usize = 4;
 /// .unwrap();
 /// ```
 pub struct FileSource {
+    tx: Option<mpsc::Sender<Result<RecordBatch, SaciError>>>,
+    reader: Mutex<Option<Box<dyn BatchReader>>>,
     rx: mpsc::Receiver<Result<RecordBatch, SaciError>>,
     schema: Arc<Schema>,
     estimated_rows: Option<usize>,
@@ -50,8 +52,8 @@ pub struct FileSource {
 }
 
 impl FileSource {
-    /// Open `config.path`, hand the handle to `codec`, and spawn the reader
-    /// thread. Returns once the format has reported its schema, which for a
+    /// Open `config.path`, hand the handle to `codec`, and prepare the reader.
+    /// Returns once the format has reported its schema, which for a
     /// self-describing format means its metadata has been read.
     ///
     /// `schema` is the schema the config declared, `None` when it declared
@@ -72,7 +74,7 @@ impl FileSource {
     }
 
     /// Same as [`new`](Self::new), configuring `skip_corrupt` before the reader
-    /// thread starts polling the codec's [`BatchReader`](crate::codec::BatchReader).
+    /// thread starts polling the codec's [`BatchReader`].
     pub fn new_with_corrupt(
         config: FileSourceConfig,
         schema: Option<Arc<Schema>>,
@@ -87,11 +89,36 @@ impl FileSource {
         let schema = reader.schema();
         let estimated_rows = reader.estimated_rows();
         let skip_flag = Arc::new(AtomicBool::new(skip_corrupt));
-        let skip_flag_bg = Arc::clone(&skip_flag);
         let corrupt = Arc::new(Mutex::new(Vec::new()));
-        let corrupt_bg = Arc::clone(&corrupt);
-
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+
+        Ok(Self {
+            tx: Some(tx),
+            reader: Mutex::new(Some(reader)),
+            rx,
+            schema,
+            estimated_rows,
+            skip_corrupt: skip_flag,
+            corrupt,
+        })
+    }
+
+    /// Spawn the background reader thread on first `next_batch` so a caller
+    /// toggling [`Source::set_skip_corrupt`] after construction never races it.
+    fn ensure_started(&mut self) {
+        let Some(mut reader) = self
+            .reader
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let Some(tx) = self.tx.take() else {
+            return;
+        };
+        let skip_flag_bg = Arc::clone(&self.skip_corrupt);
+        let corrupt_bg = Arc::clone(&self.corrupt);
         std::thread::spawn(move || {
             loop {
                 reader.set_skip_corrupt(skip_flag_bg.load(Ordering::Acquire));
@@ -118,14 +145,6 @@ impl FileSource {
                 }
             }
         });
-
-        Ok(Self {
-            rx,
-            schema,
-            estimated_rows,
-            skip_corrupt: skip_flag,
-            corrupt,
-        })
     }
 
     /// The same, with the open and the metadata read moved off the executor.
@@ -155,6 +174,7 @@ impl Source for FileSource {
     }
 
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+        self.ensure_started();
         match self.rx.recv().await {
             Some(Ok(batch)) => Ok(Some(batch)),
             Some(Err(e)) => Err(e),

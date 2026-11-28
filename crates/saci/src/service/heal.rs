@@ -506,6 +506,9 @@ pub struct HealingSource {
     /// The last size hint, re-applied to a rebuilt instance so a healed
     /// source keeps its flow-control credit.
     last_hint: Option<usize>,
+    /// Whether bad source records should be isolated rather than failing a batch;
+    /// re-applied across source rebuilds.
+    skip_corrupt: bool,
 }
 
 impl HealingSource {
@@ -531,6 +534,7 @@ impl HealingSource {
             schema,
             evolution: EvolutionPolicy::strict(),
             last_hint: None,
+            skip_corrupt: false,
         }
     }
 
@@ -569,6 +573,9 @@ impl HealingSource {
                 let mut fresh = fresh;
                 if let Some(rows) = self.last_hint {
                     fresh.request_batch_rows(rows);
+                }
+                if self.skip_corrupt {
+                    fresh.set_skip_corrupt(true);
                 }
                 if !self.evolution.is_strict() && fresh.schema().fields() != self.schema.fields() {
                     #[cfg(feature = "tracing")]
@@ -654,6 +661,7 @@ impl Source for HealingSource {
     }
 
     fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
         if let Some(inner) = self.inner.as_mut() {
             inner.set_skip_corrupt(skip);
         }
@@ -1818,6 +1826,125 @@ field "v" type="int64" nullable=#false
         let recorded = seen.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].schema(), evolved_sink_schema);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healing_source_preserves_skip_corrupt_across_rebuild() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let skip_flags = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+
+        struct CorruptMockSource {
+            schema: Arc<Schema>,
+            fail_once: bool,
+            skip_corrupt: bool,
+            emitted_corrupt: bool,
+            flags: Arc<std::sync::Mutex<Vec<bool>>>,
+        }
+        #[async_trait]
+        impl Source for CorruptMockSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+            async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+                if self.fail_once {
+                    self.fail_once = false;
+                    return Err(SaciError::generic("transient source error"));
+                }
+                if !self.skip_corrupt {
+                    return Err(SaciError::generic("skip_corrupt was not re-applied"));
+                }
+                self.emitted_corrupt = true;
+                let batch = RecordBatch::try_new(
+                    Arc::clone(&self.schema),
+                    vec![Arc::new(Int64Array::from(vec![42i64]))],
+                )
+                .unwrap();
+                Ok(Some(batch))
+            }
+            fn set_skip_corrupt(&mut self, skip: bool) {
+                self.skip_corrupt = skip;
+                self.flags.lock().unwrap().push(skip);
+            }
+            fn drain_corrupt(&mut self) -> Vec<crate::io::CorruptRecord> {
+                if self.emitted_corrupt {
+                    self.emitted_corrupt = false;
+                    vec![crate::io::CorruptRecord {
+                        format: "ndjson",
+                        payload: b"{bad json".to_vec(),
+                        error: "parse error".to_string(),
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+
+        struct CorruptMockFactory {
+            builds: AtomicUsize,
+            schema: Arc<Schema>,
+            flags: Arc<std::sync::Mutex<Vec<bool>>>,
+        }
+        impl crate::service::registry::Connector for CorruptMockFactory {
+            fn name(&self) -> &'static str {
+                "corrupt_heal_mock"
+            }
+            fn source(
+                &self,
+                _c: &ConfigValue,
+                _ctx: &ConnectorContext,
+            ) -> Result<Box<dyn Source>, SaciError> {
+                let n = self.builds.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(CorruptMockSource {
+                    schema: Arc::clone(&self.schema),
+                    fail_once: n == 0,
+                    skip_corrupt: false,
+                    emitted_corrupt: false,
+                    flags: Arc::clone(&self.flags),
+                }))
+            }
+            fn sink(
+                &self,
+                _c: &ConfigValue,
+                _ctx: &ConnectorContext,
+            ) -> Result<Box<dyn Sink>, SaciError> {
+                unreachable!()
+            }
+            fn rebuild(&self, _r: Role, _c: &ConfigValue) -> Rebuild {
+                Rebuild::Yes
+            }
+        }
+
+        let mut reg = Registry::new();
+        reg.register(CorruptMockFactory {
+            builds: AtomicUsize::new(0),
+            schema: Arc::clone(&schema),
+            flags: Arc::clone(&skip_flags),
+        });
+        let rebuilder = Rebuilder::new(
+            Arc::new(reg),
+            "corrupt_heal_mock",
+            "src",
+            ConfigValue::Object(ConfigMap::new()),
+            None,
+            None,
+            None,
+        );
+        let initial = rebuilder.build_source().expect("initial source builds");
+        let mut healing = HealingSource::new(initial, rebuilder, settings(1, 0), "wf", "src");
+        healing.set_skip_corrupt(true);
+
+        assert!(healing.next_batch().await.is_err());
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        let recovered = healing
+            .next_batch()
+            .await
+            .expect("rebuilt source must retain skip_corrupt")
+            .expect("batch present");
+        assert_eq!(recovered.num_rows(), 1);
+        let corrupt = healing.drain_corrupt();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].payload, b"{bad json");
+        assert_eq!(*skip_flags.lock().unwrap(), vec![true, true]);
     }
 }
 
