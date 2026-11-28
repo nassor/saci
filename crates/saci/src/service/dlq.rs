@@ -69,6 +69,7 @@ use crate::inspector_wire::{DlqGroup, DlqReplayReport, DlqSummary, DlqTrigger};
 use crate::io::{Sink, Source};
 use crate::metrics::{SinkMetrics, WorkflowMetrics};
 
+use super::alert::{AlertDispatcher, AlertEvent};
 use super::config::{RetryConfig, ServiceConfig, WorkflowSpec, default_config};
 use super::heal::{HealSettings, Rebuilder};
 use super::registry::Registry;
@@ -529,7 +530,7 @@ impl DlqShared {
 /// `GET /api/dlq` answers before the first pass and a workflow the lifecycle
 /// plane has stopped keeps the summary its last run published.
 pub struct DlqRegistry {
-    entries: Vec<(String, Arc<DlqShared>)>,
+    entries: RwLock<Vec<(String, Arc<DlqShared>)>>,
 }
 
 impl DlqRegistry {
@@ -546,20 +547,51 @@ impl DlqRegistry {
                 ))
             })
             .collect();
-        Self { entries }
+        Self {
+            entries: RwLock::new(entries),
+        }
+    }
+
+    /// Synchronize entries with a reloaded [`ServiceConfig`], keeping existing
+    /// queues for workflows still present, adding newly declared queues, and
+    /// removing queues for removed workflows.
+    pub(crate) fn sync_with_config(&self, config: &ServiceConfig) {
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = Vec::new();
+        for workflow in &config.workflows {
+            let Some(dlq) = workflow.dlq.as_ref() else {
+                continue;
+            };
+            if let Some((_, existing)) = entries.iter().find(|(id, _)| id == &workflow.id) {
+                next.push((workflow.id.clone(), Arc::clone(existing)));
+            } else {
+                next.push((
+                    workflow.id.clone(),
+                    Arc::new(DlqShared::new(&workflow.id, &dlq.0)),
+                ));
+            }
+        }
+        *entries = next;
     }
 
     /// The queue workflow `id` declared, or `None`.
-    pub fn get(&self, id: &str) -> Option<&Arc<DlqShared>> {
+    pub fn get(&self, id: &str) -> Option<Arc<DlqShared>> {
         self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|(workflow, _)| workflow == id)
-            .map(|(_, shared)| shared)
+            .map(|(_, shared)| Arc::clone(shared))
     }
 
     /// Every queue's summary, in declaration order.
     pub fn list(&self) -> Vec<DlqSummary> {
         self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .map(|(_, shared)| shared.summary())
             .collect()
@@ -567,7 +599,10 @@ impl DlqRegistry {
 
     /// Whether no workflow declares a queue.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 }
 
@@ -625,6 +660,8 @@ pub struct DeadLetterQueue {
     /// sinks and extended on the first letter that names another (a letter
     /// recorded under an earlier config outlives the sink it was for).
     sink_handles: HashMap<String, SinkMetrics>,
+    /// Outbound alert dispatcher notified on recorded or lost dead letters.
+    alerts: AlertDispatcher,
 }
 
 /// Counts and identity only: the two rebuilders hold trait objects that are
@@ -745,7 +782,14 @@ impl DeadLetterQueue {
                     )
                 })
                 .collect(),
+            alerts: AlertDispatcher::noop(),
         })
+    }
+
+    /// Attach an outbound [`AlertDispatcher`] for DLQ notifications.
+    pub(crate) fn with_alerts(mut self, alerts: AlertDispatcher) -> Self {
+        self.alerts = alerts;
+        self
     }
 
     /// Store one batch a sink refused. Never fails outward: a queue that
@@ -768,7 +812,7 @@ impl DeadLetterQueue {
                 rows,
                 "dead letter store unavailable (letter lost)"
             );
-            self.count_lost(sink);
+            self.count_lost(sink, rows, "dead letter store unavailable");
             return;
         }
         let letter = match Letter::from_failure(batch, sink, component, error, &self.ipc) {
@@ -782,7 +826,7 @@ impl DeadLetterQueue {
                     error = %_e,
                     "dead letter could not be encoded (letter lost)"
                 );
-                self.count_lost(sink);
+                self.count_lost(sink, rows, &_e.to_string());
                 return;
             }
         };
@@ -797,7 +841,7 @@ impl DeadLetterQueue {
                     error = %_e,
                     "dead letter could not be encoded (letter lost)"
                 );
-                self.count_lost(sink);
+                self.count_lost(sink, rows, &_e.to_string());
                 return;
             }
         };
@@ -810,6 +854,14 @@ impl DeadLetterQueue {
                 self.sink_metrics(sink).dlq_recorded(rows);
                 self.add_to_summary(&letter);
                 self.schedule_auto_replay();
+                self.alerts.emit(AlertEvent::dlq_recorded(
+                    &self.workflow_id,
+                    sink,
+                    component,
+                    rows,
+                    &letter.reason,
+                    self.pending_letters,
+                ));
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     target: DLQ_TARGET,
@@ -834,7 +886,7 @@ impl DeadLetterQueue {
                     error = %_e,
                     "dead letter store write failed (letter lost)"
                 );
-                self.count_lost(sink);
+                self.count_lost(sink, rows, &_e.to_string());
             }
         }
     }
@@ -1192,9 +1244,20 @@ impl DeadLetterQueue {
             return;
         }
         if !self.reopen_record_half() {
-            report.lost += retained.len() as u64;
+            let lost_count = retained.len() as u64;
+            let lost_rows: u64 = retained.iter().map(|l| u64::from(l.rows)).sum();
+            report.lost += lost_count;
             for letter in retained.iter() {
                 self.sink_metrics(&letter.sink).dlq_lost();
+            }
+            if let Some(first) = retained.first() {
+                self.alerts.emit(AlertEvent::dlq_lost(
+                    &self.workflow_id,
+                    &first.sink,
+                    lost_count,
+                    lost_rows,
+                    "dead letter store unavailable after replay",
+                ));
             }
             #[cfg(feature = "tracing")]
             tracing::error!(
@@ -1246,6 +1309,13 @@ impl DeadLetterQueue {
             let letter = retained.remove(index);
             report.lost += 1;
             self.sink_metrics(&letter.sink).dlq_lost();
+            self.alerts.emit(AlertEvent::dlq_lost(
+                &self.workflow_id,
+                &letter.sink,
+                1,
+                u64::from(letter.rows),
+                "dead letter store refused write-back after replay",
+            ));
         }
     }
 
@@ -1327,8 +1397,15 @@ impl DeadLetterQueue {
 
     /// Count one letter the store would not take. The batch is gone: nothing
     /// is buffered in memory waiting for the store to come back.
-    fn count_lost(&mut self, sink: &str) {
+    fn count_lost(&mut self, sink: &str, rows: u64, reason: &str) {
         self.sink_metrics(sink).dlq_lost();
+        self.alerts.emit(AlertEvent::dlq_lost(
+            &self.workflow_id,
+            sink,
+            1,
+            rows,
+            reason,
+        ));
     }
 
     /// The bound writers of sink `sink`, built on first use.
@@ -2364,6 +2441,7 @@ mod tests {
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: Some(crate::service::config::DlqConfig(block)),
+            run: None,
         }
     }
 

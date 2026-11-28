@@ -315,7 +315,7 @@ workflow "plain" {
     async fn a_replay_answers_the_report_the_runner_sends_back() {
         let registry = Arc::new(DlqRegistry::from_config(&config()));
         let state = state_with(Some(Arc::clone(&registry)));
-        let shared = Arc::clone(registry.get("orders").expect("declared queue"));
+        let shared = registry.get("orders").expect("declared queue");
 
         // Stand in for the runner: take the queued request and answer it.
         let runner = tokio::spawn(async move {

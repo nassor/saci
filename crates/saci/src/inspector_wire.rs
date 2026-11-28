@@ -713,6 +713,128 @@ pub struct DlqReplayRequest {
     pub reason: Option<String>,
 }
 
+// ── Backfill, cursors & hot-reload ───────────────────────────────────────────
+
+/// Request body for `POST /api/workflows/{id}/backfill`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackfillRequest {
+    /// Optional inclusive lower bound (`YYYY-MM-DD`, RFC3339, or unix_ms string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    /// Optional inclusive upper bound (`YYYY-MM-DD`, RFC3339, or unix_ms string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    /// Optional event-time column name to filter source batches within `[start_date, end_date]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_field: Option<String>,
+    /// Custom parameters substituted into `${KEY}` placeholders and processor configs.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub params: std::collections::BTreeMap<String, String>,
+    /// Run with fresh processor state rather than loading or overwriting persisted priors.
+    #[serde(default)]
+    pub reset_state: bool,
+}
+
+/// Result returned by `POST /api/workflows/{id}/backfill`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackfillReport {
+    /// Workflow identifier.
+    pub workflow: String,
+    /// Unix milliseconds when the backfill started.
+    pub started_at_unix_ms: u64,
+    /// Duration of the backfill run in milliseconds.
+    pub duration_ms: u64,
+    /// Passes executed during the backfill.
+    pub iterations: u64,
+    /// Total rows processed during the backfill.
+    pub rows_processed: u64,
+    /// Source batches drained during the backfill.
+    pub source_batches_drained: u64,
+    /// Sink batches written during the backfill.
+    pub sink_batches_written: u64,
+    /// Non-fatal errors raised during the backfill.
+    pub iteration_errors: u64,
+    /// Echoed `start_date` window bound, if specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    /// Echoed `end_date` window bound, if specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+}
+
+/// Persisted cursor snapshot for one source node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorSnapshot {
+    /// Declared source node ID.
+    pub source: String,
+    /// Items processed at this save point.
+    pub items_processed: u64,
+    /// Unix milliseconds of this save point.
+    pub last_batch_at_ms: u64,
+}
+
+/// Persisted cursor and checkpoint summary returned by `GET /api/workflows/{id}/cursors`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowCursorsReport {
+    /// Workflow identifier.
+    pub workflow: String,
+    /// Current source cursors.
+    pub cursors: Vec<CursorSnapshot>,
+    /// Processor node IDs that currently hold persisted state blobs.
+    pub processors_with_state: Vec<String>,
+    /// Available historical checkpoint timestamps in Unix milliseconds (ascending).
+    pub checkpoints_unix_ms: Vec<u64>,
+}
+
+/// Request body for `POST /api/workflows/{id}/cursors/reset`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorResetRequest {
+    /// Specific source node ID to reset; when `None`, resets every source in the workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Target timestamp in Unix milliseconds to roll back cursors and priors to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_unix_ms: Option<u64>,
+    /// Target timestamp as RFC3339 or `YYYY-MM-DD` string (alternative to `to_unix_ms`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// Explicit `items_processed` value to set on the cursor(s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items_processed: Option<u64>,
+    /// Whether to also clear or roll back processor state priors (defaults to `true`).
+    #[serde(default)]
+    pub reset_priors: Option<bool>,
+}
+
+/// Result returned by `POST /api/workflows/{id}/cursors/reset`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorResetReport {
+    /// Workflow identifier.
+    pub workflow: String,
+    /// Resulting source cursors after the reset.
+    pub cursors: Vec<CursorSnapshot>,
+    /// Processor IDs whose persisted state was restored or cleared.
+    pub priors_reset: Vec<String>,
+    /// Timestamp of the historical checkpoint restored, if time-travel rollback matched one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_checkpoint_unix_ms: Option<u64>,
+}
+
+/// Result returned by `POST /api/reload`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReloadReport {
+    /// Newly added workflow IDs.
+    pub added: Vec<String>,
+    /// Existing workflow IDs whose definition or artifacts were updated and rebuilt.
+    pub updated: Vec<String>,
+    /// Removed workflow IDs that were drained and stopped.
+    pub removed: Vec<String>,
+    /// Unchanged workflow IDs left running uninterrupted.
+    pub unchanged: Vec<String>,
+    /// Inspector topology version after the reload (0 if inspector is disabled).
+    pub topology_version: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

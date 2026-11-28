@@ -96,7 +96,7 @@ plugin = ["engine", "dep:pollster", "dep:serde_json", "dep:base64"]
 # enables it.
 config = [
     "dep:kdl", "dep:serde_json", "dep:serde_path_to_error",
-    "serde_json/preserve_order",
+    "serde_json/preserve_order", "dep:chrono",
 ]
 codec-api = ["engine", "config"]
 connector-api = ["engine", "codec-api"]

@@ -8,13 +8,14 @@ use crate::config::{ConfigMap, ConfigValue, one_or_many};
 
 /// How the standalone service drives pipeline execution.
 ///
-/// Written as the `run` node: its argument is the kind, and `interval` takes
-/// one property.
+/// Written as the `run` node: its argument is the kind, and `interval` and
+/// `cron` take properties.
 ///
 /// ```kdl
 /// run "continuous"
 /// run "once"
 /// run "interval" every_ms=5000
+/// run "cron" expr="0 */15 * * *" timezone="America/New_York"
 /// run "stream"
 /// ```
 ///
@@ -44,6 +45,15 @@ pub enum RunMode {
         /// skipped. Only a pass that drained every source pays it.
         every_ms: u64,
     },
+    /// Re-run the pipeline on a cron schedule, optionally evaluated in a
+    /// named IANA timezone or fixed UTC offset.
+    Cron {
+        /// Cron expression (5-field, 6-field, or `@hourly`/`@daily`/etc.).
+        expr: String,
+        /// Optional IANA timezone or fixed offset (`+HH:MM`/`-HH:MM`).
+        /// Defaults to UTC when absent.
+        timezone: Option<String>,
+    },
     /// Process each source batch as it arrives, in flow-control-sized chunks
     /// (streaming).
     ///
@@ -63,7 +73,7 @@ impl<'de> Deserialize<'de> for RunMode {
     {
         use serde::de::Error as _;
 
-        const KINDS: &str = r#""once", "continuous", "interval" or "stream""#;
+        const KINDS: &str = r#""once", "continuous", "interval", "cron" or "stream""#;
 
         let (kind, mut properties) = match ConfigValue::deserialize(deserializer)? {
             ConfigValue::String(kind) => (kind, ConfigMap::new()),
@@ -74,6 +84,9 @@ impl<'de> Deserialize<'de> for RunMode {
             _ => return Err(D::Error::custom(format!("run needs a kind: {KINDS}"))),
         };
         let every_ms = properties.remove("every_ms");
+        let expr = properties.remove("expr");
+        let schedule = properties.remove("schedule");
+        let timezone = properties.remove("timezone");
         if let Some(key) = properties.keys().next() {
             return Err(D::Error::custom(format!(
                 "run \"{kind}\": unknown key '{key}'"
@@ -86,6 +99,11 @@ impl<'de> Deserialize<'de> for RunMode {
                         "run \"{kind}\" takes no every_ms; only \"interval\" does"
                     )));
                 }
+                if expr.is_some() || schedule.is_some() || timezone.is_some() {
+                    return Err(D::Error::custom(format!(
+                        "run \"{kind}\" takes no cron keys; only \"cron\" does"
+                    )));
+                }
                 Ok(match kind.as_str() {
                     "continuous" => Self::Continuous,
                     "once" => Self::Once,
@@ -93,6 +111,11 @@ impl<'de> Deserialize<'de> for RunMode {
                 })
             }
             "interval" => {
+                if expr.is_some() || schedule.is_some() || timezone.is_some() {
+                    return Err(D::Error::custom(
+                        r#"run "interval" takes no cron keys; only "cron" does"#,
+                    ));
+                }
                 let every_ms =
                     every_ms.ok_or_else(|| D::Error::custom(r#"run "interval" needs every_ms"#))?;
                 let every_ms = every_ms.as_u64().ok_or_else(|| {
@@ -101,6 +124,47 @@ impl<'de> Deserialize<'de> for RunMode {
                     ))
                 })?;
                 Ok(Self::Interval { every_ms })
+            }
+            "cron" => {
+                if every_ms.is_some() {
+                    return Err(D::Error::custom(
+                        r#"run "cron" takes no every_ms; use expr="..." instead"#,
+                    ));
+                }
+                let raw_expr = match (expr, schedule) {
+                    (Some(_), Some(_)) => {
+                        return Err(D::Error::custom(
+                            r#"run "cron": specify either expr or schedule, not both"#,
+                        ));
+                    }
+                    (Some(v), None) | (None, Some(v)) => v,
+                    (None, None) => {
+                        return Err(D::Error::custom(r#"run "cron" needs expr="...""#));
+                    }
+                };
+                let expr = raw_expr
+                    .as_str()
+                    .ok_or_else(|| {
+                        D::Error::custom(format!(
+                            "run \"cron\": expr must be a string, got {raw_expr}"
+                        ))
+                    })?
+                    .to_string();
+                let timezone = match timezone {
+                    Some(tz) => Some(
+                        tz.as_str()
+                            .ok_or_else(|| {
+                                D::Error::custom(format!(
+                                    "run \"cron\": timezone must be a string, got {tz}"
+                                ))
+                            })?
+                            .to_string(),
+                    ),
+                    None => None,
+                };
+                super::cron::CronSchedule::parse(&expr, timezone.as_deref())
+                    .map_err(|e| D::Error::custom(format!("run \"cron\": {e}")))?;
+                Ok(Self::Cron { expr, timezone })
             }
             other => Err(D::Error::custom(format!(
                 "unknown run kind '{other}' (expected {KINDS})"
@@ -124,6 +188,16 @@ impl Serialize for RunMode {
                 let mut table = serializer.serialize_map(Some(2))?;
                 table.serialize_entry("id", "interval")?;
                 table.serialize_entry("every_ms", every_ms)?;
+                table.end()
+            }
+            Self::Cron { expr, timezone } => {
+                let len = if timezone.is_some() { 3 } else { 2 };
+                let mut table = serializer.serialize_map(Some(len))?;
+                table.serialize_entry("id", "cron")?;
+                table.serialize_entry("expr", expr)?;
+                if let Some(tz) = timezone {
+                    table.serialize_entry("timezone", tz)?;
+                }
                 table.end()
             }
         }
@@ -419,5 +493,42 @@ cluster {{
     #[test]
     fn test_run_mode_stream_parses() {
         assert_eq!(parse_run(r#"run "stream""#), Ok(RunMode::Stream));
+    }
+
+    #[test]
+    fn test_run_mode_cron_round_trip_and_validation() {
+        let restored = parse_run(r#"run "cron" expr="*/15 * * * *" timezone="America/New_York""#)
+            .expect("deserialize cron");
+        assert_eq!(
+            restored,
+            RunMode::Cron {
+                expr: "*/15 * * * *".to_string(),
+                timezone: Some("America/New_York".to_string()),
+            }
+        );
+        let written = serde_json::to_value(&restored).expect("serialize");
+        assert_eq!(
+            written,
+            serde_json::json!({
+                "id": "cron",
+                "expr": "*/15 * * * *",
+                "timezone": "America/New_York"
+            })
+        );
+        assert_eq!(RunMode::deserialize(written).expect("read back"), restored);
+
+        let via_alias = parse_run(r#"run "cron" schedule="@daily""#).expect("schedule alias");
+        assert_eq!(
+            via_alias,
+            RunMode::Cron {
+                expr: "@daily".to_string(),
+                timezone: None,
+            }
+        );
+
+        assert!(parse_run(r#"run "cron""#).is_err());
+        assert!(parse_run(r#"run "cron" expr="invalid""#).is_err());
+        assert!(parse_run(r#"run "cron" expr="* * * * *" timezone="Mars/Base""#).is_err());
+        assert!(parse_run(r#"run "cron" expr="* * * * *" every_ms=100"#).is_err());
     }
 }

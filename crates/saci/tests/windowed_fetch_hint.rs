@@ -239,11 +239,13 @@ fn pinned_config(run_mode: RunMode) -> ServiceConfig {
             sinks: Vec::new(),
             links: Vec::new(),
             dlq: None,
+            run: None,
         }],
         http: HttpConfig::default(),
         store: None,
         observability: ObservabilityConfig::default(),
         encryption: None,
+        alerts: Default::default(),
         variables: std::collections::HashMap::new(),
     }
 }

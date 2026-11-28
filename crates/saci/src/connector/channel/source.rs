@@ -10,6 +10,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::connector::channel::registry::ChannelSlot;
 use crate::error::SaciError;
 use crate::io::Source;
 
@@ -36,6 +37,8 @@ use crate::io::Source;
 pub struct ChannelSource {
     rx: mpsc::Receiver<RecordBatch>,
     schema: Arc<Schema>,
+    slot: Option<Arc<ChannelSlot>>,
+    generation: u64,
 }
 
 impl ChannelSource {
@@ -45,14 +48,49 @@ impl ChannelSource {
     /// blocking the sender. Drop the sender to signal EOF.
     pub fn new(schema: Arc<Schema>, buffer: usize) -> (Self, mpsc::Sender<RecordBatch>) {
         let (tx, rx) = mpsc::channel(buffer);
-        (Self { rx, schema }, tx)
+        (
+            Self {
+                rx,
+                schema,
+                slot: None,
+                generation: 0,
+            },
+            tx,
+        )
     }
 
     /// Wrap an existing receiver half, paired with a sender resolved
     /// elsewhere — the [`ChannelRegistry`](crate::connector::channel::registry::ChannelRegistry)
     /// bridge's source-side constructor.
     pub fn with_receiver(schema: Arc<Schema>, rx: mpsc::Receiver<RecordBatch>) -> Self {
-        Self { rx, schema }
+        Self {
+            rx,
+            schema,
+            slot: None,
+            generation: 0,
+        }
+    }
+
+    pub(crate) fn with_slot(
+        schema: Arc<Schema>,
+        rx: mpsc::Receiver<RecordBatch>,
+        slot: Arc<ChannelSlot>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            rx,
+            schema,
+            slot: Some(slot),
+            generation,
+        }
+    }
+}
+
+impl Drop for ChannelSource {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.slot {
+            slot.release_source(self.generation);
+        }
     }
 }
 
@@ -63,19 +101,29 @@ impl Source for ChannelSource {
     }
 
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
-        match self.rx.recv().await {
-            None => Ok(None),
-            Some(batch) => {
-                if !Arc::ptr_eq(batch.schema_ref(), &self.schema)
-                    && batch.schema_ref().fields() != self.schema.fields()
-                {
-                    return Err(SaciError::generic(format!(
-                        "ChannelSource: received batch with schema {:?}, expected {:?}",
-                        batch.schema_ref(),
-                        self.schema
-                    )));
+        loop {
+            match self.rx.recv().await {
+                None => {
+                    if let Some(slot) = &self.slot
+                        && let Some(new_rx) = slot.take_newer_rx(&mut self.generation)
+                    {
+                        self.rx = new_rx;
+                        continue;
+                    }
+                    return Ok(None);
                 }
-                Ok(Some(batch))
+                Some(batch) => {
+                    if !Arc::ptr_eq(batch.schema_ref(), &self.schema)
+                        && batch.schema_ref().fields() != self.schema.fields()
+                    {
+                        return Err(SaciError::generic(format!(
+                            "ChannelSource: received batch with schema {:?}, expected {:?}",
+                            batch.schema_ref(),
+                            self.schema
+                        )));
+                    }
+                    return Ok(Some(batch));
+                }
             }
         }
     }

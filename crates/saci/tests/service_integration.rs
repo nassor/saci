@@ -582,3 +582,665 @@ async fn test_serve_returns_clean_after_shutdown_token_fires() {
         ServeExit::Clean
     );
 }
+
+#[cfg(all(
+    feature = "connector-file",
+    feature = "codec-csv",
+    feature = "connector-redb"
+))]
+#[tokio::test]
+async fn test_backfill_and_cursor_endpoints_and_cli() {
+    use saci::service::{RedbStateClient, SourceCursorMeta};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let d = dir.path().to_string_lossy().replace('\\', "/");
+    let input_csv = dir.path().join("events.csv");
+    std::fs::write(
+        &input_csv,
+        "id,ts\n1,2025-01-15T00:00:00Z\n2,2025-02-05T12:00:00Z\n3,2025-03-01T00:00:00Z\n",
+    )
+    .expect("write input csv");
+
+    let redb_path = dir.path().join("state.redb");
+    {
+        let state = RedbStateClient::open(&redb_path).expect("open redb");
+        state
+            .save_source_cursor(
+                "orders",
+                "src_in",
+                SourceCursorMeta {
+                    items_processed: 10,
+                    last_batch_at_ms: 1_000,
+                },
+            )
+            .await
+            .expect("save cursor 1");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let t_mid = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        state
+            .save_source_cursor(
+                "orders",
+                "src_in",
+                SourceCursorMeta {
+                    items_processed: 25,
+                    last_batch_at_ms: 2_000,
+                },
+            )
+            .await
+            .expect("save cursor 2");
+        assert!(t_mid > 0);
+    }
+
+    let kdl = format!(
+        r#"
+mode "standalone"
+node id=1 name="backfill-node" data_dir="{d}"
+run "continuous"
+
+variables {{
+    OUT_TAG "live"
+}}
+
+store "redb" path="{d}/state.redb" batch_resume=#true
+
+workflow "orders" {{
+    codec "csv_fmt" format="csv" {{
+        config has_headers=#true
+    }}
+    source "src_in" connector="file" component="Event" codec="csv_fmt" {{
+        config {{
+            path "{d}/events.csv"
+            field "id" type="int64" nullable=#false
+            field "ts" type="utf8" nullable=#false
+        }}
+    }}
+    sink "dst_out" connector="file" component="Event" codec="csv_fmt" {{
+        config {{
+            path "{d}/events_${{OUT_TAG}}.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "ts" type="utf8" nullable=#false
+        }}
+    }}
+    link from="src_in" to="dst_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn"
+"#
+    );
+    let cfg_path = dir.path().join("service.kdl");
+    std::fs::write(&cfg_path, &kdl).expect("write config");
+
+    let mut service = Service::spawn(&cfg_path);
+    let health_url = service.url("/health");
+    service
+        .poll_until_200(&health_url, STARTUP_BUDGET)
+        .await
+        .expect("service starts");
+
+    let client = probe_client();
+    // 1. Trigger parameterized time-windowed backfill over HTTP.
+    let bf_resp = client
+        .post(service.url("/api/workflows/orders/backfill"))
+        .json(&serde_json::json!({
+            "start_date": "2025-02-01T00:00:00Z",
+            "end_date": "2025-02-10T23:59:59Z",
+            "time_field": "ts",
+            "params": { "OUT_TAG": "bf1" },
+            "reset_state": true
+        }))
+        .send()
+        .await
+        .expect("POST backfill");
+    assert_eq!(bf_resp.status(), 200);
+    let bf_json: serde_json::Value = bf_resp.json().await.expect("backfill JSON");
+    assert_eq!(bf_json["workflow"], "orders");
+    assert_eq!(bf_json["rows_processed"], 1);
+    let bf_out = std::fs::read_to_string(dir.path().join("events_bf1.csv")).expect("bf1 output");
+    assert!(bf_out.contains("2,2025-02-05T12:00:00Z"), "got: {bf_out}");
+    assert!(!bf_out.contains("1,2025-01-15"), "outside window: {bf_out}");
+
+    // 2. Inspect cursors and roll back to earliest checkpoint via HTTP + CLI.
+    let cursors_resp = client
+        .get(service.url("/api/workflows/orders/cursors"))
+        .send()
+        .await
+        .expect("GET cursors");
+    assert_eq!(cursors_resp.status(), 200);
+    let cursors_json: serde_json::Value = cursors_resp.json().await.expect("cursors JSON");
+    let checkpoints = cursors_json["checkpoints_unix_ms"]
+        .as_array()
+        .expect("checkpoints array");
+    assert!(
+        checkpoints.len() >= 2,
+        "expected >=2 checkpoints: {cursors_json}"
+    );
+    let first_ts = checkpoints[0].as_u64().expect("u64 timestamp");
+
+    let reset_resp = client
+        .post(service.url("/api/workflows/orders/cursors/reset"))
+        .json(&serde_json::json!({ "to_unix_ms": first_ts }))
+        .send()
+        .await
+        .expect("POST cursors/reset");
+    assert_eq!(reset_resp.status(), 200);
+    let reset_json: serde_json::Value = reset_resp.json().await.expect("reset JSON");
+    assert_eq!(reset_json["cursors"][0]["items_processed"], 10);
+
+    // Also verify `saci-service cursor list`, `cursor reset`, and `backfill --local` CLI subcommands.
+    let cli_out = std::process::Command::new(BIN)
+        .args(["cursor", "list", "orders", "--url", &service.url("")])
+        .output()
+        .expect("run cursor list CLI");
+    assert!(
+        cli_out.status.success(),
+        "cursor list failed: {}",
+        String::from_utf8_lossy(&cli_out.stderr)
+    );
+
+    service.terminate();
+    service.wait_exit(SHUTDOWN_BUDGET);
+
+    let bf_local_out = std::process::Command::new(BIN)
+        .args([
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "backfill",
+            "orders",
+            "--start",
+            "2025-02-01",
+            "--end",
+            "2025-02-10",
+            "--time-field",
+            "ts",
+            "--param",
+            "OUT_TAG=localbf",
+            "--reset-state",
+            "--local",
+        ])
+        .output()
+        .expect("run backfill --local CLI");
+    assert!(
+        bf_local_out.status.success(),
+        "backfill --local failed: {}",
+        String::from_utf8_lossy(&bf_local_out.stderr)
+    );
+    let local_out =
+        std::fs::read_to_string(dir.path().join("events_localbf.csv")).expect("localbf output");
+    assert!(local_out.contains("2,2025-02-05T12:00:00Z"));
+    assert!(!local_out.contains("1,2025-01-15"));
+}
+
+#[cfg(all(
+    feature = "connector-file",
+    feature = "codec-csv",
+    feature = "connector-redb",
+    feature = "inspector"
+))]
+#[tokio::test]
+async fn test_hot_reload_syncs_newly_added_dlq_workflow_and_rejects_broken_reload() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let d = dir.path().to_string_lossy().replace('\\', "/");
+    std::fs::write(dir.path().join("orders.csv"), "id,total\n1,10.0\n").expect("write csv");
+
+    let kdl_initial = format!(
+        r#"
+mode "standalone"
+node id=1 name="dlq-reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "base" {{
+    codec "base_csv" format="csv" {{ config has_headers=#true }}
+    source "base_in" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "base_out" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/base_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="base_in" to="base_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+
+    let cfg_path = dir.path().join("service.kdl");
+    std::fs::write(&cfg_path, &kdl_initial).expect("write initial");
+
+    let mut service = Service::spawn(&cfg_path);
+    let health_url = service.url("/health");
+    service
+        .poll_until_200(&health_url, STARTUP_BUDGET)
+        .await
+        .expect("service starts");
+
+    let client = probe_client();
+    // 1. Failing pre-build on an added workflow returns 400 and keeps base intact.
+    let broken_kdl = format!(
+        r#"
+mode "standalone"
+node id=1 name="dlq-reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "base" {{
+    codec "base_csv" format="csv" {{ config has_headers=#true }}
+    source "base_in" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "base_out" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/base_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="base_in" to="base_out"
+}}
+
+workflow "broken" {{
+    codec "b_csv" format="csv" {{ config has_headers=#true }}
+    source "b_in" connector="file" component="Order" codec="b_csv" {{
+        config {{
+            path "{d}/does_not_exist.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "b_out" connector="file" component="Order" codec="b_csv" {{
+        config {{
+            path "{d}/b_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="b_in" to="b_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+    let broken_resp = client
+        .post(service.url("/api/reload"))
+        .body(broken_kdl)
+        .send()
+        .await
+        .expect("POST broken reload");
+    assert_eq!(broken_resp.status(), 400);
+
+    // 2. Reload adding a workflow with a `dlq "redb"` block succeeds via CLI `saci-service reload --file`
+    //    and exposes it under `GET /api/dlq`.
+    let with_dlq_path = dir.path().join("with_dlq.kdl");
+    let with_dlq_kdl = format!(
+        r#"
+mode "standalone"
+node id=1 name="dlq-reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "base" {{
+    codec "base_csv" format="csv" {{ config has_headers=#true }}
+    source "base_in" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "base_out" connector="file" component="Order" codec="base_csv" {{
+        config {{
+            path "{d}/base_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="base_in" to="base_out"
+}}
+
+workflow "with_dlq" {{
+    codec "d_csv" format="csv" {{ config has_headers=#true }}
+    source "d_in" connector="file" component="Order" codec="d_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "d_out" connector="file" component="Order" codec="d_csv" {{
+        config {{
+            path "{d}/d_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    dlq "redb" {{
+        directory "{d}/dlq"
+    }}
+    link from="d_in" to="d_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+    std::fs::write(&with_dlq_path, &with_dlq_kdl).expect("write with_dlq");
+
+    let reload_cli = std::process::Command::new(BIN)
+        .args([
+            "reload",
+            "--file",
+            with_dlq_path.to_str().unwrap(),
+            "--url",
+            &service.url(""),
+        ])
+        .output()
+        .expect("run reload CLI");
+    assert!(
+        reload_cli.status.success(),
+        "reload CLI failed: {}{}",
+        String::from_utf8_lossy(&reload_cli.stderr),
+        service.diagnostics()
+    );
+
+    let dlq_resp = client
+        .get(service.url("/api/dlq"))
+        .send()
+        .await
+        .expect("GET /api/dlq");
+    assert_eq!(dlq_resp.status(), 200);
+    let dlq_json: serde_json::Value = dlq_resp.json().await.expect("dlq json");
+    let entries = dlq_json.as_array().expect("dlq array");
+    assert!(
+        entries.iter().any(|e| e["workflow"] == "with_dlq"),
+        "expected hot-reloaded DLQ workflow in /api/dlq: {dlq_json}"
+    );
+
+    service.terminate();
+    service.wait_exit(SHUTDOWN_BUDGET);
+}
+
+#[cfg(all(
+    feature = "connector-file",
+    feature = "codec-csv",
+    feature = "inspector"
+))]
+#[tokio::test]
+async fn test_live_reload_over_http_and_sighup() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let d = dir.path().to_string_lossy().replace('\\', "/");
+    let in_csv = dir.path().join("orders.csv");
+    std::fs::write(&in_csv, "id,total\n1,10.0\n").expect("write csv");
+
+    let kdl_v1 = format!(
+        r#"
+mode "standalone"
+node id=1 name="reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "steady" {{
+    codec "steady_csv" format="csv" {{ config has_headers=#true }}
+    source "steady_in" connector="file" component="Order" codec="steady_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "steady_out" connector="file" component="Order" codec="steady_csv" {{
+        config {{
+            path "{d}/steady_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="steady_in" to="steady_out"
+}}
+
+workflow "legacy" {{
+    codec "legacy_csv" format="csv" {{ config has_headers=#true }}
+    source "legacy_in" connector="file" component="Order" codec="legacy_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "legacy_out" connector="file" component="Order" codec="legacy_csv" {{
+        config {{
+            path "{d}/legacy_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="legacy_in" to="legacy_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+
+    let cfg_path = dir.path().join("service.kdl");
+    std::fs::write(&cfg_path, &kdl_v1).expect("write v1");
+
+    let mut service = Service::spawn(&cfg_path);
+    let health_url = service.url("/health");
+    service
+        .poll_until_200(&health_url, STARTUP_BUDGET)
+        .await
+        .expect("service starts");
+
+    let client = probe_client();
+    let topo1: serde_json::Value = client
+        .get(service.url("/api/topology"))
+        .send()
+        .await
+        .expect("GET topology")
+        .json()
+        .await
+        .expect("topology JSON");
+    let v1 = topo1["version"].as_u64().expect("version u64");
+
+    // 1. Invalid reload returns 400 and leaves running workflows untouched.
+    let bad_resp = client
+        .post(service.url("/api/reload"))
+        .body("not valid kdl {{{")
+        .send()
+        .await
+        .expect("POST bad reload");
+    assert_eq!(bad_resp.status(), 400);
+
+    // 2. Valid HTTP reload removes `legacy`, adds `added_wf`, leaves `steady` uninterrupted.
+    let kdl_v2 = format!(
+        r#"
+mode "standalone"
+node id=1 name="reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "steady" {{
+    codec "steady_csv" format="csv" {{ config has_headers=#true }}
+    source "steady_in" connector="file" component="Order" codec="steady_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "steady_out" connector="file" component="Order" codec="steady_csv" {{
+        config {{
+            path "{d}/steady_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="steady_in" to="steady_out"
+}}
+
+workflow "added_wf" {{
+    codec "added_csv" format="csv" {{ config has_headers=#true }}
+    source "added_in" connector="file" component="Order" codec="added_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "added_out" connector="file" component="Order" codec="added_csv" {{
+        config {{
+            path "{d}/added_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="added_in" to="added_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+    );
+
+    let reload_resp = client
+        .post(service.url("/api/reload"))
+        .body(kdl_v2)
+        .send()
+        .await
+        .expect("POST reload");
+    assert_eq!(reload_resp.status(), 200);
+    let report: serde_json::Value = reload_resp.json().await.expect("reload JSON");
+    assert_eq!(report["added"], serde_json::json!(["added_wf"]));
+    assert_eq!(report["removed"], serde_json::json!(["legacy"]));
+    assert_eq!(report["unchanged"], serde_json::json!(["steady"]));
+    let v2 = report["topology_version"].as_u64().expect("version u64");
+    assert!(v2 > v1, "expected topology version bump: v1={v1}, v2={v2}");
+
+    let steady_wf: serde_json::Value = client
+        .get(service.url("/api/workflows/steady"))
+        .send()
+        .await
+        .expect("GET steady")
+        .json()
+        .await
+        .expect("steady JSON");
+    assert_eq!(steady_wf["runs"], 1, "unchanged workflow was not rebuilt");
+
+    // 3. Unix SIGHUP reloads the updated file on disk.
+    #[cfg(unix)]
+    {
+        let kdl_v3 = format!(
+            r#"
+mode "standalone"
+node id=1 name="reload-node" data_dir="{d}"
+run "continuous"
+
+workflow "steady" {{
+    codec "steady_csv" format="csv" {{ config has_headers=#true }}
+    source "steady_in" connector="file" component="Order" codec="steady_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "steady_out" connector="file" component="Order" codec="steady_csv" {{
+        config {{
+            path "{d}/steady_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="steady_in" to="steady_out"
+}}
+
+workflow "sighup_wf" {{
+    codec "sighup_csv" format="csv" {{ config has_headers=#true }}
+    source "sighup_in" connector="file" component="Order" codec="sighup_csv" {{
+        config {{
+            path "{d}/orders.csv"
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    sink "sighup_out" connector="file" component="Order" codec="sighup_csv" {{
+        config {{
+            path "{d}/sighup_out.csv"
+            truncate #true
+            field "id" type="int64" nullable=#false
+            field "total" type="float64" nullable=#false
+        }}
+    }}
+    link from="sighup_in" to="sighup_out"
+}}
+
+http bind="127.0.0.1:0" control=#true
+observability log_level="warn" {{
+    inspector enabled=#true
+}}
+"#
+        );
+        std::fs::write(&cfg_path, &kdl_v3).expect("write v3");
+        let pid = service.child.id().to_string();
+        let status = std::process::Command::new("kill")
+            .args(["-HUP", &pid])
+            .status()
+            .expect("send SIGHUP");
+        assert!(status.success(), "kill -HUP succeeded");
+
+        let deadline = Instant::now() + STARTUP_BUDGET;
+        loop {
+            let resp = client
+                .get(service.url("/api/workflows/sighup_wf"))
+                .send()
+                .await
+                .expect("GET sighup_wf");
+            if resp.status() == 200 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for sighup_wf after SIGHUP"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    service.terminate();
+    service.wait_exit(SHUTDOWN_BUDGET);
+}

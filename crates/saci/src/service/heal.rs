@@ -57,6 +57,7 @@ use crate::io::{RetryingSink, RetryingSource, Sink, Source};
 use crate::metrics::{SinkMetrics, SourceMetrics};
 use crate::retry::RetryMode;
 
+use super::alert::{AlertDispatcher, AlertEvent};
 use super::config::flexible::{de_opt_bool_flexible, de_opt_f64_flexible, de_opt_u64_flexible};
 use super::factories::lookup_connector;
 use super::registry::Registry;
@@ -300,6 +301,8 @@ struct Healer {
     /// most likely to land, and waiting out the backoff schedule instead
     /// would hold the letters for up to a minute.
     recovered: Arc<std::sync::atomic::AtomicBool>,
+    /// Outbound alert dispatcher notified when healing is exhausted.
+    alerts: AlertDispatcher,
 }
 
 impl Healer {
@@ -309,6 +312,7 @@ impl Healer {
         role: Role,
         workflow_id: &str,
         node_id: &str,
+        alerts: AlertDispatcher,
     ) -> Self {
         Self {
             rebuilder,
@@ -320,6 +324,7 @@ impl Healer {
             metrics: HealMetrics::bind(role, node_id),
             down: None,
             recovered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            alerts,
         }
     }
 
@@ -390,6 +395,13 @@ impl Healer {
                 attempts = self.settings.max_attempts,
                 "connector heal exhausted"
             );
+            self.alerts.emit(AlertEvent::heal_exhausted(
+                &self.workflow_id,
+                &self.node_id,
+                self.role.as_str(),
+                self.settings.max_attempts,
+                self.down.as_deref(),
+            ));
             return;
         }
         let delay = self.settings.delay_for(attempt);
@@ -490,10 +502,23 @@ impl HealingSource {
         let schema = inner.schema();
         Self {
             inner: Some(inner),
-            healer: Healer::new(rebuilder, settings, Role::Source, workflow_id, node_id),
+            healer: Healer::new(
+                rebuilder,
+                settings,
+                Role::Source,
+                workflow_id,
+                node_id,
+                AlertDispatcher::noop(),
+            ),
             schema,
             last_hint: None,
         }
+    }
+
+    /// Attach an outbound [`AlertDispatcher`] for heal-exhausted notifications.
+    pub(crate) fn with_alerts(mut self, alerts: AlertDispatcher) -> Self {
+        self.healer.alerts = alerts;
+        self
     }
 
     /// Rebuild if the schedule is due. Never sleeps and never fails: a
@@ -610,9 +635,22 @@ impl HealingSink {
         let schema = inner.schema();
         Self {
             inner: Some(inner),
-            healer: Healer::new(rebuilder, settings, Role::Sink, workflow_id, node_id),
+            healer: Healer::new(
+                rebuilder,
+                settings,
+                Role::Sink,
+                workflow_id,
+                node_id,
+                AlertDispatcher::noop(),
+            ),
             schema,
         }
+    }
+
+    /// Attach an outbound [`AlertDispatcher`] for heal-exhausted notifications.
+    pub(crate) fn with_alerts(mut self, alerts: AlertDispatcher) -> Self {
+        self.healer.alerts = alerts;
+        self
     }
 
     /// A handle on the flag this node sets when a rebuilt instance's first
