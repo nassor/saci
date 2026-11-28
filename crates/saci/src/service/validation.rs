@@ -111,7 +111,16 @@ pub fn validate_workflow_graph(workflow_id: &str, nodes: &[BuiltNode]) -> SaciRe
         for (edge_idx, edge) in node.downstream.iter().enumerate() {
             let d = edge.node;
             let evolution = node.edge_evolution(edge_idx);
-            validate_edge(workflow_id, nodes, &declared, &templates, i, d, evolution)?;
+            validate_edge(
+                workflow_id,
+                nodes,
+                &declared,
+                &templates,
+                i,
+                d,
+                edge.branch.as_deref(),
+                evolution,
+            )?;
         }
     }
 
@@ -276,6 +285,18 @@ fn schemas_agree(
     check_schema_compatibility(&up, &down, evolution).map_err(|e| e.message())
 }
 
+fn with_quality_diagnostic_fields(fields: &Fields) -> Fields {
+    use arrow_schema::{DataType, Field};
+    let mut out: Vec<std::sync::Arc<Field>> = fields.iter().cloned().collect();
+    for name in ["__dq_rule", "__dq_column", "__dq_reason"] {
+        if !out.iter().any(|f| f.name() == name) {
+            out.push(std::sync::Arc::new(Field::new(name, DataType::Utf8, false)));
+        }
+    }
+    Fields::from(out)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_edge(
     workflow_id: &str,
     nodes: &[BuiltNode],
@@ -283,6 +304,7 @@ fn validate_edge(
     templates: &[Option<Dataset>],
     from: usize,
     to: usize,
+    branch: Option<&str>,
     evolution: EvolutionPolicy,
 ) -> SaciResult<()> {
     let from_node = &nodes[from];
@@ -363,7 +385,11 @@ fn validate_edge(
                 let down_fields = fields_of(down_template, component);
                 match (up_fields, down_fields) {
                     (Some(u), Some(d)) => {
-                        if let Err(reason) = schemas_agree(&u, &d, evolution) {
+                        let diag_ok = from_node.connector == "operator:quality"
+                            && branch == Some("quarantine")
+                            && schemas_agree(&with_quality_diagnostic_fields(&u), &d, evolution)
+                                .is_ok();
+                        if !diag_ok && let Err(reason) = schemas_agree(&u, &d, evolution) {
                             let suffix = if reason.is_empty() {
                                 String::new()
                             } else {
@@ -404,19 +430,30 @@ fn validate_edge(
                 )));
             }
             let up_template = templates[from].as_ref().expect("processor node");
-            if let Some(up_fields) = output_fields_of(up_template, component)
-                && let Err(reason) = schemas_agree(&up_fields, sink.schema().fields(), evolution)
-            {
-                let suffix = if reason.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({reason})")
-                };
-                return Err(SaciError::configuration(format!(
-                    "workflow '{workflow_id}': link '{}' -> '{}': component '{component}' \
-                     schema differs between processor '{}' and sink '{}'{suffix}",
-                    from_node.id, to_node.id, from_node.id, to_node.id
-                )));
+            if let Some(up_fields) = output_fields_of(up_template, component) {
+                let diag_ok = from_node.connector == "operator:quality"
+                    && branch == Some("quarantine")
+                    && schemas_agree(
+                        &with_quality_diagnostic_fields(&up_fields),
+                        sink.schema().fields(),
+                        evolution,
+                    )
+                    .is_ok();
+                if !diag_ok
+                    && let Err(reason) =
+                        schemas_agree(&up_fields, sink.schema().fields(), evolution)
+                {
+                    let suffix = if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({reason})")
+                    };
+                    return Err(SaciError::configuration(format!(
+                        "workflow '{workflow_id}': link '{}' -> '{}': component '{component}' \
+                         schema differs between processor '{}' and sink '{}'{suffix}",
+                        from_node.id, to_node.id, from_node.id, to_node.id
+                    )));
+                }
             }
         }
         // Every other combination (a source or sink as a link target/source
@@ -1176,5 +1213,42 @@ mod tests {
         let compat_sink = sink_node("out", "Order", evolved_sink_schema);
         validate_workflow_graph("w", &[compat_src, compat_sink])
             .expect("compatible evolution allows widening Int32->Int64 and adding nullable column");
+    }
+
+    #[cfg(feature = "connector-channel")]
+    #[test]
+    fn quality_operator_quarantine_branch_accepts_diagnostic_columns_without_quarantine_into() {
+        let in_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let q_diag_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("__dq_rule", DataType::Utf8, false),
+            Field::new("__dq_column", DataType::Utf8, false),
+            Field::new("__dq_reason", DataType::Utf8, false),
+        ]));
+        let mut proc_pipeline = Pipeline::new("dq");
+        proc_pipeline
+            .data_mut()
+            .register_schema("Order", in_schema.clone())
+            .unwrap();
+        let mut dq = BuiltWorkflow::builder("w")
+            .processor("dq", proc_pipeline)
+            .build()
+            .unwrap()
+            .nodes
+            .remove(0);
+        dq.connector = "operator:quality".to_string();
+        dq.downstream.push(BuiltEdge {
+            node: 1,
+            branch: Some("valid".to_string()),
+        });
+        dq.downstream.push(BuiltEdge {
+            node: 2,
+            branch: Some("quarantine".to_string()),
+        });
+        let valid_sink = sink_node("valid_out", "Order", in_schema);
+        let q_sink = sink_node("bad_out", "Order", q_diag_schema);
+        validate_workflow_graph("w", &[dq, valid_sink, q_sink]).expect(
+            "quarantine branch with diagnostic columns must validate without quarantine_into",
+        );
     }
 }

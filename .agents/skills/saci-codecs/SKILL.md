@@ -27,7 +27,8 @@ otherwise). A new writer implementation sets both.
 `BatchReader` and `MessageDecoder` both provide `set_skip_corrupt(&mut self, skip: bool)` and
 `drain_corrupt(&mut self) -> Vec<CorruptRecord>` (`codec::CorruptRecord`, re-exported from
 `io::CorruptRecord`) for source-side bad-record isolation (`on_corrupt="drop"|"dlq"`). Implemented
-with per-line/per-payload isolation in `ndjson`, `csv`, and `avro` (`MessageDecoder`).
+with per-line/per-payload isolation in `ndjson`, `csv`, and `avro` (`AvroBatchReader` and
+`AvroMessageDecoder`).
 
 A connector moves bytes and a codec turns bytes into `RecordBatch`es and back, so transport and
 format are separate modules. A byte-carrying source or sink node names a declared `codec`
@@ -58,8 +59,11 @@ config key it does not read with `"{format}: unknown option '{key}'"`.
   `Snappy` or `Zstd`. Options `compression`, `schema_id`, `registry_url`, `registry_kind`, `subject`,
   `auto_register`, `compatibility`, `apicurio_group`, `apicurio_eight_byte_id`, `glue_registry_name`,
   `glue_schema_name`, `aws_region`, `auth_basic_user`, `auth_basic_password`, `auth_bearer_token`.
-  Dynamic writer-schema lookups are cached in memory and decoded batches evolve onto the declared
-  consumer schema via `EvolutionPolicy::compatible()`.
+  Dynamic writer-schema lookups are cached in memory, compatibility checks support both single-step
+  and transitive modes (`BackwardTransitive`/`ForwardTransitive`/`FullTransitive` via Confluent,
+  Apicurio v2, and AWS Glue `ListSchemaVersions`), and decoded batches evolve onto the declared
+  consumer schema via `EvolutionPolicy::compatible()`. `SchemaRegistryClient` serializes
+  `current_thread` Tokio `block_on` calls so concurrent worker cache misses cannot panic.
 - `codec::csv`: `CsvCodec::new().has_headers(false)` (default `true`), `CsvCodecFactory`. Stream
   read and write plus `PerRow` messages, one record per payload. Option `has_headers` governs the
   stream surface only: a message carries no header row in either direction.

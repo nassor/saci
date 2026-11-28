@@ -377,6 +377,12 @@ pub struct WorkflowLineageGraph {
     pub outputs: Vec<LineageDataset>,
     /// Topological links within the workflow.
     pub edges: Vec<LineageEdge>,
+    /// Declared source node IDs aligned 1:1 with `inputs` (for per-dataset stats).
+    #[serde(skip, default)]
+    pub(crate) input_node_ids: Vec<String>,
+    /// Declared sink node IDs aligned 1:1 with `outputs` (for per-dataset stats).
+    #[serde(skip, default)]
+    pub(crate) output_node_ids: Vec<String>,
 }
 
 /// HTTP snapshot returned by `GET /api/lineage`.
@@ -600,6 +606,8 @@ pub fn build_workflow_lineage(
         inputs,
         outputs,
         edges,
+        input_node_ids: workflow.sources.iter().map(|s| s.id.clone()).collect(),
+        output_node_ids: workflow.sinks.iter().map(|s| s.id.clone()).collect(),
     }
 }
 
@@ -729,6 +737,24 @@ fn propagate_operator_lineage(
                     );
                 }
                 provenance.insert(q_into.clone(), q_prov);
+                if !comp_schemas.contains_key(q_into)
+                    && let Some(mut q_fields) = comp_schemas.get(src).cloned()
+                {
+                    if cfg
+                        .and_then(|m| m.get("diagnostics"))
+                        .and_then(ConfigValue::as_bool)
+                        == Some(true)
+                    {
+                        for diag in ["__dq_rule", "__dq_column", "__dq_reason"] {
+                            q_fields.push(SchemaFieldFacet {
+                                name: diag.to_string(),
+                                data_type: "Utf8".to_string(),
+                                nullable: false,
+                            });
+                        }
+                    }
+                    comp_schemas.insert(q_into.clone(), q_fields);
+                }
             }
         }
         "project" => {
@@ -737,7 +763,9 @@ fn propagate_operator_lineage(
             };
             let dst = op.into.as_deref().unwrap_or(src);
             let src_prov = provenance.get(src).cloned().unwrap_or_default();
+            let src_schema = comp_schemas.get(src).cloned().unwrap_or_default();
             let mut next_prov = ComponentColumns::new();
+            let mut static_fields = Vec::new();
             let raw_clauses = extract_string_list(cfg.and_then(|m| m.get("select")));
             for raw in raw_clauses {
                 for clause in split_top_level_commas(&raw) {
@@ -751,6 +779,15 @@ fn propagate_operator_lineage(
                         } else {
                             "TRANSFORMATION"
                         };
+                        let inherited = (refs.len() == 1)
+                            .then(|| src_schema.iter().find(|f| f.name == refs[0]))
+                            .flatten();
+                        static_fields.push(SchemaFieldFacet {
+                            name: out_name.clone(),
+                            data_type: inherited
+                                .map_or_else(|| "Unknown".to_string(), |f| f.data_type.clone()),
+                            nullable: inherited.is_none_or(|f| f.nullable),
+                        });
                         next_prov.insert(
                             out_name,
                             (
@@ -765,6 +802,9 @@ fn propagate_operator_lineage(
             if !next_prov.is_empty() {
                 provenance.insert(dst.to_string(), next_prov);
             }
+            if !static_fields.is_empty() && (!comp_schemas.contains_key(dst) || dst == src) {
+                comp_schemas.insert(dst.to_string(), static_fields);
+            }
         }
         "group_by" | "window" => {
             let Some(src) = op.component.as_deref() else {
@@ -772,10 +812,15 @@ fn propagate_operator_lineage(
             };
             let dst = op.into.as_deref().unwrap_or(src);
             let src_prov = provenance.get(src).cloned().unwrap_or_default();
+            let src_schema = comp_schemas.get(src).cloned().unwrap_or_default();
             let mut next_prov = ComponentColumns::new();
+            let mut static_fields = Vec::new();
             for key in extract_string_list(cfg.and_then(|m| m.get("keys"))) {
                 if let Some(entry) = src_prov.get(&key).cloned() {
-                    next_prov.insert(key, entry);
+                    next_prov.insert(key.clone(), entry);
+                }
+                if let Some(f) = src_schema.iter().find(|f| f.name == key) {
+                    static_fields.push(f.clone());
                 }
             }
             if let Some(win) = &op.window {
@@ -783,15 +828,34 @@ fn propagate_operator_lineage(
                     if let Some(entry) = src_prov.get(key).cloned() {
                         next_prov.insert(key.clone(), entry);
                     }
+                    if !static_fields.iter().any(|f| f.name == *key)
+                        && let Some(f) = src_schema.iter().find(|f| f.name == *key)
+                    {
+                        static_fields.push(f.clone());
+                    }
                 }
             }
             if let Some(aggs) = cfg.and_then(|m| m.get("aggregates").or_else(|| m.get("aggregate")))
             {
                 for (out_name, input_col, desc) in extract_aggregate_refs(aggs) {
-                    let origins = match input_col {
-                        Some(c) => resolve_input_cols(Some(&src_prov), &[c]),
+                    let origins = match &input_col {
+                        Some(c) => resolve_input_cols(Some(&src_prov), std::slice::from_ref(c)),
                         None => src_prov.values().flat_map(|(o, _, _)| o.clone()).collect(),
                     };
+                    let data_type = if desc.to_ascii_lowercase().starts_with("count") {
+                        "Int64".to_string()
+                    } else if let Some(col) = &input_col
+                        && let Some(f) = src_schema.iter().find(|f| f.name == *col)
+                    {
+                        f.data_type.clone()
+                    } else {
+                        "Float64".to_string()
+                    };
+                    static_fields.push(SchemaFieldFacet {
+                        name: out_name.clone(),
+                        data_type,
+                        nullable: true,
+                    });
                     next_prov.insert(
                         out_name,
                         (
@@ -804,6 +868,9 @@ fn propagate_operator_lineage(
             }
             if !next_prov.is_empty() {
                 provenance.insert(dst.to_string(), next_prov);
+            }
+            if !static_fields.is_empty() && (!comp_schemas.contains_key(dst) || dst == src) {
+                comp_schemas.insert(dst.to_string(), static_fields);
             }
         }
         "join" | "interval_join" | "lookup_join" => {
@@ -828,6 +895,20 @@ fn propagate_operator_lineage(
                 merged.insert(target_name, v);
             }
             provenance.insert(into.to_string(), merged);
+            if !comp_schemas.contains_key(into) {
+                let l_fields = comp_schemas.get(left).cloned().unwrap_or_default();
+                let r_fields = comp_schemas.get(right).cloned().unwrap_or_default();
+                let mut merged_fields = l_fields;
+                for mut f in r_fields {
+                    if merged_fields.iter().any(|lf| lf.name == f.name) {
+                        f.name = format!("{prefix}{}", f.name);
+                    }
+                    merged_fields.push(f);
+                }
+                if !merged_fields.is_empty() {
+                    comp_schemas.insert(into.to_string(), merged_fields);
+                }
+            }
         }
         "unnest" => {
             let Some(src) = op.component.as_deref() else {
@@ -835,6 +916,7 @@ fn propagate_operator_lineage(
             };
             let dst = op.into.as_deref().unwrap_or(src);
             let mut next_prov = provenance.get(src).cloned().unwrap_or_default();
+            let mut next_fields = comp_schemas.get(src).cloned().unwrap_or_default();
             if let Some(field) = cfg
                 .and_then(|m| m.get("field"))
                 .and_then(ConfigValue::as_str)
@@ -852,8 +934,18 @@ fn propagate_operator_lineage(
                         format!("unnest({}): {field}", op.id),
                     ),
                 );
+                if !next_fields.iter().any(|f| f.name == alias) {
+                    next_fields.push(SchemaFieldFacet {
+                        name: alias.to_string(),
+                        data_type: "Utf8".to_string(),
+                        nullable: true,
+                    });
+                }
             }
             provenance.insert(dst.to_string(), next_prov);
+            if !next_fields.is_empty() && !comp_schemas.contains_key(dst) {
+                comp_schemas.insert(dst.to_string(), next_fields);
+            }
         }
         "sql" => {
             let Some(dst) = op.into.as_deref().or(op.component.as_deref()) else {
@@ -867,15 +959,45 @@ fn propagate_operator_lineage(
             };
             if let Ok(sys) = crate::operators::SqlSystem::parse(dst, query) {
                 let mut combined_src = ComponentColumns::new();
+                let mut combined_fields = Vec::new();
                 for &src_comp in sys.source_components() {
                     if let Some(sp) = provenance.get(src_comp) {
                         for (k, v) in sp {
                             combined_src.insert(k.clone(), v.clone());
                         }
                     }
+                    if let Some(sf) = comp_schemas.get(src_comp) {
+                        for f in sf {
+                            if !combined_fields
+                                .iter()
+                                .any(|ef: &SchemaFieldFacet| ef.name == f.name)
+                            {
+                                combined_fields.push(f.clone());
+                            }
+                        }
+                    }
                 }
                 let next_prov = sql_select_provenance(query, &combined_src, &op.id);
                 if !next_prov.is_empty() {
+                    if !comp_schemas.contains_key(dst) {
+                        let synthesized: Vec<SchemaFieldFacet> = next_prov
+                            .keys()
+                            .map(|col| {
+                                combined_fields
+                                    .iter()
+                                    .find(|f| f.name == *col)
+                                    .cloned()
+                                    .unwrap_or(SchemaFieldFacet {
+                                        name: col.clone(),
+                                        data_type: "Unknown".to_string(),
+                                        nullable: true,
+                                    })
+                            })
+                            .collect();
+                        if !synthesized.is_empty() {
+                            comp_schemas.insert(dst.to_string(), synthesized);
+                        }
+                    }
                     provenance.insert(dst.to_string(), next_prov);
                 }
             }
@@ -1237,6 +1359,22 @@ impl LineageDispatcher {
         }
     }
 
+    /// Refresh the computed lineage graph for one newly built/reloaded workflow.
+    pub fn update_workflow_nodes(
+        &self,
+        config: &ServiceConfig,
+        spec: &WorkflowSpec,
+        built_nodes: &[BuiltNode],
+    ) {
+        let graph = build_workflow_lineage(config, spec, Some(built_nodes));
+        if let Ok(mut guard) = self.inner.write() {
+            if !guard.order.iter().any(|id| id == &graph.workflow_id) {
+                guard.order.push(graph.workflow_id.clone());
+            }
+            guard.graphs.insert(graph.workflow_id.clone(), graph);
+        }
+    }
+
     fn ensure_worker(&self, cfg: &LineageConfig) {
         let Ok(mut slot) = self.tx.lock() else {
             return;
@@ -1346,11 +1484,24 @@ impl LineageDispatcher {
             None,
             None,
             None,
+            None,
         );
     }
 
     /// Emit a per-pass `RUNNING` event when `emit_on == Pass`.
     pub fn emit_pass(&self, workflow_id: &str, run_id: &str, rows_in: u64, rows_out: u64) {
+        self.emit_pass_with_node_rows(workflow_id, run_id, rows_in, rows_out, None);
+    }
+
+    /// Emit a per-pass `RUNNING` event carrying per-node cumulative row counts when available.
+    pub fn emit_pass_with_node_rows(
+        &self,
+        workflow_id: &str,
+        run_id: &str,
+        rows_in: u64,
+        rows_out: u64,
+        node_rows: Option<&HashMap<String, u64>>,
+    ) {
         let emit_on_pass = self
             .inner
             .read()
@@ -1363,6 +1514,7 @@ impl LineageDispatcher {
                 LineageEventType::Running,
                 Some(rows_in),
                 Some(rows_out),
+                node_rows,
                 None,
             );
         }
@@ -1370,12 +1522,25 @@ impl LineageDispatcher {
 
     /// Emit `COMPLETE` when a workflow finishes.
     pub fn emit_complete(&self, workflow_id: &str, run_id: &str, rows_in: u64, rows_out: u64) {
+        self.emit_complete_with_node_rows(workflow_id, run_id, rows_in, rows_out, None);
+    }
+
+    /// Emit `COMPLETE` carrying per-node row counts for multi-source and multi-sink workflows.
+    pub fn emit_complete_with_node_rows(
+        &self,
+        workflow_id: &str,
+        run_id: &str,
+        rows_in: u64,
+        rows_out: u64,
+        node_rows: Option<&HashMap<String, u64>>,
+    ) {
         self.emit(
             workflow_id,
             run_id,
             LineageEventType::Complete,
             Some(rows_in),
             Some(rows_out),
+            node_rows,
             None,
         );
     }
@@ -1386,6 +1551,7 @@ impl LineageDispatcher {
             workflow_id,
             run_id,
             LineageEventType::Fail,
+            None,
             None,
             None,
             Some(error),
@@ -1401,9 +1567,11 @@ impl LineageDispatcher {
             None,
             None,
             None,
+            None,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit(
         &self,
         workflow_id: &str,
@@ -1411,6 +1579,7 @@ impl LineageDispatcher {
         event_type: LineageEventType,
         rows_in: Option<u64>,
         rows_out: Option<u64>,
+        node_rows: Option<&HashMap<String, u64>>,
         error_msg: Option<&str>,
     ) {
         let event = {
@@ -1421,13 +1590,15 @@ impl LineageDispatcher {
             if !guard.config.enabled {
                 return;
             }
-            let (ns, job_name, mut inputs, mut outputs) =
+            let (ns, job_name, mut inputs, mut outputs, in_ids, out_ids) =
                 if let Some(g) = guard.graphs.get(workflow_id) {
                     (
                         g.namespace.clone(),
                         g.job_name.clone(),
                         g.inputs.clone(),
                         g.outputs.clone(),
+                        g.input_node_ids.clone(),
+                        g.output_node_ids.clone(),
                     )
                 } else {
                     (
@@ -1435,29 +1606,37 @@ impl LineageDispatcher {
                         guard.config.job_name(workflow_id),
                         Vec::new(),
                         Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
                     )
                 };
 
             if let Some(in_rows) = rows_in {
-                for ds in &mut inputs {
+                for (idx, ds) in inputs.iter_mut().enumerate() {
+                    let count = node_rows
+                        .and_then(|map| in_ids.get(idx).and_then(|id| map.get(id)).copied())
+                        .unwrap_or(in_rows);
                     ds.facets.input_statistics = Some(DatasetStatisticsFacet {
                         producer: PRODUCER_URI.to_string(),
                         schema_url:
                             "https://openlineage.io/spec/facets/1-0-0/InputStatisticsInputDatasetFacet.json"
                                 .to_string(),
-                        row_count: in_rows,
+                        row_count: count,
                         size: None,
                     });
                 }
             }
             if let Some(out_rows) = rows_out {
-                for ds in &mut outputs {
+                for (idx, ds) in outputs.iter_mut().enumerate() {
+                    let count = node_rows
+                        .and_then(|map| out_ids.get(idx).and_then(|id| map.get(id)).copied())
+                        .unwrap_or(out_rows);
                     ds.facets.output_statistics = Some(DatasetStatisticsFacet {
                         producer: PRODUCER_URI.to_string(),
                         schema_url:
                             "https://openlineage.io/spec/facets/1-1-1/OutputStatisticsOutputDatasetFacet.json"
                                 .to_string(),
-                        row_count: out_rows,
+                        row_count: count,
                         size: None,
                     });
                 }
@@ -1728,5 +1907,111 @@ workflow "wf" {
             events[0].run.facets["errorMessage"]["message"],
             "connection reset"
         );
+    }
+
+    #[test]
+    fn branching_workflow_reports_per_sink_output_statistics_row_counts() {
+        let cfg = parse(
+            r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-lineage-branch-counts"
+lineage enabled=#true namespace="prod"
+workflow "wf" {
+    source "in" connector="noop" component="Order"
+    operator "dq" kind="quality" component="Order" {
+        config on_violation="quarantine" {
+            rules {
+                rule type="not_null" column="id"
+            }
+        }
+    }
+    sink "valid_out" connector="noop" component="Order"
+    sink "quarantine_out" connector="noop" component="Order"
+    link from="in" to="dq"
+    link from="dq" to="valid_out" branch="valid"
+    link from="dq" to="quarantine_out" branch="quarantine"
+}
+"#,
+        )
+        .unwrap();
+        let dispatcher = LineageDispatcher::new(&cfg, None);
+        let mut node_rows = HashMap::new();
+        node_rows.insert("in".to_string(), 100);
+        node_rows.insert("valid_out".to_string(), 95);
+        node_rows.insert("quarantine_out".to_string(), 5);
+        dispatcher.emit_complete_with_node_rows("wf", "run-branch", 100, 100, Some(&node_rows));
+        let events = dispatcher.snapshot().recent_events;
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(
+            ev.inputs[0]
+                .facets
+                .input_statistics
+                .as_ref()
+                .unwrap()
+                .row_count,
+            100
+        );
+        assert_eq!(
+            ev.outputs[0]
+                .facets
+                .output_statistics
+                .as_ref()
+                .unwrap()
+                .row_count,
+            95
+        );
+        assert_eq!(
+            ev.outputs[1]
+                .facets
+                .output_statistics
+                .as_ref()
+                .unwrap()
+                .row_count,
+            5
+        );
+    }
+
+    #[test]
+    fn static_lineage_synthesizes_output_schema_for_project_and_group_by_without_built_nodes() {
+        let cfg = parse(
+            r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-lineage-static-synth"
+lineage enabled=#true namespace="analytics"
+workflow "synth" {
+    source "s_orders" connector="file" component="Orders" {
+        config path="/data/orders.csv" {
+            field "order_id" type="int64" nullable=#false
+            field "tier" type="utf8" nullable=#false
+            field "amount" type="float64" nullable=#false
+        }
+    }
+    operator "proj" kind="project" component="Orders" into="Projected" {
+        config select="tier, amount"
+    }
+    operator "agg" kind="group_by" component="Projected" into="Totals" {
+        config keys="tier" {
+            aggregates "sum(amount) AS total_amount"
+        }
+    }
+    sink "out" connector="file" component="Totals" {
+        config path="/data/totals.parquet"
+    }
+    link from="s_orders" to="proj"
+    link from="proj" to="agg"
+    link from="agg" to="out"
+}
+"#,
+        )
+        .unwrap();
+        let g = build_workflow_lineage(&cfg, &cfg.workflows[0], None);
+        let schema = g.outputs[0]
+            .facets
+            .schema
+            .as_ref()
+            .expect("static lineage must synthesize output schema for schemaless sink");
+        let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["tier", "total_amount"]);
     }
 }

@@ -304,7 +304,7 @@ operator "priority_split" kind="route" component="Order" {
 
 ## Data quality and quarantine splitting (`quality` / `assert`)
 
-`kind="quality"` (alias `"assert"`) evaluates declarative per-row rules (`not_null`, `not_empty`, `regex`, `range`, `in_set`, `unique`, and arbitrary SQL `check` expressions supporting `~`, `~*`, `!~`, `!~*`, and `REGEXP_LIKE`) and splits passing rows onto branch `"valid"` and offending rows onto branch `"quarantine"` (and optionally `quarantine_into` component). Setting `diagnostics=#true` appends `__dq_rule`, `__dq_column`, and `__dq_reason` columns to quarantined batches.
+`kind="quality"` (alias `"assert"`) evaluates declarative per-row rules (`not_null`, `not_empty`, `regex`, `range`, `in_set`, `unique`, and arbitrary SQL `check` expressions supporting `~`, `~*`, `!~`, `!~*`, and `REGEXP_LIKE`) and splits passing rows onto branch `"valid"` and offending rows onto branch `"quarantine"` (and optionally `quarantine_into` component). Stateful `unique` rules (`stateful=#true`) also accept `max_keys` to bound tracked cross-batch uniqueness keys using FIFO eviction. Setting `diagnostics=#true` appends `__dq_rule`, `__dq_column`, and `__dq_reason` columns to quarantined batches whether routed via `branch="quarantine"` or `quarantine_into`: a downstream node on `branch="quarantine"` may either declare those three diagnostic columns or declare only the base component schema (which drops them cleanly).
 
 ```kdl,name=Row-level data quality gate with quarantine output
 operator "validate_orders" kind="quality" component="Orders" {
@@ -312,7 +312,7 @@ operator "validate_orders" kind="quality" component="Orders" {
         rules {
             rule "email_ok" type="regex" column="email" pattern="^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
             rule "pos_total" type="range" column="total" min=0.0
-            rule "unique_id" type="unique" column="id" stateful=#true
+            rule "unique_id" type="unique" column="id" stateful=#true max_keys=100000
         }
     }
 }
@@ -348,5 +348,6 @@ operator "validate_orders" kind="quality" component="Orders" {
 | `interval_join` | `on`, `lower_bound_ms`, `upper_bound_ms`, `left_time_field` & `right_time_field` (or `time_field`) | `allowed_lateness_ms` (`watermark_delay_ms`), `max_buffered_rows`, `right_prefix` |
 | `lookup_join` | `on` | `join_type`, `right_prefix` |
 | `deduplicate` | `keys` | `keep`, `time_field`, `ttl_ms`, `max_keys`, `stateful` |
+| `quality` / `assert` | `rules` | `on_violation` (`quarantine`, `drop`, `fail`), `quarantine_into`, `diagnostics` (plus `stateful`, `max_keys` on `unique` rules) |
 | `quality` / `assert` | `rules` | `on_violation` (`quarantine`, `drop`, `fail`), `diagnostics`, `quarantine_into` |
 | `sql` | `query` | |

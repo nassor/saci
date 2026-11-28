@@ -1411,6 +1411,28 @@ fn eval_concat(arrays: &[ArrayRef], len: usize) -> SaciResult<ArrayRef> {
     Ok(Arc::new(out))
 }
 
+fn compile_regex_cached(pattern: &str, case_insensitive: bool) -> SaciResult<regex::Regex> {
+    thread_local! {
+        static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<(String, bool), regex::Regex>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    REGEX_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if let Some(re) = cache.get(&(pattern.to_string(), case_insensitive)) {
+            return Ok(re.clone());
+        }
+        let compiled = regex::RegexBuilder::new(pattern)
+            .case_insensitive(case_insensitive)
+            .build()
+            .map_err(|e| SaciError::configuration(format!("invalid regex '{pattern}': {e}")))?;
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert((pattern.to_string(), case_insensitive), compiled.clone());
+        Ok(compiled)
+    })
+}
+
 fn eval_regex(
     lhs: &ArrayRef,
     rhs: &ArrayRef,
@@ -1434,10 +1456,7 @@ fn eval_regex(
         let re = match &cached_pat {
             Some((prev, compiled)) if prev == pat => compiled,
             _ => {
-                let compiled = regex::RegexBuilder::new(pat)
-                    .case_insensitive(case_insensitive)
-                    .build()
-                    .map_err(|e| SaciError::configuration(format!("invalid regex '{pat}': {e}")))?;
+                let compiled = compile_regex_cached(pat, case_insensitive)?;
                 cached_pat = Some((pat.to_string(), compiled));
                 &cached_pat.as_ref().expect("just set").1
             }
@@ -2823,5 +2842,29 @@ mod tests {
         );
         assert_eq!(eval_bool("x IN (1, NULL)"), vec![None, Some(true)]);
         assert_eq!(eval_bool("x IN (2, NULL)"), vec![None, None]);
+    }
+
+    #[test]
+    fn regex_cache_evaluates_repeated_sensitive_and_insensitive_matches() {
+        let schema = Arc::new(Schema::new(vec![Field::new("code", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["ORD-10", "ord-20", "misc"])) as ArrayRef],
+        )
+        .unwrap();
+        let cs = Expr::parse("code ~ '^ORD-[0-9]+$'").unwrap();
+        let ci = Expr::parse("code ~* '^ord-[0-9]+$'").unwrap();
+        for _ in 0..2 {
+            let p1 = cs.evaluate_predicate(&batch).unwrap();
+            let p2 = ci.evaluate_predicate(&batch).unwrap();
+            assert_eq!(
+                p1.iter().collect::<Vec<_>>(),
+                vec![Some(true), Some(false), Some(false)]
+            );
+            assert_eq!(
+                p2.iter().collect::<Vec<_>>(),
+                vec![Some(true), Some(true), Some(false)]
+            );
+        }
     }
 }

@@ -30,7 +30,7 @@
 //! it. A streaming mode has no such choice: the message surface takes a
 //! required schema, opened before the first byte arrives.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
@@ -41,7 +41,7 @@ use reqwest::{Method, Url};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::codec::{Codec, ReadInput};
+use crate::codec::{Codec, CorruptRecord, ReadInput};
 use crate::connector::{NodeIdentity, SchemaFrom};
 use crate::error::SaciError;
 use crate::io::Source;
@@ -298,6 +298,8 @@ pub struct HttpSource {
     /// `Arc::clone`, and fixed for the source's lifetime.
     schema: Arc<Schema>,
     max_body_bytes: Option<usize>,
+    skip_corrupt: bool,
+    corrupt_records: Arc<Mutex<Vec<CorruptRecord>>>,
     engine: Engine,
 }
 
@@ -435,6 +437,8 @@ impl HttpSource {
             declared: schema,
             schema_from,
             max_body_bytes,
+            skip_corrupt: false,
+            corrupt_records: Arc::new(Mutex::new(Vec::new())),
             engine,
         })
     }
@@ -462,6 +466,10 @@ struct Decode {
     expected: Arc<Schema>,
     /// The largest body to accept.
     cap: Option<usize>,
+    /// Isolate corrupt rows instead of failing the stream.
+    skip_corrupt: bool,
+    /// Shared buffer where corrupt records are collected.
+    corrupt_records: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
 /// GET one page, spool it, open the reader, and start the decode thread.
@@ -488,6 +496,8 @@ async fn fetch_page(
         check,
         expected,
         cap,
+        skip_corrupt,
+        corrupt_records,
     } = decode;
     let mut exchange = request.get(url, validators).await?;
 
@@ -547,6 +557,7 @@ async fn fetch_page(
             declared,
             check,
             &expected,
+            skip_corrupt,
         )
     })
     .await
@@ -555,7 +566,7 @@ async fn fetch_page(
 
     let estimated_rows = reader.estimated_rows();
     let (tx, batches) = mpsc::channel(CHANNEL_CAPACITY);
-    document::spawn_reader(reader, tx);
+    document::spawn_reader(reader, tx, corrupt_records);
 
     Ok(Some(Page {
         batches,
@@ -646,6 +657,7 @@ fn validators(state: &DocumentState) -> HeaderMap {
 /// Every outcome reaches the consumer: a transport failure, a non-2xx status
 /// and a decode error are all sent as `Err` so the runner counts them, and the
 /// reader then waits `reconnect` and asks again.
+#[allow(clippy::too_many_arguments)]
 async fn read_stream(
     request: Arc<Request>,
     codec: Arc<dyn Codec>,
@@ -653,6 +665,8 @@ async fn read_stream(
     window: BatchWindow,
     events: Option<Option<String>>,
     cap: Option<usize>,
+    skip_corrupt: bool,
+    corrupt_records: Arc<Mutex<Vec<CorruptRecord>>>,
     tx: mpsc::Sender<Result<RecordBatch, SaciError>>,
 ) {
     let mut reconnect = window.reconnect;
@@ -697,6 +711,8 @@ async fn read_stream(
             window,
             events.as_ref(),
             cap,
+            skip_corrupt,
+            &corrupt_records,
             &tx,
             exchange,
             &mut reconnect,
@@ -730,12 +746,22 @@ async fn read_body(
     window: BatchWindow,
     events: Option<&Option<String>>,
     cap: Option<usize>,
+    skip_corrupt: bool,
+    corrupt_records: &Arc<Mutex<Vec<CorruptRecord>>>,
     tx: &mpsc::Sender<Result<RecordBatch, SaciError>>,
     mut exchange: Exchange,
     reconnect: &mut Duration,
     last_event_id: &mut Option<HeaderValue>,
 ) -> BodyEnd {
-    let mut frames = match Frames::open(&request.metrics, codec, schema, tx, window) {
+    let mut frames = match Frames::open(
+        &request.metrics,
+        codec,
+        schema,
+        tx,
+        window,
+        skip_corrupt,
+        Arc::clone(corrupt_records),
+    ) {
         Ok(frames) => frames,
         Err(e) => {
             request.metrics.error("decode");
@@ -893,6 +919,8 @@ struct Frames<'a> {
     schema: &'a Arc<Schema>,
     tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
     window: BatchWindow,
+    skip_corrupt: bool,
+    corrupt_records: Arc<Mutex<Vec<CorruptRecord>>>,
     decoder: Box<dyn crate::codec::MessageDecoder>,
     /// Frames pushed since the last close.
     pushed: usize,
@@ -913,17 +941,32 @@ impl<'a> Frames<'a> {
         schema: &'a Arc<Schema>,
         tx: &'a mpsc::Sender<Result<RecordBatch, SaciError>>,
         window: BatchWindow,
+        skip_corrupt: bool,
+        corrupt_records: Arc<Mutex<Vec<CorruptRecord>>>,
     ) -> Result<Self, SaciError> {
+        let mut decoder = codec.open_message_decoder(Arc::clone(schema))?;
+        decoder.set_skip_corrupt(skip_corrupt);
         Ok(Self {
             metrics,
             codec,
             schema,
             tx,
             window,
-            decoder: codec.open_message_decoder(Arc::clone(schema))?,
+            skip_corrupt,
+            corrupt_records,
+            decoder,
             pushed: 0,
             deadline: None,
         })
+    }
+
+    fn drain_decoder_corrupt(&mut self) {
+        let drained = self.decoder.drain_corrupt();
+        if !drained.is_empty()
+            && let Ok(mut guard) = self.corrupt_records.lock()
+        {
+            guard.extend(drained);
+        }
     }
 
     /// Decode every frame one chunk yielded, closing a window each time it
@@ -937,9 +980,11 @@ impl<'a> Frames<'a> {
         for frame in frames {
             if let Err(e) = self.decoder.push(&frame) {
                 self.metrics.error("decode");
+                self.drain_decoder_corrupt();
                 self.refused(e).await?;
                 continue;
             }
+            self.drain_decoder_corrupt();
             self.pushed += 1;
             if self.deadline.is_none() {
                 self.deadline = Some(Instant::now() + self.window.poll_timeout);
@@ -963,7 +1008,9 @@ impl<'a> Frames<'a> {
             return Ok(());
         }
         self.pushed = 0;
-        match self.decoder.flush() {
+        let flushed = self.decoder.flush();
+        self.drain_decoder_corrupt();
+        match flushed {
             Ok(None) => Ok(()),
             Ok(Some(batch)) => self.send(Ok(batch)).await,
             Err(e) => {
@@ -997,7 +1044,8 @@ impl<'a> Frames<'a> {
     /// Replace the decoder, which a refused frame leaves holding part of one.
     async fn reopen(&mut self) -> Result<(), BodyEnd> {
         match self.codec.open_message_decoder(Arc::clone(self.schema)) {
-            Ok(decoder) => {
+            Ok(mut decoder) => {
+                decoder.set_skip_corrupt(self.skip_corrupt);
                 self.decoder = decoder;
                 Ok(())
             }
@@ -1046,6 +1094,17 @@ impl Source for HttpSource {
         Arc::clone(&self.schema)
     }
 
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.corrupt_records
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default()
+    }
+
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
         let Self {
             request,
@@ -1054,6 +1113,8 @@ impl Source for HttpSource {
             schema_from,
             schema,
             max_body_bytes,
+            skip_corrupt,
+            corrupt_records,
             engine,
         } = self;
 
@@ -1069,6 +1130,8 @@ impl Source for HttpSource {
                         state.window,
                         state.events.clone(),
                         *max_body_bytes,
+                        *skip_corrupt,
+                        Arc::clone(corrupt_records),
                         tx,
                     )));
                 }
@@ -1102,6 +1165,8 @@ impl Source for HttpSource {
                             check: *schema_from == SchemaFrom::Payload,
                             expected: Arc::clone(schema),
                             cap: *max_body_bytes,
+                            skip_corrupt: *skip_corrupt,
+                            corrupt_records: Arc::clone(corrupt_records),
                         },
                         &url,
                         &sent,
@@ -1240,7 +1305,17 @@ mod tests {
             ..BatchWindow::default()
         };
 
-        let mut decode = Frames::open(&metrics, &codec, &schema, &tx, window).expect("open");
+        let corrupt = Arc::new(Mutex::new(Vec::new()));
+        let mut decode = Frames::open(
+            &metrics,
+            &codec,
+            &schema,
+            &tx,
+            window,
+            false,
+            Arc::clone(&corrupt),
+        )
+        .expect("open");
         decode
             .push(frames(&["1", "2", "3", "oops", "5", "6"]))
             .await
@@ -1266,8 +1341,17 @@ mod tests {
         let schema = stub_schema();
         let (tx, mut rx) = mpsc::channel(8);
 
-        let mut decode =
-            Frames::open(&metrics, &codec, &schema, &tx, BatchWindow::default()).expect("open");
+        let corrupt = Arc::new(Mutex::new(Vec::new()));
+        let mut decode = Frames::open(
+            &metrics,
+            &codec,
+            &schema,
+            &tx,
+            BatchWindow::default(),
+            false,
+            Arc::clone(&corrupt),
+        )
+        .expect("open");
         decode
             .push(frames(&[r#"{"id":1}"#, "not json", r#"{"id":2}"#]))
             .await
@@ -1362,5 +1446,50 @@ mod tests {
         let sent = validators(&state);
         assert_eq!(sent.get("if-none-match").expect("etag"), "\"v1\"");
         assert!(sent.contains_key("if-modified-since"));
+    }
+
+    #[cfg(feature = "codec-ndjson")]
+    #[tokio::test]
+    async fn http_source_isolates_corrupt_ndjson_rows_when_skip_corrupt_enabled() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let body = "{\"id\":1}\nnot-valid-json\n{\"id\":2}\n";
+
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(reply.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let schema = stub_schema();
+        let codec: Arc<dyn Codec> = Arc::new(crate::codec::ndjson::NdjsonCodec::default());
+        let mut src = HttpSource::new(
+            HttpSourceConfig::new(format!("http://{addr}/orders.ndjson")),
+            Some(schema),
+            codec,
+        )
+        .expect("http source");
+        src.set_skip_corrupt(true);
+
+        let batch = src
+            .next_batch()
+            .await
+            .expect("first batch succeeds")
+            .expect("batch present");
+        assert_eq!(batch.num_rows(), 2);
+        let corrupt = src.drain_corrupt();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].format, "ndjson");
+        assert!(src.next_batch().await.expect("eof").is_none());
     }
 }

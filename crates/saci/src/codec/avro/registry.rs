@@ -2,7 +2,7 @@
 //! compatibility checks, and thread-safe in-memory caching.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use arrow_avro::schema::AvroSchema;
@@ -465,7 +465,7 @@ fn avro_type_compatible(writer: &Value, reader: &Value) -> bool {
 pub(crate) struct SchemaRegistryClient {
     config: SchemaRegistryConfig,
     http: reqwest::Client,
-    rt: Arc<tokio::runtime::Runtime>,
+    rt: Arc<Mutex<tokio::runtime::Runtime>>,
     id32_cache: RwLock<HashMap<u32, Arc<AvroSchema>>>,
     id64_cache: RwLock<HashMap<u64, Arc<AvroSchema>>>,
     uuid_cache: RwLock<HashMap<Uuid, Arc<AvroSchema>>>,
@@ -488,12 +488,12 @@ impl SchemaRegistryClient {
             .map_err(|e| {
                 SaciError::generic(format!("avro registry: HTTP client init failed: {e}"))
             })?;
-        let rt = Arc::new(
+        let rt = Arc::new(Mutex::new(
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| SaciError::generic(format!("avro registry runtime build: {e}")))?,
-        );
+        ));
         Ok(Self {
             config,
             http,
@@ -850,15 +850,27 @@ impl SchemaRegistryClient {
         });
 
         if self.config.compatibility != CompatibilityMode::None {
-            let latest_req = json!({
-                "SchemaId": schema_id_obj,
-                "SchemaVersionNumber": { "LatestVersion": true },
-            });
-            if let Ok(latest_body) = self.send_glue("AWSGlue.GetSchemaVersion", &latest_req)
-                && let Ok(val) = serde_json::from_str::<Value>(&latest_body)
-                && let Some(existing) = val.get("SchemaDefinition").and_then(Value::as_str)
+            let mut checked_any = false;
+            if self.config.compatibility.is_transitive()
+                && let Ok(versions) =
+                    self.glue_list_schema_versions(&self.config.glue_registry_name, schema_name)
             {
-                check_avro_compatibility(schema_json, existing, self.config.compatibility)?;
+                for existing in &versions {
+                    check_avro_compatibility(schema_json, existing, self.config.compatibility)?;
+                    checked_any = true;
+                }
+            }
+            if !checked_any {
+                let latest_req = json!({
+                    "SchemaId": schema_id_obj,
+                    "SchemaVersionNumber": { "LatestVersion": true },
+                });
+                if let Ok(latest_body) = self.send_glue("AWSGlue.GetSchemaVersion", &latest_req)
+                    && let Ok(val) = serde_json::from_str::<Value>(&latest_body)
+                    && let Some(existing) = val.get("SchemaDefinition").and_then(Value::as_str)
+                {
+                    check_avro_compatibility(schema_json, existing, self.config.compatibility)?;
+                }
             }
         }
 
@@ -905,6 +917,51 @@ impl SchemaRegistryClient {
         Ok(RegistrySchemaId::GlueUuid(uuid))
     }
 
+    fn glue_list_schema_versions(
+        &self,
+        registry_name: &str,
+        schema_name: &str,
+    ) -> Result<Vec<String>, SaciError> {
+        let schema_id_obj = json!({
+            "RegistryName": registry_name,
+            "SchemaName": schema_name,
+        });
+        let list_req = json!({
+            "SchemaId": schema_id_obj,
+            "MaxResults": 100,
+        });
+        let list_body = self.send_glue("AWSGlue.ListSchemaVersions", &list_req)?;
+        let list_val: Value = serde_json::from_str(&list_body).map_err(|e| {
+            SaciError::generic(format!("avro registry: invalid Glue list response: {e}"))
+        })?;
+        let Some(entries) = list_val.get("Schemas").and_then(Value::as_array) else {
+            return Ok(Vec::new());
+        };
+        let mut versions = Vec::new();
+        for entry in entries {
+            let available = entry
+                .get("Status")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s == "AVAILABLE");
+            if !available {
+                continue;
+            }
+            if let Some(ver_num) = entry.get("VersionNumber").and_then(Value::as_u64) {
+                let get_req = json!({
+                    "SchemaId": schema_id_obj,
+                    "SchemaVersionNumber": { "VersionNumber": ver_num },
+                });
+                if let Ok(ver_body) = self.send_glue("AWSGlue.GetSchemaVersion", &get_req)
+                    && let Ok(ver_val) = serde_json::from_str::<Value>(&ver_body)
+                    && let Some(def) = ver_val.get("SchemaDefinition").and_then(Value::as_str)
+                {
+                    versions.push(def.to_string());
+                }
+            }
+        }
+        Ok(versions)
+    }
+
     fn send_glue(&self, target: &str, payload: &Value) -> Result<String, SaciError> {
         let body = serde_json::to_string(payload)
             .map_err(|e| SaciError::generic(format!("avro registry: serialize Glue body: {e}")))?;
@@ -948,12 +1005,13 @@ impl SchemaRegistryClient {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
 
-        // Execute HTTP work on a dedicated single-thread Tokio runtime in an OS thread
-        // so synchronous `Codec` methods never conflict with an outer Tokio runtime.
+        // Serialize `block_on` across threads because `current_thread` Tokio runtimes
+        // panic if entered concurrently from multiple OS threads.
         std::thread::scope(|scope| {
             scope
                 .spawn(move || {
-                    rt.block_on(async move {
+                    let rt_guard = rt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    rt_guard.block_on(async move {
                         let mut req = http.request(method.clone(), &url_owned);
                         let has_content_type = headers_owned
                             .iter()
@@ -1424,5 +1482,78 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "X-Amz-Security-Token" && v == "STS_TOKEN")
         );
+    }
+
+    #[test]
+    fn concurrent_schema_registry_requests_do_not_panic() {
+        let s = serde_json::to_string(orders_v1_json()).unwrap();
+        let (endpoint, hits) = spawn_mock_server(move |method, path, _body| match (method, path) {
+            ("GET", p) if p.starts_with("/schemas/ids/") => (200, format!(r#"{{"schema":{s}}}"#)),
+            _ => (404, "{}".to_string()),
+        });
+        let cfg = SchemaRegistryConfig::confluent(&endpoint);
+        let client = Arc::new(SchemaRegistryClient::new(cfg).expect("client"));
+        let mut handles = Vec::new();
+        for id in 1u32..=8 {
+            let c = Arc::clone(&client);
+            handles.push(std::thread::spawn(move || c.fetch_schema_by_id32(id)));
+        }
+        for handle in handles {
+            let res = handle
+                .join()
+                .expect("thread must not panic on Tokio runtime");
+            assert!(res.is_ok(), "concurrent fetch failed: {res:?}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn glue_transitive_compatibility_checks_all_versions() {
+        let v1 = r#"{"type":"record","name":"Ev","fields":[{"name":"id","type":"int"}]}"#;
+        let v2 = r#"{"type":"record","name":"Ev","fields":[{"name":"id","type":"int"},{"name":"mid","type":"string","default":"ok"}]}"#;
+        let v3 = r#"{"type":"record","name":"Ev","fields":[{"name":"id","type":"int"},{"name":"mid","type":"string"}]}"#;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind glue mock");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(6) {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                let is_list =
+                    req.contains("ListSchemaVersions") || req.contains("listschemaversions");
+                let resp_body = if is_list {
+                    r#"{"Schemas":[{"VersionNumber":1,"Status":"AVAILABLE"},{"VersionNumber":2,"Status":"AVAILABLE"}]}"#.to_string()
+                } else if body.contains("\"VersionNumber\":1") {
+                    serde_json::json!({ "SchemaDefinition": v1 }).to_string()
+                } else {
+                    serde_json::json!({ "SchemaDefinition": v2 }).to_string()
+                };
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+                    resp_body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let endpoint = format!("http://{addr}");
+        let cfg = SchemaRegistryConfig::glue(&endpoint, "us-east-1")
+            .with_subject("ev-value")
+            .with_compatibility(CompatibilityMode::BackwardTransitive)
+            .with_auth(RegistryAuth::AwsSigV4 {
+                access_key_id: Some("AKIAEXAMPLE".to_string()),
+                secret_access_key: Some("secret".to_string()),
+                session_token: None,
+                region: "us-east-1".to_string(),
+            });
+        let client = SchemaRegistryClient::new(cfg).expect("glue client");
+        let err = client
+            .resolve_or_register_for_write(v3)
+            .expect_err("Glue BackwardTransitive must reject v3 incompatible with v1");
+        assert!(err.message().contains("mid"), "got: {err}");
     }
 }

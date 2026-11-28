@@ -821,6 +821,8 @@ async fn apply_reload<'a>(
         }
     }
 
+    lineage.update_config(&new_config, None);
+
     let mut built_topos: HashMap<String, WorkflowTopology> = HashMap::new();
     for spec in respawn_specs {
         let build_res = factory.borrow_mut().build(&spec);
@@ -838,6 +840,7 @@ async fn apply_reload<'a>(
             &built.nodes,
         );
         built_topos.insert(spec.id.clone(), wf_topo);
+        lineage.update_workflow_nodes(&new_config, &spec, &built.nodes);
         let live_stats = lifecycle
             .as_ref()
             .map(|_| Arc::new(RwLock::new(WorkflowStats::default())));
@@ -867,6 +870,7 @@ async fn apply_reload<'a>(
 
     for (spec, built, wf_topo) in built_added {
         built_topos.insert(spec.id.clone(), wf_topo);
+        lineage.update_workflow_nodes(&new_config, &spec, &built.nodes);
         let live_stats = lifecycle
             .as_ref()
             .map(|_| Arc::new(RwLock::new(WorkflowStats::default())));
@@ -895,7 +899,6 @@ async fn apply_reload<'a>(
     }
 
     alerts.update_config(&new_config.alerts);
-    lineage.update_config(&new_config, None);
 
     let topology_version = if let Some(inspector) = factory.borrow().inspector() {
         let existing = inspector.topology();

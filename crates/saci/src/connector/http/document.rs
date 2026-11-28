@@ -11,13 +11,13 @@
 //! is a seek), so both happen inside a `spawn_blocking` the caller owns.
 
 use std::io::Seek;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema};
 use tokio::sync::mpsc;
 
-use crate::codec::{BatchReader, Codec, ReadInput};
+use crate::codec::{BatchReader, Codec, CorruptRecord, ReadInput};
 use crate::error::SaciError;
 
 use crate::connector::http::client::Body;
@@ -136,6 +136,7 @@ fn over_cap(what: &str, source: &str, cap: usize) -> SaciError {
 /// Returns the format's own error when the body cannot be read, and
 /// [`SaciError::Configuration`] when `check` is set and the body's schema
 /// differs from `expected`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn open(
     what: &str,
     source: &str,
@@ -144,8 +145,10 @@ pub(crate) fn open(
     declared: Option<Arc<Schema>>,
     check: bool,
     expected: &Schema,
+    skip_corrupt: bool,
 ) -> Result<Box<dyn BatchReader>, SaciError> {
-    let reader = codec.open_reader(input, declared)?;
+    let mut reader = codec.open_reader(input, declared)?;
+    reader.set_skip_corrupt(skip_corrupt);
     if check {
         let carried = reader.schema();
         if carried.fields() != expected.fields() {
@@ -167,10 +170,18 @@ pub(crate) fn open(
 pub(crate) fn spawn_reader(
     mut reader: Box<dyn BatchReader>,
     tx: mpsc::Sender<Result<RecordBatch, SaciError>>,
+    corrupt_records: Arc<Mutex<Vec<CorruptRecord>>>,
 ) {
     std::thread::spawn(move || {
         loop {
-            match reader.next_batch() {
+            let next = reader.next_batch();
+            let drained = reader.drain_corrupt();
+            if !drained.is_empty()
+                && let Ok(mut guard) = corrupt_records.lock()
+            {
+                guard.extend(drained);
+            }
+            match next {
                 Ok(None) => break,
                 Ok(Some(batch)) => {
                     // A send error means the consumer is gone (pipeline

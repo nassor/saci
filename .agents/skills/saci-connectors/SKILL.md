@@ -66,6 +66,10 @@ spools a large document to disk passes `ReadInput::File`.
 - `build_topology` copies connector config through each connector's own
   `Connector::detail_keys(role)` list, never a blanket copy of `SourceSpec.config`, which holds DSNs
   and credentials. Keys outside the list are dropped, not masked.
+- `ConnectorContext::skip_corrupt()` reflects source `on_corrupt` (`drop` or `dlq`); byte/frame
+  sources (`file`, `s3`, `redb`, `http`, `http-listen`, `udp`, `tcp`, `nats`, `kafka`) wire
+  `Source::set_skip_corrupt` and `Source::drain_corrupt` to isolate malformed records instead of
+  failing valid rows or batches.
 
 ## Self-healing contract
 

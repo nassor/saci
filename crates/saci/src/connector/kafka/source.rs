@@ -719,28 +719,83 @@ impl KafkaSource {
         let mut decoder = self
             .codec
             .open_message_decoder(Arc::clone(&self.decode_schema))?;
+        decoder.set_skip_corrupt(self.skip_corrupt);
+
+        let mut surviving: Vec<CompactedEntry> = if self.skip_corrupt {
+            Vec::with_capacity(entries.len())
+        } else {
+            Vec::new()
+        };
         for entry in entries {
-            decoder.push(&entry.value).map_err(|e| {
-                SaciError::generic(format!(
-                    "KafkaSource: decode failed for {}[{}]@{}: {e}",
-                    self.topics[entry.topic], entry.partition, entry.offset
-                ))
-            })?;
+            match decoder.push(&entry.value) {
+                Ok(()) => {
+                    if self.skip_corrupt {
+                        let drained = decoder.drain_corrupt();
+                        if !drained.is_empty() {
+                            if let Ok(mut guard) = self.corrupt.lock() {
+                                guard.extend(drained);
+                            }
+                        } else {
+                            surviving.push(entry.clone());
+                        }
+                    }
+                }
+                Err(e) if self.skip_corrupt => {
+                    if let Ok(mut guard) = self.corrupt.lock() {
+                        guard.push(CorruptRecord {
+                            format: self.codec.format(),
+                            payload: entry.value.clone(),
+                            error: format!(
+                                "KafkaSource: decode failed for {}[{}]@{}: {e}",
+                                self.topics[entry.topic], entry.partition, entry.offset
+                            ),
+                        });
+                    }
+                }
+                Err(e) => {
+                    return Err(SaciError::generic(format!(
+                        "KafkaSource: decode failed for {}[{}]@{}: {e}",
+                        self.topics[entry.topic], entry.partition, entry.offset
+                    )));
+                }
+            }
         }
-        let decoded = decoder
-            .flush()?
-            .ok_or_else(|| SaciError::generic("KafkaSource: snapshot chunk decoded no rows"))?;
-        if decoded.num_rows() != entries.len() {
+        let flushed = decoder.flush()?;
+        if self.skip_corrupt {
+            let drained = decoder.drain_corrupt();
+            if !drained.is_empty()
+                && let Ok(mut guard) = self.corrupt.lock()
+            {
+                guard.extend(drained);
+            }
+        }
+        let decoded = match flushed {
+            Some(batch) => batch,
+            None if self.skip_corrupt => {
+                return Ok(RecordBatch::new_empty(Arc::clone(&self.schema)));
+            }
+            None => {
+                return Err(SaciError::generic(
+                    "KafkaSource: snapshot chunk decoded no rows",
+                ));
+            }
+        };
+        let key_entries = if self.skip_corrupt {
+            &surviving[..]
+        } else {
+            entries
+        };
+        if decoded.num_rows() != key_entries.len() {
             return Err(SaciError::generic(format!(
                 "KafkaSource: {} compacted messages decoded into {} rows; 'compacted' needs one \
                  row per message to carry its key",
-                entries.len(),
+                key_entries.len(),
                 decoded.num_rows()
             )));
         }
 
         let mut columns = decoded.columns().to_vec();
-        columns[key_index] = key_column(entries, self.schema.field(key_index), &self.topics)?;
+        columns[key_index] = key_column(key_entries, self.schema.field(key_index), &self.topics)?;
         RecordBatch::try_new(Arc::clone(&self.schema), columns).map_err(|e| {
             SaciError::generic(format!(
                 "KafkaSource: cannot attach the message key column: {e}"

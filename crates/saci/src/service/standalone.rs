@@ -1157,7 +1157,18 @@ pub(crate) async fn run(
                 .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
                 .map(|(_, s)| s.rows)
                 .sum();
-            l.emit_pass(&workflow_id, &lineage_run_id, total_rows_in, sink_rows_out);
+            let node_rows: std::collections::HashMap<String, u64> = ids
+                .iter()
+                .zip(node_stats.iter())
+                .map(|(id, s)| (id.clone(), s.rows))
+                .collect();
+            l.emit_pass_with_node_rows(
+                &workflow_id,
+                &lineage_run_id,
+                total_rows_in,
+                sink_rows_out,
+                Some(&node_rows),
+            );
         }
 
         if cancelled_before_finish {
@@ -1297,11 +1308,17 @@ pub(crate) async fn run(
                 .filter(|(k, _)| matches!(k, NodeRunKind::Sink))
                 .map(|(_, s)| s.rows)
                 .sum();
-            l.emit_complete(
+            let node_rows: std::collections::HashMap<String, u64> = ids
+                .iter()
+                .zip(node_stats.iter())
+                .map(|(id, s)| (id.clone(), s.rows))
+                .collect();
+            l.emit_complete_with_node_rows(
                 &workflow_id,
                 &lineage_run_id,
                 stats.rows_processed,
                 sink_rows_out,
+                Some(&node_rows),
             );
         }
         l.flush().await;

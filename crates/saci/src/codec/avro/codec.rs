@@ -134,6 +134,8 @@ impl Codec for AvroCodec {
             reader,
             schema,
             declared,
+            skip_corrupt: false,
+            corrupt: Vec::new(),
         }))
     }
 
@@ -407,6 +409,8 @@ struct AvroBatchReader {
     schema: Arc<Schema>,
     /// The projection, `None` when the file's own schema governs.
     declared: Option<Arc<Schema>>,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
 }
 
 impl BatchReader for AvroBatchReader {
@@ -414,18 +418,47 @@ impl BatchReader for AvroBatchReader {
         Arc::clone(&self.schema)
     }
 
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        std::mem::take(&mut self.corrupt)
+    }
+
     fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
-        match self.reader.next() {
-            None => Ok(None),
-            // Avro widens: int8/uint8/uint16 all arrive as Int32, so a decoded
-            // batch carries the types Avro has rather than the ones
-            // the `field` entries declared, and may carry columns the projection
-            // drops.
-            Some(Ok(batch)) => match &self.declared {
-                Some(declared) => project(batch, declared).map(Some),
-                None => Ok(Some(batch)),
-            },
-            Some(Err(e)) => Err(SaciError::generic(format!("avro: read error: {e}"))),
+        loop {
+            match self.reader.next() {
+                None => return Ok(None),
+                // Avro widens: int8/uint8/uint16 all arrive as Int32, so a decoded
+                // batch carries the types Avro has rather than the ones
+                // the `field` entries declared, and may carry columns the projection
+                // drops.
+                Some(Ok(batch)) => match &self.declared {
+                    Some(declared) => match project(batch, declared) {
+                        Ok(projected) => return Ok(Some(projected)),
+                        Err(e) if self.skip_corrupt => {
+                            self.corrupt.push(CorruptRecord {
+                                format: "avro",
+                                payload: Vec::new(),
+                                error: e.to_string(),
+                            });
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    },
+                    None => return Ok(Some(batch)),
+                },
+                Some(Err(e)) if self.skip_corrupt => {
+                    self.corrupt.push(CorruptRecord {
+                        format: "avro",
+                        payload: Vec::new(),
+                        error: format!("avro: read error: {e}"),
+                    });
+                    continue;
+                }
+                Some(Err(e)) => return Err(SaciError::generic(format!("avro: read error: {e}"))),
+            }
         }
     }
 }
@@ -1464,5 +1497,35 @@ mod tests {
             .unwrap();
         assert!(notes.is_null(0));
         assert_eq!(notes.value(1), "v2");
+    }
+
+    #[test]
+    fn avro_batch_reader_isolates_unprojectable_batch_when_skip_corrupt_enabled() {
+        let writer_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let tmp = NamedTempFile::new().expect("temp file");
+        let mut writer = AvroCodec::new()
+            .open_writer(Box::new(tmp.reopen().unwrap()), writer_schema.clone())
+            .expect("open writer");
+        let bad_batch = RecordBatch::try_new(
+            writer_schema,
+            vec![Arc::new(StringArray::from(vec!["not-an-int"]))],
+        )
+        .unwrap();
+        writer.write_batch(&bad_batch).unwrap();
+        writer.finish().unwrap();
+
+        let expected_int_schema =
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut reader = AvroCodec::new()
+            .open_reader(
+                ReadInput::File(tmp.reopen().unwrap()),
+                Some(expected_int_schema),
+            )
+            .expect("open reader");
+        reader.set_skip_corrupt(true);
+        assert!(reader.next_batch().expect("skips bad batch").is_none());
+        let corrupt = reader.drain_corrupt();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].format, "avro");
     }
 }

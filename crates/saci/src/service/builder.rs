@@ -1340,6 +1340,48 @@ impl ServiceBuilder {
 
         super::validation::validate_workflow_graph(&workflow.id, &nodes)?;
 
+        // When `operator kind="quality"` emits `diagnostics=#true` onto `branch="quarantine"`
+        // without `quarantine_into` and the downstream target declares only the input schema
+        // (without `__dq_*`), adapt that branch edge to `Compatible` so `evolve_batch` drops
+        // extra diagnostic columns cleanly at runtime.
+        for op in &workflow.operator {
+            if op.kind == "quality"
+                && op.config.get("diagnostics").and_then(ConfigValue::as_bool) == Some(true)
+                && op.config.get("quarantine_into").is_none()
+                && let Some(&from_idx) = id_to_topo_index.get(op.id.as_str())
+            {
+                let mut adapt_edges = Vec::new();
+                for (edge_idx, edge) in nodes[from_idx].downstream.iter().enumerate() {
+                    if edge.branch.as_deref() == Some("quarantine")
+                        && nodes[from_idx].edge_evolution(edge_idx).is_strict()
+                    {
+                        let lacks_diag = match &nodes[edge.node].kind {
+                            BuiltNodeKind::Sink(sink) => {
+                                sink.schema().field_with_name("__dq_rule").is_err()
+                            }
+                            BuiltNodeKind::Processor { runtime, .. } => nodes[edge.node]
+                                .component
+                                .and_then(|c| {
+                                    runtime
+                                        .template_dataset()
+                                        .schemas()
+                                        .get(c)
+                                        .map(|s| s.field_with_name("__dq_rule").is_err())
+                                })
+                                .unwrap_or(false),
+                            BuiltNodeKind::Source(_) => false,
+                        };
+                        if lacks_diag {
+                            adapt_edges.push(edge_idx);
+                        }
+                    }
+                }
+                for edge_idx in adapt_edges {
+                    nodes[from_idx].edge_evolutions[edge_idx] = EvolutionPolicy::compatible();
+                }
+            }
+        }
+
         // After the nodes: a store that cannot be opened refuses the
         // workflow the way a sink node does, and it is worth hearing about
         // the graph first.

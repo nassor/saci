@@ -43,7 +43,8 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
@@ -56,7 +57,7 @@ use subtle::ConstantTimeEq as _;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::codec::Codec;
+use crate::codec::{Codec, CorruptRecord};
 use crate::connector::{NodeIdentity, SchemaFrom};
 use crate::error::SaciError;
 use crate::io::Source;
@@ -146,6 +147,8 @@ struct Handler {
     /// `alt-svc` for the QUIC port, when one is served.
     alt_svc: Option<HeaderValue>,
     metrics: Instruments,
+    skip_corrupt: AtomicBool,
+    corrupt_records: Mutex<Vec<CorruptRecord>>,
 }
 
 /// Listening HTTP source: one request in, its whole document out as batches.
@@ -322,6 +325,8 @@ impl HttpListenSource {
                 tx,
                 alt_svc,
                 metrics: Instruments::new("push", identity.as_ref()),
+                skip_corrupt: AtomicBool::new(false),
+                corrupt_records: Mutex::new(Vec::new()),
             }),
             schema,
             rx,
@@ -820,6 +825,7 @@ impl Handler {
         let check = self.schema_from == SchemaFrom::Payload;
         let expected = Arc::clone(&self.declared);
         let codec = Arc::clone(&self.codec);
+        let skip_corrupt = self.skip_corrupt.load(Ordering::Relaxed);
 
         // Decoding is blocking: a parquet footer read is a seek. The body is
         // already whole in memory, so the reader gets it as it is.
@@ -832,16 +838,23 @@ impl Handler {
                 declared,
                 check,
                 &expected,
+                skip_corrupt,
             )?;
             let mut batches = Vec::new();
+            let mut corrupt = Vec::new();
             while let Some(batch) = reader.next_batch()? {
+                let drained = reader.drain_corrupt();
+                if !drained.is_empty() {
+                    corrupt.extend(drained);
+                }
                 batches.push(batch);
             }
-            Ok::<_, SaciError>(batches)
+            corrupt.extend(reader.drain_corrupt());
+            Ok::<_, SaciError>((batches, corrupt))
         })
         .await;
 
-        let batches = match decoded {
+        let (batches, corrupt) = match decoded {
             Err(e) => {
                 return Answer {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -862,8 +875,13 @@ impl Handler {
                     allow: false,
                 };
             }
-            Ok(Ok(batches)) => batches,
+            Ok(Ok(pair)) => pair,
         };
+        if !corrupt.is_empty()
+            && let Ok(mut guard) = self.corrupt_records.lock()
+        {
+            guard.extend(corrupt);
+        }
 
         // Bounded, so a consumer that falls behind makes this request wait
         // for its response and the client wait with it. A document that held
@@ -911,6 +929,18 @@ impl Handler {
 impl Source for HttpListenSource {
     fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.handler.skip_corrupt.store(skip, Ordering::Relaxed);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        self.handler
+            .corrupt_records
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default()
     }
 
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {

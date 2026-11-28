@@ -92,6 +92,11 @@ so storing it would run the processor twice on data it never accepted. Setting
 `on_corrupt="dlq"` on a `source` node (with a `dlq` block configured) also
 isolates corrupt raw records decoded by NDJSON, CSV, or Avro readers/decoders
 into the dead letter store without failing valid rows in the same file or batch.
+Source-side corrupt letters are recorded under `sink: "corrupt:<source_id>"`
+carrying columns `(format, payload, error)`; because they have no target sink to
+replay into, they appear in `GET /api/workflows/{id}/dlq` for inspection and
+explicit `POST /api/workflows/{id}/dlq/purge`, and are skipped cleanly during
+automatic and manual replay passes.
 
 ## 2. Turn it on
 

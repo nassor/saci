@@ -508,7 +508,7 @@ impl Connector for HttpConnector {
         let schema = parse_optional_fields(config, "HttpSource")?
             .map(|fields| schema_of(&fields))
             .transpose()?;
-        Ok(Box::new(HttpSource::new(
+        let mut source = HttpSource::new(
             HttpSourceConfig {
                 url: url.to_string(),
                 client,
@@ -518,7 +518,9 @@ impl Connector for HttpConnector {
             },
             schema,
             codec,
-        )?))
+        )?;
+        source.set_skip_corrupt(ctx.skip_corrupt());
+        Ok(Box::new(source))
     }
 
     fn sink(
@@ -655,7 +657,7 @@ impl Connector for HttpListenConnector {
         };
         let bearer = listen_bearer(config, what)?;
 
-        Ok(Box::new(HttpListenSource::new(
+        let mut source = HttpListenSource::new(
             HttpListenConfig {
                 bind: bind.to_string(),
                 schema_from: schema_from(config, what)?,
@@ -677,7 +679,9 @@ impl Connector for HttpListenConnector {
             },
             declared,
             codec,
-        )?))
+        )?;
+        source.set_skip_corrupt(ctx.skip_corrupt());
+        Ok(Box::new(source))
     }
 
     /// The listener is dropped before a rebuild, so the replacement binds the

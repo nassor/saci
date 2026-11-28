@@ -112,6 +112,8 @@ pub enum QualityRule {
         columns: Vec<String>,
         /// Maintain seen keys in [`DataQualityState`] across passes.
         stateful: bool,
+        /// Optional maximum tracked keys per rule in stateful mode (FIFO eviction).
+        max_keys: Option<usize>,
     },
     /// Arbitrary SQL boolean expression parsed by [`Expr::parse`]. Must evaluate to `true`.
     Check {
@@ -203,15 +205,32 @@ impl DataQualityState {
         }
     }
 
-    fn insert(&mut self, rule_name: &str, key: String) -> bool {
+    fn insert_bounded(&mut self, rule_name: &str, key: String, max_keys: Option<usize>) -> bool {
         self.ensure_index();
-        if self.index.insert((rule_name.to_string(), key.clone())) {
-            self.rules.push(rule_name.to_string());
-            self.keys.push(key);
-            true
-        } else {
-            false
+        let entry = (rule_name.to_string(), key.clone());
+        if self.index.contains(&entry) {
+            return false;
         }
+        if let Some(limit) = max_keys
+            && limit > 0
+        {
+            let count = self
+                .rules
+                .iter()
+                .filter(|r| r.as_str() == rule_name)
+                .count();
+            if count >= limit
+                && let Some(pos) = self.rules.iter().position(|r| r.as_str() == rule_name)
+            {
+                let old_rule = self.rules.remove(pos);
+                let old_key = self.keys.remove(pos);
+                self.index.remove(&(old_rule, old_key));
+            }
+        }
+        self.index.insert(entry);
+        self.rules.push(rule_name.to_string());
+        self.keys.push(key);
+        true
     }
 }
 
@@ -584,10 +603,18 @@ fn compile_rule(rule: &QualityRule) -> SaciResult<CompiledRule> {
             }
             Ok(CompiledRule::InSet(values.iter().cloned().collect()))
         }
-        QualityRule::Unique { columns, .. } => {
+        QualityRule::Unique {
+            columns, max_keys, ..
+        } => {
             if columns.is_empty() || columns.iter().any(|c| c.trim().is_empty()) {
                 return Err(SaciError::configuration(format!(
                     "quality rule '{}': unique requires at least one column",
+                    rule.rule_name()
+                )));
+            }
+            if matches!(max_keys, Some(0)) {
+                return Err(SaciError::configuration(format!(
+                    "quality rule '{}': unique max_keys must be greater than 0",
                     rule.rule_name()
                 )));
             }
@@ -738,6 +765,7 @@ fn evaluate_rule(
             name,
             columns,
             stateful,
+            max_keys,
         } => {
             let key_cols: Vec<&ArrayRef> = columns
                 .iter()
@@ -753,7 +781,7 @@ fn evaluate_rule(
             match (*stateful, state) {
                 (true, Some(st)) => {
                     for (_hash, key) in row_keys {
-                        mask.push(st.insert(name, key));
+                        mask.push(st.insert_bounded(name, key, *max_keys));
                     }
                 }
                 _ => {
@@ -905,6 +933,7 @@ mod tests {
                     name: "unique_id".to_string(),
                     columns: vec!["id".to_string()],
                     stateful: true,
+                    max_keys: None,
                 },
             ],
         )
@@ -993,5 +1022,47 @@ mod tests {
             .evaluate_batch(&batch, None)
             .expect_err("on_violation=Fail rejects bad rows");
         assert!(err.message().contains("email_regex"), "got: {err}");
+    }
+
+    #[test]
+    fn stateful_unique_rule_respects_max_keys_eviction() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mk_batch = |ids: Vec<i64>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))]).unwrap()
+        };
+        let sys = DataQualitySystem::new(
+            "Order",
+            vec![QualityRule::Unique {
+                name: "u".to_string(),
+                columns: vec!["id".to_string()],
+                stateful: true,
+                max_keys: Some(2),
+            }],
+        )
+        .unwrap();
+        let mut state = DataQualityState::default();
+
+        // Insert id=1, id=2 -> both unique, capacity=2.
+        let s1 = sys
+            .evaluate_batch(&mk_batch(vec![1, 2]), Some(&mut state))
+            .unwrap();
+        assert_eq!(s1.valid.num_rows(), 2);
+        assert_eq!(state.len(), 2);
+
+        // Insert id=3 (evicts oldest id=1), then duplicate id=2 (fails), then id=1 (now evicted -> valid).
+        let s2 = sys
+            .evaluate_batch(&mk_batch(vec![3, 2, 1]), Some(&mut state))
+            .unwrap();
+        assert_eq!(
+            s2.valid.num_rows(),
+            2,
+            "3 and 1 should pass after id=1 was evicted"
+        );
+        assert_eq!(
+            s2.quarantine.num_rows(),
+            1,
+            "id=2 is still present so duplicate fails"
+        );
+        assert_eq!(state.len(), 2);
     }
 }

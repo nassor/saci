@@ -754,10 +754,32 @@ fn parse_single_quality_rule(val: &ConfigValue, idx: usize, ctx: &str) -> SaciRe
                 )));
             }
             let stateful = opt_bool(obj, "stateful", ctx)?.unwrap_or(false);
+            let max_keys = match obj.get("max_keys") {
+                None => None,
+                Some(ConfigValue::Number(n)) => {
+                    let v = n.as_i64().ok_or_else(|| {
+                        SaciError::configuration(format!(
+                            "{ctx}: unique rule '{name}' 'max_keys' must be an integer"
+                        ))
+                    })?;
+                    if v <= 0 {
+                        return Err(SaciError::configuration(format!(
+                            "{ctx}: unique rule '{name}' 'max_keys' must be greater than 0"
+                        )));
+                    }
+                    Some(v as usize)
+                }
+                Some(other) => {
+                    return Err(SaciError::configuration(format!(
+                        "{ctx}: unique rule '{name}' 'max_keys' must be a positive integer, got {other}"
+                    )));
+                }
+            };
             Ok(QualityRule::Unique {
                 name,
                 columns,
                 stateful,
+                max_keys,
             })
         }
         "check" => {

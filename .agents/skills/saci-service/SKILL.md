@@ -249,6 +249,14 @@ Key types:
   `cooldown_ms` deduplication, and `timeout_ms`. Non-blocking dispatcher wired into `Healer`
   (`HealExhausted`), `DeadLetterQueue` (`DlqRecorded`, `DlqLost`), and `run_supervised`
   (`WorkflowFailed`), and updated live on hot-reload via `AlertDispatcher::update_config`
+- `LineageConfig`, `LineageDispatcher`, and `src/service/lineage.rs`: optional top-level `lineage`
+  block (`enabled`, `endpoint`, `api_key`, `namespace`, `job_prefix`, `emit_on` = `"lifecycle"` |
+  `"pass"`, `timeout_ms`) computing dataset and transitive `ColumnLineageDatasetFacet` provenance
+  across sources, operators, wasm/plugin processors, and sinks, serving `GET /api/lineage` and
+  `GET /api/workflows/{id}/lineage` (`src/service/http/lineage.rs`) and asynchronously posting
+  OpenLineage v2 `START`/`RUNNING`/`COMPLETE`/`FAIL`/`ABORT` events with per-source/per-sink
+  `rowCount` statistics (`emit_pass_with_node_rows`/`emit_complete_with_node_rows`). Updated on
+  reload via `LineageDispatcher::update_config` and `update_workflow_nodes`.
 - `ServiceEncryptionConfig` (`encryption { active_key "..." key "..." env|file|hex|base64 ... }`):
   optional top-level keyring and default AEAD algorithm (`aes-256-gcm` or `chacha20-poly1305`).
   Consumed by `codec.encryption` (`CodecEncryptionConfig`), `source.decrypt`, and `sink.encrypt`
@@ -264,13 +272,20 @@ Key types:
   a `store` block, because a cluster node's state is the raft-replicated `cluster-app.redb` under
   `node.data_dir`
 - `WorkflowSpec`: one declared workflow (standalone may declare several; cluster mode takes
-  exactly one). Declares `codec`, `source`, `wasm`, `plugin`, `operator` (`OperatorSpec`), and
-  `sink` nodes, each with a mandatory id and an optional name, plus `link` nodes carrying `from`,
-  `to` and an optional `branch`. `operator` nodes run native Arrow operators (`sql`, `filter`,
-  `project`, `group_by`, `window`, `route` / `branch`, `sort`, `top_n`, `unnest`, `join`,
-  `interval_join`, `lookup_join`, `deduplicate`) built by `src/service/operator_builder.rs`
-  (`connector = "operator:<kind>"`) with automatic in-memory state carry in standalone runs for
-  stateful kinds and per-branch `BranchPayloads` row-split delivery via `RuntimeOutput`. `#[serde(deny_unknown_fields)]` means a key the service cannot honour is a parse error, not a silently dropped section.
+  exactly one). Declares `codec`, `source` (with optional `on_corrupt` and `schema_evolution`), `wasm`,
+  `plugin`, `operator` (`OperatorSpec`), and `sink` nodes (each with a mandatory id and an optional
+  name), plus `link` nodes carrying `from`, `to`, optional `branch`, and optional `schema_evolution`
+  (`workflow.schema_evolution` sets the workflow-wide default `EvolutionPolicy`: `strict`,
+  `additive`, `compatible`). `operator` nodes run native Arrow operators (`sql`, `filter`,
+  `project`, `group_by`, `window`, `route` / `branch`, `quality` / `assert` with optional
+  `on_violation`, `quarantine_into`, `diagnostics`, and bounded `max_keys` on stateful `unique`,
+  `sort`, `top_n`, `unnest`, `join`, `interval_join`, `lookup_join`, `deduplicate`) built by
+  `src/service/operator_builder.rs` (`connector = "operator:<kind>"`) with automatic in-memory
+  state carry in standalone runs for stateful kinds and per-branch `BranchPayloads` row-split
+  delivery via `RuntimeOutput`. Source-side corrupt records drained under `on_corrupt="dlq"` are
+  stored in `DeadLetterQueue` under `corrupt:<source_id>` (retained for inspection/purge, skipped
+  by replay without auto-replay churn). `#[serde(deny_unknown_fields)]` means a key the service
+  cannot honour is a parse error, not a silently dropped section.
   error, not a silently dropped section. The `wasm` and `plugin` fields, and the `window`
   block either carries, are declared unconditionally, like `ServiceMode::Cluster`: the schema
   is the same in every build, so a node whose host is compiled out, or a `window` block in a
