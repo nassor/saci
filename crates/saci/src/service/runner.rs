@@ -280,6 +280,9 @@ pub(super) fn fan_out_source(
 ) {
     #[cfg(not(feature = "tracing"))]
     let _ = (ids, log);
+    if batch.num_rows() == 0 {
+        return;
+    }
     for (edge_idx, edge) in downstream[from].iter().enumerate() {
         let d = edge.node;
         let policy = edge_evolutions

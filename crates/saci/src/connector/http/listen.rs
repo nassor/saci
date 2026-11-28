@@ -854,7 +854,7 @@ impl Handler {
         })
         .await;
 
-        let (batches, corrupt) = match decoded {
+        let (mut batches, corrupt) = match decoded {
             Err(e) => {
                 return Answer {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -877,15 +877,19 @@ impl Handler {
             }
             Ok(Ok(pair)) => pair,
         };
-        if !corrupt.is_empty()
-            && let Ok(mut guard) = self.corrupt_records.lock()
-        {
+        let had_corrupt = !corrupt.is_empty();
+        if had_corrupt && let Ok(mut guard) = self.corrupt_records.lock() {
             guard.extend(corrupt);
+        }
+        if batches.is_empty() && had_corrupt {
+            // Wake `HttpListenSource::next_batch()` immediately so the runner drains
+            // `corrupt_records` to the DLQ without waiting for another request.
+            batches.push(RecordBatch::new_empty(Arc::clone(&self.declared)));
         }
 
         // Bounded, so a consumer that falls behind makes this request wait
         // for its response and the client wait with it. A document that held
-        // no rows queues nothing and is still accepted.
+        // neither valid rows nor corrupt records queues nothing and is still accepted.
         if !batches.is_empty() && self.tx.send(Ok(batches)).await.is_err() {
             return Answer {
                 status: StatusCode::SERVICE_UNAVAILABLE,
@@ -1177,5 +1181,44 @@ mod tests {
             panic!("a listener that accepts no method accepts nothing");
         };
         assert!(err.message().contains("at least one"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn http_listen_all_corrupt_request_wakes_next_batch_and_drains_corrupt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let mut source = HttpListenSource::new(options(), schema(), ndjson()).expect("binds");
+        source.set_skip_corrupt(true);
+        let addr = source.local_addr();
+
+        let client = tokio::spawn(async move {
+            let mut sock = TcpStream::connect(addr).await.expect("connect");
+            let body = b"{not valid json\n";
+            let req = format!(
+                "POST / HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(req.as_bytes()).await.expect("write header");
+            sock.write_all(body).await.expect("write body");
+            sock.flush().await.expect("flush");
+            let mut resp = Vec::new();
+            sock.read_to_end(&mut resp).await.expect("read response");
+            String::from_utf8_lossy(&resp).to_string()
+        });
+
+        let batch = tokio::time::timeout(Duration::from_secs(2), source.next_batch())
+            .await
+            .expect("next_batch must wake on all-corrupt request")
+            .expect("source result ok")
+            .expect("wake batch present");
+        assert_eq!(batch.num_rows(), 0, "all-corrupt wake batch has zero rows");
+
+        let corrupt = source.drain_corrupt();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].format, "ndjson");
+
+        let resp_text = client.await.expect("client finishes");
+        assert!(resp_text.starts_with("HTTP/1.1 202"), "got: {resp_text}");
     }
 }

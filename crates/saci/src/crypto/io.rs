@@ -7,9 +7,11 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 
 use crate::crypto::envelope::Cipher;
-use crate::crypto::fields::{EncryptionMode, decrypt_batch, encrypt_batch, wire_schema};
+use crate::crypto::fields::{
+    EncryptionMode, decrypt_batch, decrypt_batch_isolating_corrupt, encrypt_batch, wire_schema,
+};
 use crate::error::SaciError;
-use crate::io::{Sink, Source};
+use crate::io::{CorruptRecord, Sink, Source};
 
 /// Wraps an inner [`Sink`], encrypting configured fields or the whole batch
 /// before delegating each write.
@@ -91,6 +93,8 @@ pub struct DecryptingSource<S: Source> {
     plain_schema: Arc<Schema>,
     cipher: Arc<Cipher>,
     mode: EncryptionMode,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
 }
 
 impl<S: Source> DecryptingSource<S> {
@@ -121,6 +125,8 @@ impl<S: Source> DecryptingSource<S> {
             plain_schema,
             cipher,
             mode,
+            skip_corrupt: false,
+            corrupt: Vec::new(),
         })
     }
 }
@@ -134,7 +140,18 @@ impl<S: Source> Source for DecryptingSource<S> {
     async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
         match self.inner.next_batch().await? {
             Some(batch) => {
-                decrypt_batch(&batch, &self.plain_schema, &self.cipher, &self.mode).map(Some)
+                if self.skip_corrupt {
+                    let (decrypted, corrupt) = decrypt_batch_isolating_corrupt(
+                        &batch,
+                        &self.plain_schema,
+                        &self.cipher,
+                        &self.mode,
+                    )?;
+                    self.corrupt.extend(corrupt);
+                    Ok(Some(decrypted))
+                } else {
+                    decrypt_batch(&batch, &self.plain_schema, &self.cipher, &self.mode).map(Some)
+                }
             }
             None => Ok(None),
         }
@@ -153,10 +170,126 @@ impl<S: Source> Source for DecryptingSource<S> {
     }
 
     fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
         self.inner.set_skip_corrupt(skip);
     }
 
-    fn drain_corrupt(&mut self) -> Vec<crate::io::CorruptRecord> {
-        self.inner.drain_corrupt()
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        let mut drained = self.inner.drain_corrupt();
+        drained.append(&mut self.corrupt);
+        drained
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::{Int64Array, StringArray};
+    use arrow_schema::{DataType, Field};
+    use tokio::sync::Mutex;
+
+    use super::*;
+    use crate::crypto::fields::FieldEncoding;
+    use crate::crypto::keys::{KeyMaterial, StaticKeyProvider};
+
+    struct VecSource {
+        schema: Arc<Schema>,
+        batches: std::collections::VecDeque<RecordBatch>,
+        inner_corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
+    }
+
+    #[async_trait]
+    impl Source for VecSource {
+        fn schema(&self) -> Arc<Schema> {
+            Arc::clone(&self.schema)
+        }
+
+        async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+            Ok(self.batches.pop_front())
+        }
+
+        fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+            self.inner_corrupt
+                .try_lock()
+                .map(|mut g| std::mem::take(&mut *g))
+                .unwrap_or_default()
+        }
+    }
+
+    #[tokio::test]
+    async fn decrypting_source_isolates_corrupt_encrypted_rows_when_skip_corrupt_enabled() {
+        let provider =
+            Arc::new(StaticKeyProvider::single("k1", KeyMaterial::generate().unwrap()).unwrap());
+        let cipher = Arc::new(Cipher::aes_256_gcm(provider));
+        let plain_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("secret", DataType::Utf8, true),
+        ]));
+        let mode = EncryptionMode::fields_with_encoding(["secret"], FieldEncoding::Base64Utf8);
+        let wire = wire_schema(&plain_schema, &mode).unwrap();
+
+        let plain = RecordBatch::try_new(
+            Arc::clone(&plain_schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec![
+                    Some("alpha"),
+                    Some("beta"),
+                    Some("gamma"),
+                ])),
+            ],
+        )
+        .unwrap();
+        let encrypted = encrypt_batch(&plain, &wire, &cipher, &mode).unwrap();
+        let enc_col = encrypted
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let tampered_col = Arc::new(StringArray::from(vec![
+            Some(enc_col.value(0)),
+            Some("not!valid!base64"),
+            Some(enc_col.value(2)),
+        ]));
+        let tampered_batch = RecordBatch::try_new(
+            Arc::clone(&wire),
+            vec![Arc::clone(encrypted.column(0)), tampered_col],
+        )
+        .unwrap();
+
+        let inner_corrupt = Arc::new(Mutex::new(vec![CorruptRecord {
+            format: "ndjson",
+            payload: b"{bad json".to_vec(),
+            error: "inner parse error".to_string(),
+        }]));
+        let inner = VecSource {
+            schema: wire,
+            batches: std::collections::VecDeque::from([tampered_batch]),
+            inner_corrupt,
+        };
+        let mut src = DecryptingSource::new(inner, plain_schema, cipher, mode).unwrap();
+        src.set_skip_corrupt(true);
+
+        let batch = src
+            .next_batch()
+            .await
+            .expect("decrypt survives corrupt row")
+            .expect("batch present");
+        assert_eq!(batch.num_rows(), 2);
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(ids.values(), &[1, 3]);
+
+        let drained = src.drain_corrupt();
+        assert_eq!(
+            drained.len(),
+            2,
+            "must combine inner and crypto corrupt records"
+        );
+        assert_eq!(drained[0].format, "ndjson");
+        assert_eq!(drained[1].format, "crypto");
+        assert_eq!(drained[1].payload, b"not!valid!base64");
     }
 }

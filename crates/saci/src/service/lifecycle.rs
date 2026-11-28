@@ -1298,7 +1298,10 @@ pub async fn run_supervised(
                 publisher.publish(WorkflowRunState::Starting, None);
                 let result = factory.borrow_mut().build(&workflow);
                 match result {
-                    Ok(built) => built,
+                    Ok(built) => {
+                        factory.borrow().refresh_workflow_lineage(&workflow, &built);
+                        built
+                    }
                     Err(e) => {
                         let err_msg = e.to_string();
                         publisher.publish(WorkflowRunState::Failed, Some(err_msg.clone()));

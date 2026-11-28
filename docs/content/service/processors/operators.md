@@ -349,5 +349,4 @@ operator "validate_orders" kind="quality" component="Orders" {
 | `lookup_join` | `on` | `join_type`, `right_prefix` |
 | `deduplicate` | `keys` | `keep`, `time_field`, `ttl_ms`, `max_keys`, `stateful` |
 | `quality` / `assert` | `rules` | `on_violation` (`quarantine`, `drop`, `fail`), `quarantine_into`, `diagnostics` (plus `stateful`, `max_keys` on `unique` rules) |
-| `quality` / `assert` | `rules` | `on_violation` (`quarantine`, `drop`, `fail`), `diagnostics`, `quarantine_into` |
 | `sql` | `query` | |

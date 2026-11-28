@@ -9,6 +9,7 @@
 
 use std::collections::VecDeque;
 use std::io::Seek;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
@@ -72,7 +73,7 @@ pub struct S3Source {
     pending: Option<VecDeque<Path>>,
     /// Batches from the object currently being decoded.
     current: Option<mpsc::Receiver<Result<RecordBatch, SaciError>>>,
-    skip_corrupt: bool,
+    skip_corrupt: Arc<AtomicBool>,
     corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
@@ -104,7 +105,7 @@ impl S3Source {
             schema_from: config.schema_from,
             pending: None,
             current: None,
-            skip_corrupt: false,
+            skip_corrupt: Arc::new(AtomicBool::new(false)),
             corrupt: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -117,7 +118,7 @@ impl Source for S3Source {
     }
 
     fn set_skip_corrupt(&mut self, skip: bool) {
-        self.skip_corrupt = skip;
+        self.skip_corrupt.store(skip, Ordering::Relaxed);
     }
 
     fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
@@ -245,7 +246,7 @@ impl Source for S3Source {
                 SchemaFrom::Payload => None,
             };
             let codec = Arc::clone(&self.codec);
-            let skip_corrupt = self.skip_corrupt;
+            let skip_corrupt = self.skip_corrupt.load(Ordering::Relaxed);
             let (mut reader, object_schema) = tokio::task::spawn_blocking(move || {
                 let mut reader = codec.open_reader(spool.into(), declared_arg)?;
                 reader.set_skip_corrupt(skip_corrupt);
@@ -354,7 +355,7 @@ mod tests {
             schema_from: SchemaFrom::Payload,
             pending: None,
             current: None,
-            skip_corrupt: false,
+            skip_corrupt: Arc::new(AtomicBool::new(false)),
             corrupt: Arc::new(Mutex::new(Vec::new())),
         };
 

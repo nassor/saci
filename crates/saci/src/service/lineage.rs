@@ -428,7 +428,15 @@ pub fn build_workflow_lineage(
     workflow: &WorkflowSpec,
     built_nodes: Option<&[BuiltNode]>,
 ) -> WorkflowLineageGraph {
-    let ns = config.lineage.namespace.as_str();
+    build_workflow_lineage_with_config(&config.lineage, workflow, built_nodes)
+}
+
+fn build_workflow_lineage_with_config(
+    lineage_cfg: &LineageConfig,
+    workflow: &WorkflowSpec,
+    built_nodes: Option<&[BuiltNode]>,
+) -> WorkflowLineageGraph {
+    let ns = lineage_cfg.namespace.as_str();
     let mut comp_schemas: HashMap<String, Vec<SchemaFieldFacet>> = HashMap::new();
     let mut provenance: HashMap<String, ComponentColumns> = HashMap::new();
 
@@ -602,7 +610,7 @@ pub fn build_workflow_lineage(
         workflow_id: workflow.id.clone(),
         workflow_name: workflow.name.clone(),
         namespace: ns.to_string(),
-        job_name: config.lineage.job_name(&workflow.id),
+        job_name: lineage_cfg.job_name(&workflow.id),
         inputs,
         outputs,
         edges,
@@ -1382,6 +1390,17 @@ impl LineageDispatcher {
         }
     }
 
+    /// Refresh a workflow's lineage graph from its live configuration and freshly rebuilt nodes.
+    pub fn refresh_workflow(&self, spec: &WorkflowSpec, built: &BuiltWorkflow) {
+        if let Ok(mut guard) = self.inner.write() {
+            let graph = build_workflow_lineage_with_config(&guard.config, spec, Some(&built.nodes));
+            if !guard.order.iter().any(|id| id == &graph.workflow_id) {
+                guard.order.push(graph.workflow_id.clone());
+            }
+            guard.graphs.insert(graph.workflow_id.clone(), graph);
+        }
+    }
+
     fn ensure_worker(&self, cfg: &LineageConfig) {
         let Ok(mut slot) = self.tx.lock() else {
             return;
@@ -2110,5 +2129,71 @@ workflow "w" {{
             reloaded.outputs[0].facets.column_lineage,
             initial.outputs[0].facets.column_lineage
         );
+    }
+
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[test]
+    fn refresh_workflow_updates_runtime_schema_facets_after_reload_rebuild() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let in_path = dir.path().join("in.ndjson");
+        let out_path = dir.path().join("out.ndjson");
+        std::fs::write(&in_path, "{\"id\":1}\n").expect("write v1 input");
+
+        let mk_cfg = |out_cols: &str| {
+            let kdl = format!(
+                r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-lineage-refresh"
+lineage enabled=#true namespace="analytics"
+workflow "w" {{
+    codec "ndjson" format="ndjson"
+    source "in" connector="file" codec="ndjson" component="Row" {{
+        config path="{}"
+    }}
+    sink "out" connector="file" codec="ndjson" component="Row" {{
+        config path="{}" {{
+{out_cols}
+        }}
+    }}
+    link from="in" to="out"
+}}
+"#,
+                in_path.display(),
+                out_path.display()
+            );
+            parse(&kdl).unwrap()
+        };
+
+        let cfg1 = mk_cfg(r#"            field "id" type="int64" nullable=#true"#);
+        let built1 = crate::service::ServiceBuilder::new()
+            .build(&cfg1)
+            .expect("build v1");
+        let dispatcher = LineageDispatcher::new(&cfg1, Some(&built1));
+        assert_eq!(
+            dispatcher.workflow_lineage("w").unwrap().inputs[0]
+                .facets
+                .schema
+                .as_ref()
+                .unwrap()
+                .fields
+                .len(),
+            1
+        );
+
+        // Input schema evolves on disk and reloaded workflow is rebuilt with the new column.
+        std::fs::write(&in_path, "{\"id\":1,\"score\":9.5}\n").expect("write v2 input");
+        let cfg2 = mk_cfg(
+            "            field \"id\" type=\"int64\" nullable=#true\n            field \"score\" type=\"float64\" nullable=#true",
+        );
+        let built2 = crate::service::ServiceBuilder::new()
+            .build(&cfg2)
+            .expect("build v2");
+        dispatcher.update_config(&cfg2, None);
+        dispatcher.refresh_workflow(&cfg2.workflows[0], &built2[0]);
+
+        let updated = dispatcher.workflow_lineage("w").unwrap();
+        let in_fields = &updated.inputs[0].facets.schema.as_ref().unwrap().fields;
+        assert_eq!(in_fields.len(), 2);
+        assert_eq!(in_fields[1].name, "score");
     }
 }

@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
@@ -88,7 +89,7 @@ pub struct RedbSource {
     /// The keys whose entries were handed over whole, oldest first, waiting
     /// for [`Source::finish`] to delete them. Empty unless `consume`.
     yielded: Vec<String>,
-    skip_corrupt: bool,
+    skip_corrupt: Arc<AtomicBool>,
     corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
@@ -123,7 +124,7 @@ impl RedbSource {
             current: None,
             consume: config.consume,
             yielded: Vec::new(),
-            skip_corrupt: false,
+            skip_corrupt: Arc::new(AtomicBool::new(false)),
             corrupt: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -320,7 +321,7 @@ impl Source for RedbSource {
     }
 
     fn set_skip_corrupt(&mut self, skip: bool) {
-        self.skip_corrupt = skip;
+        self.skip_corrupt.store(skip, Ordering::Relaxed);
     }
 
     fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
@@ -397,7 +398,7 @@ impl Source for RedbSource {
 
             // 4. Spool the entry and open the reader off the executor.
             let mut reader = self.open_entry(key).await?;
-            reader.set_skip_corrupt(self.skip_corrupt);
+            reader.set_skip_corrupt(self.skip_corrupt.load(Ordering::Relaxed));
 
             // 5. Decode off the executor, feeding a bounded channel; the
             //    executor never blocks on the disk. The loop above drains the

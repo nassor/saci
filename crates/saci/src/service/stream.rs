@@ -364,8 +364,17 @@ pub(crate) async fn run(
             (si, source, outcome)
         });
     }
-    for (si, source, outcome) in futures::future::join_all(priming).await {
+    for (si, mut source, outcome) in futures::future::join_all(priming).await {
+        let corrupt = source.drain_corrupt();
         sources[si] = Some(source);
+        if !corrupt.is_empty() && on_corrupt[si] == crate::service::config::CorruptRecordPolicy::Dlq
+        {
+            let component = components[si].expect("the stream source declares a component");
+            if let Some(q) = &mut dlq {
+                q.record_corrupt(&ids[si], component, &corrupt, &mut stats)
+                    .await;
+            }
+        }
         match outcome {
             Ok(Ok(Some(batch))) => prefetched[si] = Some(batch),
             Ok(Ok(None)) => {
@@ -540,9 +549,26 @@ pub(crate) async fn run(
                         }
                     }
                 }
+                if batch.num_rows() == 0 {
+                    continue;
+                }
                 batch
             }
             Err(_e) => {
+                if let Some(source) = sources[source_index].as_mut() {
+                    let corrupt = source.drain_corrupt();
+                    if !corrupt.is_empty()
+                        && on_corrupt[source_index]
+                            == crate::service::config::CorruptRecordPolicy::Dlq
+                    {
+                        let component = components[source_index]
+                            .expect("the stream source declares a component");
+                        if let Some(q) = &mut dlq {
+                            q.record_corrupt(&ids[source_index], component, &corrupt, &mut stats)
+                                .await;
+                        }
+                    }
+                }
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     workflow = %workflow_id,
@@ -1585,11 +1611,13 @@ mod tests {
     /// Hands the workflow the source and the sink the test built, so the test
     /// keeps the sending end of the source's channel and the receiving end of
     /// the sink's.
+    #[cfg(any(feature = "wasm-host", feature = "connector-redb"))]
     struct HandedConnector {
         source: std::sync::Mutex<Option<Box<dyn Source>>>,
         sink: std::sync::Mutex<Option<Box<dyn Sink>>>,
     }
 
+    #[cfg(any(feature = "wasm-host", feature = "connector-redb"))]
     impl crate::connector::Connector for HandedConnector {
         fn name(&self) -> &'static str {
             "handed"
@@ -1722,5 +1750,90 @@ http enabled=#false
             delivered += batch.num_rows();
         }
         assert_eq!(delivered, 2, "both items reach the sink");
+    }
+
+    #[cfg(feature = "connector-redb")]
+    #[tokio::test]
+    async fn stream_run_drains_corrupt_records_when_source_reaches_eof_during_prime() {
+        use crate::io::CorruptRecord;
+        use crate::service::builder::ServiceBuilder;
+        use crate::service::config::ServiceConfig;
+
+        struct EofCorruptSource {
+            schema: Arc<Schema>,
+            corrupt: Vec<CorruptRecord>,
+        }
+
+        #[async_trait]
+        impl Source for EofCorruptSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+
+            async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+                self.corrupt.push(CorruptRecord {
+                    format: "ndjson",
+                    payload: b"{bad prime".to_vec(),
+                    error: "invalid json".to_string(),
+                });
+                Ok(None)
+            }
+
+            fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+                std::mem::take(&mut self.corrupt)
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_string_lossy().replace('\\', "/");
+        let config_path = dir.path().join("service.kdl");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+mode "standalone"
+
+node id=1 name="stream-prime-dlq" data_dir="{data_dir}"
+
+run "stream"
+
+workflow "w" {{
+    dlq "redb" replay="before_sources"
+    source "in" connector="handed" component="Row" on_corrupt="dlq"
+    sink "out" connector="handed" component="Row"
+    link from="in" to="out"
+}}
+
+http enabled=#false
+"#
+            ),
+        )
+        .expect("write config");
+        let config = ServiceConfig::load(&config_path).expect("config loads");
+        let sink_rows = Arc::new(AtomicU64::new(0));
+        let source: Box<dyn Source> = Box::new(EofCorruptSource {
+            schema: schema(),
+            corrupt: Vec::new(),
+        });
+        let sink: Box<dyn Sink> = Box::new(CountingSink {
+            schema: schema(),
+            rows: Arc::clone(&sink_rows),
+        });
+        let built = ServiceBuilder::new()
+            .connector(HandedConnector {
+                source: std::sync::Mutex::new(Some(source)),
+                sink: std::sync::Mutex::new(Some(sink)),
+            })
+            .build(&config)
+            .expect("the workflow builds")
+            .remove(0);
+
+        let stats = built
+            .run(CancellationToken::new())
+            .await
+            .expect("stream run exits cleanly on prime EOF");
+        assert_eq!(stats.dead_letters_recorded, 1);
+        assert_eq!(stats.source_batches_drained, 0);
+        assert_eq!(sink_rows.load(Ordering::Relaxed), 0);
     }
 }

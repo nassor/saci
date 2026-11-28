@@ -308,6 +308,13 @@ impl WorkflowFactory {
         }
     }
 
+    /// Refresh lineage graph for a single workflow after a supervised rebuild.
+    pub(crate) fn refresh_workflow_lineage(&self, spec: &WorkflowSpec, built: &BuiltWorkflow) {
+        if let Some(lineage) = &self.builder.lineage {
+            lineage.refresh_workflow(spec, built);
+        }
+    }
+
     /// Snapshot current factory settings so a failed hot-reload can roll back.
     pub(crate) fn snapshot_settings(
         &self,

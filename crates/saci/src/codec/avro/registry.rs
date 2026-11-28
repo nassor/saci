@@ -361,7 +361,16 @@ fn check_reader_writer_compat(reader: &Value, writer: &Value, dir: &str) -> Resu
             let name = rf.get("name").and_then(Value::as_str).unwrap_or("");
             let r_type = rf.get("type").unwrap_or(&Value::Null);
             let has_default = rf.get("default").is_some();
-            match w_map.get(name) {
+            let mut wf_match = w_map.get(name).copied();
+            if wf_match.is_none()
+                && let Some(aliases) = rf.get("aliases").and_then(Value::as_array)
+            {
+                wf_match = aliases
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find_map(|alias| w_map.get(alias).copied());
+            }
+            match wf_match {
                 Some(wf) => {
                     let w_type = wf.get("type").unwrap_or(&Value::Null);
                     check_reader_writer_compat(r_type, w_type, dir).map_err(|e| {
@@ -379,6 +388,55 @@ fn check_reader_writer_compat(reader: &Value, writer: &Value, dir: &str) -> Resu
                     )));
                 }
             }
+        }
+        return Ok(());
+    }
+
+    if avro_primitive_name(writer) == Some("enum") && avro_primitive_name(reader) == Some("enum") {
+        if let (Some(wn), Some(rn)) = (unqualified_avro_name(writer), unqualified_avro_name(reader))
+            && wn != rn
+        {
+            return Err(SaciError::configuration(format!(
+                "avro registry: {dir} enum name mismatch between writer '{wn}' and reader '{rn}'"
+            )));
+        }
+        if reader.get("default").is_none() {
+            let r_syms: std::collections::HashSet<&str> = reader
+                .get("symbols")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if let Some(w_syms) = writer.get("symbols").and_then(Value::as_array) {
+                for ws in w_syms.iter().filter_map(Value::as_str) {
+                    if !r_syms.contains(ws) {
+                        return Err(SaciError::configuration(format!(
+                            "avro registry: {dir} incompatibility on enum: \
+                             writer symbol '{ws}' missing in reader enum without a default"
+                        )));
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    if avro_primitive_name(writer) == Some("fixed") && avro_primitive_name(reader) == Some("fixed")
+    {
+        if let (Some(wn), Some(rn)) = (unqualified_avro_name(writer), unqualified_avro_name(reader))
+            && wn != rn
+        {
+            return Err(SaciError::configuration(format!(
+                "avro registry: {dir} fixed name mismatch between writer '{wn}' and reader '{rn}'"
+            )));
+        }
+        if let (Some(ws), Some(rs)) = (
+            writer.get("size").and_then(Value::as_u64),
+            reader.get("size").and_then(Value::as_u64),
+        ) && ws != rs
+        {
+            return Err(SaciError::configuration(format!(
+                "avro registry: {dir} fixed size mismatch between writer ({ws}) and reader ({rs})"
+            )));
         }
         return Ok(());
     }
@@ -414,6 +472,11 @@ fn record_fields(val: &Value) -> Option<&Vec<Value>> {
     } else {
         None
     }
+}
+
+fn unqualified_avro_name(v: &Value) -> Option<&str> {
+    let raw = v.get("name")?.as_str()?;
+    Some(raw.rsplit('.').next().unwrap_or(raw))
 }
 
 fn avro_primitive_name(v: &Value) -> Option<&str> {
@@ -1555,5 +1618,73 @@ mod tests {
             .resolve_or_register_for_write(v3)
             .expect_err("Glue BackwardTransitive must reject v3 incompatible with v1");
         assert!(err.message().contains("mid"), "got: {err}");
+    }
+
+    #[test]
+    fn avro_compatibility_handles_enum_evolution_fixed_size_and_field_aliases() {
+        // 1. Enum evolution: reader adds a symbol (backward compatible) without default,
+        // and writer adds a symbol when reader has a default (still backward compatible).
+        let enum_v1 = serde_json::json!({
+            "type": "enum",
+            "name": "Status",
+            "symbols": ["NEW", "OPEN"]
+        });
+        let enum_v2 = serde_json::json!({
+            "type": "enum",
+            "name": "Status",
+            "symbols": ["NEW", "OPEN", "CLOSED"]
+        });
+        let enum_v3_with_default = serde_json::json!({
+            "type": "enum",
+            "name": "Status",
+            "symbols": ["NEW", "OPEN"],
+            "default": "NEW"
+        });
+        check_reader_writer_compat(&enum_v2, &enum_v1, "backward").expect("superset symbols");
+        let err = check_reader_writer_compat(&enum_v1, &enum_v2, "backward")
+            .expect_err("missing CLOSED without default must fail");
+        assert!(err.message().contains("CLOSED"), "got: {err}");
+        check_reader_writer_compat(&enum_v3_with_default, &enum_v2, "backward")
+            .expect("reader enum default covers unknown writer symbols");
+
+        // 2. Fixed: matching size passes, different size fails.
+        let fixed_16 = serde_json::json!({
+            "type": "fixed",
+            "name": "UuidBytes",
+            "size": 16
+        });
+        let fixed_16_other_ns = serde_json::json!({
+            "type": "fixed",
+            "name": "pkg.UuidBytes",
+            "size": 16
+        });
+        let fixed_32 = serde_json::json!({
+            "type": "fixed",
+            "name": "UuidBytes",
+            "size": 32
+        });
+        check_reader_writer_compat(&fixed_16_other_ns, &fixed_16, "backward")
+            .expect("matching unqualified name and size passes");
+        let err = check_reader_writer_compat(&fixed_32, &fixed_16, "backward")
+            .expect_err("fixed size change must fail");
+        assert!(err.message().contains("size mismatch"), "got: {err}");
+
+        // 3. Reader field aliases: renamed field matching via `aliases` resolves writer type.
+        let rec_writer = serde_json::json!({
+            "type": "record",
+            "name": "Order",
+            "fields": [
+                {"name": "order_id", "type": "int"}
+            ]
+        });
+        let rec_reader_alias = serde_json::json!({
+            "type": "record",
+            "name": "Order",
+            "fields": [
+                {"name": "id", "type": "long", "aliases": ["order_id"]}
+            ]
+        });
+        check_reader_writer_compat(&rec_reader_alias, &rec_writer, "backward")
+            .expect("reader field alias resolves writer field and allows int->long promotion");
     }
 }

@@ -669,6 +669,12 @@ pub(crate) async fn run(
                                             )
                                             .await;
                                         }
+                                        // An all-corrupt poll window can return an empty wake
+                                        // batch solely so corrupt records reach the DLQ at once;
+                                        // skip arrival counters and downstream work for 0 rows.
+                                        if batch.num_rows() == 0 {
+                                            continue;
+                                        }
                                         // Weighed only for a source a controller
                                         // governs: the weight feeds its byte
                                         // accounting and nothing else.
@@ -680,6 +686,17 @@ pub(crate) async fn run(
                                         (batch, weight)
                                     }
                                     Err(_e) => {
+                                        let corrupt = source.drain_corrupt();
+                                        if !corrupt.is_empty()
+                                            && on_corrupt[i]
+                                                == crate::service::config::CorruptRecordPolicy::Dlq
+                                            && let Some(q) = &mut dlq
+                                        {
+                                            q.record_corrupt(
+                                                &ids[i], component, &corrupt, &mut stats,
+                                            )
+                                            .await;
+                                        }
                                         #[cfg(feature = "tracing")]
                                         tracing::warn!(
                                             parent: &batch_span,
@@ -3415,5 +3432,132 @@ workflow "filtered_wf" {{
                 .row_count,
             2
         );
+    }
+
+    #[cfg(feature = "connector-redb")]
+    #[tokio::test]
+    async fn all_corrupt_zero_row_batch_records_dlq_without_counting_drained_batch_or_writing_empty_sink_batch()
+     {
+        use crate::io::CorruptRecord;
+        use crate::service::builder::ServiceBuilder;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct WakeZeroRowSource {
+            schema: Arc<Schema>,
+            polled: bool,
+            corrupt: Vec<CorruptRecord>,
+        }
+
+        #[async_trait]
+        impl Source for WakeZeroRowSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+
+            async fn next_batch(&mut self) -> Result<Option<RecordBatch>, SaciError> {
+                if self.polled {
+                    return Ok(None);
+                }
+                self.polled = true;
+                self.corrupt.push(CorruptRecord {
+                    format: "ndjson",
+                    payload: b"{corrupt window".to_vec(),
+                    error: "invalid json".to_string(),
+                });
+                Ok(Some(RecordBatch::new_empty(Arc::clone(&self.schema))))
+            }
+
+            fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+                std::mem::take(&mut self.corrupt)
+            }
+        }
+
+        struct BatchCountingSink {
+            schema: Arc<Schema>,
+            batches: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Sink for BatchCountingSink {
+            async fn write_batch(&mut self, _batch: &RecordBatch) -> Result<(), SaciError> {
+                self.batches.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn finish(&mut self) -> Result<(), SaciError> {
+                Ok(())
+            }
+
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+        }
+
+        struct Handed {
+            source: std::sync::Mutex<Option<Box<dyn Source>>>,
+            sink: std::sync::Mutex<Option<Box<dyn Sink>>>,
+        }
+
+        impl crate::connector::Connector for Handed {
+            fn name(&self) -> &'static str {
+                "handed"
+            }
+
+            fn source(
+                &self,
+                _config: &crate::config::ConfigValue,
+                _ctx: &crate::connector::ConnectorContext,
+            ) -> Result<Box<dyn Source>, SaciError> {
+                Ok(self.source.lock().unwrap().take().unwrap())
+            }
+
+            fn sink(
+                &self,
+                _config: &crate::config::ConfigValue,
+                _ctx: &crate::connector::ConnectorContext,
+            ) -> Result<Box<dyn Sink>, SaciError> {
+                Ok(self.sink.lock().unwrap().take().unwrap())
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().replace('\\', "/");
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="{p}"
+run "once"
+
+workflow "wake_zero" {{
+    dlq "redb" replay="before_sources"
+    source "in" connector="handed" component="Row" on_corrupt="dlq"
+    sink "out" connector="handed" component="Row"
+    link from="in" to="out"
+}}
+"#
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("config parses");
+        let sink_batches = Arc::new(AtomicUsize::new(0));
+        let built = ServiceBuilder::new()
+            .connector(Handed {
+                source: std::sync::Mutex::new(Some(Box::new(WakeZeroRowSource {
+                    schema: schema(),
+                    polled: false,
+                    corrupt: Vec::new(),
+                }))),
+                sink: std::sync::Mutex::new(Some(Box::new(BatchCountingSink {
+                    schema: schema(),
+                    batches: Arc::clone(&sink_batches),
+                }))),
+            })
+            .build(&cfg)
+            .expect("build")
+            .remove(0);
+
+        let stats = built.run(CancellationToken::new()).await.expect("run");
+        assert_eq!(stats.dead_letters_recorded, 1);
+        assert_eq!(stats.source_batches_drained, 0);
+        assert_eq!(stats.sink_batches_written, 0);
+        assert_eq!(sink_batches.load(Ordering::SeqCst), 0);
     }
 }
