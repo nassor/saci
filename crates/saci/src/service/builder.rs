@@ -1340,12 +1340,12 @@ impl ServiceBuilder {
 
         super::validation::validate_workflow_graph(&workflow.id, &nodes)?;
 
-        // When `operator kind="quality"` emits `diagnostics=#true` onto `branch="quarantine"`
+        // When `operator kind="quality"` (or alias `"assert"`) emits `diagnostics=#true` onto `branch="quarantine"`
         // without `quarantine_into` and the downstream target declares only the input schema
         // (without `__dq_*`), adapt that branch edge to `Compatible` so `evolve_batch` drops
         // extra diagnostic columns cleanly at runtime.
         for op in &workflow.operator {
-            if op.kind == "quality"
+            if matches!(op.kind.as_str(), "quality" | "assert")
                 && op.config.get("diagnostics").and_then(ConfigValue::as_bool) == Some(true)
                 && op.config.get("quarantine_into").is_none()
                 && let Some(&from_idx) = id_to_topo_index.get(op.id.as_str())

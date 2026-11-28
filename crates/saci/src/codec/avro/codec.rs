@@ -773,6 +773,11 @@ impl AvroMessageDecoder {
             }
             remaining = &remaining[read..];
         }
+        // Bank immediately while `self.skip_corrupt` is active so any subsequent
+        // unprojectable-record error isolates this payload without dropping valid rows.
+        if self.skip_corrupt {
+            self.bank(framing)?;
+        }
         Ok(())
     }
 }
@@ -1525,6 +1530,116 @@ mod tests {
         reader.set_skip_corrupt(true);
         assert!(reader.next_batch().expect("skips bad batch").is_none());
         let corrupt = reader.drain_corrupt();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].format, "avro");
+    }
+
+    #[test]
+    fn avro_message_decoder_isolates_unprojectable_payload_at_end_of_window() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let store: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let store_srv = Arc::clone(&store);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock registry");
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(10) {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let req_line = req.lines().next().unwrap_or("");
+                let mut parts = req_line.split_whitespace();
+                let method = parts.next().unwrap_or("GET");
+                let path = parts.next().unwrap_or("/");
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+
+                let (status, resp_body) = if method == "POST" && path == "/subjects/ev/versions" {
+                    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let schema_str = v["schema"].as_str().unwrap().to_string();
+                    let mut guard = store_srv.lock().unwrap();
+                    guard.push(schema_str);
+                    let id = guard.len();
+                    (200, format!(r#"{{"id":{id}}}"#))
+                } else if method == "GET" && path.starts_with("/schemas/ids/") {
+                    let id: usize = path
+                        .trim_start_matches("/schemas/ids/")
+                        .parse()
+                        .unwrap_or(0);
+                    let guard = store_srv.lock().unwrap();
+                    if let Some(s) = guard.get(id.saturating_sub(1)) {
+                        (200, serde_json::json!({ "schema": s }).to_string())
+                    } else {
+                        (404, "{}".to_string())
+                    }
+                } else {
+                    (404, "{}".to_string())
+                };
+
+                let reply = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+                    resp_body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let endpoint = format!("http://{addr}");
+        let valid_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let bad_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+
+        let writer_codec = AvroCodec::new()
+            .schema_registry(SchemaRegistryConfig::confluent(&endpoint).with_subject("ev"));
+
+        let valid_batch = RecordBatch::try_new(
+            Arc::clone(&valid_schema),
+            vec![Arc::new(Int64Array::from(vec![42]))],
+        )
+        .unwrap();
+        let bad_batch = RecordBatch::try_new(
+            bad_schema,
+            vec![Arc::new(StringArray::from(vec!["not-an-int"]))],
+        )
+        .unwrap();
+
+        let valid_payload = writer_codec
+            .encode_messages(&valid_batch)
+            .expect("encode valid")
+            .remove(0);
+        let bad_payload = writer_codec
+            .encode_messages(&bad_batch)
+            .expect("encode bad")
+            .remove(0);
+
+        let consumer_codec =
+            AvroCodec::new().schema_registry(SchemaRegistryConfig::confluent(endpoint));
+        let mut decoder = consumer_codec
+            .open_message_decoder(Arc::clone(&valid_schema))
+            .expect("open message decoder");
+        decoder.set_skip_corrupt(true);
+        decoder.push(&valid_payload).expect("valid message pushes");
+        decoder
+            .push(&bad_payload)
+            .expect("unprojectable payload must be isolated inside push");
+        let out = decoder
+            .flush()
+            .expect("flush succeeds")
+            .expect("valid batch preserved");
+        assert_eq!(
+            out.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[42]
+        );
+        let corrupt = decoder.drain_corrupt();
         assert_eq!(corrupt.len(), 1);
         assert_eq!(corrupt[0].format, "avro");
     }

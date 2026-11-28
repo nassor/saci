@@ -303,7 +303,32 @@ pub fn evolve_batch(
                 if col.data_type() == target_field.data_type() {
                     columns.push(Arc::clone(col));
                 } else {
-                    let cast_col =
+                    let intermediate_ts = match (col.data_type(), target_field.data_type()) {
+                        (
+                            DataType::Date32 | DataType::Date64,
+                            DataType::Timestamp(unit, Some(_)),
+                        ) => Some(DataType::Timestamp(*unit, None)),
+                        _ => None,
+                    };
+                    let cast_col = if let Some(naive_ts) = intermediate_ts {
+                        let widen_err = |e: arrow_schema::ArrowError| {
+                            SaciError::generic(format!(
+                                "evolve_batch: cannot widen column '{}' from {:?} to {:?}: {e}",
+                                target_field.name(),
+                                col.data_type(),
+                                target_field.data_type()
+                            ))
+                        };
+                        let step1 = cast_with_options(col.as_ref(), &naive_ts, &cast_opts)
+                            .map_err(widen_err)?;
+                        let data = step1
+                            .to_data()
+                            .into_builder()
+                            .data_type(target_field.data_type().clone())
+                            .build()
+                            .map_err(widen_err)?;
+                        arrow_array::make_array(data)
+                    } else {
                         cast_with_options(col.as_ref(), target_field.data_type(), &cast_opts)
                             .map_err(|e| {
                                 SaciError::generic(format!(
@@ -312,7 +337,8 @@ pub fn evolve_batch(
                                     col.data_type(),
                                     target_field.data_type()
                                 ))
-                            })?;
+                            })?
+                    };
                     columns.push(cast_col);
                 }
             }
@@ -738,6 +764,59 @@ mod tests {
         let narrow = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
         assert!(
             check_schema_compatibility(&upstream, &narrow, EvolutionPolicy::compatible()).is_err()
+        );
+    }
+
+    #[test]
+    fn test_evolve_batch_widens_date32_and_date64_to_timestamptz() {
+        use arrow_array::{Date32Array, Date64Array, TimestampMillisecondArray};
+        use arrow_schema::TimeUnit;
+
+        let upstream = Arc::new(Schema::new(vec![
+            Field::new("d32", DataType::Date32, false),
+            Field::new("d64", DataType::Date64, false),
+        ]));
+        let target = Arc::new(Schema::new(vec![
+            Field::new(
+                "d32",
+                DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC"))),
+                false,
+            ),
+            Field::new(
+                "d64",
+                DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC"))),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            upstream,
+            vec![
+                Arc::new(Date32Array::from(vec![1])),
+                Arc::new(Date64Array::from(vec![86_400_000])),
+            ],
+        )
+        .unwrap();
+
+        let evolved = evolve_batch(&batch, &target, EvolutionPolicy::compatible())
+            .expect("Date32/Date64 -> TimestampTZ widens cleanly");
+        assert_eq!(evolved.schema(), target);
+        assert_eq!(
+            evolved
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .value(0),
+            86_400_000
+        );
+        assert_eq!(
+            evolved
+                .column(1)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .value(0),
+            86_400_000
         );
     }
 }

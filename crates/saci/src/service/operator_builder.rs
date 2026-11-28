@@ -692,21 +692,65 @@ fn parse_single_quality_rule(val: &ConfigValue, idx: usize, ctx: &str) -> SaciRe
         .unwrap_or_else(default_name);
 
     match kind.trim().to_ascii_lowercase().as_str() {
-        "not_null" => Ok(QualityRule::NotNull {
-            name,
-            column: req_str(obj, "column", ctx)?,
-        }),
-        "not_empty" => Ok(QualityRule::NotEmpty {
-            name,
-            column: req_str(obj, "column", ctx)?,
-        }),
-        "regex" => Ok(QualityRule::Regex {
-            name,
-            column: req_str(obj, "column", ctx)?,
-            pattern: req_str(obj, "pattern", ctx)?,
-            case_insensitive: opt_bool(obj, "case_insensitive", ctx)?.unwrap_or(false),
-        }),
+        "not_null" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "column"],
+                &format!("{ctx}: not_null rule '{name}'"),
+            )?;
+            Ok(QualityRule::NotNull {
+                name,
+                column: req_str(obj, "column", ctx)?,
+            })
+        }
+        "not_empty" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "column"],
+                &format!("{ctx}: not_empty rule '{name}'"),
+            )?;
+            Ok(QualityRule::NotEmpty {
+                name,
+                column: req_str(obj, "column", ctx)?,
+            })
+        }
+        "regex" => {
+            check_allowed_keys(
+                obj,
+                &[
+                    "type",
+                    "kind",
+                    "id",
+                    "name",
+                    "column",
+                    "pattern",
+                    "case_insensitive",
+                ],
+                &format!("{ctx}: regex rule '{name}'"),
+            )?;
+            Ok(QualityRule::Regex {
+                name,
+                column: req_str(obj, "column", ctx)?,
+                pattern: req_str(obj, "pattern", ctx)?,
+                case_insensitive: opt_bool(obj, "case_insensitive", ctx)?.unwrap_or(false),
+            })
+        }
         "range" => {
+            check_allowed_keys(
+                obj,
+                &[
+                    "type",
+                    "kind",
+                    "id",
+                    "name",
+                    "column",
+                    "min",
+                    "max",
+                    "min_exclusive",
+                    "max_exclusive",
+                ],
+                &format!("{ctx}: range rule '{name}'"),
+            )?;
             let column = req_str(obj, "column", ctx)?;
             let min = opt_f64(obj, "min", ctx)?;
             let max = opt_f64(obj, "max", ctx)?;
@@ -722,6 +766,11 @@ fn parse_single_quality_rule(val: &ConfigValue, idx: usize, ctx: &str) -> SaciRe
             })
         }
         "in_set" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "column", "values"],
+                &format!("{ctx}: in_set rule '{name}'"),
+            )?;
             let column = req_str(obj, "column", ctx)?;
             let values = match obj.get("values") {
                 Some(ConfigValue::Array(arr)) => arr
@@ -742,6 +791,13 @@ fn parse_single_quality_rule(val: &ConfigValue, idx: usize, ctx: &str) -> SaciRe
             })
         }
         "unique" => {
+            check_allowed_keys(
+                obj,
+                &[
+                    "type", "kind", "id", "name", "column", "columns", "stateful", "max_keys",
+                ],
+                &format!("{ctx}: unique rule '{name}'"),
+            )?;
             let mut columns = opt_ident_list(obj, "columns");
             if columns.is_empty()
                 && let Some(col) = opt_str(obj, "column")
@@ -783,6 +839,11 @@ fn parse_single_quality_rule(val: &ConfigValue, idx: usize, ctx: &str) -> SaciRe
             })
         }
         "check" => {
+            check_allowed_keys(
+                obj,
+                &["type", "kind", "id", "name", "expr", "where", "predicate"],
+                &format!("{ctx}: check rule '{name}'"),
+            )?;
             let expr = opt_str(obj, "expr")
                 .or_else(|| opt_str(obj, "where"))
                 .or_else(|| opt_str(obj, "predicate"))
@@ -1283,5 +1344,79 @@ fn parse_join_kind(raw: Option<&str>, ctx: &str) -> SaciResult<JoinKind> {
         other => Err(SaciError::configuration(format!(
             "{ctx}: unsupported join_type '{other}'"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_rule_rejects_unknown_keys() {
+        let mut rule = serde_json::Map::new();
+        rule.insert("type".to_string(), ConfigValue::String("range".to_string()));
+        rule.insert("column".to_string(), ConfigValue::String("amt".to_string()));
+        rule.insert("minumum".to_string(), ConfigValue::from(0));
+        let err = parse_single_quality_rule(&ConfigValue::Object(rule), 0, "test").unwrap_err();
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(err.to_string().contains("minumum"), "got: {err}");
+    }
+
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[test]
+    fn assert_operator_quarantine_diagnostic_edge_validates_and_builds() {
+        use crate::service::ServiceConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let in_path = dir.path().join("in.ndjson");
+        let valid_path = dir.path().join("valid.ndjson");
+        let bad_path = dir.path().join("bad.ndjson");
+        std::fs::write(&in_path, "{\"id\":1}\n").expect("write input");
+
+        let kdl = format!(
+            r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-assert-diag"
+workflow "w" {{
+    codec "ndjson" format="ndjson"
+    schema "Order" {{
+        field "id" type="int64" nullable=#false
+    }}
+    source "in" connector="file" codec="ndjson" component="Order" {{
+        config path="{}"
+    }}
+    operator "check_orders" kind="assert" component="Order" {{
+        config on_violation="quarantine" diagnostics=#true {{
+            rules {{
+                rule type="not_null" column="id"
+            }}
+        }}
+    }}
+    sink "valid" connector="file" codec="ndjson" component="Order" {{
+        config path="{}"
+    }}
+    sink "bad" connector="file" codec="ndjson" component="Order" {{
+        config path="{}"
+    }}
+    link from="in" to="check_orders"
+    link from="check_orders" to="valid" branch="valid"
+    link from="check_orders" to="bad" branch="quarantine"
+}}
+"#,
+            in_path.display(),
+            valid_path.display(),
+            bad_path.display()
+        );
+        let cfg = ServiceConfig::from_kdl(&kdl).expect("parse");
+        let built = crate::service::ServiceBuilder::new()
+            .build(&cfg)
+            .expect("assert operator with quarantine diagnostic branch builds");
+        let assert_node = &built[0].nodes[1];
+        let q_edge_idx = assert_node
+            .downstream
+            .iter()
+            .position(|e| e.branch.as_deref() == Some("quarantine"))
+            .expect("quarantine edge");
+        assert!(assert_node.edge_evolution(q_edge_idx).drop_extra_columns);
     }
 }

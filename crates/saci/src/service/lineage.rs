@@ -1333,8 +1333,15 @@ impl LineageDispatcher {
 
     /// Replace lineage configuration and graphs on startup or hot reload.
     pub fn update_config(&self, config: &ServiceConfig, built: Option<&[BuiltWorkflow]>) {
-        let graphs = build_service_lineage(config, built);
+        let mut graphs = build_service_lineage(config, built);
         if let Ok(mut guard) = self.inner.write() {
+            if built.is_none() {
+                for g in &mut graphs {
+                    if let Some(prev) = guard.graphs.get(&g.workflow_id) {
+                        preserve_runtime_facets(prev, g);
+                    }
+                }
+            }
             guard.config = config.lineage.clone();
             guard.graphs.clear();
             guard.order.clear();
@@ -1687,6 +1694,33 @@ impl LineageDispatcher {
     }
 }
 
+fn preserve_runtime_facets(prev: &WorkflowLineageGraph, next: &mut WorkflowLineageGraph) {
+    if prev.edges != next.edges
+        || prev.input_node_ids != next.input_node_ids
+        || prev.output_node_ids != next.output_node_ids
+    {
+        return;
+    }
+    for (p, n) in prev.inputs.iter().zip(next.inputs.iter_mut()) {
+        preserve_dataset_facets(p, n);
+    }
+    for (p, n) in prev.outputs.iter().zip(next.outputs.iter_mut()) {
+        preserve_dataset_facets(p, n);
+    }
+}
+
+fn preserve_dataset_facets(prev: &LineageDataset, next: &mut LineageDataset) {
+    if prev.name != next.name {
+        return;
+    }
+    if next.facets.schema.is_none() {
+        next.facets.schema = prev.facets.schema.clone();
+    }
+    if next.facets.column_lineage.is_none() {
+        next.facets.column_lineage = prev.facets.column_lineage.clone();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2013,5 +2047,68 @@ workflow "synth" {
             .expect("static lineage must synthesize output schema for schemaless sink");
         let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["tier", "total_amount"]);
+    }
+
+    #[cfg(all(feature = "connector-file", feature = "codec-ndjson"))]
+    #[test]
+    fn update_config_without_built_preserves_runtime_schema_facets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let in_path = dir.path().join("in.ndjson");
+        let out_path = dir.path().join("out.ndjson");
+        std::fs::write(&in_path, "{\"id\":1,\"tag\":\"a\"}\n").expect("write input");
+
+        let mk_cfg = |emit_on: &str| {
+            let kdl = format!(
+                r#"
+mode "standalone"
+node id=1 data_dir="/tmp/saci-lineage-reload"
+lineage enabled=#true namespace="analytics" emit_on="{emit_on}"
+workflow "w" {{
+    codec "ndjson" format="ndjson"
+    source "in" connector="file" codec="ndjson" component="Row" {{
+        config path="{}"
+    }}
+    sink "out" connector="file" codec="ndjson" component="Row" {{
+        config path="{}" {{
+            field "id" type="int64" nullable=#true
+            field "tag" type="utf8" nullable=#true
+        }}
+    }}
+    link from="in" to="out"
+}}
+"#,
+                in_path.display(),
+                out_path.display()
+            );
+            parse(&kdl).unwrap()
+        };
+
+        let cfg1 = mk_cfg("lifecycle");
+        let built = crate::service::ServiceBuilder::new()
+            .build(&cfg1)
+            .expect("build succeeds with inferred ndjson schema");
+        let dispatcher = LineageDispatcher::new(&cfg1, Some(&built));
+        let initial = dispatcher.snapshot().workflows.remove(0);
+        assert!(initial.inputs[0].facets.schema.is_some());
+        assert!(initial.outputs[0].facets.schema.is_some());
+
+        // Hot-reload with `built = None`: inferred schemas stay intact instead of vanishing.
+        let cfg2 = mk_cfg("pass");
+        dispatcher.update_config(&cfg2, None);
+        let snap = dispatcher.snapshot();
+        assert_eq!(snap.emit_on, LineageEmitMode::Pass);
+        let reloaded = snap.workflows.into_iter().next().unwrap();
+        assert_eq!(
+            reloaded.inputs[0].facets.schema,
+            initial.inputs[0].facets.schema
+        );
+        assert_eq!(
+            reloaded.outputs[0].facets.schema,
+            initial.outputs[0].facets.schema
+        );
+        assert_eq!(
+            reloaded.outputs[0].facets.column_lineage,
+            initial.outputs[0].facets.column_lineage
+        );
     }
 }

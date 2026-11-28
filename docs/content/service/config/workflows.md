@@ -289,7 +289,7 @@ is the runnable example.
 | `connector` | string | required | which connector to build; see [Sources and sinks](@/service/connectors/_index.md) |
 | `component` | string | required | the rows this source produces, which its downstream processor must declare |
 | `codec` | string | none | id of the `codec` node whose format decodes its bytes; omitted by a connector that carries rows already |
-| `on_corrupt` | string | `"fail"` | corrupt source record handling: `"fail"`, `"drop"`, or `"dlq"` (routes offending payloads into the workflow's `dlq`) |
+| `on_corrupt` | string | `"fail"` | corrupt source record handling: `"fail"`, `"drop"`, or `"dlq"` (routes offending payloads into the workflow's `dlq`; requires a workflow `dlq` block) |
 | `retry` | child block | 4 attempts | per-node retry policy, below |
 | `flow_control` | child block | the top-level policy | admission override for this source; see [Flow control](@/service/operate/flow-control.md) |
 | `decrypt` | child block | none | decrypt fields or whole batches read from the source; see [Encryption and TLS](@/service/config/encryption.md) |
@@ -366,6 +366,7 @@ is the workflow id in the message, and the quoted node ids are yours.
 | `workflow 'orders': source id 'bad/id' is invalid; ids must match ^[A-Za-z0-9][A-Za-z0-9_-]*$ and be at most 64 bytes` | Rename the node to letters, digits, `_` and `-`, starting with a letter or digit. |
 | `workflow 'orders': id 'shared' is declared twice, as source and as sink` | Give the two nodes different ids; every kind shares one namespace. |
 | `workflow 'orders': source 'orders_in' names codec 'orders_csv', which is not declared` | Declare that `codec` node, or correct the id the source names. |
+| `workflow 'orders': source 'orders_in' sets on_corrupt="dlq" without a workflow 'dlq' block` | Declare a workflow `dlq` block, or change `on_corrupt` to `"drop"` or `"fail"`. |
 | `workflow 'orders': schema 'Order' is declared twice` | Rename one of the two `schema` nodes. |
 | `workflow 'orders': schema 'Order' declares no field` | Add a `field` line to the schema. |
 | `workflow 'orders': link 'enrich' -> 'enrich' links a node to itself` | Point `to` at a different node. |

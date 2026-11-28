@@ -945,6 +945,14 @@ impl WorkflowSpec {
                 crate::service::dlq::store_names()
             )));
         }
+        for source in &self.sources {
+            if source.on_corrupt == Some(CorruptRecordPolicy::Dlq) && self.dlq.is_none() {
+                return Err(SaciError::configuration(format!(
+                    "workflow '{wf}': source '{}' sets on_corrupt=\"dlq\" without a workflow 'dlq' block",
+                    source.id
+                )));
+            }
+        }
 
         // 19. Schema ids are unique within the workflow, and each declares at
         //     least one `field` that parses.
@@ -1908,5 +1916,26 @@ link from="up" to="down"
         .expect("parse should succeed");
         cfg.validate()
             .expect("a processor may be fed by sources and processors at once");
+    }
+
+    #[test]
+    fn on_corrupt_dlq_without_workflow_dlq_block_is_rejected() {
+        let cfg = parse(&workflow_kdl(
+            r#"
+source "s" connector="noop" component="X" {
+    on_corrupt "dlq"
+}
+sink "out" connector="noop" component="X"
+link from="s" to="out"
+"#,
+        ))
+        .expect("parse should succeed");
+        let err = cfg.validate().unwrap_err();
+        assert_eq!(err.category(), "configuration", "got: {err}");
+        assert!(
+            err.to_string()
+                .contains("sets on_corrupt=\"dlq\" without a workflow 'dlq' block"),
+            "got: {err}"
+        );
     }
 }

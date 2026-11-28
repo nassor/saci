@@ -33,6 +33,7 @@
 //! nothing.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -70,7 +71,7 @@ pub struct TcpSource {
     max_frame_bytes: usize,
     tls: Option<TlsAcceptor>,
     listener_task: Option<JoinHandle<()>>,
-    skip_corrupt: bool,
+    skip_corrupt: Arc<AtomicBool>,
     corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
@@ -135,7 +136,7 @@ impl TcpSource {
             max_frame_bytes,
             tls,
             listener_task: None,
-            skip_corrupt: false,
+            skip_corrupt: Arc::new(AtomicBool::new(false)),
             corrupt: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -164,7 +165,7 @@ impl TcpSource {
         let codec = Arc::clone(&self.codec);
         let max_frame_bytes = self.max_frame_bytes;
         let tls = self.tls.clone();
-        let skip_corrupt = self.skip_corrupt;
+        let skip_corrupt = Arc::clone(&self.skip_corrupt);
         let corrupt = Arc::clone(&self.corrupt);
 
         self.listener_task = Some(tokio::spawn(async move {
@@ -182,6 +183,7 @@ impl TcpSource {
                 let schema = Arc::clone(&schema);
                 let codec = Arc::clone(&codec);
                 let tls = tls.clone();
+                let skip_corrupt = Arc::clone(&skip_corrupt);
                 let corrupt = Arc::clone(&corrupt);
                 tokio::spawn(async move {
                     if let Some(acceptor) = tls {
@@ -240,12 +242,12 @@ async fn read_connection<S: AsyncRead + Unpin>(
     schema: Arc<Schema>,
     codec: Arc<dyn Codec>,
     max_frame_bytes: usize,
-    skip_corrupt: bool,
+    skip_corrupt: Arc<AtomicBool>,
     corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 ) {
     let mut decoder = match codec.open_message_decoder(schema) {
         Ok(mut decoder) => {
-            decoder.set_skip_corrupt(skip_corrupt);
+            decoder.set_skip_corrupt(skip_corrupt.load(Ordering::Relaxed));
             decoder
         }
         Err(_e) => {
@@ -296,6 +298,7 @@ async fn read_connection<S: AsyncRead + Unpin>(
             return;
         }
 
+        decoder.set_skip_corrupt(skip_corrupt.load(Ordering::Relaxed));
         let decoded = decoder.push(&frame).and_then(|()| decoder.flush());
         let drained = decoder.drain_corrupt();
         if !drained.is_empty()
@@ -308,7 +311,7 @@ async fn read_connection<S: AsyncRead + Unpin>(
             // A frame that decodes to no rows at all is isolated if skip_corrupt is on,
             // otherwise it is a protocol violation.
             Ok(None) => {
-                if skip_corrupt {
+                if skip_corrupt.load(Ordering::Relaxed) {
                     continue;
                 }
                 #[cfg(feature = "tracing")]
@@ -337,7 +340,7 @@ impl Source for TcpSource {
     }
 
     fn set_skip_corrupt(&mut self, skip: bool) {
-        self.skip_corrupt = skip;
+        self.skip_corrupt.store(skip, Ordering::Relaxed);
     }
 
     fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {

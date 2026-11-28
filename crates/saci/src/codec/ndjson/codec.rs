@@ -1,6 +1,6 @@
 //! [`NdjsonCodec`]: the `ndjson` format, both surfaces.
 
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Cursor, Seek, Write};
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -62,14 +62,22 @@ impl Codec for NdjsonCodec {
             Some(schema) => schema,
             // Seeks back to the start itself, so the reader below still sees
             // the whole file.
-            None => {
-                let (inferred, _records) = arrow_json::reader::infer_json_schema_from_seekable(
-                    &mut buffered,
-                    Some(self.infer_max),
-                )
-                .map_err(|e| SaciError::generic(format!("ndjson: schema inference failed: {e}")))?;
-                Arc::new(inferred)
-            }
+            None => match arrow_json::reader::infer_json_schema_from_seekable(
+                &mut buffered,
+                Some(self.infer_max),
+            ) {
+                Ok((inferred, _records)) => Arc::new(inferred),
+                Err(err) => {
+                    let inferred =
+                        infer_schema_tolerating_corrupt_lines(&mut buffered, self.infer_max)
+                            .map_err(|_| {
+                                SaciError::generic(format!(
+                                    "ndjson: schema inference failed: {err}"
+                                ))
+                            })?;
+                    Arc::new(inferred)
+                }
+            },
         };
 
         Ok(Box::new(NdjsonBatchReader {
@@ -449,6 +457,53 @@ impl MessageDecoder for NdjsonMessageDecoder {
     }
 }
 
+fn infer_schema_tolerating_corrupt_lines<R: BufRead + Seek>(
+    buffered: &mut R,
+    infer_max: usize,
+) -> Result<Schema, SaciError> {
+    buffered
+        .rewind()
+        .map_err(|e| SaciError::generic(format!("ndjson: rewind failed: {e}")))?;
+
+    let mut valid_sample = String::new();
+    let mut valid_count = 0usize;
+    let mut line = String::new();
+    while valid_count < infer_max {
+        line.clear();
+        let n = buffered
+            .read_line(&mut line)
+            .map_err(|e| SaciError::generic(format!("ndjson: scan failed: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(serde_json::Value::Object(_)) = serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            valid_sample.push_str(trimmed);
+            valid_sample.push('\n');
+            valid_count += 1;
+        }
+    }
+
+    buffered
+        .rewind()
+        .map_err(|e| SaciError::generic(format!("ndjson: rewind failed: {e}")))?;
+
+    if valid_count == 0 {
+        return Err(SaciError::generic(
+            "ndjson: schema inference found no valid JSON object records",
+        ));
+    }
+    let mut cursor = Cursor::new(valid_sample.into_bytes());
+    let (schema, _) =
+        arrow_json::reader::infer_json_schema_from_seekable(&mut cursor, Some(infer_max))
+            .map_err(|e| SaciError::generic(format!("ndjson: schema inference failed: {e}")))?;
+    Ok(schema)
+}
+
 #[cfg(test)]
 mod tests {
     use arrow_array::{Int32Array, Int64Array};
@@ -731,5 +786,26 @@ mod tests {
         let batch = decoder.flush().expect("flush").expect("2 valid rows");
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(decoder.drain_corrupt().len(), 1);
+    }
+
+    #[test]
+    fn ndjson_schema_inference_tolerates_corrupt_lines_when_skip_corrupt_enabled() {
+        let f = write_ndjson(&[
+            r#"{corrupt line first"#,
+            r#"{"id":1,"val":1.5}"#,
+            r#"not json either"#,
+            r#"{"id":2,"val":2.5}"#,
+        ]);
+        let mut reader = NdjsonCodec::default()
+            .open_reader(f.reopen().expect("reopen").into(), None)
+            .expect("inference succeeds past corrupt lines");
+        reader.set_skip_corrupt(true);
+
+        let mut rows = 0usize;
+        while let Some(batch) = reader.next_batch().expect("valid batches read") {
+            rows += batch.num_rows();
+        }
+        assert_eq!(rows, 2);
+        assert_eq!(reader.drain_corrupt().len(), 2);
     }
 }

@@ -35,6 +35,7 @@
 //! back, the way `TcpSource::new` does.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
@@ -71,7 +72,7 @@ pub struct UdpSource {
     /// The error the receive task ended with. Every later `next_batch`
     /// returns it, so the runner keeps seeing a failure rather than an EOF.
     dead: Option<SaciError>,
-    skip_corrupt: bool,
+    skip_corrupt: Arc<AtomicBool>,
     corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 }
 
@@ -132,7 +133,7 @@ impl UdpSource {
             rx,
             task: None,
             dead: None,
-            skip_corrupt: false,
+            skip_corrupt: Arc::new(AtomicBool::new(false)),
             corrupt: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -161,7 +162,7 @@ impl UdpSource {
         let schema = Arc::clone(&self.schema);
         let codec = Arc::clone(&self.codec);
         let local_addr = self.local_addr;
-        let skip_corrupt = self.skip_corrupt;
+        let skip_corrupt = Arc::clone(&self.skip_corrupt);
         let corrupt = Arc::clone(&self.corrupt);
         self.task = Some(tokio::spawn(async move {
             receive(socket, tx, schema, codec, local_addr, skip_corrupt, corrupt).await
@@ -213,12 +214,12 @@ async fn receive(
     schema: Arc<Schema>,
     codec: Arc<dyn Codec>,
     local_addr: SocketAddr,
-    skip_corrupt: bool,
+    skip_corrupt: Arc<AtomicBool>,
     corrupt: Arc<Mutex<Vec<CorruptRecord>>>,
 ) -> SaciError {
     let mut decoder = match codec.open_message_decoder(Arc::clone(&schema)) {
         Ok(mut decoder) => {
-            decoder.set_skip_corrupt(skip_corrupt);
+            decoder.set_skip_corrupt(skip_corrupt.load(Ordering::Relaxed));
             decoder
         }
         Err(e) => return e,
@@ -258,11 +259,11 @@ async fn receive(
                 }
             }
             Ok((n, _from)) => {
+                decoder.set_skip_corrupt(skip_corrupt.load(Ordering::Relaxed));
                 let decoded = decoder.push(&buf[..n]).and_then(|()| decoder.flush());
                 let drained = decoder.drain_corrupt();
-                if !drained.is_empty()
-                    && let Ok(mut guard) = corrupt.lock()
-                {
+                let had_corrupt = !drained.is_empty();
+                if had_corrupt && let Ok(mut guard) = corrupt.lock() {
                     guard.extend(drained);
                 }
                 let spent = match decoded {
@@ -276,12 +277,14 @@ async fn receive(
                         false
                     }
                     Ok(None) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            peer = %_from,
-                            bytes = n,
-                            "UdpSource: datagram decoded no batch, dropped"
-                        );
+                        if !had_corrupt {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                peer = %_from,
+                                bytes = n,
+                                "UdpSource: datagram decoded no batch, dropped"
+                            );
+                        }
                         true
                     }
                     Err(_e) => {
@@ -304,7 +307,7 @@ async fn receive(
                 if spent {
                     decoder = match codec.open_message_decoder(Arc::clone(&schema)) {
                         Ok(mut decoder) => {
-                            decoder.set_skip_corrupt(skip_corrupt);
+                            decoder.set_skip_corrupt(skip_corrupt.load(Ordering::Relaxed));
                             decoder
                         }
                         Err(e) => return e,
@@ -322,7 +325,7 @@ impl Source for UdpSource {
     }
 
     fn set_skip_corrupt(&mut self, skip: bool) {
-        self.skip_corrupt = skip;
+        self.skip_corrupt.store(skip, Ordering::Relaxed);
     }
 
     fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {

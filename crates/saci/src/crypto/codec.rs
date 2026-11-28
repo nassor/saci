@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use crate::codec::{BatchReader, BatchWriter, Codec, MessageDecoder, MessageShape, ReadInput};
+use crate::codec::{
+    BatchReader, BatchWriter, Codec, CorruptRecord, MessageDecoder, MessageShape, ReadInput,
+};
 use crate::crypto::envelope::Cipher;
 use crate::crypto::stream::{EncryptingWriter, decrypt_read_input};
 use crate::error::SaciError;
@@ -124,11 +126,36 @@ impl BatchWriter for EncryptedBatchWriter {
 struct DecryptingMessageDecoder {
     inner: Box<dyn MessageDecoder>,
     cipher: Arc<Cipher>,
+    format: &'static str,
+    skip_corrupt: bool,
+    corrupt: Vec<CorruptRecord>,
 }
 
 impl MessageDecoder for DecryptingMessageDecoder {
+    fn set_skip_corrupt(&mut self, skip: bool) {
+        self.skip_corrupt = skip;
+        self.inner.set_skip_corrupt(skip);
+    }
+
+    fn drain_corrupt(&mut self) -> Vec<CorruptRecord> {
+        let mut out = std::mem::take(&mut self.corrupt);
+        out.extend(self.inner.drain_corrupt());
+        out
+    }
+
     fn push(&mut self, payload: &[u8]) -> Result<(), SaciError> {
-        let plain = self.cipher.decrypt(payload, MESSAGE_AAD)?;
+        let plain = match self.cipher.decrypt(payload, MESSAGE_AAD) {
+            Ok(plain) => plain,
+            Err(err) if self.skip_corrupt => {
+                self.corrupt.push(CorruptRecord {
+                    format: self.format,
+                    payload: payload.to_vec(),
+                    error: err.to_string(),
+                });
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
         self.inner.push(&plain)
     }
 
@@ -173,6 +200,9 @@ impl Codec for EncryptedCodec {
         Ok(Box::new(DecryptingMessageDecoder {
             inner,
             cipher: Arc::clone(&self.cipher),
+            format: self.inner.format(),
+            skip_corrupt: false,
+            corrupt: Vec::new(),
         }))
     }
 
@@ -262,5 +292,63 @@ mod tests {
         decoder.push(&msgs[0]).unwrap();
         let decoded = decoder.flush().unwrap().unwrap();
         assert_eq!(decoded.num_rows(), 3);
+    }
+
+    #[cfg(feature = "codec-ndjson")]
+    #[test]
+    fn decrypting_message_decoder_isolates_corrupt_ciphertext_and_inner_records() {
+        let provider =
+            Arc::new(StaticKeyProvider::single("k1", KeyMaterial::generate().unwrap()).unwrap());
+        let cipher = Arc::new(Cipher::aes_256_gcm(provider));
+        let codec = EncryptedCodec::new(Arc::new(crate::codec::ndjson::NdjsonCodec::new()), cipher);
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![10]))],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![20]))],
+        )
+        .unwrap();
+
+        let msg1 = codec.encode_messages(&batch1).unwrap().pop().unwrap();
+        let msg2 = codec.encode_messages(&batch2).unwrap().pop().unwrap();
+
+        let mut decoder = codec.open_message_decoder(Arc::clone(&schema)).unwrap();
+        decoder.set_skip_corrupt(true);
+        decoder.push(&msg1).unwrap();
+        // Corrupt AEAD ciphertext (wrong payload / auth tag mismatch).
+        decoder
+            .push(b"not-valid-ciphertext")
+            .expect("corrupt ciphertext must be isolated");
+        // Valid outer ciphertext whose inner NDJSON payload is malformed.
+        let bad_inner = codec
+            .cipher
+            .encrypt(b"{not-valid-json", MESSAGE_AAD)
+            .unwrap();
+        decoder
+            .push(&bad_inner)
+            .expect("inner corrupt payload must be isolated");
+        decoder.push(&msg2).unwrap();
+
+        let decoded = decoder.flush().unwrap().expect("two valid rows decoded");
+        assert_eq!(
+            decoded
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[10, 20]
+        );
+        let corrupt = decoder.drain_corrupt();
+        assert_eq!(corrupt.len(), 2);
+        assert_eq!(corrupt[0].format, "ndjson");
+        assert_eq!(corrupt[0].payload, b"not-valid-ciphertext");
+        assert_eq!(corrupt[1].format, "ndjson");
+        assert_eq!(corrupt[1].payload, b"{not-valid-json");
     }
 }

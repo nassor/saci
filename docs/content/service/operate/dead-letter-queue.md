@@ -419,6 +419,7 @@ schema, and a declared `field` is replaced.
 | Message | What to change |
 |---|---|
 | `workflow 'orders': dlq store 'mongodb' is not one of redb, kafka, nats` | Name one of the three stores. |
+| `workflow 'orders': source 'orders_in' sets on_corrupt="dlq" without a workflow 'dlq' block` | Declare a workflow `dlq` block, or switch the source's `on_corrupt` policy to `"drop"` or `"fail"`. |
 | `` mode "cluster" does not take a `dlq` block (workflow 'w'): a cluster workflow declares no sink node, so there is nothing to dead-letter `` | Delete the block. A cluster node writes through claims and checkpoints, not sinks. |
 | `workflow 'orders' dlq "nats": source needs a mode block` | Add `source { mode kind="jetstream" ... }`. The NATS connector needs a mode named. |
 | `workflow 'orders' dlq "nats": source mode kind must be "jetstream"; core NATS is at-most-once and drops a letter published with no subscriber` | Use JetStream on both halves, or pick another store. |

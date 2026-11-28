@@ -385,8 +385,10 @@ fn validate_edge(
                 let down_fields = fields_of(down_template, component);
                 match (up_fields, down_fields) {
                     (Some(u), Some(d)) => {
-                        let diag_ok = from_node.connector == "operator:quality"
-                            && branch == Some("quarantine")
+                        let diag_ok = matches!(
+                            from_node.connector.as_str(),
+                            "operator:quality" | "operator:assert"
+                        ) && branch == Some("quarantine")
                             && schemas_agree(&with_quality_diagnostic_fields(&u), &d, evolution)
                                 .is_ok();
                         if !diag_ok && let Err(reason) = schemas_agree(&u, &d, evolution) {
@@ -431,8 +433,10 @@ fn validate_edge(
             }
             let up_template = templates[from].as_ref().expect("processor node");
             if let Some(up_fields) = output_fields_of(up_template, component) {
-                let diag_ok = from_node.connector == "operator:quality"
-                    && branch == Some("quarantine")
+                let diag_ok = matches!(
+                    from_node.connector.as_str(),
+                    "operator:quality" | "operator:assert"
+                ) && branch == Some("quarantine")
                     && schemas_agree(
                         &with_quality_diagnostic_fields(&up_fields),
                         sink.schema().fields(),
